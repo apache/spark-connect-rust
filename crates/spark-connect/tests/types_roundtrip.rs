@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use spark_connect::types::{DataType, StructField};
+use spark_connect::types::{DataType, Metadata, StructField};
 
 fn all_scalar_variants() -> Vec<DataType> {
     vec![
@@ -72,7 +72,7 @@ fn nested_variants() -> Vec<DataType> {
                     name: "a".to_string(),
                     data_type: DataType::Integer,
                     nullable: true,
-                    metadata: BTreeMap::new(),
+                    metadata: Metadata::new(),
                 },
                 StructField {
                     name: "b".to_string(),
@@ -88,7 +88,7 @@ fn nested_variants() -> Vec<DataType> {
                     metadata: {
                         let mut m = BTreeMap::new();
                         m.insert("k".to_string(), serde_json::Value::String("v".to_string()));
-                        m
+                        m.into()
                     },
                 },
             ],
@@ -177,13 +177,13 @@ fn struct_field_helpers() {
                 name: "x".to_string(),
                 data_type: DataType::Integer,
                 nullable: true,
-                metadata: BTreeMap::new(),
+                metadata: Metadata::new(),
             },
             StructField {
                 name: "y".to_string(),
                 data_type: DataType::Double,
                 nullable: false,
-                metadata: BTreeMap::new(),
+                metadata: Metadata::new(),
             },
         ],
     };
@@ -244,7 +244,7 @@ fn collations_are_in_the_metadata_of_the_json_of_a_field_as_spark() {
         name: name.to_string(),
         data_type,
         nullable: true,
-        metadata: BTreeMap::new(),
+        metadata: Metadata::new(),
     };
     let st = DataType::Struct {
         fields: vec![
@@ -403,10 +403,10 @@ fn from_ddl_reads_not_null_and_comment_as_spark() {
     ) -> StructField {
         let metadata = comment
             .map(|c| {
-                BTreeMap::from([(
+                Metadata::from(BTreeMap::from([(
                     "comment".to_string(),
                     serde_json::Value::String(c.to_string()),
-                )])
+                )]))
             })
             .unwrap_or_default();
         StructField {
@@ -632,10 +632,10 @@ fn from_ddl_reads_not_null_and_comment_as_spark() {
 #[test]
 fn to_ddl_of_non_nullable_and_commented_fields_round_trips() {
     let comment = |c: &str| {
-        BTreeMap::from([(
+        Metadata::from(BTreeMap::from([(
             "comment".to_string(),
             serde_json::Value::String(c.to_string()),
-        )])
+        )]))
     };
     let schemas = [
         DataType::Struct {
@@ -644,7 +644,7 @@ fn to_ddl_of_non_nullable_and_commented_fields_round_trips() {
                     name: "a".to_string(),
                     data_type: DataType::Integer,
                     nullable: false,
-                    metadata: BTreeMap::new(),
+                    metadata: Metadata::new(),
                 },
                 StructField {
                     name: "b".to_string(),
@@ -680,7 +680,7 @@ fn to_ddl_of_non_nullable_and_commented_fields_round_trips() {
                         }],
                     },
                     nullable: true,
-                    metadata: BTreeMap::new(),
+                    metadata: Metadata::new(),
                 },
                 StructField {
                     name: "arr".to_string(),
@@ -696,7 +696,7 @@ fn to_ddl_of_non_nullable_and_commented_fields_round_trips() {
                         contains_null: true,
                     },
                     nullable: false,
-                    metadata: BTreeMap::new(),
+                    metadata: Metadata::new(),
                 },
                 StructField {
                     name: "m".to_string(),
@@ -709,7 +709,7 @@ fn to_ddl_of_non_nullable_and_commented_fields_round_trips() {
                                 name: "v".to_string(),
                                 data_type: DataType::Integer,
                                 nullable: false,
-                                metadata: BTreeMap::new(),
+                                metadata: Metadata::new(),
                             }],
                         }),
                         value_contains_null: true,
@@ -721,7 +721,7 @@ fn to_ddl_of_non_nullable_and_commented_fields_round_trips() {
                     name: "a b`c".to_string(),
                     data_type: DataType::Integer,
                     nullable: false,
-                    metadata: BTreeMap::new(),
+                    metadata: Metadata::new(),
                 },
             ],
         },
@@ -844,7 +844,7 @@ fn from_ddl_interval_ranges_and_colon_fields_as_spark() {
             name: name.to_string(),
             data_type,
             nullable: true,
-            metadata: BTreeMap::new(),
+            metadata: Metadata::new(),
         }],
     };
     let year_month = |start_field, end_field| DataType::YearMonthInterval {
@@ -892,21 +892,21 @@ fn from_ddl_interval_ranges_and_colon_fields_as_spark() {
                     name: "a".to_string(),
                     data_type: DataType::Integer,
                     nullable: true,
-                    metadata: BTreeMap::new(),
+                    metadata: Metadata::new(),
                 },
                 StructField {
                     name: "b".to_string(),
                     data_type: string,
                     nullable: true,
-                    metadata: BTreeMap::new(),
+                    metadata: Metadata::new(),
                 },
             ],
         }
     );
-    let comment = BTreeMap::from([(
+    let comment = Metadata::from(BTreeMap::from([(
         "comment".to_string(),
         serde_json::Value::String("x:y".to_string()),
-    )]);
+    )]));
     assert_eq!(
         DataType::from_ddl("a:int COMMENT 'x:y'").unwrap(),
         DataType::Struct {
@@ -952,7 +952,7 @@ fn from_ddl_type_spellings_as_spark() {
             name: name.to_string(),
             data_type,
             nullable: true,
-            metadata: BTreeMap::new(),
+            metadata: Metadata::new(),
         }],
     };
     let decimal = |precision, scale| DataType::Decimal { precision, scale };
@@ -1375,7 +1375,8 @@ fn to_ddl_escapes_the_comments_as_spark_does() {
                 metadata: BTreeMap::from([(
                     "comment".to_string(),
                     serde_json::Value::String(comment.to_string()),
-                )]),
+                )])
+                .into(),
             }],
         }
     }
@@ -1419,7 +1420,8 @@ fn to_ddl_comments_round_trip_through_the_server_parser() {
                 metadata: BTreeMap::from([(
                     "comment".to_string(),
                     serde_json::Value::String(comment.to_string()),
-                )]),
+                )])
+                .into(),
             }],
         };
         let parsed = session.parse_ddl(&schema.to_ddl().unwrap()).unwrap();
@@ -1428,7 +1430,7 @@ fn to_ddl_comments_round_trip_through_the_server_parser() {
         };
         assert_eq!(
             fields[0].metadata.get("comment"),
-            Some(&serde_json::Value::String(comment.to_string())),
+            Some(serde_json::Value::String(comment.to_string())),
             "{comment:?}"
         );
     }
@@ -1864,4 +1866,112 @@ fn from_ddl_unquotes_a_backquoted_collation_name_of_a_field() {
         }
         other => panic!("expected struct, got {other:?}"),
     }
+}
+
+/// The metadata of a field is sent as PySpark sends its dict, the text of `json.dumps(metadata)`,
+/// and written in the JSON of its type as PySpark's `json()` writes it, of its keys sorted: of its
+/// values as they are, an int beyond 64 bits, a float of Python's repr, and NaN and Infinity,
+/// which `serde_json` values do not hold. A plan held the `serde_json` values of the metadata,
+/// which sent an int beyond 64 bits as a float. The texts are official PySpark 4.3.0's.
+#[test]
+fn field_metadata_is_sent_and_written_as_pyspark() {
+    use spark_connect_proto::data_type::Kind;
+
+    let sent = r#"{"x": 1000000000000000000000000000000, "f": 1e-07, "b": [1, 1180591620717411303424], "n": NaN}"#;
+    let field = StructField {
+        name: "a".to_string(),
+        data_type: DataType::Integer,
+        nullable: true,
+        metadata: Metadata::from_json(sent).unwrap(),
+    };
+    let schema = DataType::Struct {
+        fields: vec![field.clone()],
+    };
+    let written = concat!(
+        r#"{"fields":[{"metadata":{"b":[1,1180591620717411303424],"f":1e-07,"n":NaN,"#,
+        r#""x":1000000000000000000000000000000},"name":"a","nullable":true,"type":"integer"}],"#,
+        r#""type":"struct"}"#
+    );
+    let proto = schema.to_proto();
+    let Some(Kind::Struct(proto_struct)) = &proto.kind else {
+        panic!("expected a struct");
+    };
+    assert_eq!(proto_struct.fields[0].metadata.as_deref(), Some(sent));
+    assert_eq!(schema.json(), written);
+    assert_eq!(schema.json_as_pyspark(), written);
+    // The metadata reads back as it was written, of the proto and of the JSON, also nested.
+    assert_eq!(DataType::from_proto(&proto).unwrap().to_proto(), proto);
+    assert_eq!(DataType::from_json_str(written).unwrap().json(), written);
+    assert_eq!(StructField::from_json_str(&field.json()).unwrap(), field);
+    let nested = DataType::Array {
+        element_type: Box::new(schema.clone()),
+        contains_null: true,
+    };
+    assert_eq!(DataType::from_json_str(&nested.json()).unwrap(), nested);
+    // As `serde_json` values, an int beyond 64 bits is its nearest float, and NaN is null.
+    let value = schema.json_value();
+    let metadata = &value["fields"][0]["metadata"];
+    assert_eq!(metadata["x"], serde_json::json!(1e30));
+    assert!(metadata["n"].is_null());
+    assert_eq!(field.metadata.get("x"), Some(serde_json::json!(1e30)));
+    assert_eq!(
+        field.metadata.get_json("x").as_deref(),
+        Some("1000000000000000000000000000000")
+    );
+    // Metadata of `serde_json` values is sent as `json.dumps` of the dict of their map, as Python
+    // writes its floats and the strings that are not ASCII.
+    let of_map = StructField {
+        name: "a".to_string(),
+        data_type: DataType::Integer,
+        nullable: true,
+        metadata: BTreeMap::from([
+            ("k".to_string(), serde_json::json!(1e-7)),
+            ("c".to_string(), serde_json::json!("é")),
+        ])
+        .into(),
+    };
+    let proto = DataType::Struct {
+        fields: vec![of_map],
+    }
+    .to_proto();
+    let Some(Kind::Struct(proto_struct)) = &proto.kind else {
+        panic!("expected a struct");
+    };
+    assert_eq!(
+        proto_struct.fields[0].metadata.as_deref(),
+        Some(r#"{"c": "\u00e9", "k": 1e-07}"#)
+    );
+    // `add` takes `serde_json` values, as before.
+    let added = DataType::Struct { fields: vec![] }
+        .add(
+            "b",
+            DataType::Long,
+            true,
+            Some(BTreeMap::from([(
+                "comment".to_string(),
+                serde_json::json!("c"),
+            )])),
+        )
+        .unwrap();
+    assert_eq!(added.to_ddl().unwrap(), "b BIGINT COMMENT 'c'");
+}
+
+/// The JSON of a type writes the strings as PySpark's `json()` does, of the `ensure_ascii` of
+/// `json.dumps`: a character that is not printable ASCII is a `\u` escape, where the core wrote
+/// UTF-8.
+#[test]
+fn json_escapes_the_characters_that_are_not_printable_ascii_as_pyspark() {
+    let schema = DataType::Struct {
+        fields: vec![StructField {
+            name: "é\u{7f}".to_string(),
+            data_type: DataType::Integer,
+            nullable: true,
+            metadata: Metadata::new(),
+        }],
+    };
+    assert_eq!(
+        schema.json(),
+        r#"{"fields":[{"metadata":{},"name":"\u00e9\u007f","nullable":true,"type":"integer"}],"type":"struct"}"#
+    );
+    assert_eq!(DataType::from_json_str(&schema.json()).unwrap(), schema);
 }

@@ -33,7 +33,7 @@ impl GcReady {
 }
 
 /// The flag of a clone of a written value, which is written too: for a class whose value is
-/// cloned, such as the session builder, of which PyO3 extracts a clone.
+/// cloned.
 impl Clone for GcReady {
     fn clone(&self) -> Self {
         GcReady::new()

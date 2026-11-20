@@ -14,8 +14,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""The table argument under the connect import path, as PySpark Connect's
-``pyspark.sql.connect.table_arg``: the ``TableArg`` of ``pyspark.sql.table_arg``, of
-``DataFrame.asTable()``."""
+# The table argument under the connect import path, as PySpark Connect's
+# ``pyspark.sql.connect.table_arg``: the native ``TableArg`` of ``DataFrame.asTable()``, a virtual
+# subclass of PySpark's classic ``pyspark.sql.table_arg.TableArg``, as PySpark Connect's is its
+# subclass (pyspark.sql._classic_bases).
 
-from pyspark.sql.table_arg import TableArg  # noqa: F401
+from pyspark._pyspark import TableArg  # noqa: F401

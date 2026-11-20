@@ -20,15 +20,16 @@
 """User-defined function related classes and functions"""
 
 from typing import Callable, Any, Optional, Union
-from pyspark.util import PythonEvalType
+from pyspark.util import PythonEvalType as PythonEvalType
 from pyspark.sql.connect.expressions import CommonInlineUserDefinedFunction
 from pyspark.sql.connect.column import Column
-from pyspark.sql.types import DataType, StringType, _parse_datatype_string
+from pyspark.sql.types import DataType as DataType, StringType as StringType, _parse_datatype_string
 from pyspark.sql.udf import UserDefinedFunction as PySparkUserDefinedFunction
-from pyspark.errors import PySparkTypeError
+from pyspark.errors import PySparkTypeError as PySparkTypeError, PySparkRuntimeError as PySparkRuntimeError
 from pyspark.sql.connect._typing import ColumnOrName, DataTypeOrString, UserDefinedFunctionLike
 from pyspark.sql.connect.session import SparkSession
 
+def _create_py_udf(f: Callable[..., Any], returnType: 'DataTypeOrString', useArrow: Optional[bool]=None) -> 'UserDefinedFunctionLike': ...
 def _create_udf(f: Callable[..., Any], returnType: 'DataTypeOrString', evalType: int, name: Optional[str]=None, deterministic: bool=True) -> 'UserDefinedFunctionLike': ...
 
 class UserDefinedFunction:
@@ -269,3 +270,7 @@ class UDFRegistration:
         >>> spark.sql(q).collect()  # doctest: +SKIP
         [Row(name='b', avg=102.0), Row(name='a', avg=102.0)]
         """
+
+# Names of the drop-in's module that PySpark's does not have.
+from pyspark.serializers import CloudPickleSerializer as CloudPickleSerializer
+from pyspark.sql.functions.builtin import udf as udf

@@ -14,12 +14,308 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""User-defined table function classes under the connect import path."""
-from pyspark.sql.udtf import (
-    AnalyzeArgument,
-    AnalyzeResult,
-    UDTFRegistration,
-    UserDefinedTableFunction,
-)
+
+# User-defined table functions of Spark Connect, as PySpark Connect's ``pyspark.sql.connect.udtf``:
+# the UDTF objects of ``pyspark.sql.functions.udtf`` and ``arrow_udtf``, and the registration of
+# ``spark.udtf``. PySpark's classic ``pyspark.sql.udtf``, vendored as it is, holds the dataclasses of
+# ``analyze`` that this module takes.
+"""
+User-defined table function related classes and functions
+"""
+
+import functools
+import pickle
+import sys
+from typing import Any, Optional, Type, Union
+
+from pyspark.errors import PySparkAttributeError, PySparkPicklingError, PySparkTypeError
+from pyspark.serializers import CloudPickleSerializer
+from pyspark.sql.types import StructType
+
+# PySpark's classic dataclasses of the analyze method of a UDTF and its validation of a handler,
+# as PySpark Connect's module imports them: a handler that the client pickles may capture them,
+# and the Python worker of the server unpickles them as PySpark's.
+from pyspark.sql.udtf import AnalyzeArgument, AnalyzeResult, _validate_udtf_handler
+# As PySpark Connect's, whose registration takes the docstrings of PySpark's classic one.
+from pyspark.sql.udtf import UDTFRegistration as _PySparkUDTFRegistration
 
 __all__ = ["AnalyzeArgument", "AnalyzeResult", "UDTFRegistration", "UserDefinedTableFunction"]
+
+# Eval types for Python UDTFs (mirrors pyspark.util.PythonEvalType).
+SQL_TABLE_UDF = 300
+SQL_ARROW_TABLE_UDF = 301
+SQL_ARROW_UDTF = 302
+
+
+# Verbatim from PySpark Connect (pyspark.sql.connect.udtf): validates the handler class of a
+# PyArrow UDTF.
+def _validate_arrow_udtf_handler(cls: Any, returnType: Optional[Any]) -> None:
+    """Validate the handler class of a PyArrow UDTF."""
+    # First run standard UDTF validation
+    _validate_udtf_handler(cls, returnType)
+
+    # Block analyze method usage in arrow UDTFs
+    # TODO(SPARK-53286): Support analyze method for Arrow UDTFs to enable dynamic return types
+    has_analyze = hasattr(cls, "analyze")
+    if has_analyze:
+        raise PySparkAttributeError(
+            errorClass="INVALID_ARROW_UDTF_WITH_ANALYZE",
+            messageParameters={"name": cls.__name__},
+        )
+
+
+def _python_ver() -> str:
+    """The Python version of the client, ``major.minor``, as PySpark's ``get_python_ver``, which
+    the plan of a UDTF carries."""
+    return f"{sys.version_info.major}.{sys.version_info.minor}"
+
+
+def _pickled_handler(func: Type, name: Optional[str] = None) -> bytes:
+    """The command of a UDTF of the handler class ``func``, as PySpark Connect's
+    ``PythonUDTF.to_plan`` pickles it each time it builds a plan that holds the UDTF, and its
+    registration when it registers it: ``UDTF_SERIALIZATION_ERROR`` of the name of the class, of
+    a handler that does not pickle, which is ``name``, the name that the ``PythonUDTF`` of a call
+    read at the call, or else the name of the class now. Connect sends the schema separately, in
+    ``PythonUDTF.return_type``, so the command is only the handler class, unlike that of a scalar
+    UDF."""
+    try:
+        return CloudPickleSerializer().dumps(func)
+    except pickle.PicklingError:
+        raise PySparkPicklingError(
+            errorClass="UDTF_SERIALIZATION_ERROR",
+            messageParameters={
+                "name": func.__name__ if name is None else name,
+                "message": "Please check the stack trace and "
+                "make sure the function is serializable.",
+            },
+        )
+
+
+def _udtf_command(func: Type, name: str, returnType: Optional[Any]) -> bytes:
+    """The ``PythonUDTF`` message of the return type and the command of a call of a UDTF, as
+    PySpark Connect's ``PythonUDTF.to_plan`` builds them each time it builds a plan that holds the
+    call, of what the ``PythonUDTF`` of the call keeps: the handler class ``func``, its ``name``
+    then and the return type object ``returnType``. It converts the return type first, of the
+    object as it is now, with ``pyspark_types_to_proto_types``: so a ``StructType`` changed in
+    place after the call is the type that the request sends, and the error of a type that does not
+    convert, such as ``UNSUPPORTED_OPERATION`` of a value that is not a DataType, is raised before
+    the handler is pickled. Then it pickles the handler (see ``_pickled_handler``). The request
+    sends this type and this command, with the eval type and the Python version of the call."""
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.sql.connect.types import pyspark_types_to_proto_types
+
+    udtf = pb2.PythonUDTF()
+    if returnType is not None:
+        udtf.return_type.CopyFrom(pyspark_types_to_proto_types(returnType))
+    udtf.command = _pickled_handler(func, name)
+    return udtf.SerializeToString()
+
+
+class UserDefinedTableFunction:
+    """
+    User defined function in Python
+
+    Notes
+    -----
+    The constructor of this class is not supposed to be directly called.
+    Use :meth:`pyspark.sql.functions.udtf` to create this instance.
+    """
+
+    # A Python handler class that yields rows: calling the UDTF with Column arguments returns a
+    # DataFrame of the CommonInlineUserDefinedTableFunction relation, as PySpark Connect's.
+
+    def __init__(
+        self,
+        func: Type,
+        returnType: Optional[Union[StructType, str]],
+        name: Optional[str] = None,
+        evalType: int = SQL_TABLE_UDF,
+        deterministic: bool = False,
+    ) -> None:
+        # cloudpickle pickles this class by reference only when its module is imported.
+        import pyspark.sql.connect.udtf  # noqa: F401
+
+        # As PySpark's UserDefinedTableFunction, for udtf(), arrow_udtf() and register(), whose
+        # returnType has no default, and which sets its attributes in this order, as vars() shows
+        # them. A returnType that is neither a DataType nor a str is kept as it is, as PySpark
+        # converts it when it builds a plan of a call.
+        _validate_udtf_handler(func, returnType)
+        self.func = func
+        # As PySpark Connect's: a DDL string is a type that the server parses.
+        if isinstance(returnType, str):
+            from pyspark.sql.connect.types import UnparsedDataType
+
+            returnType = UnparsedDataType(returnType)
+        self.returnType = returnType
+        self._name = name or func.__name__
+        self.evalType = evalType
+        self.deterministic = deterministic
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        from pyspark import _pyspark
+        from pyspark.sql import SparkSession
+        from pyspark.sql.connect.types import UnparsedDataType
+
+        # As PySpark's: an argument is ColumnOrName, so a bare string is a column name, of
+        # which pyfunc_make_udtf makes a ColumnReference, and each keyword argument is a
+        # NamedArgumentExpression, after the positional ones. As its `PythonUDTF`, made at the
+        # call, the plan keeps the handler class, its name and the return type object as they
+        # are now, a str as an UnparsedDataType, so a returnType or a func set after the call is
+        # not that of the call. As its `PythonUDTF.to_plan`, each request converts that type, as
+        # the object is then, and pickles the handler class when it builds the plan of the
+        # DataFrame, after the arguments: `_udtf_command` gives both, so the call passes no type.
+        cols = list(args)
+        named = list(kwargs.items())
+        returnType = self.returnType
+        if isinstance(returnType, str):
+            returnType = UnparsedDataType(returnType)
+        return _pyspark.functions.pyfunc_make_udtf(
+            SparkSession.active(),
+            self._name,
+            None,
+            self.evalType,
+            functools.partial(_udtf_command, self.func, self.func.__name__, returnType),
+            _python_ver(),
+            *cols,
+            deterministic=self.deterministic,
+            named_args=named,
+        )
+
+    def asDeterministic(self) -> "UserDefinedTableFunction":
+        # Mark this UDTF as deterministic, and return it. Mirrors
+        # ``UserDefinedTableFunction.asDeterministic``.
+        self.deterministic = True
+        return self
+
+
+def udtf(
+    cls: Optional[Type] = None,
+    *,
+    returnType: Optional[Any] = None,
+    useArrow: Optional[bool] = None,
+) -> Any:
+    """Create a user-defined table function (UDTF).
+
+    Use as ``@udtf(returnType=...)`` on a handler class, or call
+    ``udtf(MyClass, returnType=...)`` directly. As PySpark's ``_create_py_udtf``, the UDTF is
+    Arrow-optimized when ``useArrow`` is True, or is not given and
+    ``spark.sql.execution.pythonUDTF.arrow.enabled`` of the active session is true.
+    """
+
+    def _udtf_decorator(handler: Type) -> UserDefinedTableFunction:
+        if useArrow is not None:
+            arrow_enabled = useArrow
+        else:
+            from pyspark.errors import PySparkRuntimeError
+            from pyspark.sql import SparkSession
+
+            arrow_enabled = False
+            try:
+                session = SparkSession.active()
+                arrow_enabled = (
+                    str(session.conf.get("spark.sql.execution.pythonUDTF.arrow.enabled")).lower()
+                    == "true"
+                )
+            except PySparkRuntimeError as e:
+                if e.getCondition() == "NO_ACTIVE_OR_DEFAULT_SESSION":
+                    pass  # Just uses the default if no session found.
+                else:
+                    raise e
+        eval_type = SQL_TABLE_UDF
+        if arrow_enabled:
+            try:
+                from pyspark.sql.pandas.utils import (
+                    require_minimum_pandas_version,
+                    require_minimum_pyarrow_version,
+                )
+
+                require_minimum_pandas_version()
+                require_minimum_pyarrow_version()
+                eval_type = SQL_ARROW_TABLE_UDF
+            except ImportError as e:
+                import warnings
+
+                warnings.warn(
+                    f"Arrow optimization for Python UDTFs cannot be enabled: {str(e)}. "
+                    f"Falling back to using regular Python UDTFs.",
+                    UserWarning,
+                )
+        return UserDefinedTableFunction(handler, returnType=returnType, evalType=eval_type)
+
+    if cls is not None:
+        return _udtf_decorator(cls)
+    return _udtf_decorator
+
+
+def arrow_udtf(
+    cls: Optional[Type] = None,
+    *,
+    returnType: Optional[Any] = None,
+) -> Any:
+    """Create an Arrow-based user-defined table function (UDTF).
+
+    Mirrors ``pyspark.sql.functions.arrow_udtf``: a PyArrow-native UDTF (``SQL_ARROW_UDTF``),
+    whose ``eval`` takes ``pyarrow`` arrays and returns ``pyarrow`` tables.
+    """
+    def _arrow_udtf_decorator(handler: Type) -> UserDefinedTableFunction:
+        from pyspark.sql.pandas.utils import require_minimum_pyarrow_version
+
+        require_minimum_pyarrow_version()
+        _validate_arrow_udtf_handler(handler, returnType)
+        return UserDefinedTableFunction(handler, returnType=returnType, evalType=SQL_ARROW_UDTF)
+
+    if cls is not None:
+        return _arrow_udtf_decorator(cls)
+    return _arrow_udtf_decorator
+
+
+class UDTFRegistration:
+    """
+    Wrapper for user-defined table function registration.
+
+    .. versionadded:: 3.5.0
+    """
+
+    # The class of `spark.udtf`, as PySpark Connect's.
+
+    def __init__(self, sparkSession: Any):
+        self.sparkSession = sparkSession
+
+    def register(
+        self,
+        name: str,
+        f: "UserDefinedTableFunction",
+    ) -> "UserDefinedTableFunction":
+        # Register the UDTF ``f`` as ``name`` on the server, so that SQL calls it, and return
+        # ``f``. As PySpark's, ``f`` is a UDTF of ``udtf()`` or ``arrow_udtf()``.
+        if not isinstance(f, UserDefinedTableFunction):
+            raise PySparkTypeError(
+                errorClass="CANNOT_REGISTER_UDTF",
+                messageParameters={
+                    "name": name,
+                },
+            )
+
+        if f.evalType not in [SQL_TABLE_UDF, SQL_ARROW_TABLE_UDF, SQL_ARROW_UDTF]:
+            raise PySparkTypeError(
+                errorClass="INVALID_UDTF_EVAL_TYPE",
+                messageParameters={
+                    "name": name,
+                    "eval_type": "SQL_TABLE_UDF, SQL_ARROW_TABLE_UDF, SQL_ARROW_UDTF",
+                },
+            )
+
+        # As PySpark Connect's `register_udtf`, which takes the Python version of the client,
+        # which a UDTF does not keep, and sets the name and converts the return type before it
+        # pickles the handler class: `_registerPythonUdtf` calls the pickling after them.
+        self.sparkSession._registerPythonUdtf(
+            name,
+            f.returnType,
+            f.evalType,
+            functools.partial(_pickled_handler, f.func),
+            _python_ver(),
+            f.deterministic,
+        )
+        return f
+
+    register.__doc__ = _PySparkUDTFRegistration.register.__doc__

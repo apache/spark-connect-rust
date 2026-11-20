@@ -205,11 +205,13 @@ class Tree:
         dropped=None,
         dropped_star_imports=None,
         ml_connect=None,
+        executed_sources=None,
     ):
         """The outputs of the generator of the stubs of `modules`, and of the modules of
         pyspark.ml.connect `ml_connect` and their package, if given."""
         with (
             mock.patch.object(gen, "STUB_MODULES", tuple(modules)),
+            mock.patch.object(gen, "EXECUTED_SOURCES", executed_sources or {}),
             mock.patch.object(gen, "EXTRAS", extras or {}),
             mock.patch.object(gen, "ATTRIBUTE_TYPES", attribute_types or {}),
             mock.patch.object(gen, "UNRESOLVED_IMPORTS", unresolved_imports or {}),
@@ -463,6 +465,41 @@ class Schema:
             "\nfrom typing import Dict\n\n_registry: Dict[str, int]\n\n"
             "def _helper(x: int) -> int: ...\ndef read(x: int) -> int: ...\n",
         )
+
+    def test_keeps_the_private_names_of_the_files_that_the_dropins_module_runs(self):
+        tree = Tree(self)
+        tree.write(
+            tree.src,
+            "pyspark/sql/reader.py",
+            """
+            def _helper(x: int) -> int:
+                return x
+
+            def _unused(x: int) -> int:
+                return x
+
+            def read(x: int) -> int:
+                return x
+            """,
+        )
+        # The drop-in's module runs the code of a generated file in its namespace, which binds
+        # _helper: the stub declares it, as a name of the module at run time.
+        tree.write(
+            tree.repo,
+            "python/pyspark/sql/reader.py",
+            "exec(open('_generated.py').read(), globals())\n",
+        )
+        tree.write(tree.repo, "python/pyspark/sql/_generated.py", "def _helper(x):\n    return x\n")
+        outputs = tree.generate(
+            ["pyspark.sql.reader"],
+            executed_sources={"pyspark.sql.reader": ("pyspark/sql/_generated.py",)},
+        )
+        self.assertEqual(
+            body(outputs[Path("python/pyspark/sql/reader.pyi")]),
+            "\ndef _helper(x: int) -> int: ...\ndef read(x: int) -> int: ...\n",
+        )
+        with self.assertRaisesRegex(gen.GeneratorError, "EXECUTED_SOURCES of modules without"):
+            tree.generate(["pyspark.sql.reader"], executed_sources={"pyspark.sql.other": ()})
 
     def test_keeps_the_type_ignores_and_the_imports_of_the_annotation_of_all(self):
         tree = Tree(self)

@@ -604,10 +604,13 @@ impl SparkError {
                 None => {
                     // The `grpc-status-details-bin` of the status is the `google.rpc.Status` of
                     // `rpc_status.from_call`, whose message is that of the call.
-                    let pyspark_message = if details.is_empty() {
-                        grpc_call_text(call, code, &message)
-                    } else {
+                    let pyspark_message = if !details.is_empty() {
                         message.clone()
+                    } else if is_decode_failure(&status) {
+                        // As grpcio's error of a response that it fails to deserialize.
+                        grpc_call_text_of(call, code, DESERIALIZE_FAILURE, "None")
+                    } else {
+                        grpc_call_text(call, code, &message)
                     };
                     let err = Self::connect_msg(format!("[{code}] {message}"));
                     (err, Some(pyspark_message))
@@ -914,20 +917,43 @@ fn status_code_name(code: tonic::Code) -> &'static str {
 /// are tonic's message, where grpcio's are those of gRPC's C core, such as `failed to connect to
 /// all addresses; last error: ...`.
 fn grpc_call_text(call: GrpcCall, code: tonic::Code, details: &str) -> String {
-    let class = match call {
-        GrpcCall::Unary => "_InactiveRpcError",
-        GrpcCall::ServerStreaming => "_MultiThreadedRendezvous",
-    };
     let name = status_code_name(code);
     let debug_error_string = if details.is_empty() {
         name.to_string()
     } else {
         format!("{name}:{details}")
     };
+    grpc_call_text_of(call, code, details, &debug_error_string)
+}
+
+/// The text of grpcio's error of a failed call of the kind `call`, of the code, the details and
+/// the `debug_error_string` given.
+fn grpc_call_text_of(
+    call: GrpcCall,
+    code: tonic::Code,
+    details: &str,
+    debug_error_string: &str,
+) -> String {
+    let class = match call {
+        GrpcCall::Unary => "_InactiveRpcError",
+        GrpcCall::ServerStreaming => "_MultiThreadedRendezvous",
+    };
+    let name = status_code_name(code);
     format!(
         "<{class} of RPC that terminated with:\n\tstatus = StatusCode.{name}\n\tdetails = \
          \"{details}\"\n\tdebug_error_string = \"{debug_error_string}\"\n>"
     )
+}
+
+/// The details of grpcio's error of a response that it fails to deserialize, of no
+/// `debug_error_string` (`None`), as PySpark raises it of a corrupt response.
+const DESERIALIZE_FAILURE: &str = "Exception deserializing response!";
+
+/// Whether `status` is the client's own of a response that it failed to decode, of the codec of
+/// the generated client, which tags it (see [`spark_connect_proto::ClientCodec`]): a status of the
+/// same code and text that a server sends, as of its failure to decode a request, is not.
+fn is_decode_failure(status: &Status) -> bool {
+    status.code() == tonic::Code::Internal && spark_connect_proto::is_client_decode_error(status)
 }
 
 /// The `google.rpc.ErrorInfo` of a gRPC status, from its `grpc-status-details-bin`: the
@@ -1872,6 +1898,47 @@ mod tests {
              \tstatus = StatusCode.UNKNOWN\n\tdetails = \"line one\nline two é\"\n\
              \tdebug_error_string = \"UNKNOWN:line one\nline two é\"\n>"
         );
+        // Of a response that the client fails to decode (the status of prost's error that the
+        // codec of the client tags), grpcio's error of a response that it fails to deserialize,
+        // as PySpark raises it.
+        let undecodable = "failed to decode Protobuf message: ExecutePlanResponse.session_id: \
+                           buffer underflow";
+        let tagged = |mut status: Status| {
+            status.set_source(std::sync::Arc::new(spark_connect_proto::ClientDecodeError));
+            status
+        };
+        for (call, class) in [
+            (GrpcCall::ServerStreaming, "_MultiThreadedRendezvous"),
+            (GrpcCall::Unary, "_InactiveRpcError"),
+        ] {
+            assert_eq!(
+                message(tagged(Status::internal(undecodable)), call),
+                format!(
+                    "<{class} of RPC that terminated with:\n\tstatus = StatusCode.INTERNAL\n\
+                     \tdetails = \"Exception deserializing response!\"\n\
+                     \tdebug_error_string = \"None\"\n>"
+                )
+            );
+        }
+        // Not of a status of the server of the same text, as a server that fails to decode a
+        // request sends it, nor of another code, nor of a `google.rpc.Status`.
+        assert_eq!(
+            message(Status::internal(undecodable), GrpcCall::Unary),
+            format!(
+                "<_InactiveRpcError of RPC that terminated with:\n\
+                 \tstatus = StatusCode.INTERNAL\n\tdetails = \"{undecodable}\"\n\
+                 \tdebug_error_string = \"INTERNAL:{undecodable}\"\n>"
+            )
+        );
+        assert!(
+            message(tagged(Status::unknown(undecodable)), GrpcCall::Unary).contains(undecodable)
+        );
+        let of_server = Status::with_details(
+            tonic::Code::Internal,
+            undecodable,
+            bytes::Bytes::from_static(&[8, 13]),
+        );
+        assert_eq!(message(of_server, GrpcCall::Unary), undecodable);
         // Of a `google.rpc.Status` without an `ErrorInfo`, here of the code 14 alone, the message
         // of the status, which `rpc_status.from_call` checks is that of the call.
         let without_info = Status::with_details(

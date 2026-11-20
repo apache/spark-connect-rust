@@ -34,6 +34,7 @@ EXPECTED = {
     "na": "pyspark.sql.connect.dataframe.DataFrameNaFunctions",
     "stat": "pyspark.sql.connect.dataframe.DataFrameStatFunctions",
     "groupBy": "pyspark.sql.connect.group.GroupedData",
+    "cogroup": "pyspark.sql.connect.group.PandasCogroupedOps",
     "column": "pyspark.sql.connect.column.Column",
     "window": "pyspark.sql.connect.window.WindowSpec",
     "asTable": "pyspark.sql.connect.table_arg.TableArg",
@@ -66,6 +67,7 @@ def _objects(spark):
         "na": df.na,
         "stat": df.stat,
         "groupBy": df.groupBy(),
+        "cogroup": df.groupBy().cogroup(df.groupBy()),
         "column": F.col("id"),
         "window": Window.partitionBy("id"),
         "asTable": df.asTable(),
@@ -135,6 +137,305 @@ def test_the_classic_conf_tvf_merge_and_observation_classes_are_pysparks(objects
     assert Observation.__module__ == "pyspark.sql.observation"
 
 
+# The classic class of each object of a session, of its module of PySpark's, which pyspark.sql or
+# pyspark.sql.streaming names too, as PySpark's do.
+_STREAMING = "pyspark.sql.streaming"
+CLASSIC = {
+    "catalog": ("pyspark.sql.catalog", "Catalog", "pyspark.sql"),
+    "read": ("pyspark.sql.readwriter", "DataFrameReader", "pyspark.sql"),
+    "write": ("pyspark.sql.readwriter", "DataFrameWriter", "pyspark.sql"),
+    "writeTo": ("pyspark.sql.readwriter", "DataFrameWriterV2", "pyspark.sql"),
+    "readStream": (f"{_STREAMING}.readwriter", "DataStreamReader", _STREAMING),
+    "writeStream": (f"{_STREAMING}.readwriter", "DataStreamWriter", _STREAMING),
+    "streams": (f"{_STREAMING}.query", "StreamingQueryManager", _STREAMING),
+    "udf": ("pyspark.sql.udf", "UDFRegistration", "pyspark.sql"),
+    "udtf": ("pyspark.sql.udtf", "UDTFRegistration", "pyspark.sql"),
+    "groupBy": ("pyspark.sql.group", "GroupedData", "pyspark.sql"),
+    "cogroup": ("pyspark.sql.pandas.group_ops", "PandasCogroupedOps", "pyspark.sql"),
+}
+
+
+@pytest.mark.parametrize("name", list(CLASSIC))
+def test_the_classic_classes_of_the_objects_of_a_session_are_pysparks(objects, name):
+    # As PySpark's: the classic modules are PySpark's, of Apache Spark as they are, whose classes
+    # are of the JVM of Spark Classic, and the objects of a session are of PySpark Connect's
+    # classes, which are not their subclasses.
+    import importlib
+
+    module, qualname, package = CLASSIC[name]
+    classic = getattr(importlib.import_module(module), qualname)
+    assert f"{classic.__module__}.{classic.__qualname__}" == f"{module}.{qualname}"
+    assert getattr(importlib.import_module(package), qualname) is classic
+    assert not isinstance(objects[name], classic)
+    assert type(objects[name]).__module__.startswith("pyspark.sql.connect.")
+    assert pickle.loads(pickle.dumps(classic)) is classic
+
+
+def test_the_classic_modules_of_the_objects_of_a_session_are_pysparks():
+    # Of PySpark's own names of these modules, which the Connect classes do not have: the option
+    # helpers of its readers and writers, and the decorators and the mixin of its grouped data.
+    from pyspark.sql import group, readwriter
+    from pyspark.sql.pandas import group_ops
+    from pyspark.sql.streaming import query
+    from pyspark.sql.streaming import readwriter as streaming_readwriter
+
+    assert [readwriter.to_str(v) for v in (True, False, None, 1, "a")] == [
+        "true",
+        "false",
+        None,
+        "1",
+        "a",
+    ]
+    for cls in (readwriter.DataFrameReader, readwriter.DataFrameWriter):
+        assert cls.__mro__ == (cls, readwriter.OptionUtils, object)
+    assert streaming_readwriter.DataStreamReader.__mro__[1] is readwriter.OptionUtils
+    assert group.GroupedData.__mro__ == (
+        group.GroupedData,
+        group_ops.PandasGroupedOpsMixin,
+        object,
+    )
+    assert callable(group.dfapi) and callable(group.df_varargs_api)
+    assert query.StreamingCheckpointManager.__module__ == "pyspark.sql.streaming.query"
+
+
+def test_the_udfs_and_udtfs_are_of_pyspark_connects_classes():
+    # As PySpark's on Spark Connect: udf, pandas_udf, udtf and arrow_udtf make the UDFs and the
+    # UDTFs of PySpark Connect's classes, of pyspark.sql.connect.udf and pyspark.sql.connect.udtf,
+    # which are not instances of the classic classes of pyspark.sql.udf and pyspark.sql.udtf,
+    # which pyspark.sql.functions names, as PySpark's does.
+    import pandas as pd
+    import pyarrow as pa
+    import pyspark.sql.udf as classic_udf
+    import pyspark.sql.udtf as classic_udtf
+    from pyspark.sql.connect import udf as connect_udf
+    from pyspark.sql.connect import udtf as connect_udtf
+
+    class Handler:
+        def eval(self, a):
+            yield (a,)
+
+    class ArrowHandler:
+        def eval(self, a: pa.RecordBatch):
+            yield pa.table({"a": [1]})
+
+    for table_function in (
+        F.udtf(Handler, returnType="a int"),
+        F.arrow_udtf(ArrowHandler, returnType="a int"),
+    ):
+        assert type(table_function) is connect_udtf.UserDefinedTableFunction
+        assert not isinstance(table_function, classic_udtf.UserDefinedTableFunction)
+
+    def plus_one(s: pd.Series) -> pd.Series:
+        return s + 1
+
+    for function in (F.udf(lambda x: x), F.pandas_udf(plus_one, "long")):
+        assert type(function._unwrapped) is connect_udf.UserDefinedFunction
+        assert not isinstance(function._unwrapped, classic_udf.UserDefinedFunction)
+
+    assert F.UserDefinedFunction is classic_udf.UserDefinedFunction
+    assert F.UserDefinedTableFunction is classic_udtf.UserDefinedTableFunction
+    for cls, module in [
+        (connect_udf.UserDefinedFunction, "pyspark.sql.connect.udf"),
+        (connect_udtf.UserDefinedTableFunction, "pyspark.sql.connect.udtf"),
+    ]:
+        assert cls.__module__ == module
+        assert pickle.loads(pickle.dumps(cls)) is cls
+
+
+# The names of pyspark-client 4.3.0's pyspark.sql.utils, but those of the dunder methods.
+SQL_UTILS_NAMES = (
+    "AnalysisException Any Callable CapturedException Dict Enum ForeachBatchFunction FuncT "
+    "IllegalArgumentException JVM_INT_MAX List NumpyHelper Optional ParseException "
+    "PySparkImportError PySparkNotImplementedError PySparkRuntimeError PythonException "
+    "QueryExecutionException Sequence SparkUpgradeException StreamingQueryException StringConcat "
+    "TYPE_CHECKING TypeVar Union UnknownException _find_spark_home cast dispatch_col_method "
+    "dispatch_df_method dispatch_table_arg_method dispatch_window_method enum_to_value "
+    "escape_meta_characters functools get_active_spark_context get_lit_sql_str inspect is_remote "
+    "is_remote_only is_timestamp_ntz_preferred os overload pyspark_column_op remote_only "
+    "require_minimum_plotly_version require_test_compiled to_java_array to_scala_map to_str "
+    "try_partitioning_remote_functions try_remote_avro_functions try_remote_functions "
+    "try_remote_protobuf_functions try_remote_session_classmethod"
+).split()
+
+
+def test_sql_utils_is_pysparks_module(tmp_path, monkeypatch):
+    # As pyspark-client's pyspark.sql.utils, of its names and its helpers: a remote-only client,
+    # whose is_remote() is True, and whose require_test_compiled raises of a SPARK_HOME without
+    # the test classes of Spark SQL.
+    import pyspark.sql.utils as utils
+    from pyspark.errors import PySparkRuntimeError
+
+    assert sorted(n for n in vars(utils) if not n.startswith("__")) == sorted(SQL_UTILS_NAMES)
+    assert utils.is_remote_only() is True and utils.is_remote() is True
+    assert utils.JVM_INT_MAX == (1 << 31) - 1
+    assert utils.escape_meta_characters("a\nb\tc") == "a\\nb\\tc"
+    concat = utils.StringConcat()
+    concat.append("a")
+    concat.append("b")
+    assert concat.toString() == "ab"
+    monkeypatch.setenv("SPARK_HOME", str(tmp_path))
+    assert utils._find_spark_home() == str(tmp_path)
+    with pytest.raises(PySparkRuntimeError) as raised:
+        utils.require_test_compiled()
+    assert raised.value.getCondition() == "TEST_CLASS_NOT_COMPILED"
+    # A Connect-only client has no SparkContext, of which PySpark's classic helper imports.
+    with pytest.raises(ImportError, match="SparkContext"):
+        utils.get_active_spark_context()
+
+
+def test_the_decorators_of_sql_utils_run_spark_connects(objects):
+    # As PySpark's decorators of a remote client: the functions run those of PySpark Connect's
+    # modules of their names, and the methods those of the classes of Spark Connect, which an
+    # object of another class does not have.
+    from pyspark.errors import PySparkNotImplementedError
+    from pyspark.sql.connect.column import Column
+    from pyspark.sql.connect.dataframe import DataFrame
+    from pyspark.sql.connect.table_arg import TableArg
+    from pyspark.sql.connect.window import WindowSpec
+    from pyspark.sql.utils import (
+        dispatch_col_method,
+        dispatch_df_method,
+        dispatch_table_arg_method,
+        dispatch_window_method,
+        try_partitioning_remote_functions,
+        try_remote_avro_functions,
+        try_remote_functions,
+        try_remote_protobuf_functions,
+    )
+
+    def named(name, decorator):
+        def classic(*args, **kwargs):
+            raise AssertionError("of Spark Classic")
+
+        classic.__name__ = classic.__qualname__ = name
+        return decorator(classic)
+
+    assert type(named("lit", try_remote_functions)(5)) is Column
+    assert type(named("years", try_partitioning_remote_functions)(F.col("d"))) is Column
+    assert type(named("to_avro", try_remote_avro_functions)(F.col("d"))) is Column
+    protobuf = named("to_protobuf", try_remote_protobuf_functions)
+    assert type(protobuf(F.col("d"), "M", binaryDescriptorSet=b"")) is Column
+    limit = named("limit", dispatch_df_method)
+    assert type(limit(objects["df"], 1)) is DataFrame
+    alias = named("alias", dispatch_col_method)
+    assert type(alias(objects["column"], "x")) is Column
+    for method, feature in ((limit, "DataFrame.limit"), (alias, "Column.alias")):
+        with pytest.raises(PySparkNotImplementedError) as raised:
+            method(object(), 1)
+        assert raised.value.getMessageParameters() == {"feature": feature}
+    assert type(named("partitionBy", dispatch_window_method)("id")) is WindowSpec
+    table_arg = named("partitionBy", dispatch_table_arg_method)(objects["asTable"], "id")
+    assert type(table_arg) is TableArg
+
+
+def test_the_connect_package_has_pysparks_names_and_imports_without_its_checks(tmp_path):
+    # As pyspark-client's pyspark.sql.connect, whose __init__ imports the check_dependencies of
+    # pyspark.sql.connect.utils: the package has those names, and importing pyspark imports no
+    # module of it, nor do the functions of UDFs and UDTFs until they are asked for. Its import
+    # does not run the check, which requires pandas, PyArrow and the packages of gRPC, so it
+    # imports without them, and of a main module without a file, which `python -c` runs and
+    # which PySpark's check takes for its doctests.
+    import subprocess
+    import sys
+
+    script = tmp_path / "connect_names.py"
+    script.write_text(
+        """
+import importlib.abc, pickle, sys
+
+blocked = sys.argv[1:]
+
+
+class Block(importlib.abc.MetaPathFinder):
+    def find_spec(self, name, path, target=None):
+        if any(name == b or name.startswith(b + ".") for b in blocked):
+            raise ImportError("blocked: " + name)
+
+
+sys.meta_path.insert(0, Block())
+
+
+def connect_modules():
+    return sorted(m for m in sys.modules if m.startswith("pyspark.sql.connect"))
+
+
+import pyspark
+from pyspark.sql import SparkSession, functions as F
+
+assert connect_modules() == [], connect_modules()
+assert {"udf", "udtf", "arrow_udtf"} <= set(dir(F))
+assert connect_modules() == [], connect_modules()
+import pyspark.sql.connect as connect
+
+assert sorted(n for n in vars(connect) if not n.startswith("__")) == ["check_dependencies", "utils"]
+assert connect_modules() == ["pyspark.sql.connect", "pyspark.sql.connect.utils"], connect_modules()
+assert connect.__doc__ == "Spark Connect client"
+assert connect.check_dependencies is connect.utils.check_dependencies
+from pyspark.sql.functions import udf
+import pyspark.sql.functions.builtin as builtin
+
+assert udf is F.udf is builtin.udf and F.udtf is builtin.udtf and F.arrow_udtf is builtin.arrow_udtf
+assert udf.__module__ == "pyspark.sql.functions.builtin" and pickle.loads(pickle.dumps(udf)) is udf
+print("ok")
+"""
+    )
+    packages = ["pandas", "pyarrow", "numpy", "grpc", "grpc_status", "google.rpc", "zstandard"]
+    for blocked in ([], packages):
+        result = subprocess.run(
+            [sys.executable, str(script), *blocked], capture_output=True, text=True, timeout=300
+        )
+        assert result.returncode == 0 and result.stdout.strip() == "ok", result.stderr
+    result = subprocess.run(
+        [sys.executable, "-c", "import pyspark.sql.connect as c; print(sorted(vars(c))[-1])"],
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    assert result.returncode == 0 and result.stdout.strip() == "utils", result.stderr
+
+
+def test_the_ml_connect_package_has_check_dependencies_as_pysparks():
+    # As PySpark's pyspark.ml.connect, whose __init__ imports the check_dependencies of
+    # pyspark.sql.connect.utils (and runs it, which the drop-in's does not; see the test above).
+    import pyspark.ml.connect as ml_connect
+    from pyspark.sql.connect import utils
+
+    assert ml_connect.check_dependencies is utils.check_dependencies
+
+
+def test_the_udf_functions_are_names_of_the_functions_modules_as_pysparks():
+    # The functions of UDFs and UDTFs that pyspark.sql.functions reads when they are asked for are
+    # names of it and of its builtin module, which dir() lists, and a name that neither has raises
+    # the AttributeError of a module, as PySpark's.
+    import pyspark.sql.functions.builtin as builtin
+
+    for module in (F, builtin):
+        assert {"udf", "udtf", "arrow_udtf"} <= set(dir(module))
+        assert module.udf is F.udf and module.arrow_udtf is F.arrow_udtf
+        with pytest.raises(AttributeError) as raised:
+            module.no_such_function
+        assert str(raised.value) == f"module {module.__name__!r} has no attribute 'no_such_function'"
+
+
+def test_the_native_trigger_and_listener_bus_are_of_the_connect_modules(objects):
+    # The drop-in's Trigger of a stream writer, of its module of PySpark Connect, where it pickles
+    # by reference, and the listener bus of a session's streams, of PySpark Connect's module and
+    # name of the class of its bus.
+    from pyspark.sql.connect.streaming import readwriter
+
+    trigger = readwriter.Trigger
+    assert (trigger.__module__, trigger.__qualname__) == (
+        "pyspark.sql.connect.streaming.readwriter",
+        "Trigger",
+    )
+    assert pickle.loads(pickle.dumps(trigger)) is trigger
+    bus = type(objects["streams"]._sqlb)
+    assert (bus.__module__, bus.__qualname__) == (
+        "pyspark.sql.connect.streaming.query",
+        "StreamingQueryListenerBus",
+    )
+
+
 def test_the_connect_window_is_a_class_of_its_own_as_pysparks():
     # As PySpark Connect's Window, a subclass of pyspark.sql.window.Window, whose static methods
     # make the WindowSpecs of PySpark Connect.
@@ -153,7 +454,240 @@ def test_the_connect_window_is_a_class_of_its_own_as_pysparks():
     assert window.Window.unboundedPreceding == Window.unboundedPreceding
 
 
+# PySpark's classic classes whose Connect classes are native: their import paths of PySpark, the
+# MRO of PySpark's class, and the object of a session of each.
+CLASSIC_OF_NATIVE = {
+    "column": ("pyspark.sql.column", "Column", "pyspark.sql.connect.column"),
+    "na": ("pyspark.sql.dataframe", "DataFrameNaFunctions", "pyspark.sql.connect.dataframe"),
+    "stat": ("pyspark.sql.dataframe", "DataFrameStatFunctions", "pyspark.sql.connect.dataframe"),
+    "window": ("pyspark.sql.window", "WindowSpec", "pyspark.sql.connect.window"),
+    "asTable": ("pyspark.sql.table_arg", "TableArg", "pyspark.sql.connect.table_arg"),
+}
+CLASSIC_MRO = {
+    "column": ["pyspark.sql.column.Column", "pyspark.sql.tvf_argument.TableValuedFunctionArgument"],
+    "na": ["pyspark.sql.dataframe.DataFrameNaFunctions"],
+    "stat": ["pyspark.sql.dataframe.DataFrameStatFunctions"],
+    "window": ["pyspark.sql.window.WindowSpec"],
+    "asTable": [
+        "pyspark.sql.table_arg.TableArg",
+        "pyspark.sql.tvf_argument.TableValuedFunctionArgument",
+    ],
+}
+
+# The first line of the docstring of each of PySpark's classic classes.
+CLASSIC_DOC = {
+    "column": "A column in a DataFrame.",
+    "na": "Functionality for working with missing data in :class:`DataFrame`.",
+    "stat": "Functionality for statistic functions with :class:`DataFrame`.",
+    "window": "A window specification that defines the partitioning, ordering,",
+    "asTable": "Represents a table argument in PySpark.",
+}
+
+
+def _qualified(cls):
+    return f"{cls.__module__}.{cls.__qualname__}"
+
+
+@pytest.mark.parametrize("name", list(CLASSIC_OF_NATIVE))
+def test_the_classic_classes_of_native_connect_classes_are_pysparks(objects, name):
+    # As PySpark's: the classic Column, DataFrameNaFunctions, DataFrameStatFunctions, WindowSpec
+    # and TableArg are PySpark's classes, of its modules and MROs, which pyspark.sql names, and the
+    # Connect class of each, which its objects are of, is another class, a subclass of it: the
+    # drop-in's native one, its virtual subclass.
+    import importlib
+
+    import pyspark.sql
+
+    module, qualname, connect = CLASSIC_OF_NATIVE[name]
+    classic = getattr(importlib.import_module(module), qualname)
+    native = getattr(importlib.import_module(connect), qualname)
+    assert _qualified(classic) == f"{module}.{qualname}"
+    assert [_qualified(c) for c in classic.__mro__] == CLASSIC_MRO[name] + ["builtins.object"]
+    assert classic is not native and _qualified(native) == f"{connect}.{qualname}"
+    if hasattr(pyspark.sql, qualname):
+        assert getattr(pyspark.sql, qualname) is classic
+    assert issubclass(native, classic)
+    assert isinstance(objects[name], classic) and type(objects[name]) is native
+    assert pickle.loads(pickle.dumps(classic)) is classic
+    assert classic.__doc__.strip().splitlines()[0] == CLASSIC_DOC[name]
+    assert "_of_expression" not in vars(classic) and "to_plan" not in vars(classic)
+
+
+def test_the_classic_classes_construct_and_subclass_as_pysparks(objects):
+    # As PySpark's on Spark Connect: the classic Column and WindowSpec build the classic
+    # implementation, which pyspark-client does not have, and the others construct as plain
+    # classes; each subclasses as PySpark's, in the caller's module, of PySpark's MRO, and the
+    # objects of a session are not instances of a subclass.
+    import abc
+
+    from pyspark import cloudpickle
+    from pyspark.sql.column import Column
+    from pyspark.sql.dataframe import DataFrameNaFunctions, DataFrameStatFunctions
+    from pyspark.sql.table_arg import TableArg
+    from pyspark.sql.tvf_argument import TableValuedFunctionArgument
+    from pyspark.sql.window import Window, WindowSpec
+
+    for make in (lambda: Column(), lambda: Column("a"), lambda: WindowSpec(None)):
+        with pytest.raises(ModuleNotFoundError, match="No module named 'pyspark.sql.classic'"):
+            make()
+    df = objects["df"]
+    for cls in (DataFrameNaFunctions, DataFrameStatFunctions):
+        made = cls(df)
+        assert type(made) is cls and vars(made) == {"df": df}
+        with pytest.raises(TypeError, match="missing 1 required positional argument: 'df'"):
+            cls()
+    for cls in (Window, TableArg, TableValuedFunctionArgument):
+        assert type(cls()) is cls
+    for cls, name in [
+        (Column, "column"), (DataFrameNaFunctions, "na"), (DataFrameStatFunctions, "stat"),
+        (WindowSpec, "window"), (TableArg, "asTable"), (Window, None),
+        (TableValuedFunctionArgument, None),
+    ]:
+        sub = type("Sub", (cls,), {})
+        assert sub.__module__ == __name__ and sub.__mro__[1:] == cls.__mro__
+        # Of a metaclass of the standard library, which a by-value cloudpickle of the subclass
+        # names, and which the Python workers of PySpark import to make it again.
+        assert type(sub) is (type if cls is Window else abc.ABCMeta)
+        assert b"_classic_bases" not in cloudpickle.dumps(sub)
+        assert cloudpickle.loads(cloudpickle.dumps(sub)) is sub
+        if name is not None:
+            assert not isinstance(objects[name], sub)
+            assert not issubclass(type(objects[name]), sub)
+        assert pickle.loads(pickle.dumps(cls)) is cls
+
+
+def test_pickled_columns_and_table_args_load_as_their_classes_as_pysparks(objects):
+    # As PySpark Connect's Columns and table arguments: pickle and cloudpickle give back an object
+    # of the same class, the native one, of the same expression, which is an instance of the
+    # classic class, of which the native class is a virtual subclass.
+    from pyspark import cloudpickle
+    from pyspark.sql.column import Column
+    from pyspark.sql.table_arg import TableArg
+
+    client, table = objects["client"], objects["asTable"]
+    for obj, classic in [
+        (objects["column"], Column),
+        ((F.col("id") + 1).alias("x"), Column),
+        (table, TableArg),
+        (table.partitionBy("id").orderBy("id"), TableArg),
+        (table.withSinglePartition(), TableArg),
+    ]:
+        for dumps in (pickle.dumps, cloudpickle.dumps):
+            restored = pickle.loads(dumps(obj))
+            assert type(restored) is type(obj) and type(restored).__module__.startswith(
+                "pyspark.sql.connect."
+            )
+            assert isinstance(restored, classic)
+            assert restored.to_plan(client) == obj.to_plan(client)
+
+
+def test_the_methods_of_the_classic_classes_dispatch_as_pysparks(objects):
+    # As PySpark's dispatch_col_method, dispatch_df_method, dispatch_window_method and
+    # dispatch_table_arg_method: an explicit call of a classic method runs the Connect class's of
+    # an object of it, and raises NOT_IMPLEMENTED of another, where the methods of the classic
+    # WindowSpec, which PySpark does not dispatch, return None.
+    from pyspark.errors import PySparkNotImplementedError
+    from pyspark.sql.column import Column
+    from pyspark.sql.connect.window import WindowSpec as ConnectWindowSpec
+    from pyspark.sql.dataframe import DataFrameNaFunctions, DataFrameStatFunctions
+    from pyspark.sql.table_arg import TableArg
+    from pyspark.sql.window import WindowSpec
+
+    column, df = objects["column"], objects["df"]
+    assert repr(Column.alias(column, "x")) == repr(column.alias("x"))
+    assert repr(Column.__add__(column, 1)) == repr(column + 1)
+    assert Column.__hash__ is None
+    for call, feature in [
+        (lambda: Column.alias(object(), "x"), "Column.alias"),
+        (lambda: DataFrameNaFunctions.drop(objects["na"]), "DataFrame.drop"),
+        (lambda: DataFrameStatFunctions.cov(objects["stat"], "id", "id"), "DataFrame.cov"),
+    ]:
+        with pytest.raises(PySparkNotImplementedError) as error:
+            call()
+        assert error.value.getMessageParameters() == {"feature": feature}
+    assert type(DataFrameNaFunctions.drop(df)) is type(df)
+    spec = Window.partitionBy("id")
+    assert type(spec) is ConnectWindowSpec and repr(spec) == "WindowSpec(PartitionBy(id))"
+    assert WindowSpec.partitionBy(spec, "id") is None
+    assert WindowSpec.orderBy(spec, "id") is None
+    assert WindowSpec.rowsBetween(spec, 0, 1) is None
+    assert WindowSpec.rangeBetween(spec, 0, 1) is None
+    assert type(TableArg.partitionBy(objects["asTable"], "id")) is type(objects["asTable"])
+
+
+def test_the_connect_window_is_pyspark_connects(objects):
+    # As PySpark Connect's Window, of PySpark Connect's code: a subclass of the classic Window,
+    # whose static methods make WindowSpecs of its `_spec`, the specification of no partitioning,
+    # ordering and frame, as the classic Window's dispatch to them.
+    from pyspark.sql.connect import window
+
+    # Of the names of PySpark Connect's class (and the __slotnames__ that copyreg caches on a
+    # class once an object of it is pickled, as of PySpark's).
+    assert sorted(set(vars(window.Window)) - {"__slotnames__"}) == [
+        "__doc__", "__module__", "_spec", "orderBy", "partitionBy", "rangeBetween", "rowsBetween",
+    ]
+    assert repr(window.Window._spec) == "WindowSpec()"
+    assert type(window.Window._spec) is window.WindowSpec
+    for build in (
+        lambda w: w.partitionBy("id"),
+        lambda w: w.orderBy("id"),
+        lambda w: w.rowsBetween(w.unboundedPreceding, w.currentRow),
+        lambda w: w.rangeBetween(-1, 1),
+    ):
+        assert repr(build(Window)) == repr(build(window.Window))
+    assert Window.partitionBy.__qualname__ == "Window.partitionBy"
+
+
+def test_patches_of_the_classic_classes_reach_the_objects_as_pysparks(objects):
+    # As PySpark's Connect objects, of which the classic class and TableValuedFunctionArgument are
+    # bases: a name patched on them is found of the objects, unless the Connect class has the name
+    # (alias), or the objects set it on themselves (_expr) and the patch is not a data descriptor;
+    # a deletion of the patch takes it back, and a patch of the class nearer the object wins.
+    from pyspark.sql.column import Column
+    from pyspark.sql.connect.column import Column as ConnectColumn
+    from pyspark.sql.tvf_argument import TableValuedFunctionArgument
+
+    column, table = objects["column"], objects["asTable"]
+    expr = column._expr
+    alias = vars(Column)["alias"]
+    try:
+        Column.c14_new = lambda self: "classic"
+        TableValuedFunctionArgument.c14_base = lambda self: "base"
+        assert column.c14_new() == "classic" and ConnectColumn.c14_new(column) == "classic"
+        assert column.c14_base() == "base" and table.c14_base() == "base"
+        Column.c14_base = lambda self: "nearer"
+        assert column.c14_base() == "nearer" and table.c14_base() == "base"
+        del Column.c14_base
+        assert column.c14_base() == "base"
+        Column.alias = lambda self, *args: "patched"
+        assert repr(column.alias("x")) == "Column<'id AS x'>"
+        Column._expr = "plain"
+        assert not isinstance(column._expr, str) and repr(column._expr) == repr(expr)
+        Column._expr = property(lambda self: "property")
+        assert column._expr == "property"
+        del Column._expr
+        assert repr(column._expr) == repr(expr)
+        # A patch of the native class itself hides the patch of a classic class, as the Connect
+        # class's own attribute does.
+        ConnectColumn.c14_own = lambda self: "own"
+        Column.c14_own = lambda self: "classic"
+        assert column.c14_own() == "own"
+    finally:
+        for cls, name in [
+            (Column, "c14_new"), (TableValuedFunctionArgument, "c14_base"), (Column, "c14_own"),
+            (ConnectColumn, "c14_own"), (Column, "_expr"),
+        ]:
+            if name in vars(cls):
+                delattr(cls, name)
+        Column.alias = alias
+    assert not hasattr(ConnectColumn, "c14_new") and "c14_base" not in vars(ConnectColumn)
+    assert repr(column.alias("x")) == "Column<'id AS x'>"
+
+
 def test_the_streaming_query_class_is_pysparks():
+    # As PySpark's: a query is of PySpark Connect's class, and the StreamingQuery of
+    # pyspark.sql.streaming is PySpark's classic class, which is not its base.
+    import pyspark.sql.streaming.query as classic
     from pyspark.sql.connect.streaming.query import StreamingQuery
     from pyspark.sql.streaming import StreamingQuery as ClassicName
 
@@ -161,7 +695,9 @@ def test_the_streaming_query_class_is_pysparks():
         "pyspark.sql.connect.streaming.query",
         "StreamingQuery",
     )
-    assert ClassicName is StreamingQuery
+    assert ClassicName is classic.StreamingQuery
+    assert classic.StreamingQuery.__module__ == "pyspark.sql.streaming.query"
+    assert not issubclass(StreamingQuery, ClassicName)
     assert pickle.loads(pickle.dumps(StreamingQuery)) is StreamingQuery
 
 
@@ -234,3 +770,235 @@ def test_every_native_class_has_its_bare_name_as_its_c_name(objects):
         assert f"{cls.__module__}.{cls.__name__}" not in str(error.value), str(error.value)
         checked.add(cls.__name__)
     assert len(checked) > 50 and "_ExitHook" in checked
+
+
+# The docstrings that the modules of PySpark Connect copy of those of PySpark's classic classes
+# (`format.__doc__ = PySparkDataStreamReader.format.__doc__`), of PySpark's source at the tracked
+# tag: by the module and the class of PySpark Connect and of the classic class, the names of the
+# members of the class whose docstrings the module copies, "-" for the class itself.
+COPIED_DOCSTRINGS = {
+    (
+        "pyspark.sql.connect.udf",
+        "UDFRegistration",
+        "pyspark.sql.udf",
+        "UDFRegistration",
+    ): "register registerJavaFunction registerJavaUDAF",
+    (
+        "pyspark.sql.connect.udtf",
+        "UDTFRegistration",
+        "pyspark.sql.udtf",
+        "UDTFRegistration",
+    ): "register",
+    (
+        "pyspark.sql.connect.streaming.query",
+        "StreamingQuery",
+        "pyspark.sql.streaming.query",
+        "StreamingQuery",
+    ): (
+        "id runId name isActive awaitTermination status recentProgress lastProgress "
+        "processAllAvailable stop explain exception"
+    ),
+    (
+        "pyspark.sql.connect.streaming.query",
+        "StreamingQueryManager",
+        "pyspark.sql.streaming.query",
+        "StreamingQueryManager",
+    ): "active get awaitAnyTermination resetTerminated addListener removeListener",
+    (
+        "pyspark.sql.connect.streaming.readwriter",
+        "DataStreamReader",
+        "pyspark.sql.streaming.readwriter",
+        "DataStreamReader",
+    ): "format schema option options name load json orc parquet text csv xml table changes -",
+    (
+        "pyspark.sql.connect.streaming.readwriter",
+        "DataStreamWriter",
+        "pyspark.sql.streaming.readwriter",
+        "DataStreamWriter",
+    ): (
+        "outputMode format option options partitionBy clusterBy queryName trigger foreach "
+        "foreachBatch start toTable"
+    ),
+    (
+        "pyspark.sql.connect.catalog",
+        "Catalog",
+        "pyspark.sql.catalog",
+        "Catalog",
+    ): (
+        "currentCatalog setCurrentCatalog listCatalogs currentDatabase setCurrentDatabase "
+        "listDatabases getDatabase databaseExists listTables getTable listFunctions "
+        "functionExists getFunction listColumns tableExists createExternalTable createTable "
+        "dropTempView dropGlobalTempView isCached cacheTable uncacheTable clearCache refreshTable "
+        "recoverPartitions refreshByPath dropTable dropView createDatabase dropDatabase "
+        "listPartitions listViews getTableProperties getCreateTableString truncateTable "
+        "analyzeTable registerFunction -"
+    ),
+    (
+        "pyspark.sql.connect.conf",
+        "RuntimeConf",
+        "pyspark.sql.conf",
+        "RuntimeConfig",
+    ): "__init__ set get getAll unset isModifiable -",
+    (
+        "pyspark.sql.connect.datasource",
+        "DataSourceRegistration",
+        "pyspark.sql.datasource",
+        "DataSourceRegistration",
+    ): "register",
+    (
+        "pyspark.sql.connect.group",
+        "GroupedData",
+        "pyspark.sql.group",
+        "GroupedData",
+    ): (
+        "agg min max sum avg count pivot apply applyInPandas applyInPandasWithState "
+        "transformWithStateInPandas transformWithState applyInArrow cogroup -"
+    ),
+    (
+        "pyspark.sql.connect.group",
+        "PandasCogroupedOps",
+        "pyspark.sql.pandas.group_ops",
+        "PandasCogroupedOps",
+    ): "applyInPandas applyInArrow -",
+    (
+        "pyspark.sql.connect.merge",
+        "MergeIntoWriter",
+        "pyspark.sql.merge",
+        "MergeIntoWriter",
+    ): (
+        "whenMatched whenNotMatched whenNotMatchedBySource withSchemaEvolution merge "
+        "WhenMatched.updateAll WhenMatched.update WhenMatched.delete WhenMatched "
+        "WhenNotMatched.insertAll WhenNotMatched.insert WhenNotMatched "
+        "WhenNotMatchedBySource.updateAll WhenNotMatchedBySource.update "
+        "WhenNotMatchedBySource.delete WhenNotMatchedBySource -"
+    ),
+    (
+        "pyspark.sql.connect.observation",
+        "Observation",
+        "pyspark.sql.observation",
+        "Observation",
+    ): "__init__ _on get -",
+    (
+        "pyspark.sql.connect.readwriter",
+        "DataFrameReader",
+        "pyspark.sql.readwriter",
+        "DataFrameReader",
+    ): "format schema option options load table changes json parquet text csv xml orc jdbc -",
+    (
+        "pyspark.sql.connect.readwriter",
+        "DataFrameWriter",
+        "pyspark.sql.readwriter",
+        "DataFrameWriter",
+    ): (
+        "mode format option options partitionBy bucketBy sortBy clusterBy save insertInto "
+        "saveAsTable json parquet text csv xml orc jdbc"
+    ),
+    (
+        "pyspark.sql.connect.readwriter",
+        "DataFrameWriterV2",
+        "pyspark.sql.readwriter",
+        "DataFrameWriterV2",
+    ): (
+        "using option options tableProperty partitionedBy clusterBy create replace "
+        "createOrReplace append overwrite overwritePartitions"
+    ),
+    (
+        "pyspark.sql.connect.tvf",
+        "TableValuedFunction",
+        "pyspark.sql.tvf",
+        "TableValuedFunction",
+    ): (
+        "- range explode explode_outer inline inline_outer json_tuple posexplode posexplode_outer "
+        "stack collations sql_keywords variant_explode variant_explode_outer python_worker_logs"
+    ),
+}
+# The `__init__` of a native class is the slot of CPython, whose docstring is CPython's.
+NATIVE_INITS = {("RuntimeConf", "__init__"), ("Observation", "__init__")}
+
+
+def _resolved(module, qualname):
+    import importlib
+
+    found = importlib.import_module(module)
+    for part in qualname.split("."):
+        found = getattr(found, part)
+    return found
+
+
+@pytest.mark.parametrize(
+    "connect, cls, classic, classic_cls, member",
+    [(*key, member) for key, members in COPIED_DOCSTRINGS.items() for member in members.split()],
+)
+def test_the_connect_objects_have_the_docstrings_that_pyspark_connect_copies(
+    connect, cls, classic, classic_cls, member
+):
+    # As PySpark Connect's modules, which give these classes and their members the docstrings of
+    # PySpark's classic ones: the Python classes assign them, and the native classes are built with
+    # them (scripts/gen_connect_docstrings.py). The classic modules are Apache Spark's as they are.
+    suffix = "" if member == "-" else "." + member
+    ours = _resolved(connect, cls + suffix)
+    theirs = _resolved(classic, classic_cls + suffix)
+    if (cls, member) in NATIVE_INITS:
+        assert ours.__doc__ == object.__init__.__doc__ != theirs.__doc__
+    else:
+        assert ours.__doc__ == theirs.__doc__
+
+
+# The modules of PySpark that the drop-in does not have (see dev/parity/known-differences.md).
+MODULES_OF_PYSPARK_ONLY = {
+    "pyspark.sql.connect.local_server",
+    "pyspark.sql.connect.streaming.worker.foreach_batch_worker",
+    "pyspark.sql.connect.streaming.worker.listener_worker",
+    "pyspark.sql.streaming.python_streaming_source_runner",
+    "pyspark.sql.transpile",
+}
+
+
+def test_the_docstrings_of_the_modules_are_pysparks():
+    # As official PySpark's, of tests/golden/runtime_docstrings.json: the docstrings of the modules
+    # of pyspark.sql and pyspark.errors (but those of the DataFrame class and of the session and its
+    # client, of `EXCLUDED` of the helper), of their classes and functions and of the members of
+    # the classes, which the native classes are built with (of scripts/gen_connect_docstrings.py)
+    # and the Python ones have: their `__doc__`, or the `inspect.getdoc` that `help()` shows of one
+    # of no docstring of its own that inherits one, such as a member of PySpark Connect's Column,
+    # of the classic Column's. The `__init__` of a native class is CPython's slot, of CPython's
+    # docstring; a name that the drop-in does not have is not compared. The sweep imports every
+    # module, so it runs in a child interpreter: this process imports none of them, as a module
+    # that keeps the state of its import (the `sys.stdout` of the progress bar of
+    # pyspark.sql.connect.shell.progress) would keep that of this test.
+    import json
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    tests = Path(__file__).resolve().parent
+    golden_path = tests.parents[1] / "tests/golden/runtime_docstrings.json"
+    assert json.loads(golden_path.read_text())["pyspark"] == "4.3.0"
+    run = subprocess.run(
+        [sys.executable, str(tests / "_runtime_docstrings.py"), str(golden_path)],
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+    assert run.returncode == 0, run.stderr
+    result = json.loads(run.stdout.strip().splitlines()[-1])
+    assert set(result["unimported"]) <= MODULES_OF_PYSPARK_ONLY, result["unimported"]
+    differ = result["differ"]
+    assert result["compared"] > 3500 and not differ, (result["compared"], len(differ), differ[:20])
+
+
+def test_the_spatial_types_convert_of_their_own_methods_as_pysparks():
+    # As PySpark's GeographyType and GeometryType (types.py), which define their own
+    # needConversion and fromInternal, of no docstring: the Geography or the Geometry of a dict of
+    # its "srid" and "bytes", None of one without either, and the dict of toInternal back.
+    from pyspark.sql.types import Geography, GeographyType, Geometry, GeometryType
+
+    for cls, value in ((GeographyType, Geography), (GeometryType, Geometry)):
+        for member in ("needConversion", "fromInternal", "toInternal"):
+            assert member in vars(cls) and getattr(cls, member).__doc__ is None, (cls, member)
+        dt = cls(4326)
+        assert dt.needConversion() is True
+        made = dt.fromInternal({"srid": 4326, "bytes": b"\x01"})
+        assert type(made) is value and (made.srid, made.wkb) == (4326, b"\x01")
+        assert dt.fromInternal({"srid": 4326}) is None and dt.fromInternal(None) is None
+        assert dt.toInternal(made) == {"srid": 4326, "wkb": b"\x01"}

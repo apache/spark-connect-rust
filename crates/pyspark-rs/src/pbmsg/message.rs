@@ -199,14 +199,23 @@ pub struct PyMessage {
     pub(crate) unknown: Vec<u8>,
 }
 
-/// A class that `_proto_register_classes` set, with the message type of its `DESCRIPTOR`.
+/// A class that `_proto_register_classes` set, with its message type and, of a class whose
+/// `DESCRIPTOR` is `protobuf`'s (as the classes of the runtime have where `protobuf` imports, as
+/// upb's do), `protobuf`'s descriptors of its fields, in the order of the fields of the message
+/// type, which `ListFields` gives: read of the `DESCRIPTOR` once `ListFields` needs them (see
+/// `registered_fields`), not as the class registers, as many classes register at once.
 struct Registered {
     class: Py<PyType>,
     desc: Arc<MessageDesc>,
+    fields: Arc<OnceLock<ProtobufFields>>,
 }
 
+/// `protobuf`'s descriptors of the fields of a registered class, of its `DESCRIPTOR` when it is
+/// not the runtime's.
+type ProtobufFields = Option<Arc<Vec<Py<PyAny>>>>;
+
 /// The classes that `_proto_register_classes` set, by the full name of their message type, and
-/// the message types of their `DESCRIPTOR`s by the address of the class, which `__new__` reads.
+/// their message types by the address of the class, which `__new__` reads.
 #[derive(Default)]
 struct Registry {
     by_name: HashMap<String, Registered>,
@@ -219,7 +228,9 @@ fn classes() -> &'static Mutex<Registry> {
 }
 
 /// Set the class of each message, by full name, that the runtime makes the instances of: a
-/// subclass of `Message`, of the `DESCRIPTOR` of its message type.
+/// subclass of `Message` of the message type of the name, whose `DESCRIPTOR` is the runtime's
+/// descriptor of the type or `protobuf`'s, of the same fields (which `ListFields` reads, and
+/// checks, once it needs them).
 #[pyfunction]
 pub(crate) fn _proto_register_classes(classes_by_name: &Bound<'_, PyDict>) -> PyResult<()> {
     let mut found = Vec::new();
@@ -231,17 +242,77 @@ pub(crate) fn _proto_register_classes(classes_by_name: &Bound<'_, PyDict>) -> Py
                 class.str()?
             )));
         }
-        let desc = class_descriptor(&class)?;
-        found.push((name.extract::<String>()?, class.unbind(), desc));
+        let name = name.extract::<String>()?;
+        let desc = pool()
+            .message(&name)
+            .ok_or_else(|| PyKeyError::new_err(name.clone()))?
+            .clone();
+        found.push((name, class.unbind(), desc));
     }
     let mut registered = classes().lock().unwrap_or_else(|e| e.into_inner());
     for (name, class, desc) in found {
         registered
             .by_type
             .insert(class.as_ptr() as usize, desc.clone());
-        registered.by_name.insert(name, Registered { class, desc });
+        registered.by_name.insert(
+            name,
+            Registered {
+                class,
+                desc,
+                fields: Arc::default(),
+            },
+        );
     }
     Ok(())
+}
+
+/// `protobuf`'s descriptors of the fields of `desc`, of the `DESCRIPTOR` of `class` when it is
+/// not the runtime's: those of the same names, in the same order.
+fn protobuf_fields_of(class: &Bound<'_, PyType>, desc: &MessageDesc) -> PyResult<ProtobufFields> {
+    let descriptor = class.getattr("DESCRIPTOR")?;
+    if descriptor.cast::<PyDescriptor>().is_ok() {
+        return Ok(None);
+    }
+    let fields = descriptor
+        .getattr("fields")?
+        .try_iter()?
+        .map(|field| field.map(Bound::unbind))
+        .collect::<PyResult<Vec<_>>>()?;
+    let py = class.py();
+    let same = fields.len() == desc.fields.len()
+        && fields.iter().zip(&desc.fields).all(|(field, ours)| {
+            field
+                .bind(py)
+                .getattr("name")
+                .and_then(|name| name.extract::<String>())
+                .is_ok_and(|name| name == ours.name)
+        });
+    if !same {
+        return Err(PyTypeError::new_err(format!(
+            "the DESCRIPTOR of {} has other fields than {}",
+            class.str()?,
+            desc.full_name
+        )));
+    }
+    Ok(Some(Arc::new(fields)))
+}
+
+/// `protobuf`'s descriptors of the fields of the message type `full_name`, of its registered
+/// class, if they are its `DESCRIPTOR`'s: read of the class once (with no lock held, as the read
+/// runs Python).
+fn registered_fields(py: Python<'_>, full_name: &str) -> PyResult<ProtobufFields> {
+    let (class, desc, cell) = {
+        let registered = classes().lock().unwrap_or_else(|e| e.into_inner());
+        let Some(r) = registered.by_name.get(full_name) else {
+            return Ok(None);
+        };
+        if let Some(fields) = r.fields.get() {
+            return Ok(fields.clone());
+        }
+        (r.class.clone_ref(py), r.desc.clone(), r.fields.clone())
+    };
+    let fields = protobuf_fields_of(class.bind(py), &desc)?;
+    Ok(cell.get_or_init(|| fields).clone())
 }
 
 /// The class of the message type `full_name` that `_proto_register_classes` set, if any.
@@ -319,6 +390,19 @@ impl MessageClass {
     }
 }
 
+/// Make the garbage collector track `message`, a message that [`MessageClass::new_message`] made,
+/// which it does not track, as Python tracks one of a call of its class (see `FromString`).
+fn track(message: &Bound<'_, PyMessage>) {
+    // SAFETY: `message` is a live object of a type of the garbage collector, made in full; an
+    // object that is tracked is not tracked again.
+    unsafe {
+        let ptr = message.as_ptr();
+        if pyo3::ffi::PyObject_GC_IsTracked(ptr) == 0 {
+            pyo3::ffi::PyObject_GC_Track(ptr.cast());
+        }
+    }
+}
+
 /// A new, empty message of the message type `full_name`, of its registered class.
 pub(crate) fn new_instance<'py>(
     py: Python<'py>,
@@ -332,8 +416,9 @@ fn new_instance_of<'py>(py: Python<'py>, desc: &MessageDesc) -> PyResult<Bound<'
     new_instance(py, &desc.full_name)
 }
 
-/// The message type of the class `cls`: of a registered class, the one of its `DESCRIPTOR` that
-/// the registry holds, else (a subclass of one) of its `DESCRIPTOR`.
+/// The message type of the class `cls`: of a registered class, the one that the registry holds,
+/// else (a class that subclasses `Message` itself) of its `DESCRIPTOR`, the runtime's descriptor
+/// of a message type or `protobuf`'s of one of the pool of the runtime.
 fn message_type_of(cls: &Bound<'_, PyType>) -> PyResult<Arc<MessageDesc>> {
     let registered = classes()
         .lock()
@@ -349,13 +434,21 @@ fn message_type_of(cls: &Bound<'_, PyType>) -> PyResult<Arc<MessageDesc>> {
 
 /// The message type of the class `cls`, of its `DESCRIPTOR`.
 fn class_descriptor(cls: &Bound<'_, PyType>) -> PyResult<Arc<MessageDesc>> {
-    let descriptor = cls
-        .getattr("DESCRIPTOR")
-        .map_err(|_| PyTypeError::new_err("Message is the abstract base of the message classes"))?;
-    let descriptor = descriptor.cast::<PyDescriptor>().map_err(|_| {
-        PyTypeError::new_err("the DESCRIPTOR of a message class is not one of this runtime")
-    })?;
-    Ok(descriptor.get().desc.clone())
+    let abstract_base =
+        || PyTypeError::new_err("Message is the abstract base of the message classes");
+    let descriptor = cls.getattr("DESCRIPTOR").map_err(|_| abstract_base())?;
+    if let Ok(descriptor) = descriptor.cast::<PyDescriptor>() {
+        return Ok(descriptor.get().desc.clone());
+    }
+    let full_name = descriptor
+        .getattr("full_name")
+        .and_then(|name| name.extract::<String>())
+        .map_err(|_| abstract_base())?;
+    pool().message(&full_name).cloned().ok_or_else(|| {
+        PyTypeError::new_err(format!(
+            "the DESCRIPTOR of a message class is of {full_name}, which the runtime does not hold"
+        ))
+    })
 }
 
 /// The bytes of `value`: bytes, a bytearray or a memoryview, as protobuf's parsers take.
@@ -516,6 +609,19 @@ pub(crate) fn message_from_value<'py>(
     value: &Bound<'py, PyAny>,
     budget: &ConversionBudget,
 ) -> PyResult<Bound<'py, PyMessage>> {
+    message_from_value_of(py, full_name, value, budget, false)
+}
+
+/// [`message_from_value`], whose copy of a message of protobuf's of the type is of its bytes of
+/// any depth when `unlimited`, as upb's `==` compares messages of any depth, else of upb's limit
+/// of a parse, as upb merges a message into a field.
+fn message_from_value_of<'py>(
+    py: Python<'py>,
+    full_name: &str,
+    value: &Bound<'py, PyAny>,
+    budget: &ConversionBudget,
+    unlimited: bool,
+) -> PyResult<Bound<'py, PyMessage>> {
     if let Ok(m) = value.cast::<PyMessage>() {
         if m.borrow().desc.full_name != full_name {
             return Err(not_initializing(py, full_name, value));
@@ -535,7 +641,11 @@ pub(crate) fn message_from_value<'py>(
     if is_protobufs_message_of(value, full_name) {
         if let Ok((_, bytes)) = name_and_bytes(value) {
             let child = new_instance(py, full_name)?;
-            codec::merge_in(py, &child, &bytes, budget)?;
+            if unlimited {
+                codec::merge_unlimited_in(py, &child, &bytes, budget)?;
+            } else {
+                codec::merge_in(py, &child, &bytes, budget)?;
+            }
             return Ok(child);
         }
     }
@@ -565,7 +675,7 @@ fn as_message_of_type<'py>(
     if !is_protobufs_message_of(other, &full_name) {
         return Ok(None);
     }
-    message_from_value(py, &full_name, other, &ConversionBudget::full()).map(Some)
+    message_from_value_of(py, &full_name, other, &ConversionBudget::full(), true).map(Some)
 }
 
 /// A new message of the type `full_name` of `value`, as a message field of a constructor takes
@@ -583,10 +693,30 @@ fn message_for_field<'py>(
     let runtime_message = value.cast::<PyMessage>().ok();
     if let Some(m) = runtime_message {
         if m.borrow().desc.full_name == full_name {
+            // As upb's, which copies the message of a field of a constructor by its bytes.
+            if deeper_than(py, &m.borrow(), codec::depth_limit()) {
+                return copy_of_bytes(py, full_name, m, budget);
+            }
             return duplicate_with(py, m, budget);
         }
     }
-    let is_mapping = value.cast::<PyDict>().is_ok() || value.hasattr("keys").unwrap_or(false);
+    let is_dict = value.cast::<PyDict>().is_ok();
+    // As upb's: a dict of a Struct is its items, of `_internal_assign`, else, of a dict of only
+    // the key `fields` that it refuses, the fields of the message.
+    if is_dict && full_name == STRUCT && assigns_values(py, full_name) {
+        let child = new_instance(py, full_name)?;
+        match child.call_method1("_internal_assign", (value,)) {
+            Ok(_) => return Ok(child),
+            Err(err) => {
+                let dict = value.cast::<PyDict>()?;
+                if !(dict.len() == 1 && dict.contains("fields")?) {
+                    return Err(err);
+                }
+            }
+        }
+        return message_from_value(py, full_name, value, budget);
+    }
+    let is_mapping = is_dict || value.hasattr("keys").unwrap_or(false);
     let is_of_type = runtime_message.is_none() && is_protobufs_message_of(value, full_name);
     if !is_mapping && !is_of_type && assigns_values(py, full_name) {
         let child = new_instance(py, full_name)?;
@@ -594,6 +724,53 @@ fn message_for_field<'py>(
         return Ok(child);
     }
     message_from_value(py, full_name, value, budget)
+}
+
+/// The full names of the well-known types of which upb's messages compare with, and find a
+/// value in, a dict and a list: `Struct` and `ListValue`.
+const STRUCT: &str = "google.protobuf.Struct";
+const LIST_VALUE: &str = "google.protobuf.ListValue";
+
+/// Whether `message` nests more than `levels` levels of messages below it, as upb's parse counts
+/// them: a message of a field or of a repeated field, a map entry, and the message of the value of
+/// a map entry each a level. The walk stops past `levels`.
+pub(crate) fn deeper_than(py: Python<'_>, message: &PyMessage, levels: u32) -> bool {
+    // A level of the walk on a stack with room for it, as the limit of upb's
+    // `SetAllowOversizeProtos(True)` is of 65535 levels.
+    grow(|| {
+        let below = |child: &Py<PyMessage>, levels: u32| -> bool {
+            levels == 0 || deeper_than(py, &child.bind(py).borrow(), levels - 1)
+        };
+        message.slots.iter().any(|(_, slot)| match slot {
+            Slot::Message(child) => below(child, levels),
+            Slot::Composite(c) => c.bind(py).borrow().items.iter().any(|m| below(m, levels)),
+            Slot::Map(map) => {
+                let map = map.bind(py).borrow();
+                !map.entries.is_empty()
+                    && (levels == 0
+                        || map.entries.iter().any(|(_, value)| match value {
+                            MapValue::Message(child) => below(child, levels - 1),
+                            MapValue::Scalar(_) => false,
+                        }))
+            }
+            Slot::Scalar(_) | Slot::Repeated(_) => false,
+        })
+    })
+}
+
+/// A copy of `message` of the type `full_name` of its bytes, as upb copies a message by a parse
+/// of its bytes, so of upb's error of a message of more levels than its limit
+/// ([`codec::depth_limit`]).
+fn copy_of_bytes<'py>(
+    py: Python<'py>,
+    full_name: &str,
+    message: &Bound<'py, PyMessage>,
+    budget: &ConversionBudget,
+) -> PyResult<Bound<'py, PyMessage>> {
+    let bytes = codec::encode(py, &message.borrow())?;
+    let child = new_instance(py, full_name)?;
+    codec::merge_in(py, &child, &bytes, budget)?;
+    Ok(child)
 }
 
 /// upb's error of a value of a message field of a constructor that is neither a dict nor a
@@ -613,14 +790,6 @@ fn not_initializing(py: Python<'_>, full_name: &str, value: &Bound<'_, PyAny>) -
     ))
 }
 
-/// A copy of `message`, of its class, whose messages and containers are copies too.
-pub(crate) fn duplicate<'py>(
-    py: Python<'py>,
-    message: &Bound<'py, PyMessage>,
-) -> PyResult<Bound<'py, PyMessage>> {
-    duplicate_with(py, message, &ConversionBudget::full())
-}
-
 /// A slot of a message, read for its copy: its scalars copied, and the messages that it holds,
 /// which the copy copies once the message is no longer borrowed.
 enum Shallow {
@@ -630,7 +799,8 @@ enum Shallow {
     Map(MapEntries),
 }
 
-/// A copy of `message`, as [`duplicate`] makes it, a step of `budget` for each message copied:
+/// A copy of `message`, of the class of its type, whose messages and containers are copies too,
+/// a step of `budget` for each message copied:
 /// each message is read under a short borrow, and the messages that it holds are copied after
 /// it, so that the checkpoints of the copy of a message of many messages, whose Python code may
 /// use the message, find no borrow of it held.
@@ -967,6 +1137,15 @@ fn map_of(slot: Option<&Slot>) -> Option<&Py<MapContainer>> {
 }
 
 impl PyMessage {
+    /// The maker of the messages of the class of `slf` (see [`MessageClass`]), of which its copies
+    /// are, as upb's.
+    fn maker_of(slf: &Bound<'_, Self>) -> MessageClass {
+        MessageClass {
+            class: Some(slf.get_type().unbind()),
+            desc: slf.borrow().desc.clone(),
+        }
+    }
+
     pub(crate) fn empty(desc: Arc<MessageDesc>) -> Self {
         PyMessage {
             desc,
@@ -1342,6 +1521,12 @@ impl PyMessage {
                 return Err(not_same_class("MergeFrom", slf.as_any(), other_msg));
             }
             mark_present(slf)?;
+            // As upb's, which merges a message by a parse of its bytes: one of more than 100
+            // levels fails, of what the parse of its bytes keeps.
+            if deeper_than(py, &other.borrow(), codec::depth_limit()) {
+                let bytes = codec::encode(py, &other.borrow())?;
+                return codec::merge_in(py, slf, &bytes, budget);
+            }
             merge_into_with(py, slf, other, budget)
         } else {
             // As upb's, which takes a message of its class of the type only: protobuf's message
@@ -1365,7 +1550,10 @@ impl PyMessage {
             if !field.repeated && field.kind != Kind::Message {
                 return match me.slots.get(index) {
                     Some(Slot::Scalar(v)) => v.to_py(py),
-                    _ => Scalar::default_of(field.kind).to_py(py),
+                    _ => match &field.default {
+                        Some(default) => default.to_py(py),
+                        None => Scalar::default_of(field.kind).to_py(py),
+                    },
                 };
             }
         }
@@ -1444,6 +1632,109 @@ impl PyMessage {
     }
 }
 
+/// The paths of the required fields that `message` and the messages that it holds lack (see
+/// `FindInitializationErrors`): its own, in the order of their declaration, then those of each
+/// message of its fields, in the order of their numbers.
+fn missing_fields(py: Python<'_>, message: &PyMessage) -> Vec<String> {
+    let mut missing = Vec::new();
+    if may_lack_required(&message.desc) {
+        collect_missing(py, message, "", &mut missing);
+    }
+    missing
+}
+
+/// Whether a message of the type `desc` can lack a required field: whether the type, or a type of
+/// a message that it can hold (of a field or of the value of a map), declares one. Of a type of
+/// proto3, as all of Spark Connect are, it is false, so that the check of a message of many
+/// messages reads none of them. Known of each type once.
+fn may_lack_required(desc: &MessageDesc) -> bool {
+    *desc
+        .may_lack_required
+        .get_or_init(|| holds_required_fields(desc))
+}
+
+/// Whether the message type `desc`, or a type of a message that it can hold, declares a required
+/// field, of a walk of their message fields.
+fn holds_required_fields(desc: &MessageDesc) -> bool {
+    // The types that the type can hold, of a walk of their message fields.
+    let mut seen = std::collections::HashSet::new();
+    let mut stack = vec![desc.full_name.clone()];
+    let mut found = false;
+    while let Some(name) = stack.pop() {
+        if !seen.insert(name.clone()) {
+            continue;
+        }
+        let Some(desc) = pool().message(&name) else {
+            continue;
+        };
+        if !desc.required.is_empty() {
+            found = true;
+            break;
+        }
+        for field in &desc.fields {
+            match &field.map {
+                Some(map) if map.value == Kind::Message => stack.push(map.value_type.clone()),
+                Some(_) => {}
+                None if field.kind == Kind::Message => stack.push(field.type_name.clone()),
+                None => {}
+            }
+        }
+    }
+    found
+}
+
+fn collect_missing(py: Python<'_>, message: &PyMessage, prefix: &str, out: &mut Vec<String>) {
+    grow(|| {
+        for &index in &message.desc.required {
+            if !message.slots.contains(index) {
+                out.push(format!("{prefix}{}", message.desc.fields[index].name));
+            }
+        }
+        for (index, slot) in message.slots.iter() {
+            let name = &message.desc.fields[index].name;
+            match slot {
+                Slot::Message(child) => {
+                    let prefix = format!("{prefix}{name}.");
+                    collect_missing(py, &child.bind(py).borrow(), &prefix, out);
+                }
+                Slot::Composite(c) => {
+                    for (at, child) in c.bind(py).borrow().items.iter().enumerate() {
+                        let prefix = format!("{prefix}{name}[{at}].");
+                        collect_missing(py, &child.bind(py).borrow(), &prefix, out);
+                    }
+                }
+                Slot::Map(map) => {
+                    for (key, value) in map.bind(py).borrow().entries.iter() {
+                        if let MapValue::Message(child) = value {
+                            let key = text::map_key_text(key);
+                            let prefix = format!("{prefix}{name}[{key}].");
+                            collect_missing(py, &child.bind(py).borrow(), &prefix, out);
+                        }
+                    }
+                }
+                Slot::Scalar(_) | Slot::Repeated(_) => {}
+            }
+        }
+    })
+}
+
+/// upb's `EncodeError` of a message that lacks required fields, which it does not serialize.
+fn check_initialized(message: &Bound<'_, PyMessage>) -> PyResult<()> {
+    let py = message.py();
+    let missing = missing_fields(py, &message.borrow());
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let full_name = message.borrow().desc.full_name.clone();
+    Err(super::encode_error_of(
+        py,
+        format!(
+            "Message {full_name} is missing required fields: {}",
+            missing.join(",")
+        ),
+    ))
+}
+
 /// Whether the message type `full_name` is a well-known type whose class assigns a value of
 /// another type, as protobuf's classes of the well-known types do (`Timestamp` takes a
 /// `datetime`): the class has `_internal_assign`.
@@ -1455,6 +1746,8 @@ fn assigns_values(py: Python<'_>, full_name: &str) -> bool {
 
 #[pymethods]
 impl PyMessage {
+    /// An empty message of the class, as upb's `__new__` makes one: of no fields, whatever its
+    /// arguments, which `__init__` takes.
     #[new]
     #[classmethod]
     #[pyo3(signature = (*args, **kwargs))]
@@ -1463,15 +1756,43 @@ impl PyMessage {
         args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
-        let desc = message_type_of(cls)?;
+        let _ = (args, kwargs);
+        Ok(PyMessage::empty(message_type_of(cls)?))
+    }
+
+    /// As upb's: set the fields of the keyword arguments, over those that the message has (so
+    /// `message.__init__(**fields)` merges them, as a constructor sets them of a new message).
+    #[pyo3(signature = (*args, **kwargs))]
+    fn __init__(
+        slf: &Bound<'_, Self>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
         if !args.is_empty() {
             return Err(PyTypeError::new_err("No positional arguments allowed"));
         }
-        let mut message = PyMessage::empty(desc);
-        if let Some(kwargs) = kwargs {
-            message.init_from_mapping(cls.py(), kwargs.as_any())?;
+        match kwargs {
+            Some(kwargs) if !kwargs.is_empty() => {
+                let py = slf.py();
+                slf.borrow_mut().init_from_mapping(py, kwargs.as_any())
+            }
+            _ => Ok(()),
         }
-        Ok(message)
+    }
+
+    /// As upb's: whether the caller is a generated module, which no caller of the runtime is.
+    #[staticmethod]
+    #[pyo3(name = "_CheckCalledFromGeneratedFile")]
+    fn check_called_from_generated_file() -> bool {
+        false
+    }
+
+    /// As upb's: the key of an item of `ListFields` that sorts the items by the numbers of their
+    /// fields.
+    #[staticmethod]
+    #[pyo3(name = "_ListFieldsItemKey")]
+    fn list_fields_item_key(item: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        Ok(item.get_item(0)?.getattr("number")?.unbind())
     }
 
     /// As upb's: a field of the name, else an attribute of the class (a method, a nested type),
@@ -1510,8 +1831,27 @@ impl PyMessage {
         if name.to_cow()? == "Extensions" {
             return Err(PyAttributeError::new_err(()));
         }
-        match slf.get_type().as_any().getattr(name) {
-            Ok(value) => Ok(value.unbind()),
+        let cls = slf.get_type();
+        match cls.as_any().getattr(name) {
+            Ok(value) => {
+                // A descriptor of the class itself (of a class of its MRO), such as a property
+                // whose getter raised the `AttributeError` that brought the lookup here, is not
+                // given as the object of the class: its error stays, of the name. Another value
+                // of the class is given, as one that the lookup of the class made of the name
+                // (`__annotations__`, which a class makes on its first read), as upb gives it.
+                for base in cls.mro().iter() {
+                    let held = base
+                        .getattr(pyo3::intern!(py, "__dict__"))
+                        .and_then(|namespace| namespace.get_item(name));
+                    if let Ok(held) = held {
+                        if held.get_type().hasattr(pyo3::intern!(py, "__get__"))? {
+                            return Err(PyAttributeError::new_err(name.clone().unbind()));
+                        }
+                        break;
+                    }
+                }
+                Ok(value.unbind())
+            }
             Err(error) if error.is_instance_of::<PyAttributeError>(py) => {
                 Err(PyAttributeError::new_err(name.clone().unbind()))
             }
@@ -1589,7 +1929,7 @@ impl PyMessage {
             Ok(())
         } else {
             // As upb's, which takes a message of its class of the type only: protobuf's message
-            // of the type of its default pool, of its bytes.
+            // of the type of its default pool, of its bytes, of any depth, as upb copies one.
             if !is_protobufs_message_of(other_msg, &full_name) {
                 return Err(not_same_class("CopyFrom", slf.as_any(), other_msg));
             }
@@ -1598,7 +1938,7 @@ impl PyMessage {
             mark_present(slf)?;
             slf.borrow_mut()
                 .replace_slots(py, Slots::default(), Vec::new())?;
-            codec::merge(py, slf, &bytes)
+            codec::merge_unlimited(py, slf, &bytes)
         }
     }
 
@@ -1676,8 +2016,16 @@ impl PyMessage {
     }
 
     /// `name in message`, as upb's: whether the field `name` is set, as `HasField` tells it.
+    /// As upb's: of a `Struct`, whether its fields have the key; of a `ListValue`, whether its
+    /// items have the value; of any other message, whether the field `name` is set, as `HasField`
+    /// tells it.
     fn __contains__(slf: &Bound<'_, Self>, name: &Bound<'_, PyAny>) -> PyResult<bool> {
-        Self::has_field(slf, name)
+        let full_name = slf.borrow().desc.full_name.clone();
+        match full_name.as_str() {
+            STRUCT => slf.getattr("fields")?.contains(name),
+            LIST_VALUE => slf.call_method0("items")?.contains(name),
+            _ => Self::has_field(slf, name),
+        }
     }
 
     #[pyo3(name = "WhichOneof")]
@@ -1703,10 +2051,13 @@ impl PyMessage {
             .map(|&i| me.desc.fields[i].name.clone()))
     }
 
+    /// The set fields and their values, in the order of their numbers, each of the descriptor of
+    /// its field of the class's `DESCRIPTOR`: `protobuf`'s, where `protobuf` imports, as upb's.
     #[pyo3(name = "ListFields")]
     fn list_fields(slf: &Bound<'_, Self>) -> PyResult<Vec<(Py<PyAny>, Py<PyAny>)>> {
         let py = slf.py();
         let me = slf.borrow();
+        let protobuf_fields = registered_fields(py, &me.desc.full_name)?;
         let mut out = Vec::new();
         for (index, slot) in me.slots.iter() {
             let field = &me.desc.fields[index];
@@ -1726,7 +2077,11 @@ impl PyMessage {
                 }
             };
             if let Some(value) = value {
-                out.push((field_descriptor_object(py, &me.desc, index)?, value));
+                let descriptor = match &protobuf_fields {
+                    Some(fields) => fields[index].clone_ref(py),
+                    None => field_descriptor_object(py, &me.desc, index)?,
+                };
+                out.push((descriptor, value));
             }
         }
         Ok(out)
@@ -1734,8 +2089,30 @@ impl PyMessage {
 
     /// The bytes of the message, of its map entries in the order of their keys (as upb's
     /// `deterministic=True` gives them, so either way here).
+    /// The bytes of the message, as upb's: of a message that lacks a required field (of proto2),
+    /// upb's `EncodeError` of the fields that it lacks.
     #[pyo3(name = "SerializeToString", signature = (*args, **kwargs))]
     fn serialize_to_string<'py>(
+        slf: &Bound<'py, Self>,
+        args: &Bound<'py, PyTuple>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<Bound<'py, PyBytes>> {
+        check_serialize_arguments(args, kwargs)?;
+        let py = slf.py();
+        {
+            // A message of a type that holds no required field, as all of Spark Connect's, is
+            // encoded under the one borrow of the check.
+            let m = slf.borrow();
+            if !may_lack_required(&m.desc) {
+                return Ok(PyBytes::new(py, &codec::encode(py, &m)?));
+            }
+        }
+        check_initialized(slf)?;
+        Ok(PyBytes::new(py, &codec::encode(py, &slf.borrow())?))
+    }
+
+    #[pyo3(name = "SerializePartialToString", signature = (*args, **kwargs))]
+    fn serialize_partial_to_string<'py>(
         slf: &Bound<'py, Self>,
         args: &Bound<'py, PyTuple>,
         kwargs: Option<&Bound<'py, PyDict>>,
@@ -1746,18 +2123,19 @@ impl PyMessage {
         Ok(PyBytes::new(py, &bytes))
     }
 
-    #[pyo3(name = "SerializePartialToString", signature = (*args, **kwargs))]
-    fn serialize_partial_to_string<'py>(
-        slf: &Bound<'py, Self>,
-        args: &Bound<'py, PyTuple>,
-        kwargs: Option<&Bound<'py, PyDict>>,
-    ) -> PyResult<Bound<'py, PyBytes>> {
-        Self::serialize_to_string(slf, args, kwargs)
-    }
-
+    /// The length of the bytes of the message, as upb's: of upb's `EncodeError` of a message that
+    /// lacks a required field.
     #[pyo3(name = "ByteSize")]
     fn byte_size(slf: &Bound<'_, Self>) -> PyResult<usize> {
-        codec::encoded_len(slf.py(), &slf.borrow())
+        let py = slf.py();
+        {
+            let m = slf.borrow();
+            if !may_lack_required(&m.desc) {
+                return codec::encoded_len(py, &m);
+            }
+        }
+        check_initialized(slf)?;
+        codec::encoded_len(py, &slf.borrow())
     }
 
     /// As upb's: `Clear()`, then `MergeFromString`, so that a value that is not bytes leaves the
@@ -1777,27 +2155,48 @@ impl PyMessage {
         Ok(bytes.len())
     }
 
+    /// A message of the class of the bytes `s`, made as a parse makes the messages that it reads,
+    /// without the call of the class and of its `__init__`.
     #[classmethod]
     #[pyo3(name = "FromString")]
     fn from_string<'py>(
         cls: &Bound<'py, PyType>,
         s: &Bound<'py, PyAny>,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        let message = cls.call0()?;
+    ) -> PyResult<Bound<'py, PyMessage>> {
+        let py = cls.py();
+        let maker = MessageClass {
+            class: Some(cls.clone().unbind()),
+            desc: message_type_of(cls)?,
+        };
+        let message = maker.new_message(py)?;
+        // As upb's message of `FromString`, which the garbage collector tracks, as of a call of
+        // its class.
+        track(&message);
         let bytes = bytes_of(s)?;
-        codec::merge(cls.py(), message.cast::<PyMessage>()?, &bytes)?;
+        codec::merge(py, &message, &bytes)?;
         Ok(message)
     }
 
+    /// Whether the message sets every required field (of proto2, and of `LEGACY_REQUIRED`), its
+    /// messages too, as upb's: the paths of the fields that it lacks are added to `errors`, when it
+    /// is given, by its `extend`.
     #[pyo3(name = "IsInitialized", signature = (errors=None))]
-    fn is_initialized(&self, errors: Option<&Bound<'_, PyAny>>) -> bool {
-        let _ = errors;
-        true
+    fn is_initialized(slf: &Bound<'_, Self>, errors: Option<&Bound<'_, PyAny>>) -> PyResult<bool> {
+        let missing = missing_fields(slf.py(), &slf.borrow());
+        if missing.is_empty() {
+            return Ok(true);
+        }
+        if let Some(errors) = errors.filter(|e| !e.is_none()) {
+            errors.call_method1("extend", (missing,))?;
+        }
+        Ok(false)
     }
 
+    /// The paths of the required fields that the message and its messages lack, as upb's:
+    /// `name`, `field.name`, `field[0].name` and `map[key].name`.
     #[pyo3(name = "FindInitializationErrors")]
-    fn find_initialization_errors(&self) -> Vec<String> {
-        Vec::new()
+    fn find_initialization_errors(slf: &Bound<'_, Self>) -> Vec<String> {
+        missing_fields(slf.py(), &slf.borrow())
     }
 
     /// As upb's, which discards the unknown fields of the message and of its messages down to
@@ -1842,6 +2241,19 @@ impl PyMessage {
         op: CompareOp,
     ) -> PyResult<Py<PyAny>> {
         let py = slf.py();
+        // As upb's: a `Struct` and a dict, or a `ListValue` and a list, compare of the
+        // `_internal_compare` of their well-known type, whose result `!=` gives too.
+        if matches!(op, CompareOp::Eq | CompareOp::Ne) {
+            let (is_struct, is_list_value) = {
+                let m = slf.borrow();
+                (m.desc.full_name == STRUCT, m.desc.full_name == LIST_VALUE)
+            };
+            let compares = (is_struct && other.cast::<PyDict>().is_ok())
+                || (is_list_value && other.cast::<pyo3::types::PyList>().is_ok());
+            if compares && slf.hasattr("_internal_compare")? {
+                return Ok(slf.call_method1("_internal_compare", (other,))?.unbind());
+            }
+        }
         match op {
             CompareOp::Eq | CompareOp::Ne => {
                 // A message of protobuf's of the type, which upb's `==` of its one class of the
@@ -1879,16 +2291,74 @@ impl PyMessage {
         text::to_text(slf.py(), slf, text::Style::Upb, false)
     }
 
-    /// Pickle as protobuf's messages pickle: the class, and the state of the bytes of the
-    /// message, which `__setstate__` parses. A nested class pickles by its qualified name, which
-    /// the generated modules of protobuf have too, so either runtime loads the pickle of the other.
-    fn __reduce__<'py>(
-        slf: &Bound<'py, Self>,
-    ) -> PyResult<(Bound<'py, PyType>, Bound<'py, PyTuple>, Bound<'py, PyDict>)> {
-        let py = slf.py();
-        Ok((slf.get_type(), PyTuple::empty(py), Self::__getstate__(slf)?))
+    #[pyo3(name = "UnknownFields")]
+    fn unknown_fields(&self) -> PyResult<()> {
+        Err(PyNotImplementedError::new_err("unknown field accessor"))
     }
 
+    /// `copy.deepcopy` of the message: a message of its class of the same fields, of any depth, as
+    /// upb's.
+    fn __deepcopy__<'py>(
+        slf: &Bound<'py, Self>,
+        memo: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyMessage>> {
+        let _ = memo;
+        copy_as(
+            slf.py(),
+            slf,
+            Some(&Self::maker_of(slf)),
+            &ConversionBudget::full(),
+        )
+    }
+
+    /// `copy.copy` of the message: a message of its class of the same fields, as upb's copy of its
+    /// bytes (of protobuf's `__reduce__`) gives, and so, of a message of more levels than upb's
+    /// limit of a parse, upb's `DecodeError` of the parse.
+    fn __copy__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyMessage>> {
+        let py = slf.py();
+        let maker = Self::maker_of(slf);
+        if deeper_than(py, &slf.borrow(), codec::depth_limit()) {
+            let copied = maker.new_message(py)?;
+            track(&copied);
+            let bytes = codec::encode(py, &slf.borrow())?;
+            codec::merge(py, &copied, &bytes)?;
+            return Ok(copied);
+        }
+        // Tracked by the garbage collector, as upb's copy of a call of its class is.
+        let copied = copy_as(py, slf, Some(&maker), &ConversionBudget::full())?;
+        track(&copied);
+        Ok(copied)
+    }
+
+    /// The pickle of the message, as protobuf's `Message.__reduce__` gives it, of which upb's
+    /// messages pickle: the class and the state of the bytes of the message, which `__setstate__`
+    /// parses, and of a nested type, where protobuf imports, protobuf's
+    /// `_InternalConstructMessage` of the full name of the type (see `internal_construct` of the
+    /// module).
+    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyTuple>> {
+        let py = slf.py();
+        let state = Self::__getstate__(slf)?;
+        let desc = slf.borrow().desc.clone();
+        if desc.containing.is_some() {
+            if let Some(construct) = super::internal_construct(py) {
+                let args = PyTuple::new(py, [desc.full_name.as_str()])?;
+                return PyTuple::new(
+                    py,
+                    [construct.into_any(), args.into_any(), state.into_any()],
+                );
+            }
+        }
+        PyTuple::new(
+            py,
+            [
+                slf.get_type().into_any(),
+                PyTuple::empty(py).into_any(),
+                state.into_any(),
+            ],
+        )
+    }
+
+    /// As protobuf's: the bytes of the message, of its fields as they are.
     fn __getstate__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyDict>> {
         let py = slf.py();
         let state = PyDict::new(py);
@@ -1899,46 +2369,13 @@ impl PyMessage {
         Ok(state)
     }
 
+    /// As protobuf's: the message of the bytes of the state, which `ParseFromString` parses (a
+    /// str, of a pickle of Python 2, is latin-1).
     fn __setstate__(slf: &Bound<'_, Self>, state: &Bound<'_, PyAny>) -> PyResult<()> {
-        let py = slf.py();
         let mut serialized = state.get_item("serialized")?;
-        // As protobuf's: a str, of a pickle of Python 2, is latin-1.
         if serialized.cast::<PyBytes>().is_err() {
             serialized = serialized.call_method1("encode", ("latin1",))?;
         }
-        let bytes = bytes_of(&serialized)?;
-        slf.borrow_mut().clear_all(py);
-        codec::merge(py, slf, &bytes)
-    }
-
-    /// The names of the attributes of the message, of its fields too, as upb's `dir()` lists.
-    fn __dir__(slf: &Bound<'_, Self>) -> PyResult<Vec<String>> {
-        let py = slf.py();
-        let object = py.import("builtins")?.getattr("object")?;
-        let mut names: Vec<String> = object.call_method1("__dir__", (slf,))?.extract()?;
-        // As upb's: not `Extensions`, which a message that declares no extension ranges (as none
-        // of Spark Connect does) has not, though its class lists it.
-        names.retain(|name| name != "Extensions");
-        names.extend(slf.borrow().desc.fields.iter().map(|f| f.name.clone()));
-        names.sort();
-        names.dedup();
-        Ok(names)
-    }
-
-    #[pyo3(name = "UnknownFields")]
-    fn unknown_fields(&self) -> PyResult<()> {
-        Err(PyNotImplementedError::new_err("unknown field accessor"))
-    }
-
-    fn __deepcopy__<'py>(
-        slf: &Bound<'py, Self>,
-        memo: &Bound<'py, PyAny>,
-    ) -> PyResult<Bound<'py, PyMessage>> {
-        let _ = memo;
-        duplicate(slf.py(), slf)
-    }
-
-    fn __copy__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyMessage>> {
-        duplicate(slf.py(), slf)
+        Self::parse_from_string(slf, &serialized).map(|_| ())
     }
 }

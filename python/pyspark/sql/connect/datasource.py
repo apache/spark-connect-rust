@@ -14,10 +14,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""The registration of data sources under the connect import path, as PySpark Connect's
-``pyspark.sql.connect.datasource``: its ``DataSourceRegistration``, the class of
-``spark.dataSource``, which the Rust extension implements. ``pyspark.sql.datasource`` has PySpark's
-classic class, of which it is not, as in PySpark."""
+# The registration of data sources under the connect import path, as PySpark Connect's
+# ``pyspark.sql.connect.datasource``: its ``DataSourceRegistration``, the class of
+# ``spark.dataSource``, which the Rust extension implements. ``pyspark.sql.datasource`` has PySpark's
+# classic class, of which it is not, as in PySpark.
 
 from pyspark._pyspark import DataSourceRegistration
 

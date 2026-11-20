@@ -204,7 +204,7 @@ Fix a behavior in the Rust core (`crates/spark-connect`), in the bindings
 (`crates/pyspark-rs`) or in a hand-written shim instead, and not by monkey-patching a
 Rust class from Python.
 
-`python/pyspark/sql/functions_generated.py` and
+`python/pyspark/sql/connect/functions/_generated.py` and
 `crates/pyspark-rs/src/dispatch_generated.rs` are generated from
 `crates/spark-connect/src/functions.rs`. Regenerate them after changing a function there;
 CI runs the same command with `--check`:
@@ -261,6 +261,17 @@ probes of the stubbed modules, and fails:
 The stubs keep the docstring of each of PySpark's objects as it has it at run time, of its
 decorators too: one that the generator does not know is an error, which `DOC_KEEPING_DECORATORS`
 takes when the decorator keeps the docstring.
+
+The classic classes whose Connect classes are native (`pyspark.sql.Column` and the others of
+`_BINDINGS` of `python/pyspark/sql/_classic_bases.py`) forward a patch to the native class unless
+PySpark's Connect class has the name itself or its `__init__` sets it on each object, of the names
+that `_BINDINGS` keeps of PySpark's classes. CI checks those names against the source of PySpark at
+the tracked tag, of which the script works them out, and prints the difference and the names to
+keep when they differ, as after a change of the tracked version:
+
+```bash
+python scripts/check_classic_bindings.py --pyspark-src "$SPARK_HOME/python"
+```
 
 For local collection measurements and their interpretation, see
 [Row conversion throughput and responsiveness](row-conversion-benchmark.md).

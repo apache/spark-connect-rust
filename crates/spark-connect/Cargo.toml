@@ -24,6 +24,8 @@ arrow.workspace = true
 bytes.workspace = true
 tokio.workspace = true
 serde_json = { version = "1.0", features = ["float_roundtrip"] }
+# The shortest digits of a float, of round-half-even ties, as Python's `repr` writes them.
+ryu = "1"
 # Local time for the reprs of timestamp literals, as Python's `datetime.fromtimestamp`.
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 uuid.workspace = true

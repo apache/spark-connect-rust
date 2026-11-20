@@ -15,7 +15,7 @@
 # limitations under the License.
 #
 
-"""PySpark exception module - re-exported from Apache Spark."""
+# PySpark exception module - re-exported from Apache Spark.
 
 # Import from the upstream Apache Spark exceptions module
 try:

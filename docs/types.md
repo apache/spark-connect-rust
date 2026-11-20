@@ -257,9 +257,12 @@ let df = spark
     .csv("/path/to/data.csv");
 ```
 
-`DataType::from_ddl` parses a DDL string into a `DataType` without the server, and a list of
-fields becomes a `DataType::Struct`. `NOT NULL` makes a field non-nullable, and
-`COMMENT 'text'` puts the text in the field's metadata under `comment`. `create_dataframe`
+`DataType::from_ddl` parses a DDL string into a `DataType` without the server, and a list of fields
+becomes a `DataType::Struct`. `NOT NULL` makes a field non-nullable, and `COMMENT 'text'` puts the
+text in the field's metadata under `comment`. The metadata of a field is a `Metadata`, a JSON object
+of its values as they are written, which `Metadata::from` a map of `serde_json` values makes, or
+`Metadata::from_json` of the text of an object: a plan sends it as PySpark's `json.dumps` of the
+metadata dict, and `json()` writes it as PySpark's `json()`, of its keys sorted. `create_dataframe`
 takes the rows of a DataFrame and its schema: each `Row` has one `Value` for each field, in the
 order of the fields.
 
@@ -371,8 +374,7 @@ let df = df.with_column("n", col("n").try_cast(DataType::Integer));
 Work with complex nested structures:
 
 ```rust
-use spark_connect::types::{DataType, StructField};
-use std::collections::BTreeMap;
+use spark_connect::types::{DataType, Metadata, StructField};
 
 // Array of strings
 let array_of_strings = DataType::Array {
@@ -400,7 +402,7 @@ let nested = DataType::Struct {
                 collation: "UTF8_BINARY".to_string(),
             },
             nullable: true,
-            metadata: BTreeMap::new(),
+            metadata: Metadata::new(),
         },
         StructField {
             name: "tags".to_string(),
@@ -411,7 +413,7 @@ let nested = DataType::Struct {
                 contains_null: true,
             },
             nullable: true,
-            metadata: BTreeMap::new(),
+            metadata: Metadata::new(),
         },
     ],
 };

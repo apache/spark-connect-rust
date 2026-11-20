@@ -6,7 +6,8 @@ use spark_connect::session::SparkSession;
 
 use crate::interrupt::interruptible;
 
-/// Python wrapper for the session runtime configuration.
+// Python wrapper for the session runtime configuration.
+#[doc = connect_doc!(RuntimeConf)]
 #[pyclass(
     name = "RuntimeConf",
     module = "pyspark.sql.connect.conf",
@@ -104,9 +105,10 @@ impl PyRuntimeConf {
         crate::reduce::thread_local_reduce(slf.as_any())
     }
 
-    /// Set a configuration value, as PySpark's: a bool as "true" or "false", an int as its
-    /// `str()`, a str as it is, and None as no value, which the server rejects. Warns each
-    /// warning of the server.
+    // Set a configuration value, as PySpark's: a bool as "true" or "false", an int as its
+    // `str()`, a str as it is, and None as no value, which the server rejects. Warns each
+    // warning of the server.
+    #[doc = connect_doc!(RuntimeConf.set)]
     fn set(
         &self,
         py: Python<'_>,
@@ -130,11 +132,12 @@ impl PyRuntimeConf {
         warn_all(py, 45, &warnings)
     }
 
-    /// Get a configuration value. With a `default`, which may be None, an unknown key returns
-    /// the default (server `GetWithDefault`) rather than raising; without one, an unknown key
-    /// raises, mirroring `RuntimeConfig.get`, which raises `NOT_EXPECTED_TYPE` for a key, and
-    /// a default other than None, that is not a str.
+    // Get a configuration value. With a `default`, which may be None, an unknown key returns
+    // the default (server `GetWithDefault`) rather than raising; without one, an unknown key
+    // raises, mirroring `RuntimeConfig.get`, which raises `NOT_EXPECTED_TYPE` for a key, and
+    // a default other than None, that is not a str.
     #[pyo3(signature = (key, default=ConfDefault::Omitted))]
+    #[doc = connect_doc!(RuntimeConf.get)]
     fn get(
         &self,
         py: Python<'_>,
@@ -162,8 +165,9 @@ impl PyRuntimeConf {
         }
     }
 
-    /// Reset a configuration value to its default. Warns each warning of the server, as
-    /// PySpark's.
+    // Reset a configuration value to its default. Warns each warning of the server, as
+    // PySpark's.
+    #[doc = connect_doc!(RuntimeConf.unset)]
     fn unset(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<()> {
         let key = crate::str_argument(key)?;
         let warnings = interruptible(py, &self.session, || {
@@ -201,6 +205,7 @@ impl PyRuntimeConf {
     }
 
     #[pyo3(name = "isModifiable")]
+    #[doc = connect_doc!(RuntimeConf.isModifiable)]
     fn is_modifiable(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<bool> {
         let key = crate::str_argument(key)?;
         interruptible(py, &self.session, || {
@@ -208,8 +213,9 @@ impl PyRuntimeConf {
         })
     }
 
-    /// All configuration values as a dict. Mirrors the `RuntimeConf.getAll` property.
+    // All configuration values as a dict. Mirrors the `RuntimeConf.getAll` property.
     #[getter(getAll)]
+    #[doc = connect_doc!(RuntimeConf.getAll)]
     fn get_all<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
         let all = interruptible(py, &self.session, || self.conf.get_all().map_err(Box::new))?;
         let dict = pyo3::types::PyDict::new(py);

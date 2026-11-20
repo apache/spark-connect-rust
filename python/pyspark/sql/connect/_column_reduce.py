@@ -34,9 +34,11 @@ def parse_deep(message_class: Any, data: bytes) -> Any:
     on its own, and one that the parser refuses is filled in turn, so that the parser never
     nests past its limit. Where ``FromString`` succeeds, this gives the same message."""
     if _is_of_the_rust_runtime(message_class):
-        # The Rust protobuf runtime of the drop-in parses a message of any depth, and needs no
-        # protobuf.
-        return message_class.FromString(data)
+        # The Rust protobuf runtime of the drop-in parses a message of any depth of its own parse,
+        # and needs no protobuf.
+        from pyspark import _pyspark
+
+        return _pyspark._proto_parse_deep(message_class, data)
     from google.protobuf.descriptor import FieldDescriptor
     from google.protobuf.message import DecodeError
 
@@ -148,6 +150,7 @@ def column_of(
     levels: int = 1,
     build_error: Optional[tuple[str, str, Any]] = None,
     repr_error: Optional[tuple[str, str, Any]] = None,
+    subqueries: Optional[list[tuple[bytes, int]]] = None,
 ) -> Any:
     """The Column of ``expression``, the bytes of a ``spark.connect.Expression`` of ``levels``
     levels, and of its rendering ``rendered``, which sends the expression as it is: of the Rust
@@ -156,7 +159,10 @@ def column_of(
     is of PySpark. For a CASE WHEN, ``branches`` are the (condition, value) Columns of its
     branches and ``else_value`` the Column of its else value, so that it is a CASE WHEN again. For
     a sort order, ``sort`` is its child Column and the name of its sort method, such as
-    ``desc_nulls_last``, so that it is a sort order again."""
+    ``desc_nulls_last``, so that it is a sort order again. ``subqueries`` are the bytes and the
+    levels of the relation of each plan that the subqueries of the expression refer to, of its
+    plan ID, which a plan of the Column sends in its ``WithRelations``, as PySpark's plan sends
+    the plans of the subqueries of its expressions."""
     if sort is not None:
         # The child is a Column of the client, or PySpark Connect's on a worker, whose sort
         # method gives back the sort order, as PySpark's SortOrder of its child.
@@ -178,15 +184,28 @@ def column_of(
                 )
             )
 
+        from pyspark.sql.connect.expressions import SubqueryExpression
+
         # Without annotations: the class body looks its names up by name, which cloudpickle
         # does not pickle with the function.
         class Sent(Expression):
-            """An expression as it was sent, of its rendering."""
+            """An expression as it was sent, of its rendering, whose children are a subquery of
+            the plan of each relation that its subqueries refer to, which a plan of it collects
+            as its references (``LogicalPlan._collect_references``), and so sends."""
 
-            def __init__(self, expression, rendered):  # type: ignore[no-untyped-def]
+            def __init__(self, expression, rendered, subqueries):  # type: ignore[no-untyped-def]
                 super().__init__()
                 self._expression = expression
                 self._rendered = rendered
+                # The type of such a subquery is not sent: the expression is sent as it is.
+                self._subqueries = [
+                    SubqueryExpression(sent_plan(parse_deep(proto.Relation, relation)), "scalar")
+                    for relation, _ in subqueries or []
+                ]
+
+            @property
+            def children(self):  # type: ignore[no-untyped-def]
+                return self._subqueries
 
             def to_plan(self, session):  # type: ignore[no-untyped-def]
                 if build_error is not None:
@@ -200,10 +219,10 @@ def column_of(
                     raise_error(repr_error)
                 return self._rendered
 
-        return ConnectColumn(Sent(parse_deep(proto.Expression, expression), rendered))
+        return ConnectColumn(Sent(parse_deep(proto.Expression, expression), rendered, subqueries))
 
     return _pyspark.Column._of_expression(
-        expression, rendered, branches, else_value, levels, build_error, repr_error
+        expression, rendered, branches, else_value, levels, build_error, repr_error, subqueries
     )
 
 
@@ -236,29 +255,9 @@ def table_arg_of(
     except ImportError:
         from pyspark.sql.connect import proto
         from pyspark.sql.connect.expressions import SubqueryExpression
-        from pyspark.sql.connect.plan import LogicalPlan
         from pyspark.sql.connect.table_arg import TableArg
 
-        # Without annotations: the class body looks its names up by name, which cloudpickle
-        # does not pickle with the function.
-        class Relation(LogicalPlan):
-            """The plan of a relation as it was sent, of its plan ID, which the subquery of the
-            table argument refers to."""
-
-            def __init__(self, relation):  # type: ignore[no-untyped-def]
-                super().__init__(None)
-                self._relation = relation
-                if relation.common.HasField("plan_id"):
-                    self._root_plan_id = relation.common.plan_id
-
-            def plan(self, session):  # type: ignore[no-untyped-def]
-                if build_error is not None:
-                    raise_error(build_error)
-                sent = proto.Relation()
-                sent.CopyFrom(self._relation)
-                return sent
-
-        plan = Relation(parse_deep(proto.Relation, relation))
+        plan = sent_plan(parse_deep(proto.Relation, relation), build_error)
         table = TableArg(SubqueryExpression(plan, subquery_type="table_arg"))
     else:
         from pyspark.sql.connect.session import SparkSession
@@ -272,6 +271,35 @@ def table_arg_of(
     if order:
         table = table.orderBy(*order)
     return table
+
+
+def sent_plan(relation: Any, build_error: Optional[tuple[str, str, Any]] = None) -> Any:
+    """PySpark Connect's plan of ``relation``, a ``spark.connect.Relation`` as it was sent, of its
+    plan ID, which a subquery refers to, on a Python worker of the server: its ``plan`` sends the
+    relation as it is, or raises the error of ``build_error``, the description of the error of a
+    plan that did not build."""
+    from pyspark.sql.connect import proto
+    from pyspark.sql.connect.plan import LogicalPlan
+
+    # Without annotations: the class body looks its names up by name, which cloudpickle does not
+    # pickle with the function.
+    class Relation(LogicalPlan):
+        """The plan of a relation as it was sent, of its plan ID."""
+
+        def __init__(self, relation):  # type: ignore[no-untyped-def]
+            super().__init__(None)
+            self._relation = relation
+            if relation.common.HasField("plan_id"):
+                self._root_plan_id = relation.common.plan_id
+
+        def plan(self, session):  # type: ignore[no-untyped-def]
+            if build_error is not None:
+                raise_error(build_error)
+            sent = proto.Relation()
+            sent.CopyFrom(self._relation)
+            return sent
+
+    return Relation(relation)
 
 
 def raise_error(error: tuple[str, str, Any]) -> None:

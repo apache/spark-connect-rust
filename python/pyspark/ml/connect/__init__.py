@@ -6,6 +6,10 @@ Re-exports the estimator/transformer/evaluator/pipeline classes so that both
 (`pyspark.ml.connect.feature`, `.classification`, `.evaluation`) work.
 """
 
+# As PySpark's package, which imports it and runs it at its import; the drop-in's does not run it
+# (see dev/parity/known-differences.md).
+from pyspark.sql.connect.utils import check_dependencies  # noqa: F401
+
 from pyspark.ml.connect.feature import (
     ArrayAssembler,
     StandardScaler,

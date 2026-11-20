@@ -303,7 +303,7 @@ class TestStreamingListenerLifecycle:
     def test_streaming_duplicate_async_listeners_share_one_decoded_event(
         self, mock_connect, monkeypatch,
     ):
-        from pyspark.sql.streaming import query as query_module
+        from pyspark.sql.connect.streaming import query as query_module
 
         spark, service = mock_connect
         service.listener_bus_enabled = True

@@ -847,28 +847,11 @@ pub(super) fn python_float_json(value: f64) -> String {
 }
 
 /// The text of the finite or non-finite float `value` as Python's `repr` (and `str`) writes it:
-/// the shortest digits that read back the same, in the decimal form for a decimal exponent from -4
-/// to 15, else in the exponent form with a sign and at least two digits (`1e-06`, `1e+16`).
+/// the shortest digits that read back the same, of an even last digit of a tie, in the decimal form
+/// for a decimal exponent from -4 to 15, else in the exponent form with a sign and at least two
+/// digits (`1e-06`, `1e+16`), as [`crate::expression::python_float_repr`] writes it.
 pub(super) fn python_float_repr(value: f64) -> String {
-    if value.is_nan() {
-        return "nan".to_string();
-    }
-    if value.is_infinite() {
-        return if value > 0.0 { "inf" } else { "-inf" }.to_string();
-    }
-    // Rust's `Debug` of a float has the same shortest digits and the same thresholds of the
-    // exponent form, but writes the exponent without its sign and its padding.
-    let text = format!("{value:?}");
-    match text.split_once('e') {
-        None => text,
-        Some((mantissa, exponent)) => {
-            let (sign, digits) = match exponent.strip_prefix('-') {
-                Some(digits) => ('-', digits),
-                None => ('+', exponent),
-            };
-            format!("{mantissa}e{sign}{digits:0>2}")
-        }
-    }
+    crate::expression::python_float_repr(value)
 }
 
 /// The metadata at `<path>/metadata`, of [`parse_python_json`].

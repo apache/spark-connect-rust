@@ -11,11 +11,15 @@ use spark_connect_core::error::{Result, SparkError, SparkErrorKind};
 
 use crate::srs;
 
+mod metadata;
+pub(crate) use metadata::Json;
+pub use metadata::Metadata;
+
 /// The base DataType representation, mirroring `pyspark.sql.types.DataType`.
 ///
 /// All concrete types are variants of this enum. Each variant carries the data
 /// needed to fully specify that type (e.g., DecimalType carries precision and scale).
-// Not `Eq` (only `PartialEq`): a Struct field's metadata holds arbitrary JSON values.
+// Not `Eq` (only `PartialEq`): a Struct field's metadata holds arbitrary JSON values, of floats.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DataType {
     /// `pyspark.sql.types.NullType`
@@ -150,14 +154,16 @@ impl GeographyType {
 }
 
 /// A field in a StructType, mirroring `pyspark.sql.types.StructField`.
-// Not `Eq`: metadata values are arbitrary JSON (`serde_json::Value`, which is only `PartialEq`
-// because of floats), matching pyspark's `Dict[str, Any]` field metadata.
+// Not `Eq`: metadata values are arbitrary JSON, of floats, matching pyspark's `Dict[str, Any]`
+// field metadata.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StructField {
     pub name: String,
     pub data_type: DataType,
     pub nullable: bool,
-    pub metadata: BTreeMap<String, serde_json::Value>,
+    /// The metadata of the field, as PySpark's `metadata` dict: `Metadata::new()` for none, or
+    /// `Metadata::from` a map of `serde_json` values.
+    pub metadata: Metadata,
 }
 
 /// A step from a type to a type below it, in a tree string: a field of a struct, the element of
@@ -459,94 +465,91 @@ impl DataType {
     /// Returns the JSON value representation, mirroring `DataType.jsonValue()`.
     ///
     /// Most simple types return their type name as a string. Complex types
-    /// (Array, Map, Struct) return a dictionary with type and component info.
+    /// (Array, Map, Struct) return a dictionary with type and component info. The metadata of a
+    /// struct field holds its values as `serde_json` values, which hold an int of 64 bits and a
+    /// finite float: [`DataType::json`] writes them exactly.
     pub fn json_value(&self) -> serde_json::Value {
+        self.json_tree().to_serde()
+    }
+
+    /// The JSON value of the type, of the metadata of its fields as they are.
+    pub(crate) fn json_tree(&self) -> Json {
+        let text = |text: String| Json::Str(text);
+        let object = |entries: Vec<(&str, Json)>| {
+            Json::Object(
+                entries
+                    .into_iter()
+                    .map(|(key, value)| (key.to_string(), value))
+                    .collect(),
+            )
+        };
         match self {
-            DataType::Null => serde_json::json!("void"),
-            DataType::Boolean => serde_json::json!("boolean"),
-            DataType::Byte => serde_json::json!("byte"),
-            DataType::Short => serde_json::json!("short"),
-            DataType::Integer => serde_json::json!("integer"),
-            DataType::Long => serde_json::json!("long"),
-            DataType::Float => serde_json::json!("float"),
-            DataType::Double => serde_json::json!("double"),
-            DataType::Decimal { precision, scale } => {
-                serde_json::json!(format!("decimal({},{})", precision, scale))
-            }
+            DataType::Null => text("void".to_string()),
+            DataType::Boolean => text("boolean".to_string()),
+            DataType::Byte => text("byte".to_string()),
+            DataType::Short => text("short".to_string()),
+            DataType::Integer => text("integer".to_string()),
+            DataType::Long => text("long".to_string()),
+            DataType::Float => text("float".to_string()),
+            DataType::Double => text("double".to_string()),
+            DataType::Decimal { precision, scale } => text(format!("decimal({precision},{scale})")),
             DataType::String { collation } => {
                 if collation == "UTF8_BINARY" {
-                    serde_json::json!("string")
+                    text("string".to_string())
                 } else {
-                    serde_json::json!(format!("string collate {}", collation))
+                    text(format!("string collate {collation}"))
                 }
             }
-            DataType::Char { length } => {
-                serde_json::json!(format!("char({})", length))
-            }
-            DataType::Varchar { length } => {
-                serde_json::json!(format!("varchar({})", length))
-            }
-            DataType::Binary => serde_json::json!("binary"),
-            DataType::Date => serde_json::json!("date"),
-            DataType::Timestamp => serde_json::json!("timestamp"),
-            DataType::TimestampNtz => serde_json::json!("timestamp_ntz"),
-            DataType::Time { precision } => {
-                serde_json::json!(format!("time({})", precision))
-            }
+            DataType::Char { length } => text(format!("char({length})")),
+            DataType::Varchar { length } => text(format!("varchar({length})")),
+            DataType::Binary => text("binary".to_string()),
+            DataType::Date => text("date".to_string()),
+            DataType::Timestamp => text("timestamp".to_string()),
+            DataType::TimestampNtz => text("timestamp_ntz".to_string()),
+            DataType::Time { precision } => text(format!("time({precision})")),
             DataType::TimestampNtzNanos { precision } => {
-                serde_json::json!(format!("timestamp_ntz({})", precision))
+                text(format!("timestamp_ntz({precision})"))
             }
             DataType::TimestampLtzNanos { precision } => {
-                serde_json::json!(format!("timestamp_ltz({})", precision))
+                text(format!("timestamp_ltz({precision})"))
             }
-            DataType::CalendarInterval => serde_json::json!("interval"),
+            DataType::CalendarInterval => text("interval".to_string()),
             DataType::YearMonthInterval {
                 start_field,
                 end_field,
-            } => {
-                serde_json::json!(interval_string(*start_field, *end_field, YEAR_MONTH_FIELDS))
-            }
+            } => text(interval_string(*start_field, *end_field, YEAR_MONTH_FIELDS)),
             DataType::DayTimeInterval {
                 start_field,
                 end_field,
-            } => {
-                serde_json::json!(interval_string(*start_field, *end_field, DAY_TIME_FIELDS))
-            }
+            } => text(interval_string(*start_field, *end_field, DAY_TIME_FIELDS)),
             DataType::Array {
                 element_type,
                 contains_null,
-            } => {
-                serde_json::json!({
-                    "type": "array",
-                    "elementType": element_type.json_value(),
-                    "containsNull": contains_null,
-                })
-            }
+            } => object(vec![
+                ("type", text("array".to_string())),
+                ("elementType", element_type.json_tree()),
+                ("containsNull", Json::Bool(*contains_null)),
+            ]),
             DataType::Map {
                 key_type,
                 value_type,
                 value_contains_null,
-            } => {
-                serde_json::json!({
-                    "type": "map",
-                    "keyType": key_type.json_value(),
-                    "valueType": value_type.json_value(),
-                    "valueContainsNull": value_contains_null,
-                })
-            }
-            DataType::Struct { fields } => {
-                let field_values: Vec<serde_json::Value> =
-                    fields.iter().map(|f| f.json_value()).collect();
-                serde_json::json!({
-                    "type": "struct",
-                    "fields": field_values,
-                })
-            }
-            DataType::Variant => serde_json::json!("variant"),
-            DataType::Geometry { srid } => {
-                serde_json::json!(format!("geometry({})", spatial_crs(*srid, false)))
-            }
-            DataType::Geography { srid } => serde_json::json!(format!(
+            } => object(vec![
+                ("type", text("map".to_string())),
+                ("keyType", key_type.json_tree()),
+                ("valueType", value_type.json_tree()),
+                ("valueContainsNull", Json::Bool(*value_contains_null)),
+            ]),
+            DataType::Struct { fields } => object(vec![
+                ("type", text("struct".to_string())),
+                (
+                    "fields",
+                    Json::Array(fields.iter().map(StructField::json_tree).collect()),
+                ),
+            ]),
+            DataType::Variant => text("variant".to_string()),
+            DataType::Geometry { srid } => text(format!("geometry({})", spatial_crs(*srid, false))),
+            DataType::Geography { srid } => text(format!(
                 "geography({}, {})",
                 spatial_crs(*srid, true),
                 GeographyType::DEFAULT_ALG
@@ -558,31 +561,35 @@ impl DataType {
                 serialized_python_class,
                 sql_type,
             } => {
-                let mut obj = serde_json::Map::new();
-                obj.insert("type".to_string(), serde_json::json!("udt"));
+                let mut entries = vec![("type", text("udt".to_string()))];
                 if let Some(jvm_cls) = jvm_class {
-                    obj.insert("class".to_string(), serde_json::json!(jvm_cls));
+                    entries.push(("class", text(jvm_cls.clone())));
                 }
                 if let Some(py_cls) = python_class {
-                    obj.insert("pyClass".to_string(), serde_json::json!(py_cls));
+                    entries.push(("pyClass", text(py_cls.clone())));
                 }
                 if let Some(serialized) = serialized_python_class {
-                    obj.insert("serializedClass".to_string(), serde_json::json!(serialized));
+                    entries.push(("serializedClass", text(serialized.clone())));
                 }
                 if let Some(sql_ty) = sql_type {
-                    obj.insert("sqlType".to_string(), sql_ty.json_value());
+                    entries.push(("sqlType", sql_ty.json_tree()));
                 }
-                serde_json::Value::Object(obj)
+                object(entries)
             }
             DataType::Unparsed { data_type_string } => {
-                serde_json::json!(format!("unparsed({})", data_type_string))
+                text(format!("unparsed({})", data_type_string))
             }
         }
     }
 
-    /// Converts to a JSON string, mirroring `DataType.json()`.
+    /// Converts to a JSON string, mirroring `DataType.json()`: as PySpark's
+    /// `json.dumps(self.jsonValue(), separators=(",", ":"), sort_keys=True)` writes it, of the
+    /// escapes of its `ensure_ascii`, and of the metadata of the fields as it is, an int beyond 64
+    /// bits too.
     pub fn json(&self) -> String {
-        self.json_value().to_string()
+        let mut out = String::new();
+        self.json_tree().write_sorted(&mut out);
+        out
     }
 
     /// The JSON of this type as PySpark's `json()` writes the type objects that the Python client
@@ -593,9 +600,11 @@ impl DataType {
     /// sent so, as PySpark sends the `json()` of its schema. Not a stable API.
     #[doc(hidden)]
     pub fn json_as_pyspark(&self) -> String {
-        let mut value = self.json_value();
+        let mut value = self.json_tree();
         lowered_json_in(self, &mut value);
-        value.to_string()
+        let mut out = String::new();
+        value.write_sorted(&mut out);
+        out
     }
 
     /// Parses a JSON value into a DataType, mirroring the reverse of `json()` / `jsonValue()`.
@@ -603,11 +612,15 @@ impl DataType {
         parse_json_value(value, "", &CollationsMap::new())
     }
 
-    /// Parses a JSON string into a DataType (convenience over [`DataType::from_json`]).
+    /// Parses a JSON string into a DataType (convenience over [`DataType::from_json`]). The text
+    /// is read as Python's `json.loads` reads it, so the metadata of a field keeps its values as
+    /// they are written, an int beyond 64 bits and the `NaN` of a float of Python's JSON too.
     pub fn from_json_str(s: &str) -> Result<DataType> {
-        let value: serde_json::Value = serde_json::from_str(s)
-            .map_err(|e| SparkError::value("INVALID_JSON", &[("detail", &e.to_string())]))?;
-        DataType::from_json(&value)
+        let tree =
+            Json::parse(s).map_err(|e| SparkError::value("INVALID_JSON", &[("detail", &e)]))?;
+        let mut data_type = DataType::from_json(&tree.to_serde())?;
+        exact_metadata_in(&mut data_type, &tree);
+        Ok(data_type)
     }
 
     /// Converts to a protobuf DataType, mirroring
@@ -768,9 +781,9 @@ impl DataType {
                     proto_field.name = field.name.clone();
                     proto_field.data_type = Some(field.data_type.to_proto());
                     proto_field.nullable = field.nullable;
+                    // As PySpark's `json.dumps(field.metadata)` of a dict that is not empty.
                     if !field.metadata.is_empty() {
-                        proto_field.metadata =
-                            Some(serde_json::to_string(&field.metadata).unwrap_or_default());
+                        proto_field.metadata = Some(field.metadata.json());
                     }
                     struct_type.fields.push(proto_field);
                 }
@@ -901,10 +914,10 @@ impl DataType {
                         DataType::from_proto(field_proto.data_type.as_ref().ok_or_else(|| {
                             SparkError::connect_msg("StructField data_type is missing")
                         })?)?;
-                    let metadata = if let Some(meta_str) = &field_proto.metadata {
-                        serde_json::from_str(meta_str).unwrap_or_default()
-                    } else {
-                        BTreeMap::new()
+                    // As PySpark's `json.loads(f.metadata)`, of the values as they are written.
+                    let metadata = match &field_proto.metadata {
+                        Some(meta_str) => Metadata::from_json(meta_str).unwrap_or_default(),
+                        None => Metadata::new(),
                     };
                     fields.push(StructField {
                         name: field_proto.name.clone(),
@@ -981,35 +994,56 @@ impl StructField {
     /// Returns the JSON value representation, mirroring `StructField.jsonValue()`: the
     /// collations of the strings of the field, also in its arrays and maps, are in the
     /// `__COLLATIONS` of its metadata, by their paths, and not in its type, as Spark writes them.
+    /// The values of the metadata are `serde_json` values (see [`DataType::json_value`]).
     pub fn json_value(&self) -> serde_json::Value {
+        self.json_tree().to_serde()
+    }
+
+    /// The JSON value of the field, of its metadata as it is.
+    fn json_tree(&self) -> Json {
         let mut collations = serde_json::Map::new();
         visit_collations(&self.data_type, &self.name, &mut collations);
         let (data_type, metadata) = if collations.is_empty() {
-            (self.data_type.json_value(), self.metadata.clone())
+            (self.data_type.json_tree(), self.metadata.as_object())
         } else {
+            // As PySpark's `{**self.metadata, "__COLLATIONS": ...}`.
             let mut metadata = self.metadata.clone();
-            metadata.insert(
+            metadata.insert_json(
                 COLLATIONS_METADATA_KEY.to_string(),
-                serde_json::Value::Object(collations),
+                Json::from_serde(&serde_json::Value::Object(collations)),
             );
-            (without_collations(&self.data_type).json_value(), metadata)
+            (
+                without_collations(&self.data_type).json_tree(),
+                metadata.as_object(),
+            )
         };
-        serde_json::json!({
-            "name": &self.name,
-            "type": data_type,
-            "nullable": self.nullable,
-            "metadata": metadata,
-        })
+        Json::Object(vec![
+            ("name".to_string(), Json::Str(self.name.clone())),
+            ("type".to_string(), data_type),
+            ("nullable".to_string(), Json::Bool(self.nullable)),
+            ("metadata".to_string(), metadata),
+        ])
     }
 
-    /// Parses a StructField from its JSON string, mirroring `StructField.fromJson`.
+    /// The JSON text of the field, mirroring `StructField.json()` (see [`DataType::json`]).
+    pub fn json(&self) -> String {
+        let mut out = String::new();
+        self.json_tree().write_sorted(&mut out);
+        out
+    }
+
+    /// Parses a StructField from its JSON string, mirroring `StructField.fromJson`, of the
+    /// metadata as it is written (see [`DataType::from_json_str`]).
     pub fn from_json_str(s: &str) -> Result<StructField> {
-        let v: serde_json::Value = serde_json::from_str(s)
-            .map_err(|e| SparkError::value("INVALID_JSON", &[("detail", &e.to_string())]))?;
+        let tree =
+            Json::parse(s).map_err(|e| SparkError::value("INVALID_JSON", &[("detail", &e)]))?;
+        let v = tree.to_serde();
         let field = v.as_object().ok_or_else(|| {
             SparkError::value("INVALID_JSON", &[("detail", "a field is not an object")])
         })?;
-        parse_json_field(field)
+        let mut field = parse_json_field(field)?;
+        exact_field_metadata_in(&mut field, &tree);
+        Ok(field)
     }
 
     /// Whether this field equals `other` as PySpark's `StructField.__eq__` compares them, by
@@ -1019,13 +1053,7 @@ impl StructField {
         self.name == other.name
             && self.nullable == other.nullable
             && self.data_type.eq_as_python(&other.data_type)
-            && self.metadata.len() == other.metadata.len()
-            && self.metadata.iter().all(|(key, value)| {
-                other
-                    .metadata
-                    .get(key)
-                    .is_some_and(|other| json_eq_as_python(value, other))
-            })
+            && self.metadata.eq_as_python(&other.metadata)
     }
 }
 
@@ -1090,67 +1118,6 @@ impl DataType {
             }
             (a, b) => a == b,
         }
-    }
-}
-
-/// Whether the JSON values `a` and `b` are equal as Python's `==` compares the values that
-/// `json.loads` gives of them: numbers by their values, whatever their types, a bool as the
-/// number of its value, and arrays and objects of equal items.
-fn json_eq_as_python(a: &serde_json::Value, b: &serde_json::Value) -> bool {
-    use serde_json::Value;
-    match (a, b) {
-        (Value::Null, Value::Null) => true,
-        (Value::String(a), Value::String(b)) => a == b,
-        (Value::Array(a), Value::Array(b)) => {
-            a.len() == b.len() && a.iter().zip(b).all(|(a, b)| json_eq_as_python(a, b))
-        }
-        (Value::Object(a), Value::Object(b)) => {
-            a.len() == b.len()
-                && a.iter().all(|(key, value)| {
-                    b.get(key)
-                        .is_some_and(|other| json_eq_as_python(value, other))
-                })
-        }
-        _ => match (python_number(a), python_number(b)) {
-            (Some(a), Some(b)) => a == b,
-            _ => false,
-        },
-    }
-}
-
-/// A JSON number or bool as Python compares it: an int, or a float.
-#[derive(Clone, Copy)]
-enum PythonNumber {
-    Int(i128),
-    Float(f64),
-}
-
-impl PartialEq for PythonNumber {
-    /// As Python compares an int and a float, exactly: `2**53 + 1` does not equal
-    /// `float(2**53 + 1)`, which is `2**53`.
-    fn eq(&self, other: &Self) -> bool {
-        match (*self, *other) {
-            (PythonNumber::Int(a), PythonNumber::Int(b)) => a == b,
-            (PythonNumber::Float(a), PythonNumber::Float(b)) => a == b,
-            (PythonNumber::Int(int), PythonNumber::Float(float))
-            | (PythonNumber::Float(float), PythonNumber::Int(int)) => {
-                // An integral float within the range of an i128 converts to it exactly.
-                float.fract() == 0.0 && float.abs() < 2f64.powi(127) && float as i128 == int
-            }
-        }
-    }
-}
-
-/// The number of `value` as Python compares it, if it is a number or a bool.
-fn python_number(value: &serde_json::Value) -> Option<PythonNumber> {
-    match value {
-        serde_json::Value::Bool(flag) => Some(PythonNumber::Int(i128::from(*flag))),
-        serde_json::Value::Number(number) => number
-            .as_i64()
-            .map(|int| PythonNumber::Int(int.into()))
-            .or_else(|| number.as_u64().map(|int| PythonNumber::Int(int.into())))
-            .or_else(|| number.as_f64().map(PythonNumber::Float)),
-        _ => None,
     }
 }
 
@@ -1468,7 +1435,7 @@ impl DataType {
                     name: field_name.to_string(),
                     data_type: field_type,
                     nullable,
-                    metadata: metadata.unwrap_or_default(),
+                    metadata: metadata.map(Metadata::from).unwrap_or_default(),
                 });
                 Ok(DataType::Struct { fields: new_fields })
             }
@@ -1551,7 +1518,7 @@ fn field_ddl_suffix(field: &StructField) -> String {
     if !field.nullable {
         s.push_str(" NOT NULL");
     }
-    if let Some(comment) = field.metadata.get("comment").and_then(|c| c.as_str()) {
+    if let Some(serde_json::Value::String(comment)) = field.metadata.get("comment") {
         let escaped = comment.replace('\\', "\\\\").replace('\'', "\\'");
         s.push_str(&format!(" COMMENT '{escaped}'"));
     }
@@ -1659,9 +1626,7 @@ fn child_path(path: &str, child: &str) -> String {
 
 /// The collations of the `__COLLATIONS` of `metadata`, which this removes, as PySpark's
 /// `StructField.fromJson`: each is `<provider>.<collation>`, of the `spark` or `icu` provider.
-fn take_field_collations(
-    metadata: &mut BTreeMap<String, serde_json::Value>,
-) -> Result<CollationsMap> {
+fn take_field_collations(metadata: &mut Metadata) -> Result<CollationsMap> {
     let Some(collations) = metadata.remove(COLLATIONS_METADATA_KEY) else {
         return Ok(CollationsMap::new());
     };
@@ -1685,21 +1650,21 @@ fn take_field_collations(
     Ok(by_path)
 }
 
-/// Writes into `value`, the [`DataType::json_value`] of `data_type`, the JSON of each type of
+/// Writes into `value`, the [`DataType::json_tree`] of `data_type`, the JSON of each type of
 /// `data_type` that the Python client lowered by its JSON, for [`DataType::json_as_pyspark`]: an
 /// [`DataType::Unparsed`] of the text of a JSON string or object, as the `json()` of a type
-/// object is. Another unparsed type, of a DDL string, stays `unparsed(...)`.
-fn lowered_json_in(data_type: &DataType, value: &mut serde_json::Value) {
+/// object is, which is written as it is, as PySpark's `json()` wrote it, unparsed, so that a text
+/// of a depth that [`Json::parse`] refuses is written too. Another unparsed type, of a DDL
+/// string, which starts with neither, stays `unparsed(...)`.
+fn lowered_json_in(data_type: &DataType, value: &mut Json) {
     match data_type {
         DataType::Unparsed { data_type_string } => {
-            if let Ok(json @ (serde_json::Value::String(_) | serde_json::Value::Object(_))) =
-                serde_json::from_str(data_type_string)
-            {
-                *value = json;
+            if data_type_string.trim_start().starts_with(['{', '"']) {
+                *value = Json::Raw(data_type_string.clone());
             }
         }
         DataType::Array { element_type, .. } => {
-            if let Some(element) = value.get_mut("elementType") {
+            if let Some(element) = value.member_mut("elementType") {
                 lowered_json_in(element_type, element);
             }
         }
@@ -1708,17 +1673,17 @@ fn lowered_json_in(data_type: &DataType, value: &mut serde_json::Value) {
             value_type,
             ..
         } => {
-            if let Some(key) = value.get_mut("keyType") {
+            if let Some(key) = value.member_mut("keyType") {
                 lowered_json_in(key_type, key);
             }
-            if let Some(value) = value.get_mut("valueType") {
+            if let Some(value) = value.member_mut("valueType") {
                 lowered_json_in(value_type, value);
             }
         }
         DataType::Struct { fields } => {
-            if let Some(serde_json::Value::Array(values)) = value.get_mut("fields") {
+            if let Some(Json::Array(values)) = value.member_mut("fields") {
                 for (field, field_value) in fields.iter().zip(values.iter_mut()) {
-                    if let Some(field_type) = field_value.get_mut("type") {
+                    if let Some(field_type) = field_value.member_mut("type") {
                         lowered_json_in(&field.data_type, field_type);
                     }
                 }
@@ -1728,11 +1693,71 @@ fn lowered_json_in(data_type: &DataType, value: &mut serde_json::Value) {
             sql_type: Some(sql_type),
             ..
         } => {
-            if let Some(sql) = value.get_mut("sqlType") {
+            if let Some(sql) = value.member_mut("sqlType") {
                 lowered_json_in(sql_type, sql);
             }
         }
         _ => {}
+    }
+}
+
+/// Sets the metadata of the fields of `data_type`, which [`DataType::from_json`] parsed of the
+/// `serde_json` value of `value`, to the metadata of `value` as it is written, of the ints beyond
+/// 64 bits and the floats that `serde_json` does not hold, as PySpark's `fromJson` takes the dicts
+/// of `json.loads`: of the same places of the JSON that the parser reads.
+fn exact_metadata_in(data_type: &mut DataType, value: &Json) {
+    match data_type {
+        DataType::Array { element_type, .. } => {
+            if let Some(element) = value.member("elementType") {
+                exact_metadata_in(element_type, element);
+            }
+        }
+        DataType::Map {
+            key_type,
+            value_type,
+            ..
+        } => {
+            if let Some(key) = value.member("keyType") {
+                exact_metadata_in(key_type, key);
+            }
+            if let Some(value) = value.member("valueType") {
+                exact_metadata_in(value_type, value);
+            }
+        }
+        DataType::Struct { fields } => {
+            if let Some(Json::Array(values)) = value.member("fields") {
+                // As the parser, which reads the fields that are objects.
+                let objects = values.iter().filter(|v| matches!(v, Json::Object(_)));
+                for (field, field_value) in fields.iter_mut().zip(objects) {
+                    exact_field_metadata_in(field, field_value);
+                }
+            }
+        }
+        DataType::Udt {
+            sql_type: Some(sql_type),
+            ..
+        } => {
+            if let Some(sql) = value.member("sqlType") {
+                exact_metadata_in(sql_type, sql);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// [`exact_metadata_in`] of the field `field`, of its JSON object `value`: its metadata, without
+/// the `__COLLATIONS` of its strings, which its type holds, and the metadata of its type.
+fn exact_field_metadata_in(field: &mut StructField, value: &Json) {
+    if let Some(mut metadata) = value
+        .member("metadata")
+        .cloned()
+        .and_then(Metadata::of_json)
+    {
+        metadata.remove_json(COLLATIONS_METADATA_KEY);
+        field.metadata = metadata;
+    }
+    if let Some(field_type) = value.member("type") {
+        exact_metadata_in(&mut field.data_type, field_type);
     }
 }
 
@@ -1759,10 +1784,10 @@ fn parse_json_field(field: &serde_json::Map<String, serde_json::Value>) -> Resul
         .get("nullable")
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
-    let mut metadata: BTreeMap<String, serde_json::Value> = field
+    let mut metadata = field
         .get("metadata")
         .and_then(|v| v.as_object())
-        .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+        .map(|m| Metadata::from(m.clone()))
         .unwrap_or_default();
     let collations = take_field_collations(&mut metadata)?;
     Ok(StructField {
@@ -2508,7 +2533,7 @@ fn parse_struct_field(part: &str) -> Result<StructField> {
     let (type_str, not_null, comment) = split_type_and_clause(rest, part)?;
     let data_type = parse_single_type(type_str)?;
     let metadata = comment
-        .map(|c| BTreeMap::from([("comment".to_string(), serde_json::Value::String(c))]))
+        .map(|c| Metadata::from_iter([("comment", serde_json::Value::String(c))]))
         .unwrap_or_default();
     Ok(StructField {
         name,
@@ -3029,13 +3054,13 @@ mod tests {
                         collation: "UTF8_BINARY".to_string(),
                     },
                     nullable: true,
-                    metadata: BTreeMap::new(),
+                    metadata: Metadata::new(),
                 },
                 StructField {
                     name: "age".to_string(),
                     data_type: DataType::Integer,
                     nullable: true,
-                    metadata: BTreeMap::new(),
+                    metadata: Metadata::new(),
                 },
             ],
         };
@@ -3138,7 +3163,7 @@ mod tests {
                     name: "a".to_string(),
                     data_type: DataType::Integer,
                     nullable: true,
-                    metadata: BTreeMap::new(),
+                    metadata: Metadata::new(),
                 },
                 StructField {
                     name: "b".to_string(),
@@ -3146,7 +3171,7 @@ mod tests {
                         collation: "UTF8_BINARY".to_string(),
                     },
                     nullable: false,
-                    metadata: BTreeMap::new(),
+                    metadata: Metadata::new(),
                 },
             ],
         };
@@ -3238,7 +3263,7 @@ mod tests {
             name: "a".to_string(),
             data_type: DataType::Long,
             nullable: true,
-            metadata: BTreeMap::from([("x".to_string(), value)]),
+            metadata: BTreeMap::from([("x".to_string(), value)]).into(),
         };
         let of = |value: serde_json::Value| DataType::Struct {
             fields: vec![field(value)],
@@ -3306,7 +3331,7 @@ mod tests {
                 collation: "UTF8_BINARY".to_string(),
             },
             nullable: true,
-            metadata: BTreeMap::new(),
+            metadata: Metadata::new(),
         };
         assert_eq!(field.simple_string(), "field_name:string");
     }
@@ -3505,13 +3530,13 @@ mod tests {
                         collation: "UTF8_BINARY".to_string(),
                     },
                     nullable: true,
-                    metadata: BTreeMap::new(),
+                    metadata: Metadata::new(),
                 },
                 StructField {
                     name: "age".to_string(),
                     data_type: DataType::Integer,
                     nullable: true,
-                    metadata: BTreeMap::new(),
+                    metadata: Metadata::new(),
                 },
             ],
         };
@@ -3791,7 +3816,7 @@ mod tests {
                     name: "a".to_string(),
                     data_type: DataType::Integer,
                     nullable: true,
-                    metadata: BTreeMap::new(),
+                    metadata: Metadata::new(),
                 },
                 StructField {
                     name: "b".to_string(),
@@ -3799,7 +3824,7 @@ mod tests {
                         collation: "UTF8_BINARY".to_string(),
                     },
                     nullable: true,
-                    metadata: BTreeMap::new(),
+                    metadata: Metadata::new(),
                 },
             ],
         };
@@ -3816,13 +3841,13 @@ mod tests {
                         collation: "UTF8_BINARY".to_string(),
                     },
                     nullable: true,
-                    metadata: BTreeMap::new(),
+                    metadata: Metadata::new(),
                 },
                 StructField {
                     name: "age".to_string(),
                     data_type: DataType::Integer,
                     nullable: true,
-                    metadata: BTreeMap::new(),
+                    metadata: Metadata::new(),
                 },
             ],
         };
@@ -4051,7 +4076,7 @@ mod tests {
                     name: "a".to_string(),
                     data_type: DataType::Integer,
                     nullable: false,
-                    metadata: BTreeMap::new(),
+                    metadata: Metadata::new(),
                 },
                 StructField {
                     name: "b".to_string(),
@@ -4059,7 +4084,7 @@ mod tests {
                         collation: "UTF8_BINARY".to_string(),
                     },
                     nullable: false,
-                    metadata: BTreeMap::new(),
+                    metadata: Metadata::new(),
                 },
             ],
         };
@@ -4333,7 +4358,7 @@ mod tests {
                     name: "id".to_string(),
                     data_type: DataType::Integer,
                     nullable: false,
-                    metadata: BTreeMap::new(),
+                    metadata: Metadata::new(),
                 },
                 StructField {
                     name: "name".to_string(),
@@ -4341,7 +4366,7 @@ mod tests {
                         collation: "UTF8_BINARY".to_string(),
                     },
                     nullable: true,
-                    metadata: BTreeMap::new(),
+                    metadata: Metadata::new(),
                 },
             ],
         };
@@ -4360,7 +4385,7 @@ mod tests {
                     name: "id".to_string(),
                     data_type: DataType::Integer,
                     nullable: false,
-                    metadata: BTreeMap::new(),
+                    metadata: Metadata::new(),
                 },
                 StructField {
                     name: "nested".to_string(),
@@ -4369,11 +4394,11 @@ mod tests {
                             name: "x".to_string(),
                             data_type: DataType::Double,
                             nullable: true,
-                            metadata: BTreeMap::new(),
+                            metadata: Metadata::new(),
                         }],
                     },
                     nullable: true,
-                    metadata: BTreeMap::new(),
+                    metadata: Metadata::new(),
                 },
             ],
         };
@@ -4401,7 +4426,7 @@ mod tests {
                 name: "m".to_string(),
                 data_type: map,
                 nullable: true,
-                metadata: BTreeMap::new(),
+                metadata: Metadata::new(),
             }],
         };
         let mut seen = Vec::new();
@@ -4450,7 +4475,7 @@ mod tests {
                     name: "a".to_string(),
                     data_type: unparsed("atomic"),
                     nullable: true,
-                    metadata: BTreeMap::new(),
+                    metadata: Metadata::new(),
                 },
                 StructField {
                     name: "m".to_string(),
@@ -4463,13 +4488,13 @@ mod tests {
                         value_contains_null: true,
                     },
                     nullable: false,
-                    metadata: BTreeMap::new(),
+                    metadata: Metadata::new(),
                 },
                 StructField {
                     name: "u".to_string(),
                     data_type: unparsed("int"),
                     nullable: true,
-                    metadata: BTreeMap::new(),
+                    metadata: Metadata::new(),
                 },
             ],
         };
@@ -4551,7 +4576,7 @@ mod tests {
                     name: "a".to_string(),
                     data_type: DataType::Integer,
                     nullable: true,
-                    metadata: BTreeMap::new(),
+                    metadata: Metadata::new(),
                 },
                 StructField {
                     name: "b".to_string(),
@@ -4559,7 +4584,7 @@ mod tests {
                         collation: "UTF8_BINARY".to_string(),
                     },
                     nullable: false,
-                    metadata: BTreeMap::new(),
+                    metadata: Metadata::new(),
                 },
             ],
         };
@@ -4634,7 +4659,7 @@ mod tests {
             name: name.to_string(),
             data_type,
             nullable: true,
-            metadata: BTreeMap::new(),
+            metadata: Metadata::new(),
         };
         let field_json = r#"{"metadata":{},"name":"x","nullable":true,"type":"integer"}"#;
         let schema = DataType::Struct {
@@ -4689,5 +4714,36 @@ mod tests {
         );
         let plain = DataType::from_ddl("a INT, b ARRAY<MAP<STRING, DECIMAL(10,2)>>").unwrap();
         assert_eq!(plain.json_as_pyspark(), plain.json());
+        // The JSON that the client lowered is written as it is, as PySpark's `json()` wrote it:
+        // the keys of the metadata `{10: "a", 9: "b"}` in the order of Python's sort of the ints,
+        // which a sort of their strs does not keep.
+        let int_keys =
+            r#"{"metadata":{"9":"b","10":"a"},"name":"x","nullable":true,"type":"integer"}"#;
+        let array = DataType::Array {
+            element_type: Box::new(lowered(int_keys)),
+            contains_null: true,
+        };
+        assert_eq!(
+            array.json_as_pyspark(),
+            format!(r#"{{"containsNull":true,"elementType":{int_keys},"type":"array"}}"#)
+        );
+        assert_eq!(lowered(int_keys).json_as_pyspark(), int_keys);
+        // Unparsed, of any depth: metadata nested deeper than the core's parser reads, which
+        // Python writes under a raised recursion limit, where the type was written as the string
+        // `unparsed(...)`.
+        let deep = format!("{}1{}", "[".repeat(1200), "]".repeat(1200));
+        let deep_field =
+            format!(r#"{{"metadata":{{"x":{deep}}},"name":"x","nullable":true,"type":"long"}}"#);
+        assert!(Json::parse(&deep_field).is_err());
+        let deep_struct = format!(r#"{{"fields":[{deep_field}],"type":"struct"}}"#);
+        assert_eq!(lowered(&deep_struct).json_as_pyspark(), deep_struct);
+        let array = DataType::Array {
+            element_type: Box::new(lowered(&deep_field)),
+            contains_null: true,
+        };
+        assert_eq!(
+            array.json_as_pyspark(),
+            format!(r#"{{"containsNull":true,"elementType":{deep_field},"type":"array"}}"#)
+        );
     }
 }

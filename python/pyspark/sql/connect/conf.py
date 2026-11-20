@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""RuntimeConf under the connect import path (mirrors pyspark.sql.connect.conf; the connect runtime-config class is named RuntimeConf upstream)."""
+# RuntimeConf under the connect import path (mirrors pyspark.sql.connect.conf; the connect runtime-config class is named RuntimeConf upstream).
 from pyspark._pyspark import RuntimeConf
 
 __all__ = ["RuntimeConf"]

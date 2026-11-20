@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""Rust-backed Column under the connect import path (pandas-on-Spark and connect tests import ConnectColumn from here)."""
+# Rust-backed Column under the connect import path (pandas-on-Spark and connect tests import ConnectColumn from here).
 from typing import Any, Callable, Optional
 
 from pyspark import cloudpickle as _cloudpickle
@@ -35,17 +35,21 @@ def _reduce_column(
     levels: int = 1,
     build_error: Optional[tuple[str, str, Any]] = None,
     repr_error: Optional[tuple[str, str, Any]] = None,
+    subqueries: Optional[list[tuple[bytes, int]]] = None,
 ) -> tuple[Callable[..., Any], tuple[Any, ...]]:
     """The ``__reduce__`` of a Column of the bytes of its ``spark.connect.Expression`` and of its
     rendering, as PySpark Connect's Column pickles its expression: the function of
     ``pyspark.sql.connect._column_reduce``, which gives back the Column, which sends the
     expression as it is. A CASE WHEN gives its branches and else value too, as Columns, so the
     Column gives back a CASE WHEN. A sort order gives its child Column and its sort method, so
-    the Column gives back a sort order. cloudpickle pickles that function by value, also to a
-    Python worker of the server, where it gives back PySpark Connect's Column, and ``pickle`` by
-    reference."""
+    the Column gives back a sort order. A Column of subqueries gives the bytes and the levels of
+    the relation of each plan that they refer to, which the Column sends with the expression.
+    cloudpickle pickles that function by value, also to a Python worker of the server, where it
+    gives back PySpark Connect's Column, and ``pickle`` by reference."""
     args: tuple[Any, ...] = (expression, rendered, branches, else_value, sort, levels)
-    if build_error is not None or repr_error is not None:
+    if build_error is not None or repr_error is not None or subqueries:
         # The errors of an expression that a request does not build, and of its ``__repr__``.
         args += (build_error, repr_error)
+    if subqueries:
+        args += (subqueries,)
     return _column_reduce.column_of, args

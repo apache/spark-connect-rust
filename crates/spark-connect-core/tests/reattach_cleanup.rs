@@ -829,6 +829,13 @@ async fn each_response_retries_its_reattaches_afresh() {
     fixture.assert_release_all_count(1).await;
 }
 
+/// The per-RPC deadline of the execution streams of the tests of their deadlines. It runs from
+/// the call, so it covers the first response of a stream too, which the fixture sends at once and
+/// which must arrive before it: a second leaves a loaded machine, of the tests of this file at once,
+/// the time to deliver it, and the deadline still ends a stream that stays open after it within
+/// `WAIT`.
+const STREAM_DEADLINE: Duration = Duration::from_secs(1);
+
 /// The deadlines of PySpark, but of `stream` for the streams of an execution.
 fn stream_deadlines(stream: Duration) -> RpcDeadlines {
     RpcDeadlines {
@@ -846,7 +853,7 @@ async fn execution_streams_carry_their_deadlines_and_reattach_past_them() {
     let mut fixture = Fixture::start(Scenario::Open).await;
     fixture
         .client
-        .set_rpc_deadlines(stream_deadlines(Duration::from_millis(200)));
+        .set_rpc_deadlines(stream_deadlines(STREAM_DEADLINE));
     {
         let mut script = fixture.state.reattach_script.lock().unwrap();
         // A stream that stalls too, then the rest of the result.
@@ -886,7 +893,7 @@ async fn reattaches_past_deadlines_are_bounded_as_the_reference_retries() {
     let mut fixture = Fixture::start(Scenario::Open).await;
     fixture
         .client
-        .set_rpc_deadlines(stream_deadlines(Duration::from_millis(100)));
+        .set_rpc_deadlines(stream_deadlines(STREAM_DEADLINE));
     fixture.client.set_retry_policy(RetryPolicy {
         max_retries: Some(2),
         initial_backoff_ms: 1,
@@ -894,6 +901,7 @@ async fn reattaches_past_deadlines_are_bounded_as_the_reference_retries() {
         max_retry_exception_elapsed_time_ms: Some(0),
         ..RetryPolicy::default()
     });
+    let started = std::time::Instant::now();
     let mut stream = bounded(fixture.client.execute_plan_reattachable(execute_request()))
         .await
         .unwrap();
@@ -908,6 +916,14 @@ async fn reattaches_past_deadlines_are_bounded_as_the_reference_retries() {
     let error = bounded(stream.message()).await.unwrap_err();
     assert!(error.message.contains("RPC deadline exceeded"), "{error:?}");
     assert_eq!(error.grpc_code, Some(Code::DeadlineExceeded as i32));
+    // It is the deadline of the call that ended the stream, not a deadline of the test.
+    assert!(
+        started.elapsed() >= STREAM_DEADLINE,
+        "{:?}",
+        started.elapsed()
+    );
+    let timeouts = fixture.state.timeouts.lock().unwrap().clone();
+    assert_eq!(timeouts.len(), 1, "{timeouts:?}");
     assert!(fixture.state.reattaches.lock().unwrap().is_empty());
     fixture.assert_release_all_count(1).await;
 }

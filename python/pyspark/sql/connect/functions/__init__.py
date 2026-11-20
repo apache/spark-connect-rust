@@ -14,7 +14,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""The functions of PySpark Connect, ``pyspark.sql.connect.functions``: those of its modules
-``builtin`` and ``partitioning``, as PySpark Connect's."""
+# The functions of PySpark Connect, ``pyspark.sql.connect.functions``: those of its modules
+# ``builtin`` and ``partitioning``, as PySpark Connect's.
+"""PySpark Functions with Spark Connect"""
 from pyspark.sql.connect.functions.builtin import *  # noqa: F401,F403
 from pyspark.sql.connect.functions import partitioning  # noqa: F401

@@ -2417,8 +2417,12 @@ def test_integer_explicit_renamed_schema_preserves_all_ipc_cells(protocol, monke
         assert table.schema.field(1).nullable is True
         if rows >= 1000 or nullable:
             from pyspark.sql.pandas.types import from_arrow_schema
-            assert from_arrow_schema(table.schema).json() == schema.json(), (
-                from_arrow_schema(table.schema).json(), schema.json(), table.schema)
+
+            # As PySpark's conversion of the frame, of `_deduplicate_field_names`, the Arrow
+            # schema has no metadata of the fields, which the schema of the relation has.
+            plain = T.StructType([T.StructField(f.name, f.dataType, f.nullable) for f in schema])
+            assert from_arrow_schema(table.schema).json() == plain.json(), (
+                from_arrow_schema(table.schema).json(), plain.json(), table.schema)
             assert state["config_requests"]
         else:
             assert state["config_requests"][:1] == [("get", _CREATE_DATAFRAME_KEYS)]
@@ -3600,7 +3604,10 @@ def test_timestamp_canonical_columns_storage_stays_columnar(protocol, unit, stor
         assert table.num_rows == 10000
         assert table.column(0).cast(pa.int64()).to_pylist() == values
         assert table.column(0).is_null().to_pylist() == [value is None for value in values]
-        assert table.schema.equals(to_arrow_schema(schema, timezone="UTC"), check_metadata=True)
+        # As PySpark's conversion of the frame, of `_deduplicate_field_names`, the Arrow schema
+        # has no metadata of the fields, which the schema of the relation has.
+        plain = T.StructType([T.StructField(f.name, f.dataType, f.nullable) for f in schema])
+        assert table.schema.equals(to_arrow_schema(plain, timezone="UTC"), check_metadata=True)
         assert json.loads(state["relations"][0].local_relation.schema) == json.loads(schema.json())
 
 
@@ -3826,6 +3833,11 @@ def test_float64_public_fallback_preserves_every_ipc_cell(protocol, reason):
         schema = expected_schema
         if reason == "duplicate_input":
             frame.columns = ["x", "x"]
+        else:
+            # As PySpark's conversion of the frame, the table is of the names of
+            # `_deduplicate_field_names` of the schema, of the top level too.
+            expected_schema = T.StructType([
+                T.StructField("x_0", T.DoubleType()), T.StructField("x_1", T.DoubleType())])
     if reason in ("inferred", "names"):
         # As PySpark Connect's, the Arrow conversion of a frame without a schema names its
         # columns _0, _1, ..., which toDF names.
@@ -5081,7 +5093,8 @@ def test_arrow_string_columns_preserve_every_ipc_cell(protocol, monkeypatch, cac
             assert column.to_pylist() == values
             actual_field = table.schema.field(field.name)
             assert actual_field.nullable == field.nullable
-            assert from_arrow_metadata(actual_field.metadata) == (field.metadata or None)
+            # As PySpark's conversion of the frame, of no metadata of the field in Arrow.
+            assert from_arrow_metadata(actual_field.metadata) is None
         assert bool(state["uploads"]) == cached
 
 
@@ -5134,11 +5147,10 @@ def test_arrow_string_columns_match_pyspark_conversion(protocol, monkeypatch, st
                 logical_schemas.append(json.loads(state["spark_schema"]))
                 # As PySpark's createDataFrame, the settings are read before any conversion.
                 assert state["config_requests"] == [("get", _CREATE_DATAFRAME_KEYS)]
-    assert tables[0].equals(tables[1])
-    # The fast path's IPC carries the field metadata, which the importer embeds; that of
-    # PySpark's conversion carries none. The logical schema of the relation has it either way.
-    assert from_arrow_metadata(tables[0].schema.field(0).metadata) == {"source": "control"}
-    assert tables[1].schema.field(0).metadata is None
+    # As PySpark's conversion, the fast path's IPC carries no metadata of the field, which the
+    # logical schema of the relation has.
+    assert tables[0].equals(tables[1], check_metadata=True)
+    assert from_arrow_metadata(tables[0].schema.field(0).metadata) is None
     assert logical_schemas == [json.loads(schema.json())] * 2
 
 
@@ -6929,7 +6941,8 @@ def test_date_columns_preserve_every_ipc_cell(protocol, monkeypatch, cached, ver
             assert column.to_pylist() == values
             actual_field = table.schema.field(field.name)
             assert actual_field.nullable == field.nullable
-            assert from_arrow_metadata(actual_field.metadata) == (field.metadata or None)
+            # As PySpark's conversion of the frame, of no metadata of the field in Arrow.
+            assert from_arrow_metadata(actual_field.metadata) is None
         assert bool(state["uploads"]) == cached
 
 
@@ -7449,10 +7462,8 @@ def _date_columns_guard_input(subclass=False):
     return frame, schema, expected
 
 
-def _assert_date_columns_guard_payload(state, schema, expected, *, fast_path):
+def _assert_date_columns_guard_payload(state, schema, expected):
     import json
-
-    from pyspark.sql.pandas.types import from_arrow_metadata
 
     assert len(state["input_tables"]) == 1
     assert state["column_names"] == schema.names
@@ -7470,12 +7481,9 @@ def _assert_date_columns_guard_payload(state, schema, expected, *, fast_path):
         assert column.null_count == sum(value is None for value in values)
         physical = table.schema.field(field.name)
         assert physical.nullable is field.nullable
-        # The fast path's IPC carries the field metadata, which the importer embeds; that of
-        # PySpark's conversion carries none. The logical schema has it either way.
-        if fast_path:
-            assert from_arrow_metadata(physical.metadata) == field.metadata
-        else:
-            assert physical.metadata is None
+        # The fast path's IPC, as that of PySpark's conversion, carries no metadata of the
+        # fields, which the logical schema has.
+        assert physical.metadata is None
     assert json.loads(state["relations"][0].local_relation.schema) == {
         "type": "struct", "fields": [
             {"name": "renamed.`day", "type": "date", "nullable": False,
@@ -7609,7 +7617,7 @@ def test_date_columns_iterator_hooks_run_in_pyspark_conversion(
             spark.createDataFrame(frame, schema).toArrow()
             expected = [column.copy() for column in values]
             expected[0][0], expected[1][-1], expected[2][17] = date(2004, 2, 29), None, date.min
-            _assert_date_columns_guard_payload(state, schema, expected, fast_path=False)
+            _assert_date_columns_guard_payload(state, schema, expected)
             assert calls == ["columns iterator"]
 
 
@@ -7670,7 +7678,7 @@ def test_date_rebound_index_data_reads_no_more_than_pyspark_conversion(
         baseline.setattr(helper, "prepare_date_table", lambda *_: None)
         with _arrow_input_service(protocol) as (spark, state):
             spark.createDataFrame(frame, schema).toArrow()
-            _assert_date_columns_guard_payload(state, schema, values, fast_path=False)
+            _assert_date_columns_guard_payload(state, schema, values)
             control_table = state["input_tables"][0]
     allowed_reads = calls.count("_data")
     assert allowed_reads > 0
@@ -7681,7 +7689,7 @@ def test_date_rebound_index_data_reads_no_more_than_pyspark_conversion(
         # PySpark's conversion does. pandas caches some of these reads, so a later conversion
         # of the same frame can read them fewer times than the first.
         assert 0 < calls.count("_data") <= allowed_reads
-        _assert_date_columns_guard_payload(state, schema, values, fast_path=False)
+        _assert_date_columns_guard_payload(state, schema, values)
         assert state["input_tables"][0].equals(control_table, check_metadata=True)
 
 
@@ -7703,4 +7711,4 @@ def test_date_canonical_columns_storage_stays_columnar(protocol, monkeypatch, st
     monkeypatch.setattr(pd.DataFrame, "values", property(no_rows))
     with _arrow_input_service(protocol) as (spark, state):
         spark.createDataFrame(frame, schema).toArrow()
-        _assert_date_columns_guard_payload(state, schema, values, fast_path=True)
+        _assert_date_columns_guard_payload(state, schema, values)

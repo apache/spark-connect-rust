@@ -91,13 +91,15 @@ fn holds_nul_name(py: Python<'_>, schema: &Bound<'_, PyAny>) -> PyResult<bool> {
 
 /// A DataFrame of the pyarrow Table `table`. `options` are the settings that the caller's
 /// createDataFrame read already, as PySpark reads them once before it converts any data; without
-/// them, a table that is not empty reads them here.
+/// them, a table that is not empty reads them here. A table of the columns of a pandas DataFrame
+/// (`pandas`) is cast as PySpark's conversion of the frame casts it (see `prepare_table`).
 pub(crate) fn create_dataframe(
     py: Python<'_>,
     session: &SparkSession,
     table: &Bound<'_, PyAny>,
     schema: Option<&Bound<'_, PyAny>>,
     options: Option<&spark_connect::ArrowInputOptions>,
+    pandas: bool,
 ) -> PyResult<PyDataFrame> {
     // As PySpark's createDataFrame, which first encodes each name of a list that is not a str, of
     // which most values raise the `AttributeError` of `encode`, before it reads any setting.
@@ -138,6 +140,7 @@ pub(crate) fn create_dataframe(
         options.as_ref().and_then(|o| o.timestamp_type()),
         options.as_ref().and_then(|o| o.timezone()),
         options.as_ref().and_then(|o| o.use_large_var_types()),
+        pandas,
     ))?;
     let normalized = result.get_item(0)?;
     let schema = result.get_item(1)?;
@@ -147,11 +150,18 @@ pub(crate) fn create_dataframe(
         let json = schema.call_method0("json")?.extract()?;
         return crate::session::schema_text_dataframe(session, json);
     }
-    let spark_schema = if schema.is_none() {
-        None
+    // Of the metadata as it was given, of which PySpark writes the `json()` after the cast, which
+    // the relation sends as its schema (`schema_json_text`).
+    let (spark_schema, schema_json) = if schema.is_none() {
+        (None, None)
     } else {
-        Some(crate::types::py_to_data_type(&schema)?)
+        let json = crate::types::schema_json_text(Some(&schema))?;
+        (Some(crate::types::py_to_data_type_as_given(&schema)?), json)
     };
+    if let (true, Some(json)) = (empty, &schema_json) {
+        return crate::session::schema_text_dataframe(session, json.clone());
+    }
+    let options = options.map(|options| crate::session::with_schema_json(options, schema_json));
     // As PySpark's createDataFrame, which applies the names with `toDF`, of whose plan a str that
     // UTF-8 cannot encode fails the requests (`data_name`).
     let mut at_build = crate::plan_args::PlanArgs::new();

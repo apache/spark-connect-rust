@@ -69,6 +69,47 @@ pip install pyspark-client-rust
 - Python 3.9 or later
 - A running Spark Connect server
 
+### Packages that require `pyspark` or `pyspark-client`
+
+A package that lists `pyspark` or `pyspark-client` among its requirements, such as a library
+built on PySpark, makes `pip install` install that distribution too, over the drop-in's files:
+pip does not know that `pyspark-client-rust` provides the same `pyspark` package. pip has no
+option to drop one requirement of a package, and a constraints file cannot do it either: a
+constraint that no version meets fails the install with `ResolutionImpossible`. Use one of these
+ways instead.
+
+- Install the package without its requirements, and then the requirements other than PySpark,
+  which `pip show` lists:
+
+    ```bash
+    pip install --no-deps some-package
+    pip show some-package        # Requires: pyspark-client, ...
+    pip install <its other requirements>
+    ```
+
+    `pip check` then reports that `some-package` requires `pyspark-client`, which is not
+    installed, as expected. Upgrade the package with `--no-deps` too.
+
+- Or install the package with its requirements first, and then put the drop-in in place of the
+  client, as above:
+
+    ```bash
+    pip install some-package
+    pip uninstall -y pyspark pyspark-client
+    pip install pyspark-client-rust
+    ```
+
+    A later `pip install` or upgrade of the package installs the client again, so repeat the last
+    two commands after it.
+
+- With [uv](https://docs.astral.sh/uv/), an override whose marker never applies drops the
+  requirement:
+
+    ```bash
+    printf 'pyspark; sys_platform == "never"\npyspark-client; sys_platform == "never"\n' > overrides.txt
+    uv pip install --override overrides.txt some-package
+    ```
+
 ### Usage and API Reference
 
 Use it exactly like PySpark. For the complete Python API reference, see the [official PySpark documentation](https://spark.apache.org/docs/latest/api/python/).

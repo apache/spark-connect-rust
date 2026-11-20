@@ -14,15 +14,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""Expressions under the connect import path.
-
-The Rust core builds the expressions of the DataFrame API: the expression of a Column, its
-``Column._expr``, is of the core. ``Expression`` and ``LiteralExpression`` are PySpark Connect's,
-from Apache Spark v4.3.0, for the modules of PySpark that build their own messages, such as the
-params of ``pyspark.ml`` (``pyspark.ml.connect.serialize``). The base has no ``alias``: the
-``ColumnAlias`` it makes is an expression of PySpark Connect's Column, which this client does not
-have. The messages are those of ``pyspark.sql.connect.proto``.
-"""
+# Expressions under the connect import path.
+#
+# The Rust core builds the expressions of the DataFrame API: the expression of a Column, its
+# ``Column._expr``, is of the core. ``Expression`` and ``LiteralExpression`` are PySpark Connect's,
+# from Apache Spark v4.3.0, for the modules of PySpark that build their own messages, such as the
+# params of ``pyspark.ml`` (``pyspark.ml.connect.serialize``). The base has no ``alias``: the
+# ``ColumnAlias`` it makes is an expression of PySpark Connect's Column, which this client does not
+# have. The messages are those of ``pyspark.sql.connect.proto``.
 
 from typing import (
     cast,
@@ -457,8 +456,8 @@ class LiteralExpression(Expression):
 
 
 class UnresolvedNamedLambdaVariable(Expression):
-    """A variable of a lambda function, of the name parts of a column reference. The lambda
-    functions of ``pyspark.sql.functions`` name their variables with :meth:`fresh_var_name`."""
+    # A variable of a lambda function, of the name parts of a column reference. The lambda
+    # functions of ``pyspark.sql.functions`` name their variables with :meth:`fresh_var_name`.
 
     _lock: Lock = Lock()
     _nextVarNameId: int = 0
@@ -497,7 +496,7 @@ class UnresolvedNamedLambdaVariable(Expression):
 
 
 class DistributedSequenceID(Expression):
-    """The ``distributed_sequence_id()`` function, which the server evaluates."""
+    # The ``distributed_sequence_id()`` function, which the server evaluates.
 
     def to_plan(self, session: Any) -> "proto.Expression":
         # As PySpark's UnresolvedFunction of no argument, which is not distinct.
