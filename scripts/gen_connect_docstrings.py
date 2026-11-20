@@ -4,26 +4,29 @@
 
 PySpark Connect's modules give the methods of their classes the docstrings of PySpark's classic
 classes, of assignments such as ``format.__doc__ = PySparkDataStreamReader.format.__doc__`` of
-pyspark/sql/connect/streaming/readwriter.py. The drop-in's classes of those modules that are
-native, of the Rust extension, cannot take an assignment of a docstring at run time: their
-docstrings are those of the ``#[doc]`` attributes of their Rust definitions, which the extension
-is built with. This script generates crates/pyspark-rs/src/connect_docs_generated.rs, whose
-``connect_doc!`` gives the docstring of each object of ``MODULES`` that PySpark's module assigns,
-as PySpark has it at run time, which the Rust definitions take
-(``#[doc = connect_doc!(DataStreamReader.format)]``). It also gives the docstring of each class of
-``CLASS_MODULES``, whose classes are native here too (``pyspark.sql.types``), and of each public
-member of it, its own or of a base of it in PySpark, as Python finds it on the class
-(``connect_doc!(IntegerType.fromInternal)`` is that of ``DataType.fromInternal``); an object of no
-docstring has none, of which the Rust definitions take no ``#[doc]``. Last, it gives each class of
-``INHERITING`` and each public member of it the docstring that ``inspect.getdoc`` and ``help()``
-find of it in PySpark: PySpark Connect's class is a subclass of the classic one, and neither has a
-docstring of its own, so they find that of the classic class (``connect_doc!(Column.alias)`` is that
-of the classic ``Column.alias``), which the native class, a virtual subclass of it, does not
-inherit. The public base of a class of ``PUBLIC_BASES``, PySpark's classic class, takes the
-docstrings of the native class (``DataFrame`` of python/pyspark/sql/dataframe.py): this script
-generates too python/pyspark/sql/_classic_docs_generated.py, of the docstrings of the classic class
-that differ from those, which the public base takes in their place. The docstrings are worked out
-of PySpark's source as scripts/gen_type_stubs.py works them out for the stubs (its ``Docs``).
+pyspark/sql/connect/streaming/readwriter.py. The drop-in's classes of those modules that are native,
+of the Rust extension, cannot take an assignment of a docstring at run time: their docstrings are
+those of the ``#[doc]`` attributes of their Rust definitions, which the extension is built with.
+This script generates crates/pyspark-rs/src/connect_docs_generated.rs, whose ``connect_doc!`` gives
+the docstring of each object of ``MODULES`` that PySpark's module assigns, as PySpark has it at run
+time, which the Rust definitions take (``#[doc = connect_doc!(DataStreamReader.format)]``). It also
+gives the docstring of each class of ``CLASS_MODULES``, whose classes are native here too
+(``pyspark.sql.types`` and the ``SparkSession`` of ``pyspark.sql.connect.session``), and of each
+class of the body of such a class (``SparkSession.Builder``), and of each public member of them, its
+own or of a base of it in PySpark, as Python finds it on the class
+(``connect_doc!(IntegerType.fromInternal)`` is that of ``DataType.fromInternal``, and
+``connect_doc!(SparkSession.sql)`` the classic ``sql`` that PySpark Connect's module assigns); an
+object of no docstring has none, of which the Rust definitions take no ``#[doc]``. Last, it gives
+each class of ``INHERITING`` and each public member of it the docstring that ``inspect.getdoc`` and
+``help()`` find of it in PySpark: PySpark Connect's class is a subclass of the classic one, and
+neither has a docstring of its own, so they find that of the classic class
+(``connect_doc!(Column.alias)`` is that of the classic ``Column.alias``), which the native class, a
+virtual subclass of it, does not inherit. The public base of a class of ``PUBLIC_BASES``, PySpark's
+classic class, takes the docstrings of the native class (``DataFrame`` of
+python/pyspark/sql/dataframe.py): this script generates too
+python/pyspark/sql/_classic_docs_generated.py, of the docstrings of the classic class that differ
+from those, which the public base takes in their place. The docstrings are worked out of PySpark's
+source as scripts/gen_type_stubs.py works them out for the stubs (its ``Docs``).
 
 Usage, from anywhere:
 
@@ -67,8 +70,12 @@ MODULES = (
 )
 
 # The modules of PySpark whose classes are native in the drop-in, of the docstrings of all their
-# classes and public members, as Python finds them on each class.
-CLASS_MODULES = ("pyspark.sql.types",)
+# classes, and of the classes of their classes (`SparkSession.Builder`), and of their public members,
+# as Python finds them on each class.
+CLASS_MODULES = ("pyspark.sql.types", "pyspark.sql.connect.session")
+# Of them, the modules whose classes a macro of the classes forwards by their names as strings
+# (`tt`, the abstract_type! of types.rs).
+NAMED_CLASS_MODULES = ("pyspark.sql.types",)
 
 # The classes of PySpark Connect, by their modules, that are subclasses of PySpark's classic
 # classes and whose classes are native in the drop-in, virtual subclasses of the classic ones: of
@@ -145,21 +152,25 @@ def docstrings(pyspark_src: str) -> dict[str, str]:
     return found
 
 
-def class_docstrings(pyspark_src: str) -> dict[str, str]:
-    """The docstring of each class of a module of ``CLASS_MODULES`` and of each public member of
-    the class, as Python finds it on the class: the member of the first class of its MRO in PySpark
-    that defines it, of the module. A member of no docstring, as a class of none, is left out. The
-    value of a member that the class does not define is the qualified name of the one it finds."""
+def class_docstrings(pyspark_src: str, modules: tuple[str, ...] = CLASS_MODULES) -> dict[str, str]:
+    """The docstring of each public class of a module of `modules`, and of each public class of
+    such a class (``SparkSession.Builder``), and of each public member of the class, as Python
+    finds it on the class: the member of the first class of its MRO in PySpark that defines it, of
+    the module. A member of no docstring, as a class of none, is left out. The value of a member
+    that the class does not define is the qualified name of the one it finds."""
     docs = Docs(Path(pyspark_src))
     found: dict[str, str] = {}
-    for module in CLASS_MODULES:
+    for module in modules:
         source = docs.source(module)
         if source is None:
             raise SystemExit(f"error: {module} not found in {pyspark_src}")
         classes = [
             name
             for name, node in source.defs.items()
-            if "." not in name and isinstance(node, ast.ClassDef) and not name.startswith("_")
+            if name.count(".") <= 1
+            and isinstance(node, ast.ClassDef)
+            and not any(part.startswith("_") for part in name.split("."))
+            and ("." not in name or isinstance(source.defs.get(name.split(".")[0]), ast.ClassDef))
         ]
         for cls in classes:
             doc = docs.raw(module, cls)
@@ -320,7 +331,9 @@ def _raw_string(text: str) -> str:
 def generate(pyspark_src: str) -> str:
     tag = tracked_tag(REPO_ROOT)
     of_classes = class_docstrings(pyspark_src)
-    classes_of_class_modules = {name for name in of_classes if "." not in name}
+    classes_of_class_modules = {
+        name for name in class_docstrings(pyspark_src, NAMED_CLASS_MODULES) if "." not in name
+    }
     lines = [
         f"// Generated by scripts/gen_connect_docstrings.py of Apache Spark {tag}. Do not edit:",
         "// regenerate it with the script.",

@@ -830,11 +830,12 @@ mypy and pyright type an application as with `pyspark-client` (see `docs/compati
   documentation with the drop-in, and none with `pyspark-client`.
 - **The docstrings of the `__init__` of the native classes** (inherent; the classes are native).
   The `__init__` of a native class, as of the types of `pyspark.sql.types` (`StringType`,
-  `ArrayType`, `StructField`, ...) and of the classes of `pyspark.sql.connect` (`DataFrame`,
-  `Catalog`, `RuntimeConf`, `Observation`, ...), is a slot of CPython, whose wrapper has CPython's
-  docstring (`Initialize self.  See help(type(self)) for accurate signature.`), which the class
-  cannot set. PySpark's is that of its Python function: None, its own (`Creates a new data frame`
-  of the DataFrame of Spark Connect), or of a docstring that PySpark Connect's modules copy
+  `ArrayType`, `StructField`, ...) and of the classes of `pyspark.sql.connect` (`SparkSession`,
+  `DataFrame`, `Catalog`, `RuntimeConf`, `Observation`, ...), is a slot of CPython, whose wrapper
+  has CPython's docstring (`Initialize self.  See help(type(self)) for accurate signature.`), which
+  the class cannot set. PySpark's is that of its Python function: None, its own (that of the
+  `SparkSession` of Spark Connect, and `Creates a new data frame` of its DataFrame), or of a
+  docstring that PySpark Connect's modules copy
   (`__init__.__doc__ = PySparkRuntimeConfig.__init__.__doc__`). The other docstrings of the
   modules of `pyspark.sql` and `pyspark.errors` are PySpark's (see `docs/compatibility.md`).
 - **The docstrings of the native DataFrame, Column, WindowSpec, TableArg, `DataFrameNaFunctions`

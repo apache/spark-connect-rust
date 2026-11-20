@@ -3,7 +3,8 @@
 exact text, of scripts/capture_runtime_docstrings_golden.py (of official PySpark) and of the test of
 the drop-in's (test_dropin_class_modules_offline.py): of each module, of each public class and
 function that the module defines, and of each public member (and ``__init__``) of such a class,
-as Python finds it on the class, by "module", "module:Name" and "module:Class.member". The digest
+and of a public class of its body (``SparkSession.Builder``), as Python finds it on the class, by
+"module", "module:Name", "module:Class.member" and "module:Class.Inner.member". The digest
 is of the kind ``doc``, of ``__doc__`` (None of none), but of an object of no ``__doc__`` of its own
 that inherits a docstring, of the kind ``getdoc``, of ``inspect.getdoc``, which ``help()`` shows
 (``{"getdoc": digest}``): such as of a member of PySpark Connect's ``Column``, a subclass of the
@@ -23,12 +24,9 @@ import sys
 import types
 import warnings
 
-# The golden leaves out the modules whose docstrings are not all PySpark's yet: those of the session
-# and its client (pyspark.sql.connect.session and pyspark.sql.connect.client).
-EXCLUDED = (
-    "pyspark.sql.connect.session",
-    "pyspark.sql.connect.client",
-)
+# The golden leaves out the modules whose docstrings are not all PySpark's yet: those of the client
+# of the session (pyspark.sql.connect.client).
+EXCLUDED = ("pyspark.sql.connect.client",)
 
 # The kinds of the digests of the golden, which its note gives.
 KINDS = {
@@ -91,19 +89,35 @@ def docstrings(module_name):
         if getattr(obj, "__module__", None) != module_name:
             continue
         out[f"{module_name}:{attr}"] = entry(obj)
-        if not inspect.isclass(obj):
+        if inspect.isclass(obj):
+            out.update(_members(module_name, attr, obj))
+    return out
+
+
+def _members(module_name, prefix, cls):
+    """The digests of the docstrings of the public members (and ``__init__``) of the class `cls`
+    of the key `prefix`, as Python finds them on the class, and of those of the public classes of
+    its body (``SparkSession.Builder``), by their keys."""
+    out = {}
+    for member in sorted(set(dir(cls))):
+        if member.startswith("_") and member != "__init__":
             continue
-        for member in sorted(set(dir(obj))):
-            if member.startswith("_") and member != "__init__":
-                continue
-            definer = next((c for c in obj.__mro__ if member in vars(c)), None)
-            if member != "__init__" and (definer is None or definer.__module__ in ("builtins", "abc", "typing", "enum", "collections")):
-                continue
-            try:
-                found = entry(getattr(obj, member))
-            except Exception as e:  # noqa: BLE001
-                found = digest("error: " + type(e).__name__)
-            out[f"{module_name}:{attr}.{member}"] = found
+        definer = next((c for c in cls.__mro__ if member in vars(c)), None)
+        if member != "__init__" and (definer is None or definer.__module__ in ("builtins", "abc", "typing", "enum", "collections")):
+            continue
+        value = None
+        try:
+            value = getattr(cls, member)
+            found = entry(value)
+        except Exception as e:  # noqa: BLE001
+            found = digest("error: " + type(e).__name__)
+        out[f"{module_name}:{prefix}.{member}"] = found
+        if (
+            inspect.isclass(value)
+            and not member.startswith("_")
+            and value.__qualname__ == f"{cls.__qualname__}.{member}"
+        ):
+            out.update(_members(module_name, f"{prefix}.{member}", value))
     return out
 
 

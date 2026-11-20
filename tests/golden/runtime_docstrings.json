@@ -2975,8 +2975,25 @@
    "": null,
    "MergeIntoWriter": "b73d0919842304f4",
    "MergeIntoWriter.WhenMatched": "ea003cc72784340c",
+   "MergeIntoWriter.WhenMatched.__init__": {
+    "getdoc": "15432c8b93cc48ea"
+   },
+   "MergeIntoWriter.WhenMatched.delete": "467a7162b3a2ae91",
+   "MergeIntoWriter.WhenMatched.update": "3ea40d68bf45cbea",
+   "MergeIntoWriter.WhenMatched.updateAll": "ac4ae8cbb79b58e3",
    "MergeIntoWriter.WhenNotMatched": "2cd0d5ee07c3ab4d",
+   "MergeIntoWriter.WhenNotMatched.__init__": {
+    "getdoc": "15432c8b93cc48ea"
+   },
+   "MergeIntoWriter.WhenNotMatched.insert": "265eb03d222019c9",
+   "MergeIntoWriter.WhenNotMatched.insertAll": "31b9b7845b158c16",
    "MergeIntoWriter.WhenNotMatchedBySource": "97618580d879b28f",
+   "MergeIntoWriter.WhenNotMatchedBySource.__init__": {
+    "getdoc": "15432c8b93cc48ea"
+   },
+   "MergeIntoWriter.WhenNotMatchedBySource.delete": "467a7162b3a2ae91",
+   "MergeIntoWriter.WhenNotMatchedBySource.update": "c0fdff3843fab4fb",
+   "MergeIntoWriter.WhenNotMatchedBySource.updateAll": "c9bca91a2dd65cc4",
    "MergeIntoWriter.__init__": {
     "getdoc": "15432c8b93cc48ea"
    },
@@ -4160,6 +4177,64 @@
     "getdoc": "15432c8b93cc48ea"
    },
    "ResourceProfile.id": null
+  },
+  "pyspark.sql.connect.session": {
+   "": null,
+   "SparkSession": "50abd019d6660100",
+   "SparkSession.Builder": "46c0b45bc4793f74",
+   "SparkSession.Builder.__init__": {
+    "getdoc": "15432c8b93cc48ea"
+   },
+   "SparkSession.Builder.appName": null,
+   "SparkSession.Builder.channelBuilder": "2a490822edf4e9a0",
+   "SparkSession.Builder.config": null,
+   "SparkSession.Builder.create": null,
+   "SparkSession.Builder.enableHiveSupport": null,
+   "SparkSession.Builder.getOrCreate": null,
+   "SparkSession.Builder.master": null,
+   "SparkSession.Builder.remote": null,
+   "SparkSession.Hook": "0c68a7c9ae870822",
+   "SparkSession.Hook.__init__": "15432c8b93cc48ea",
+   "SparkSession.Hook.on_execute_plan": "a8017a47c3528b8f",
+   "SparkSession.__init__": "7d74a54f28f87d14",
+   "SparkSession.active": null,
+   "SparkSession.addArtifact": "5a81d93b27d78a7f",
+   "SparkSession.addArtifacts": "5a81d93b27d78a7f",
+   "SparkSession.addTag": "9b2348ac60b7d232",
+   "SparkSession.builder": "46c0b45bc4793f74",
+   "SparkSession.catalog": "a9ba379e786c4079",
+   "SparkSession.clearProgressHandlers": "5967641a677e46d8",
+   "SparkSession.clearTags": "d560f2e116e7f4d4",
+   "SparkSession.client": "cd49e0c01986e48d",
+   "SparkSession.cloneSession": "d553725902d6660c",
+   "SparkSession.conf": "c41470ecee0f0ccc",
+   "SparkSession.copyFromLocalToFs": "7b85a214b38e9998",
+   "SparkSession.createDataFrame": "6e607edbef1d82e1",
+   "SparkSession.dataSource": "7891fd536b764781",
+   "SparkSession.emptyDataFrame": "d5876d48ea9abb1c",
+   "SparkSession.getActiveSession": null,
+   "SparkSession.getTags": "eacd177ab5ab21ea",
+   "SparkSession.interruptAll": "f8b63aff07b465e4",
+   "SparkSession.interruptOperation": "08e0e1eaa6bb2d3c",
+   "SparkSession.interruptTag": "2363c29de6cddeea",
+   "SparkSession.is_stopped": "0450f63677f6106d",
+   "SparkSession.newSession": "560363dd01232ee3",
+   "SparkSession.profile": "231de0c3c7be12f4",
+   "SparkSession.range": "e08bfd7bfd8ccc95",
+   "SparkSession.read": "3d9d2eaee4794afa",
+   "SparkSession.readStream": "211de9ed188ddc45",
+   "SparkSession.registerProgressHandler": "b41b8657128170d1",
+   "SparkSession.removeProgressHandler": "5ab9f864a9d9fd5b",
+   "SparkSession.removeTag": "3bb277be867fe3ec",
+   "SparkSession.session_id": null,
+   "SparkSession.sql": "afa2091b7a723b8a",
+   "SparkSession.stop": "8f852a5484935f0a",
+   "SparkSession.streams": "698aa4836629a9d7",
+   "SparkSession.table": "b98606ec933ca35d",
+   "SparkSession.tvf": "842b4a9c0a05e110",
+   "SparkSession.udf": "34bd8b93b4ef976f",
+   "SparkSession.udtf": "bf00ab74cabee1d6",
+   "SparkSession.version": "85a9269b929e203d"
   },
   "pyspark.sql.connect.shell": {
    "": "538be5f18a5f1997",
@@ -5476,8 +5551,25 @@
    "": null,
    "MergeIntoWriter": "b73d0919842304f4",
    "MergeIntoWriter.WhenMatched": "ea003cc72784340c",
+   "MergeIntoWriter.WhenMatched.__init__": {
+    "getdoc": "15432c8b93cc48ea"
+   },
+   "MergeIntoWriter.WhenMatched.delete": "467a7162b3a2ae91",
+   "MergeIntoWriter.WhenMatched.update": "3ea40d68bf45cbea",
+   "MergeIntoWriter.WhenMatched.updateAll": "ac4ae8cbb79b58e3",
    "MergeIntoWriter.WhenNotMatched": "2cd0d5ee07c3ab4d",
+   "MergeIntoWriter.WhenNotMatched.__init__": {
+    "getdoc": "15432c8b93cc48ea"
+   },
+   "MergeIntoWriter.WhenNotMatched.insert": "265eb03d222019c9",
+   "MergeIntoWriter.WhenNotMatched.insertAll": "31b9b7845b158c16",
    "MergeIntoWriter.WhenNotMatchedBySource": "97618580d879b28f",
+   "MergeIntoWriter.WhenNotMatchedBySource.__init__": {
+    "getdoc": "15432c8b93cc48ea"
+   },
+   "MergeIntoWriter.WhenNotMatchedBySource.delete": "467a7162b3a2ae91",
+   "MergeIntoWriter.WhenNotMatchedBySource.update": "c0fdff3843fab4fb",
+   "MergeIntoWriter.WhenNotMatchedBySource.updateAll": "c9bca91a2dd65cc4",
    "MergeIntoWriter.__init__": {
     "getdoc": "15432c8b93cc48ea"
    },
@@ -5491,6 +5583,10 @@
    "": null,
    "CollectedMetrics": null,
    "CollectedMetrics.Node": "870585ad466a8e72",
+   "CollectedMetrics.Node.__init__": {
+    "getdoc": "15432c8b93cc48ea"
+   },
+   "CollectedMetrics.Node.name": "fdf09be211280cf3",
    "CollectedMetrics.__init__": {
     "getdoc": "15432c8b93cc48ea"
    },
@@ -5832,6 +5928,16 @@
    "": null,
    "SparkSession": "50abd019d6660100",
    "SparkSession.Builder": "46c0b45bc4793f74",
+   "SparkSession.Builder.__init__": {
+    "getdoc": "15432c8b93cc48ea"
+   },
+   "SparkSession.Builder.appName": "d427c8855572837e",
+   "SparkSession.Builder.config": "082ea21c09ae8542",
+   "SparkSession.Builder.create": "acd84bb0d4372385",
+   "SparkSession.Builder.enableHiveSupport": "dfbc4244d085e642",
+   "SparkSession.Builder.getOrCreate": "441bb6e94e9ac768",
+   "SparkSession.Builder.master": "9bbd9644f0e65d32",
+   "SparkSession.Builder.remote": "54ed27cc61d6337e",
    "SparkSession.__init__": {
     "getdoc": "15432c8b93cc48ea"
    },
@@ -5942,6 +6048,8 @@
    "": null,
    "JStreamingQueryListener": "5417a83d7d89668a",
    "JStreamingQueryListener.Java": null,
+   "JStreamingQueryListener.Java.__init__": "15432c8b93cc48ea",
+   "JStreamingQueryListener.Java.implements": "e4b7fc2f852bd7bf",
    "JStreamingQueryListener.__init__": {
     "getdoc": "15432c8b93cc48ea"
    },
@@ -7038,6 +7146,8 @@
    "": null,
    "ForeachBatchFunction": "e1eeab26dc430fce",
    "ForeachBatchFunction.Java": null,
+   "ForeachBatchFunction.Java.__init__": "15432c8b93cc48ea",
+   "ForeachBatchFunction.Java.implements": "e4b7fc2f852bd7bf",
    "ForeachBatchFunction.__init__": {
     "getdoc": "15432c8b93cc48ea"
    },

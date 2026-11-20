@@ -16,12 +16,13 @@ use crate::interrupt::interruptible;
 use crate::options::DefaultedOption;
 use crate::streaming::{PyDataStreamReader, PyStreamingQueryManager};
 
-/// Python wrapper for a Spark session builder.
-///
-/// Mirrors PySpark Connect's `pyspark.sql.connect.session.SparkSession.Builder`: each method sets
-/// its option on the builder and returns it, and `SparkSession.builder` is a new builder of each
-/// access. `pyspark.sql.SparkSession.builder` is PySpark's classic builder, which makes the
-/// session with this one.
+// Python wrapper for a Spark session builder.
+//
+// Mirrors PySpark Connect's `pyspark.sql.connect.session.SparkSession.Builder`: each method sets
+// its option on the builder and returns it, and `SparkSession.builder` is a new builder of each
+// access. `pyspark.sql.SparkSession.builder` is PySpark's classic builder, which makes the
+// session with this one.
+#[doc = connect_doc!(SparkSession.Builder)]
 #[pyclass(
     name = "Builder",
     module = "pyspark.sql.connect.session",
@@ -270,18 +271,18 @@ impl PySparkSessionBuilder {
         self.shared = None;
     }
 
-    /// Set the remote Spark Connect server URL. Returns the builder (chainable).
-    /// Mirrors PySpark Connect's `SparkSession.Builder.remote(location="sc://localhost")`: the
-    /// URL is the positional argument or the keyword `location`, and `sc://localhost` when there
-    /// is none. (`pyspark.sql.SparkSession.builder` is PySpark's classic builder, whose
-    /// `remote(url)` gives its URL to this builder in its options.)
-    /// An explicit None is kept as None, as PySpark's `config("spark.remote", None)` keeps it:
-    /// `create` and `getOrCreate` fail its assertion, unless a session exists already, and a later
-    /// `remote` replaces it.
-    ///
-    /// As PySpark's `config("spark.remote", location)`, the URL is kept as an option of any
-    /// value: a value that is not a str (such as bytes) is `str()` of it, which `create` and
-    /// `getOrCreate` reject as an invalid URL, and a str that UTF-8 cannot encode fails there too.
+    // Set the remote Spark Connect server URL. Returns the builder (chainable).
+    // Mirrors PySpark Connect's `SparkSession.Builder.remote(location="sc://localhost")`: the
+    // URL is the positional argument or the keyword `location`, and `sc://localhost` when there
+    // is none. (`pyspark.sql.SparkSession.builder` is PySpark's classic builder, whose
+    // `remote(url)` gives its URL to this builder in its options.)
+    // An explicit None is kept as None, as PySpark's `config("spark.remote", None)` keeps it:
+    // `create` and `getOrCreate` fail its assertion, unless a session exists already, and a later
+    // `remote` replaces it.
+    //
+    // As PySpark's `config("spark.remote", location)`, the URL is kept as an option of any
+    // value: a value that is not a str (such as bytes) is `str()` of it, which `create` and
+    // `getOrCreate` reject as an invalid URL, and a str that UTF-8 cannot encode fails there too.
     #[pyo3(
         signature = (*args, **kwargs),
         text_signature = "($self, location='sc://localhost')"
@@ -330,10 +331,10 @@ impl PySparkSessionBuilder {
         })
     }
 
-    /// Set a config option, or several via `map`. Mirrors
-    /// `SparkSession.Builder.config(key=None, value=None, *, map=None, conf=None)`.
-    /// `spark.remote` sets the connect endpoint; other keys are applied as runtime confs
-    /// on connect. `conf` accepts a `SparkConf` (its `getAll()` pairs are applied).
+    // Set a config option, or several via `map`. Mirrors
+    // `SparkSession.Builder.config(key=None, value=None, *, map=None, conf=None)`.
+    // `spark.remote` sets the connect endpoint; other keys are applied as runtime confs
+    // on connect. `conf` accepts a `SparkConf` (its `getAll()` pairs are applied).
     #[pyo3(signature = (key=None, value=None, map=None, conf=None, **unexpected), text_signature = "($self, key=None, value=None, map=None, conf=None)")]
     fn config<'py>(
         slf: &Bound<'py, Self>,
@@ -381,8 +382,8 @@ impl PySparkSessionBuilder {
         })
     }
 
-    /// `appName` - the option `spark.app.name`, as PySpark's builder sets. Like any option,
-    /// it is set on the session silently, so it has no effect on a running server.
+    // `appName` - the option `spark.app.name`, as PySpark's builder sets. Like any option,
+    // it is set on the session silently, so it has no effect on a running server.
     #[pyo3(name = "appName")]
     fn app_name<'py>(
         slf: &Bound<'py, Self>,
@@ -399,8 +400,8 @@ impl PySparkSessionBuilder {
         })
     }
 
-    /// `master`, which PySpark Connect's builder takes and ignores, of any value: a session of
-    /// Spark Connect has no master.
+    // `master`, which PySpark Connect's builder takes and ignores, of any value: a session of
+    // Spark Connect has no master.
     fn master<'py>(slf: PyRef<'py, Self>, master: &Bound<'_, PyAny>) -> PyRef<'py, Self> {
         let _ = master;
         slf
@@ -423,15 +424,16 @@ impl PySparkSessionBuilder {
         })
     }
 
-    /// `channelBuilder` - the channel builder that the session connects with, of any object, as
-    /// PySpark's `SparkSession.Builder.channelBuilder` keeps it: the session that the builder
-    /// creates is of the `sc://` URL of its endpoint (host and port) and its connection
-    /// parameters, read then, and raises the errors of PySpark's client for an object that is not
-    /// one (see `url_of_channel_builder`). Custom gRPC channels and interceptors are a concept of
-    /// the Python transport and do not apply to the native Rust transport, but the endpoint and
-    /// the parameters do.
+    // `channelBuilder` - the channel builder that the session connects with, of any object, as
+    // PySpark's `SparkSession.Builder.channelBuilder` keeps it: the session that the builder
+    // creates is of the `sc://` URL of its endpoint (host and port) and its connection
+    // parameters, read then, and raises the errors of PySpark's client for an object that is not
+    // one (see `url_of_channel_builder`). Custom gRPC channels and interceptors are a concept of
+    // the Python transport and do not apply to the native Rust transport, but the endpoint and
+    // the parameters do.
     #[pyo3(name = "channelBuilder")]
     #[allow(non_snake_case)]
+    #[doc = connect_doc!(SparkSession.Builder.channelBuilder)]
     fn channel_builder<'py>(
         slf: &Bound<'py, Self>,
         channelBuilder: &Bound<'_, PyAny>,
@@ -446,10 +448,10 @@ impl PySparkSessionBuilder {
         })
     }
 
-    /// `enableHiveSupport` raises `PySparkNotImplementedError` `NOT_IMPLEMENTED`, as PySpark
-    /// Connect's builder does: the catalog is the server's. The classic builder,
-    /// `pyspark.sql.SparkSession.builder`, sets `spark.sql.catalogImplementation` instead, as
-    /// PySpark's does.
+    // `enableHiveSupport` raises `PySparkNotImplementedError` `NOT_IMPLEMENTED`, as PySpark
+    // Connect's builder does: the catalog is the server's. The classic builder,
+    // `pyspark.sql.SparkSession.builder`, sets `spark.sql.catalogImplementation` instead, as
+    // PySpark's does.
     #[pyo3(name = "enableHiveSupport")]
     fn enable_hive_support(&self, py: Python<'_>) -> PyResult<()> {
         Err(crate::column::raise_pyspark(
@@ -460,11 +462,11 @@ impl PySparkSessionBuilder {
         ))
     }
 
-    /// Get the active session of this thread, or else the default session, or create one
-    /// (`getOrCreate`), and set the options of the builder on it. Mirrors PySpark Connect's: the
-    /// URL is that of `remote()`, and an existing session is returned whatever its URL. As
-    /// PySpark's, it holds `SparkSession._lock` all the while, and the options are set on a
-    /// session that it creates twice, by `create` and again.
+    // Get the active session of this thread, or else the default session, or create one
+    // (`getOrCreate`), and set the options of the builder on it. Mirrors PySpark Connect's: the
+    // URL is that of `remote()`, and an existing session is returned whatever its URL. As
+    // PySpark's, it holds `SparkSession._lock` all the while, and the options are set on a
+    // session that it creates twice, by `create` and again.
     #[pyo3(name = "getOrCreate")]
     fn get_or_create(slf: &Bound<'_, Self>) -> PyResult<Py<PySparkSession>> {
         let py = slf.py();
@@ -491,9 +493,9 @@ impl PySparkSessionBuilder {
         })
     }
 
-    /// `create()` - a new session, which is the default session, and the active one of this
-    /// thread, only when they are not set. Mirrors PySpark's, which makes the session with the
-    /// hooks of its factories before it holds `SparkSession._lock` to make it the default.
+    // `create()` - a new session, which is the default session, and the active one of this
+    // thread, only when they are not set. Mirrors PySpark's, which makes the session with the
+    // hooks of its factories before it holds `SparkSession._lock` to make it the default.
     fn create(slf: &Bound<'_, Self>) -> PyResult<Py<PySparkSession>> {
         let py = slf.py();
         let (url, factories, channel_builder) = {
@@ -1415,13 +1417,14 @@ impl PyActiveSession {
     }
 }
 
-/// `SparkSession.Hook` - injects behavior around plan execution, as PySpark's
-/// `SparkSession.Hook`: a session calls the `on_execute_plan` of each hook of the factories of
-/// `_registerHook` with each `ExecutePlanRequest`, as a message of the generated
-/// `pyspark.sql.connect.proto`, before it sends it, and sends the request that it returns. The
-/// base hook returns the request as it is. PySpark's is a plain Python class nested in
-/// `SparkSession`, so a hook takes attributes and weak references, and pickles and copies as a
-/// plain object does, as a hook of a subclass does too.
+// `SparkSession.Hook` - injects behavior around plan execution, as PySpark's
+// `SparkSession.Hook`: a session calls the `on_execute_plan` of each hook of the factories of
+// `_registerHook` with each `ExecutePlanRequest`, as a message of the generated
+// `pyspark.sql.connect.proto`, before it sends it, and sends the request that it returns. The
+// base hook returns the request as it is. PySpark's is a plain Python class nested in
+// `SparkSession`, so a hook takes attributes and weak references, and pickles and copies as a
+// plain object does, as a hook of a subclass does too.
+#[doc = connect_doc!(SparkSession.Hook)]
 #[pyclass(
     name = "Hook",
     module = "pyspark.sql.connect.session",
@@ -1458,7 +1461,8 @@ impl PyHook {
         Ok(PyHook)
     }
 
-    /// Called before sending an ExecutePlanRequest; returns the (unchanged) request.
+    // Called before sending an ExecutePlanRequest; returns the (unchanged) request.
+    #[doc = connect_doc!(SparkSession.Hook.on_execute_plan)]
     fn on_execute_plan<'py>(&self, request: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
         request
     }
@@ -1572,9 +1576,10 @@ fn interrupted_id(id: &Bound<'_, PyAny>) -> PyResult<String> {
     crate::str_argument(id)
 }
 
-/// Python wrapper for a Spark session, PySpark Connect's `SparkSession`. As PySpark's plain class,
-/// it is subclassed: a subclass constructs of the arguments of its own `__init__`, which gives the
-/// session its client through the `__init__` of the class, of PySpark's arguments.
+// Python wrapper for a Spark session, PySpark Connect's `SparkSession`. As PySpark's plain class,
+// it is subclassed: a subclass constructs of the arguments of its own `__init__`, which gives the
+// session its client through the `__init__` of the class, of PySpark's arguments.
+#[doc = connect_doc!(SparkSession)]
 #[pyclass(
     name = "SparkSession",
     module = "pyspark.sql.connect.session",
@@ -3023,16 +3028,17 @@ fn schema_spec(
 
 #[pymethods]
 impl PySparkSession {
-    /// Create a DataFrame representing a range of integers.
-    ///
-    /// Mirrors `pyspark.sql.SparkSession.range(start, end=None, step=1, numPartitions=None)`:
-    /// called with a single positional arg it means `range(0, start)`.
-    /// Each argument is taken by its `int()`, as PySpark's `range` takes them.
+    // Create a DataFrame representing a range of integers.
+    //
+    // Mirrors `pyspark.sql.SparkSession.range(start, end=None, step=1, numPartitions=None)`:
+    // called with a single positional arg it means `range(0, start)`.
+    // Each argument is taken by its `int()`, as PySpark's `range` takes them.
     #[pyo3(
         signature = (start, end=None, step=RangeStep::Omitted, numPartitions=None),
         text_signature = "($self, start, end=None, step=1, numPartitions=None)"
     )]
     #[allow(non_snake_case)]
+    #[doc = connect_doc!(SparkSession.range)]
     fn range(
         &self,
         start: &Bound<'_, PyAny>,
@@ -3050,15 +3056,16 @@ impl PySparkSession {
         Ok(PyDataFrame::new(args.plan(df)))
     }
 
-    /// Execute a SQL query and return a DataFrame, as PySpark Connect does. `args` binds
-    /// parameters: a list fills positional `?` parameters and a dict named `:name` ones, each
-    /// value as a literal (a string arg is a string literal, never a column reference).
-    ///
-    /// Keyword arguments format the query, as `str.format` does, with the formatter of
-    /// `pyspark.sql.connect.sql_formatter`: a DataFrame becomes the name of a reference that
-    /// is sent with the query, a column reference its name, a string its SQL literal, and
-    /// another value its string.
+    // Execute a SQL query and return a DataFrame, as PySpark Connect does. `args` binds
+    // parameters: a list fills positional `?` parameters and a dict named `:name` ones, each
+    // value as a literal (a string arg is a string literal, never a column reference).
+    //
+    // Keyword arguments format the query, as `str.format` does, with the formatter of
+    // `pyspark.sql.connect.sql_formatter`: a DataFrame becomes the name of a reference that
+    // is sent with the query, a column reference its name, a string its SQL literal, and
+    // another value its string.
     #[pyo3(signature = (sqlQuery, args=None, **kwargs))]
+    #[doc = connect_doc!(SparkSession.sql)]
     fn sql(
         slf: &Bound<'_, Self>,
         sqlQuery: &Bound<'_, PyAny>,
@@ -3136,13 +3143,14 @@ impl PySparkSession {
         Ok(PyDataFrame::new(df))
     }
 
-    /// Create a DataFrame from local data (a list of rows, a pandas DataFrame, or a pyarrow
-    /// Table) and an optional schema, as in pyspark.
-    ///
-    /// Local rows are inferred, converted and named as PySpark Connect does it, in
-    /// `crate::infer`. The columns of a pandas DataFrame, or the field names of its schema,
-    /// are applied with `toDF`, and its fields take the type of their first non-null value.
+    // Create a DataFrame from local data (a list of rows, a pandas DataFrame, or a pyarrow
+    // Table) and an optional schema, as in pyspark.
+    //
+    // Local rows are inferred, converted and named as PySpark Connect does it, in
+    // `crate::infer`. The columns of a pandas DataFrame, or the field names of its schema,
+    // are applied with `toDF`, and its fields take the type of their first non-null value.
     #[pyo3(signature = (data, schema=None, samplingRatio=None, verifySchema=None))]
+    #[doc = connect_doc!(SparkSession.createDataFrame)]
     fn createDataFrame(
         &self,
         py: Python<'_>,
@@ -3538,11 +3546,12 @@ impl PySparkSession {
         self.create_from_local(py, data, spec, checks, options, type_schema)
     }
 
-    /// Get the catalog API (`spark.catalog`): the same object at each access, as PySpark
-    /// Connect's `functools.cached_property`, so that its attributes stick and
-    /// `mock.patch.object(spark.catalog, ...)` patches the catalog that the session gives.
+    // Get the catalog API (`spark.catalog`): the same object at each access, as PySpark
+    // Connect's `functools.cached_property`, so that its attributes stick and
+    // `mock.patch.object(spark.catalog, ...)` patches the catalog that the session gives.
     #[getter]
     #[pyo3(name = "catalog")]
+    #[doc = connect_doc!(SparkSession.catalog)]
     fn catalog(&self, py: Python<'_>) -> PyResult<Py<PyCatalog>> {
         if let Some(catalog) = self.catalog.get() {
             return Ok(catalog.clone_ref(py));
@@ -3551,30 +3560,33 @@ impl PySparkSession {
         Ok(self.catalog.get_or_init(|| catalog).clone_ref(py))
     }
 
-    /// Runtime configuration (`spark.conf`).
+    // Runtime configuration (`spark.conf`).
     #[getter]
     #[pyo3(name = "conf")]
+    #[doc = connect_doc!(SparkSession.conf)]
     fn conf(&self) -> crate::conf::PyRuntimeConf {
         crate::conf::PyRuntimeConf::new(&self.session)
     }
 
-    /// Table-valued functions namespace (`spark.tvf`).
+    // Table-valued functions namespace (`spark.tvf`).
     #[getter]
     #[pyo3(name = "tvf")]
+    #[doc = connect_doc!(SparkSession.tvf)]
     fn tvf(&self) -> crate::tvf::PyTableValuedFunction {
         crate::tvf::PyTableValuedFunction::new(self.session.tvf())
     }
 
-    /// Copy a local file to the Spark-managed filesystem (`copyFromLocalToFs`), with the errors
-    /// of PySpark Connect's: those of `urlparse` of the destination, such as the AttributeError
-    /// of a `pathlib.Path`, and `NO_SCHEMA_AND_DRIVER_DEFAULT_SCHEME` for a destination of a
-    /// scheme, and then those of its client's `copy_from_local_to_fs`: an `AssertionError` for a
-    /// local path that is not a file, and for a destination that is not an absolute path, and the
-    /// `TypeError` of a destination that is not a str. The local path is what PySpark's
-    /// `Path(local_path).absolute()` takes, a str or an `os.PathLike` such as a `pathlib.Path`, of
-    /// its errors otherwise, and the file of the str of that absolute path is uploaded, as
-    /// PySpark's `LocalFile` reads it.
+    // Copy a local file to the Spark-managed filesystem (`copyFromLocalToFs`), with the errors
+    // of PySpark Connect's: those of `urlparse` of the destination, such as the AttributeError
+    // of a `pathlib.Path`, and `NO_SCHEMA_AND_DRIVER_DEFAULT_SCHEME` for a destination of a
+    // scheme, and then those of its client's `copy_from_local_to_fs`: an `AssertionError` for a
+    // local path that is not a file, and for a destination that is not an absolute path, and the
+    // `TypeError` of a destination that is not a str. The local path is what PySpark's
+    // `Path(local_path).absolute()` takes, a str or an `os.PathLike` such as a `pathlib.Path`, of
+    // its errors otherwise, and the file of the str of that absolute path is uploaded, as
+    // PySpark's `LocalFile` reads it.
     #[pyo3(name = "copyFromLocalToFs")]
+    #[doc = connect_doc!(SparkSession.copyFromLocalToFs)]
     fn copy_from_local_to_fs(
         slf: &Bound<'_, Self>,
         local_path: &Bound<'_, PyAny>,
@@ -3640,29 +3652,32 @@ impl PySparkSession {
             .unbind())
     }
 
-    /// DataFrameReader for batch reads (`spark.read`).
+    // DataFrameReader for batch reads (`spark.read`).
     #[getter]
     #[pyo3(name = "read")]
+    #[doc = connect_doc!(SparkSession.read)]
     fn read(&self) -> crate::readwriter::PyDataFrameReader {
         crate::readwriter::PyDataFrameReader::new(self.session.read())
     }
 
-    /// Get the DataStreamReader for reading streaming data (`spark.readStream`).
+    // Get the DataStreamReader for reading streaming data (`spark.readStream`).
     #[getter]
     #[pyo3(name = "readStream")]
+    #[doc = connect_doc!(SparkSession.readStream)]
     fn read_stream(&self) -> PyDataStreamReader {
         let reader = self.session.read_stream();
         PyDataStreamReader::new(reader)
     }
 
-    /// Get the StreamingQueryManager for managing active streaming queries (`spark.streams`):
-    /// the same object at each access, as PySpark Connect's.
-    ///
-    /// The native manager is of the Rust-side listener bus of the session, so
-    /// `addListener`/`removeListener`/`close` are implemented in the core (Rust clients get the
-    /// feature too).
+    // Get the StreamingQueryManager for managing active streaming queries (`spark.streams`):
+    // the same object at each access, as PySpark Connect's.
+    //
+    // The native manager is of the Rust-side listener bus of the session, so
+    // `addListener`/`removeListener`/`close` are implemented in the core (Rust clients get the
+    // feature too).
     #[getter]
     #[pyo3(name = "streams")]
+    #[doc = connect_doc!(SparkSession.streams)]
     fn streams(&self, py: Python<'_>) -> PyResult<Py<PyStreamingQueryManager>> {
         if let Some(manager) = self.streams.get() {
             return Ok(manager.clone_ref(py));
@@ -3697,11 +3712,12 @@ impl PySparkSession {
         self.catalog.take();
     }
 
-    /// Stop this Spark session. Best-effort and idempotent, mirroring pyspark: a failure
-    /// to release the session on the server is logged by the logger of Spark Connect, not
-    /// raised. Also clears the active session and the cached `SQLContext` if they belong to
-    /// this session. Listener callbacks are not joined; the current event's listener snapshot
-    /// may finish afterward.
+    // Stop this Spark session. Best-effort and idempotent, mirroring pyspark: a failure
+    // to release the session on the server is logged by the logger of Spark Connect, not
+    // raised. Also clears the active session and the cached `SQLContext` if they belong to
+    // this session. Listener callbacks are not joined; the current event's listener snapshot
+    // may finish afterward.
+    #[doc = connect_doc!(SparkSession.stop)]
     fn stop(&self, py: Python<'_>) -> PyResult<()> {
         // As PySpark's stop, all of which holds `SparkSession._lock`.
         with_session_lock(py, || {
@@ -3804,10 +3820,11 @@ impl PySparkSession {
         self.stop(py)
     }
 
-    /// Get the UDF registration API (`spark.udf`). Returns the
-    /// `pyspark.sql.connect.udf.UDFRegistration` bound to this session, as PySpark Connect's, so
-    /// it can register Python UDFs and Java UDFs/UDAFs (registerJavaFunction / registerJavaUDAF).
+    // Get the UDF registration API (`spark.udf`). Returns the
+    // `pyspark.sql.connect.udf.UDFRegistration` bound to this session, as PySpark Connect's, so
+    // it can register Python UDFs and Java UDFs/UDAFs (registerJavaFunction / registerJavaUDAF).
     #[getter(udf)]
+    #[doc = connect_doc!(SparkSession.udf)]
     fn get_udf<'a>(slf: &Bound<'a, Self>, py: Python<'a>) -> PyResult<Bound<'a, PyAny>> {
         let cls = py
             .import("pyspark.sql.connect.udf")?
@@ -3977,10 +3994,11 @@ impl PySparkSession {
             .collect())
     }
 
-    /// The client of PySpark Connect's `session.client`, as far as the modules of PySpark that
-    /// build their own messages, such as `pyspark.ml`, use it: of their commands and of the ML
-    /// cache, over the Rust transport (`pyspark.sql.connect.client`).
+    // The client of PySpark Connect's `session.client`, as far as the modules of PySpark that
+    // build their own messages, such as `pyspark.ml`, use it: of their commands and of the ML
+    // cache, over the Rust transport (`pyspark.sql.connect.client`).
     #[getter]
+    #[doc = connect_doc!(SparkSession.client)]
     fn client(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
         Ok(slf
             .py()
@@ -4029,14 +4047,15 @@ impl PySparkSession {
         Self::client(slf)
     }
 
-    /// The session id (property form, mirrors `SparkSession.session_id`).
+    // The session id (property form, mirrors `SparkSession.session_id`).
     #[getter]
     fn session_id(&self) -> String {
         self.session.session_id().to_string()
     }
 
-    /// Whether this session has been stopped. Mirrors `SparkSession.is_stopped`.
+    // Whether this session has been stopped. Mirrors `SparkSession.is_stopped`.
     #[getter]
+    #[doc = connect_doc!(SparkSession.is_stopped)]
     fn is_stopped(&self) -> bool {
         self.session.is_stopped()
     }
@@ -4385,9 +4404,10 @@ impl PySparkSession {
         py.get_type::<PyHook>().unbind()
     }
 
-    /// UDTF registration accessor, mirroring `SparkSession.udtf`: the `UDTFRegistration`
-    /// of this session, whose `register(name, f)` registers the UDTF `f` as `name`.
+    // UDTF registration accessor, mirroring `SparkSession.udtf`: the `UDTFRegistration`
+    // of this session, whose `register(name, f)` registers the UDTF `f` as `name`.
     #[getter]
+    #[doc = connect_doc!(SparkSession.udtf)]
     fn udtf<'a>(slf: &Bound<'a, Self>) -> PyResult<Bound<'a, PyAny>> {
         slf.py()
             .import("pyspark.sql.connect.udtf")?
@@ -4395,7 +4415,7 @@ impl PySparkSession {
             .call1((slf,))
     }
 
-    /// The active session of this thread, or None. Mirrors `SparkSession.getActiveSession`.
+    // The active session of this thread, or None. Mirrors `SparkSession.getActiveSession`.
     #[staticmethod]
     #[pyo3(name = "getActiveSession")]
     fn get_active_session(py: Python<'_>) -> Option<Py<PySparkSession>> {
@@ -4451,8 +4471,8 @@ impl PySparkSession {
         crate::types::data_type_to_py(py, &data_type)
     }
 
-    /// The active session of this thread, or else the default session; errors if neither.
-    /// Mirrors `SparkSession.active`, which raises `NO_ACTIVE_OR_DEFAULT_SESSION`.
+    // The active session of this thread, or else the default session; errors if neither.
+    // Mirrors `SparkSession.active`, which raises `NO_ACTIVE_OR_DEFAULT_SESSION`.
     #[staticmethod]
     fn active(py: Python<'_>) -> PyResult<Py<PySparkSession>> {
         active_session(py)
@@ -4467,11 +4487,12 @@ impl PySparkSession {
             })
     }
 
-    /// Register a handler of the progress of the executions of the session, as PySpark
-    /// Connect's: once, called with the keyword arguments of `ProgressHandler` (`stages`,
-    /// `inflight_tasks`, `operation_id` and `done`) for each progress of an execution, and
-    /// once more, as done, when it ends.
+    // Register a handler of the progress of the executions of the session, as PySpark
+    // Connect's: once, called with the keyword arguments of `ProgressHandler` (`stages`,
+    // `inflight_tasks`, `operation_id` and `done`) for each progress of an execution, and
+    // once more, as done, when it ends.
     #[pyo3(name = "registerProgressHandler")]
+    #[doc = connect_doc!(SparkSession.registerProgressHandler)]
     fn register_progress_handler(
         &self,
         py: Python<'_>,
@@ -4480,22 +4501,25 @@ impl PySparkSession {
         crate::progress::session_progress(py, &self.session).register(py, handler)
     }
 
-    /// Remove a progress handler, as PySpark Connect's: a `ValueError` for one that is not
-    /// registered.
+    // Remove a progress handler, as PySpark Connect's: a `ValueError` for one that is not
+    // registered.
     #[pyo3(name = "removeProgressHandler")]
+    #[doc = connect_doc!(SparkSession.removeProgressHandler)]
     fn remove_progress_handler(&self, py: Python<'_>, handler: &Bound<'_, PyAny>) -> PyResult<()> {
         crate::progress::session_progress(py, &self.session).remove(py, handler)
     }
 
-    /// Remove all progress handlers. Mirrors `clearProgressHandlers`.
+    // Remove all progress handlers. Mirrors `clearProgressHandlers`.
     #[pyo3(name = "clearProgressHandlers")]
+    #[doc = connect_doc!(SparkSession.clearProgressHandlers)]
     fn clear_progress_handlers(&self, py: Python<'_>) -> PyResult<()> {
         crate::progress::session_progress(py, &self.session).clear(py)
     }
 
-    /// The UDF profiles of the session, as PySpark Connect's `spark.profile`: a `Profile` of its
-    /// `ConnectProfilerCollector`, of `show`, `dump`, `render` and `clear`.
+    // The UDF profiles of the session, as PySpark Connect's `spark.profile`: a `Profile` of its
+    // `ConnectProfilerCollector`, of `show`, `dump`, `render` and `clear`.
     #[getter]
+    #[doc = connect_doc!(SparkSession.profile)]
     fn profile(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let collector = crate::profiler::profiler_collector(py, &self.session)?;
         Ok(py
@@ -4511,10 +4535,11 @@ impl PySparkSession {
         crate::profiler::profiler_collector(py, &self.session)
     }
 
-    /// Get the data source registration accessor.
-    ///
-    /// Mirrors `SparkSession.dataSource.register`. Used to register custom data sources.
+    // Get the data source registration accessor.
+    //
+    // Mirrors `SparkSession.dataSource.register`. Used to register custom data sources.
     #[getter]
+    #[doc = connect_doc!(SparkSession.dataSource)]
     fn dataSource(&self, py: Python<'_>) -> PyResult<PyDataSourceRegistration> {
         Ok(PyDataSourceRegistration::new(session_object(
             py,
@@ -4523,14 +4548,16 @@ impl PySparkSession {
     }
 
     #[getter]
+    #[doc = connect_doc!(SparkSession.version)]
     fn version(&self, py: Python<'_>) -> PyResult<String> {
         interruptible(py, &self.session, || {
             self.session.version().map_err(Box::new)
         })
     }
 
-    /// The DataFrame of a table, as PySpark Connect's: `NOT_EXPECTED_TYPE` for a name that is not
-    /// a str. A name that UTF-8 cannot encode fails the plan, as PySpark's `Read` plan does.
+    // The DataFrame of a table, as PySpark Connect's: `NOT_EXPECTED_TYPE` for a name that is not
+    // a str. A name that UTF-8 cannot encode fails the plan, as PySpark's `Read` plan does.
+    #[doc = connect_doc!(SparkSession.table)]
     fn table(&self, tableName: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
         let Ok(name) = tableName.cast::<pyo3::types::PyString>() else {
             return Err(crate::stat_arguments::not_expected_type(
@@ -4546,24 +4573,27 @@ impl PySparkSession {
         )))
     }
 
-    /// `SparkSession.emptyDataFrame(schema)`, as PySpark's: `createDataFrame([], schema)` of the
-    /// required schema, a type or a DDL string, with its errors, such as the
-    /// `CANNOT_INFER_EMPTY_SCHEMA` of None.
+    // `SparkSession.emptyDataFrame(schema)`, as PySpark's: `createDataFrame([], schema)` of the
+    // required schema, a type or a DDL string, with its errors, such as the
+    // `CANNOT_INFER_EMPTY_SCHEMA` of None.
     #[pyo3(name = "emptyDataFrame")]
+    #[doc = connect_doc!(SparkSession.emptyDataFrame)]
     fn empty_data_frame(&self, py: Python<'_>, schema: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
         self.createDataFrame(py, PyList::empty(py).as_any(), Some(schema), None, None)
     }
 
     #[pyo3(name = "interruptAll")]
+    #[doc = connect_doc!(SparkSession.interruptAll)]
     fn interrupt_all(&self, py: Python<'_>) -> PyResult<Vec<String>> {
         interruptible(py, &self.session, || {
             self.session.interrupt_all().map_err(Box::new)
         })
     }
 
-    /// Interrupt the operations of the tag `tag`, as PySpark's, whose request asserts a tag that
-    /// is not None and sets it in its string field, as protobuf converts it: bytes of UTF-8 too.
+    // Interrupt the operations of the tag `tag`, as PySpark's, whose request asserts a tag that
+    // is not None and sets it in its string field, as protobuf converts it: bytes of UTF-8 too.
     #[pyo3(name = "interruptTag")]
+    #[doc = connect_doc!(SparkSession.interruptTag)]
     fn interrupt_tag(&self, py: Python<'_>, tag: &Bound<'_, PyAny>) -> PyResult<Vec<String>> {
         let tag = interrupted_id(tag)?;
         interruptible(py, &self.session, || {
@@ -4571,8 +4601,9 @@ impl PySparkSession {
         })
     }
 
-    /// Interrupt the operation `op_id`, as [`PySparkSession::interrupt_tag`] takes its tag.
+    // Interrupt the operation `op_id`, as [`PySparkSession::interrupt_tag`] takes its tag.
     #[pyo3(name = "interruptOperation")]
+    #[doc = connect_doc!(SparkSession.interruptOperation)]
     fn interrupt_operation(
         &self,
         py: Python<'_>,
@@ -4584,17 +4615,19 @@ impl PySparkSession {
         })
     }
 
-    /// Add a tag of the current thread, as PySpark Connect's `addTag`, which its client adds to
-    /// the set of its `thread_local.tags` (`client.add_tag`), of the errors of PySpark's.
+    // Add a tag of the current thread, as PySpark Connect's `addTag`, which its client adds to
+    // the set of its `thread_local.tags` (`client.add_tag`), of the errors of PySpark's.
     #[pyo3(name = "addTag")]
+    #[doc = connect_doc!(SparkSession.addTag)]
     fn add_tag(slf: &Bound<'_, Self>, tag: &Bound<'_, PyAny>) -> PyResult<()> {
         Self::client(slf)?.call_method1(slf.py(), "add_tag", (tag,))?;
         Ok(())
     }
 
-    /// Remove a tag of the current thread, as PySpark Connect's `removeTag`, of its client
-    /// (`client.remove_tag`).
+    // Remove a tag of the current thread, as PySpark Connect's `removeTag`, of its client
+    // (`client.remove_tag`).
     #[pyo3(name = "removeTag")]
+    #[doc = connect_doc!(SparkSession.removeTag)]
     fn remove_tag(slf: &Bound<'_, Self>, tag: &Bound<'_, PyAny>) -> PyResult<()> {
         Self::client(slf)?.call_method1(slf.py(), "remove_tag", (tag,))?;
         Ok(())
@@ -4619,17 +4652,19 @@ impl PySparkSession {
         })
     }
 
-    /// The tags of the current thread, as PySpark Connect's `getTags`: the set of the
-    /// `thread_local.tags` of its client (`client.get_tags`), which the later changes of the tags
-    /// change too.
+    // The tags of the current thread, as PySpark Connect's `getTags`: the set of the
+    // `thread_local.tags` of its client (`client.get_tags`), which the later changes of the tags
+    // change too.
     #[pyo3(name = "getTags")]
+    #[doc = connect_doc!(SparkSession.getTags)]
     fn get_tags(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
         Self::client(slf)?.call_method0(slf.py(), "get_tags")
     }
 
-    /// Remove the tags of the current thread, as PySpark Connect's `clearTags`, of its client
-    /// (`client.clear_tags`), which gives the thread a new empty set.
+    // Remove the tags of the current thread, as PySpark Connect's `clearTags`, of its client
+    // (`client.clear_tags`), which gives the thread a new empty set.
     #[pyo3(name = "clearTags")]
+    #[doc = connect_doc!(SparkSession.clearTags)]
     fn clear_tags(slf: &Bound<'_, Self>) -> PyResult<()> {
         Self::client(slf)?.call_method0(slf.py(), "clear_tags")?;
         Ok(())
@@ -4672,19 +4707,20 @@ impl PySparkSession {
         }
     }
 
-    /// Add local files, or `file:` URIs, as artifacts of the session, as PySpark's
-    /// `addArtifacts(*path, pyfile=False, archive=False, file=False)`: each path is named by
-    /// the flags and its extension, and the errors for a path that is not supported are
-    /// PySpark's (see `spark_connect_core::artifact::parse_artifact`). A class file is refused,
-    /// as PySpark's ArtifactManager does not upload one. The flags are any objects, as PySpark's:
-    /// `sum([file, pyfile, archive]) > 1` refuses them first, and each path tests their truth. The
-    /// paths are uploaded one after the other, and one that is not a str is read as PySpark's
-    /// ArtifactManager reads it, of the error of its `urlparse` (see `artifact_path_of`).
+    // Add local files, or `file:` URIs, as artifacts of the session, as PySpark's
+    // `addArtifacts(*path, pyfile=False, archive=False, file=False)`: each path is named by
+    // the flags and its extension, and the errors for a path that is not supported are
+    // PySpark's (see `spark_connect_core::artifact::parse_artifact`). A class file is refused,
+    // as PySpark's ArtifactManager does not upload one. The flags are any objects, as PySpark's:
+    // `sum([file, pyfile, archive]) > 1` refuses them first, and each path tests their truth. The
+    // paths are uploaded one after the other, and one that is not a str is read as PySpark's
+    // ArtifactManager reads it, of the error of its `urlparse` (see `artifact_path_of`).
     #[pyo3(
         name = "addArtifacts",
         signature = (*path, pyfile=DefaultedOption::Omitted, archive=DefaultedOption::Omitted, file=DefaultedOption::Omitted),
         text_signature = "($self, *path, pyfile=False, archive=False, file=False)"
     )]
+    #[doc = connect_doc!(SparkSession.addArtifacts)]
     fn add_artifacts(
         &self,
         py: Python<'_>,
@@ -4697,12 +4733,13 @@ impl PySparkSession {
         self.upload_artifact_paths(py, &path, &flags)
     }
 
-    /// `addArtifact` is `addArtifacts`, as in PySpark.
+    // `addArtifact` is `addArtifacts`, as in PySpark.
     #[pyo3(
         name = "addArtifact",
         signature = (*path, pyfile=DefaultedOption::Omitted, archive=DefaultedOption::Omitted, file=DefaultedOption::Omitted),
         text_signature = "($self, *path, pyfile=False, archive=False, file=False)"
     )]
+    #[doc = connect_doc!(SparkSession.addArtifact)]
     fn add_artifact(
         &self,
         py: Python<'_>,
@@ -4714,11 +4751,12 @@ impl PySparkSession {
         self.add_artifacts(py, path, pyfile, archive, file)
     }
 
-    /// A new session of the same connection, as PySpark's `newSession()`: a session of none of
-    /// the server-side state of this one, of the user of `client._user_id`, as PySpark's new
-    /// client takes it, unless the connection has one (see
-    /// `pyspark.sql.connect.client._new_session_of`).
+    // A new session of the same connection, as PySpark's `newSession()`: a session of none of
+    // the server-side state of this one, of the user of `client._user_id`, as PySpark's new
+    // client takes it, unless the connection has one (see
+    // `pyspark.sql.connect.client._new_session_of`).
     #[pyo3(name = "newSession")]
+    #[doc = connect_doc!(SparkSession.newSession)]
     fn new_session(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
         Ok(slf
             .py()
@@ -4728,11 +4766,12 @@ impl PySparkSession {
             .unbind())
     }
 
-    /// Clone this session on the server, as PySpark's `cloneSession(new_session_id=None)`: a
-    /// session of a copy of the server-side state of this one, its SQL configurations,
-    /// temporary views, registered functions and catalog state, of the id `new_session_id`,
-    /// a UUID, if one is given, and of the user of `client._user_id`, as `newSession()`.
+    // Clone this session on the server, as PySpark's `cloneSession(new_session_id=None)`: a
+    // session of a copy of the server-side state of this one, its SQL configurations,
+    // temporary views, registered functions and catalog state, of the id `new_session_id`,
+    // a UUID, if one is given, and of the user of `client._user_id`, as `newSession()`.
     #[pyo3(name = "cloneSession", signature = (new_session_id=None))]
+    #[doc = connect_doc!(SparkSession.cloneSession)]
     fn clone_session(
         slf: &Bound<'_, Self>,
         new_session_id: Option<Bound<'_, PyAny>>,
