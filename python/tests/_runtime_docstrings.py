@@ -23,39 +23,12 @@ import sys
 import types
 import warnings
 
-# The golden leaves out the docstrings that are not all PySpark's yet: those of the DataFrame class
-# of both DataFrame modules, and of the modules of the session and its client
-# (pyspark.sql.connect.session and pyspark.sql.connect.client), which are left out here as a whole.
+# The golden leaves out the modules whose docstrings are not all PySpark's yet: those of the session
+# and its client (pyspark.sql.connect.session and pyspark.sql.connect.client).
 EXCLUDED = (
     "pyspark.sql.connect.session",
     "pyspark.sql.connect.client",
 )
-# Of the two DataFrame modules, the golden leaves out the DataFrame class, and the docstrings that
-# can only match PySpark's once those of the class do: the docstrings of both modules, and those
-# that the classic `DataFrameNaFunctions` and `DataFrameStatFunctions` copy of the class
-# (`drop.__doc__ = DataFrame.dropna.__doc__`). Their other docstrings are compared.
-DATAFRAME_MODULES = ("pyspark.sql.dataframe", "pyspark.sql.connect.dataframe")
-COPIES_OF_THE_DATAFRAME = {
-    "DataFrameNaFunctions.drop",
-    "DataFrameNaFunctions.fill",
-    "DataFrameNaFunctions.replace",
-    "DataFrameStatFunctions.approxQuantile",
-    "DataFrameStatFunctions.corr",
-    "DataFrameStatFunctions.cov",
-    "DataFrameStatFunctions.crosstab",
-    "DataFrameStatFunctions.freqItems",
-    "DataFrameStatFunctions.sampleBy",
-}
-
-
-def of_the_dataframe(module_name, rest):
-    """Whether the key of `rest` of the module `module_name` is of the DataFrame class, of a
-    DataFrame module: the module, the class, its members, and the classic copies of them."""
-    if module_name not in DATAFRAME_MODULES:
-        return False
-    if rest in ("", "DataFrame") or rest.startswith("DataFrame."):
-        return True
-    return module_name == "pyspark.sql.dataframe" and rest in COPIES_OF_THE_DATAFRAME
 
 # The kinds of the digests of the golden, which its note gives.
 KINDS = {
@@ -106,17 +79,7 @@ def module_names():
 
 
 def docstrings(module_name):
-    """The digests of the docstrings of the module `module_name`, by their keys, but those of the
-    DataFrame class (``of_the_dataframe``)."""
-    out = _docstrings(module_name)
-    return {
-        key: value
-        for key, value in out.items()
-        if not of_the_dataframe(module_name, key.partition(":")[2])
-    }
-
-
-def _docstrings(module_name):
+    """The digests of the docstrings of the module `module_name`, by their keys."""
     warnings.simplefilter("ignore")
     module = importlib.import_module(module_name)
     out = {module_name: digest(module.__doc__)}

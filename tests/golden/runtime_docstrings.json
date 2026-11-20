@@ -1680,6 +1680,353 @@
    "storage_level_to_proto": null
   },
   "pyspark.sql.connect.dataframe": {
+   "": null,
+   "DataFrame": {
+    "getdoc": "b72e35bbdd3b9a7b"
+   },
+   "DataFrame.__init__": "6272c320c15b8a2e",
+   "DataFrame.agg": {
+    "getdoc": "c5d0b4e916a57a18"
+   },
+   "DataFrame.alias": {
+    "getdoc": "0a38cbafe19f367c"
+   },
+   "DataFrame.approxQuantile": {
+    "getdoc": "a05cd037782861ff"
+   },
+   "DataFrame.asTable": {
+    "getdoc": "1a0d1a9ffe926b5b"
+   },
+   "DataFrame.cache": {
+    "getdoc": "121fc3cdc3623d37"
+   },
+   "DataFrame.checkpoint": {
+    "getdoc": "4633d214d6b8bdac"
+   },
+   "DataFrame.coalesce": {
+    "getdoc": "febea5a9705cddfb"
+   },
+   "DataFrame.colRegex": {
+    "getdoc": "1c275d19bc98b0b7"
+   },
+   "DataFrame.collect": {
+    "getdoc": "65d64a1c82839e99"
+   },
+   "DataFrame.columns": {
+    "getdoc": "ae1221ace5286279"
+   },
+   "DataFrame.corr": {
+    "getdoc": "4af1de23e84c040e"
+   },
+   "DataFrame.count": {
+    "getdoc": "78c4e9f4e0facc62"
+   },
+   "DataFrame.cov": {
+    "getdoc": "940b8aca5d365b86"
+   },
+   "DataFrame.createGlobalTempView": {
+    "getdoc": "5ba734c5ac98c07c"
+   },
+   "DataFrame.createOrReplaceGlobalTempView": {
+    "getdoc": "7fa74e198ff24f4e"
+   },
+   "DataFrame.createOrReplaceTempView": {
+    "getdoc": "71fa4e318c79a6bf"
+   },
+   "DataFrame.createTempView": {
+    "getdoc": "3c3f670ac20664e4"
+   },
+   "DataFrame.crossJoin": {
+    "getdoc": "3375ff8bc9300aba"
+   },
+   "DataFrame.crosstab": {
+    "getdoc": "aa568a4428058166"
+   },
+   "DataFrame.cube": {
+    "getdoc": "f31594be6d919e1a"
+   },
+   "DataFrame.describe": {
+    "getdoc": "50ab83d95512bc2f"
+   },
+   "DataFrame.distinct": {
+    "getdoc": "b8ebdbd4fbb14130"
+   },
+   "DataFrame.drop": {
+    "getdoc": "4ab1d51ca5a88e7e"
+   },
+   "DataFrame.dropDuplicates": {
+    "getdoc": "21b6570bfbba4f5f"
+   },
+   "DataFrame.dropDuplicatesWithinWatermark": {
+    "getdoc": "e86d30df514bac6c"
+   },
+   "DataFrame.drop_duplicates": {
+    "getdoc": "21b6570bfbba4f5f"
+   },
+   "DataFrame.dropna": {
+    "getdoc": "2c668bea08d3a1f4"
+   },
+   "DataFrame.dtypes": {
+    "getdoc": "7cebf058b82c3794"
+   },
+   "DataFrame.exceptAll": {
+    "getdoc": "ebfd51828fe72d82"
+   },
+   "DataFrame.executionInfo": {
+    "getdoc": "8640ad154df8ee7a"
+   },
+   "DataFrame.exists": {
+    "getdoc": "2ef6d2557c98df4b"
+   },
+   "DataFrame.explain": {
+    "getdoc": "dcd82604359dfbd8"
+   },
+   "DataFrame.fillna": {
+    "getdoc": "8825469cfd2a36c0"
+   },
+   "DataFrame.filter": {
+    "getdoc": "763a0fed9af30671"
+   },
+   "DataFrame.first": {
+    "getdoc": "7d368abcb785d458"
+   },
+   "DataFrame.foreach": {
+    "getdoc": "1e862501d7deeced"
+   },
+   "DataFrame.foreachPartition": {
+    "getdoc": "bf40ecb6f46de3eb"
+   },
+   "DataFrame.freqItems": {
+    "getdoc": "ff7610a3f04a8829"
+   },
+   "DataFrame.groupBy": {
+    "getdoc": "fd197834d503b885"
+   },
+   "DataFrame.groupby": {
+    "getdoc": "fd197834d503b885"
+   },
+   "DataFrame.groupingSets": {
+    "getdoc": "53ffcd902533660e"
+   },
+   "DataFrame.head": {
+    "getdoc": "ebfb2a647d12c198"
+   },
+   "DataFrame.hint": {
+    "getdoc": "bae6c63943ea3619"
+   },
+   "DataFrame.inputFiles": null,
+   "DataFrame.intersect": {
+    "getdoc": "9d9e902e441a3430"
+   },
+   "DataFrame.intersectAll": {
+    "getdoc": "c5e171bb1dd062a9"
+   },
+   "DataFrame.isEmpty": null,
+   "DataFrame.isLocal": null,
+   "DataFrame.isStreaming": null,
+   "DataFrame.is_cached": null,
+   "DataFrame.join": {
+    "getdoc": "d50386bcdd8ea74c"
+   },
+   "DataFrame.lateralJoin": {
+    "getdoc": "332fb93768f0ed3e"
+   },
+   "DataFrame.limit": {
+    "getdoc": "fa033241a0f91b7f"
+   },
+   "DataFrame.localCheckpoint": {
+    "getdoc": "2f6020b4fa3df68d"
+   },
+   "DataFrame.mapInArrow": {
+    "getdoc": "7a2e0392e29e2ca6"
+   },
+   "DataFrame.mapInPandas": {
+    "getdoc": "850403c90fb83fca"
+   },
+   "DataFrame.melt": {
+    "getdoc": "1bfe809e36ffe508"
+   },
+   "DataFrame.mergeInto": {
+    "getdoc": "f7cd85a8cdf6ab9c"
+   },
+   "DataFrame.metadataColumn": {
+    "getdoc": "f7077730209d0506"
+   },
+   "DataFrame.na": {
+    "getdoc": "6414071f05040e9e"
+   },
+   "DataFrame.nearestByJoin": {
+    "getdoc": "4a1c3a61d093f04f"
+   },
+   "DataFrame.observe": {
+    "getdoc": "fdc22d397d32b6e3"
+   },
+   "DataFrame.offset": {
+    "getdoc": "04b0868d8a27788f"
+   },
+   "DataFrame.orderBy": {
+    "getdoc": "dc47ab91cbb0bc8f"
+   },
+   "DataFrame.pandas_api": {
+    "getdoc": "dc3667b9c82365fa"
+   },
+   "DataFrame.persist": {
+    "getdoc": "ca4fd89bddc85586"
+   },
+   "DataFrame.plot": {
+    "getdoc": "26195e8a5f1bbf12"
+   },
+   "DataFrame.printSchema": {
+    "getdoc": "8c857412a8f9c2fa"
+   },
+   "DataFrame.randomSplit": {
+    "getdoc": "8b937412254cb7b2"
+   },
+   "DataFrame.registerTempTable": {
+    "getdoc": "e0045f19ccb6f240"
+   },
+   "DataFrame.repartition": {
+    "getdoc": "ac64526b47cf1baa"
+   },
+   "DataFrame.repartitionById": {
+    "getdoc": "3de70e15d382949a"
+   },
+   "DataFrame.repartitionByRange": {
+    "getdoc": "dcc2173a40703d85"
+   },
+   "DataFrame.replace": {
+    "getdoc": "424502702903dcc7"
+   },
+   "DataFrame.rollup": {
+    "getdoc": "6a719dd8f5cf834a"
+   },
+   "DataFrame.sameSemantics": {
+    "getdoc": "8f2f36d3e9969a88"
+   },
+   "DataFrame.sample": {
+    "getdoc": "f2a9b72cd06343ca"
+   },
+   "DataFrame.sampleBy": {
+    "getdoc": "657beacfdd3f8f9d"
+   },
+   "DataFrame.scalar": {
+    "getdoc": "41e8e205d4182913"
+   },
+   "DataFrame.schema": {
+    "getdoc": "77ddb896a66c79b9"
+   },
+   "DataFrame.select": {
+    "getdoc": "87b333213a32396a"
+   },
+   "DataFrame.selectExpr": {
+    "getdoc": "1de6d1ab7a54e2dc"
+   },
+   "DataFrame.semanticHash": null,
+   "DataFrame.show": {
+    "getdoc": "9c84e29d5a8cab47"
+   },
+   "DataFrame.sort": {
+    "getdoc": "dc47ab91cbb0bc8f"
+   },
+   "DataFrame.sortWithinPartitions": {
+    "getdoc": "9680ebb838b62b75"
+   },
+   "DataFrame.sparkSession": {
+    "getdoc": "2a542a88947add61"
+   },
+   "DataFrame.stat": {
+    "getdoc": "e5fb7f78d08ef9be"
+   },
+   "DataFrame.storageLevel": {
+    "getdoc": "f87bf10bb5c83c48"
+   },
+   "DataFrame.subtract": {
+    "getdoc": "a4ffebed08a197d5"
+   },
+   "DataFrame.summary": {
+    "getdoc": "e0aafcba52ae512e"
+   },
+   "DataFrame.tail": {
+    "getdoc": "745187dcccb2495b"
+   },
+   "DataFrame.take": {
+    "getdoc": "23ea88ea10469901"
+   },
+   "DataFrame.to": {
+    "getdoc": "29598252f66a2b0f"
+   },
+   "DataFrame.toArrow": {
+    "getdoc": "a95fdd30ac303cee"
+   },
+   "DataFrame.toDF": {
+    "getdoc": "3043e3427c68068e"
+   },
+   "DataFrame.toJSON": {
+    "getdoc": "3709a56b4eff25af"
+   },
+   "DataFrame.toLocalIterator": {
+    "getdoc": "9d7b49af6b213adf"
+   },
+   "DataFrame.toPandas": {
+    "getdoc": "9bf834db599f9f00"
+   },
+   "DataFrame.transform": {
+    "getdoc": "d13687c3d99e8a85"
+   },
+   "DataFrame.transpose": {
+    "getdoc": "12207fb54915a24f"
+   },
+   "DataFrame.union": {
+    "getdoc": "43801df302d39290"
+   },
+   "DataFrame.unionAll": {
+    "getdoc": "9d3c08041d0bbaea"
+   },
+   "DataFrame.unionByName": {
+    "getdoc": "f7ebb83da3c52ad6"
+   },
+   "DataFrame.unpersist": {
+    "getdoc": "1e304c81b7891d4e"
+   },
+   "DataFrame.unpivot": {
+    "getdoc": "1bfe809e36ffe508"
+   },
+   "DataFrame.where": {
+    "getdoc": "ec22c1409f86db4d"
+   },
+   "DataFrame.withColumn": {
+    "getdoc": "2ba60670576ba0f9"
+   },
+   "DataFrame.withColumnRenamed": {
+    "getdoc": "625e9a9a81fbcf27"
+   },
+   "DataFrame.withColumns": {
+    "getdoc": "ea15db570f975100"
+   },
+   "DataFrame.withColumnsRenamed": {
+    "getdoc": "fb2c9cb64f8e928c"
+   },
+   "DataFrame.withMetadata": {
+    "getdoc": "ba6f66e26b262e6e"
+   },
+   "DataFrame.withWatermark": {
+    "getdoc": "5e5c9e11e5590441"
+   },
+   "DataFrame.write": {
+    "getdoc": "9abc7cb9fbb72623"
+   },
+   "DataFrame.writeStream": {
+    "getdoc": "2e470ec72a8912fe"
+   },
+   "DataFrame.writeTo": {
+    "getdoc": "ef81ba096713c30e"
+   },
+   "DataFrame.zip": {
+    "getdoc": "aea4a42d0100b266"
+   },
+   "DataFrame.zipWithIndex": {
+    "getdoc": "8111daae730642b6"
+   },
    "DataFrameNaFunctions": {
     "getdoc": "1c90589c460eebe0"
    },
@@ -4182,14 +4529,143 @@
    "PandasToArrowConversion.convert": "a98c23c396a1230a"
   },
   "pyspark.sql.dataframe": {
+   "": null,
+   "DataFrame": "6e0cdf1b555a0b57",
+   "DataFrame.__init__": "15432c8b93cc48ea",
+   "DataFrame.agg": "33314a4ea280ec88",
+   "DataFrame.alias": "51e4c503de6e5f06",
+   "DataFrame.approxQuantile": "962620df3868828a",
+   "DataFrame.asTable": "d4e5fe70a6416247",
+   "DataFrame.cache": "0fcf8461610cc3b4",
+   "DataFrame.checkpoint": "f92beded3054e243",
+   "DataFrame.coalesce": "0839a8b1971b7923",
+   "DataFrame.colRegex": "f83e6118c8cf938a",
+   "DataFrame.collect": "5c0e0768028a71be",
+   "DataFrame.columns": "8573158d5b80f462",
+   "DataFrame.corr": "b74ba556876b9abb",
+   "DataFrame.count": "854ef0cdb37c178d",
+   "DataFrame.cov": "3f486260ce10fd33",
+   "DataFrame.createGlobalTempView": "e16f2cc57e093588",
+   "DataFrame.createOrReplaceGlobalTempView": "f2f5db6ce25d33ed",
+   "DataFrame.createOrReplaceTempView": "a8d29373c294103d",
+   "DataFrame.createTempView": "8d3cc8edd560f7aa",
+   "DataFrame.crossJoin": "df1feed62b871fea",
+   "DataFrame.crosstab": "8db1a0ad5fa7c83d",
+   "DataFrame.cube": "dff40b28a061ca65",
+   "DataFrame.describe": "7aa7ed981ff3ae04",
+   "DataFrame.distinct": "f2654200b9f9483a",
+   "DataFrame.drop": "58d17fb3457ddc9d",
+   "DataFrame.dropDuplicates": "8084202118e0e744",
+   "DataFrame.dropDuplicatesWithinWatermark": "432320f0957c9ccb",
+   "DataFrame.drop_duplicates": "aba0639bbb4dbc17",
+   "DataFrame.dropna": "458a7b254801c278",
+   "DataFrame.dtypes": "2268ff513c9f4b8f",
+   "DataFrame.exceptAll": "f3807b1d5665e62c",
+   "DataFrame.executionInfo": "865bb3408f905dad",
+   "DataFrame.exists": "60a7b6f9206bc3dc",
+   "DataFrame.explain": "8558f2f7cbb03bdb",
+   "DataFrame.fillna": "f2f903051f896b3e",
+   "DataFrame.filter": "fd6ea60dd3f39a12",
+   "DataFrame.first": "122b1f251956a477",
+   "DataFrame.foreach": "161364bdf537641e",
+   "DataFrame.foreachPartition": "910db9047bc5fa67",
+   "DataFrame.freqItems": "dd4ef509cf65054d",
+   "DataFrame.groupBy": "e3c1b5efeac98095",
+   "DataFrame.groupby": "d8b5906f91c943b4",
+   "DataFrame.groupingSets": "4adddf3ef7415b39",
+   "DataFrame.head": "6c6ce74ceab72000",
+   "DataFrame.hint": "3c16a5b2f306e2f6",
+   "DataFrame.inputFiles": "e3eea9ab01600cb6",
+   "DataFrame.intersect": "f9adddba69db5ac4",
+   "DataFrame.intersectAll": "a18b6037f3cbafc5",
+   "DataFrame.isEmpty": "498c279816886def",
+   "DataFrame.isLocal": "f05694e398fbb1fc",
+   "DataFrame.isStreaming": "fad2b5e1d9c45fbe",
+   "DataFrame.join": "1281dbbcde4fed5b",
+   "DataFrame.lateralJoin": "f3d60765b9bc070f",
+   "DataFrame.limit": "3138a5aae9bd0ff8",
+   "DataFrame.localCheckpoint": "27115396081b4b6e",
+   "DataFrame.mapInArrow": "d7eca1af61b4ad87",
+   "DataFrame.mapInPandas": "50962e1bc1ac592c",
+   "DataFrame.melt": "4ff54395c48b96b9",
+   "DataFrame.mergeInto": "c95e656a740dd05f",
+   "DataFrame.metadataColumn": "e4361b1ef37e07a6",
+   "DataFrame.na": "abfd978b05997d8d",
+   "DataFrame.nearestByJoin": "72e17d22ff01efc9",
+   "DataFrame.observe": "4e07c7145f82d6f4",
+   "DataFrame.offset": "e20275c21e3b659a",
+   "DataFrame.orderBy": "a08da9f3bc828186",
+   "DataFrame.pandas_api": "2642b0846dc0d7a6",
+   "DataFrame.persist": "d60c7bc244d24e99",
+   "DataFrame.plot": "8cf629b207b330b0",
+   "DataFrame.printSchema": "818f77292ddfec6d",
+   "DataFrame.randomSplit": "e8d65004dd00ff39",
+   "DataFrame.registerTempTable": "44e555510517114c",
+   "DataFrame.repartition": "5e9170eec99fef27",
+   "DataFrame.repartitionById": "5cec972eed2faac9",
+   "DataFrame.repartitionByRange": "3ba8b7a80c0093c9",
+   "DataFrame.replace": "0adbbf65554b1ba7",
+   "DataFrame.rollup": "e60a919362f52fba",
+   "DataFrame.sameSemantics": "a9f9ff7e488ff769",
+   "DataFrame.sample": "68b1e354dacbeae8",
+   "DataFrame.sampleBy": "f2db960f4d4e078d",
+   "DataFrame.scalar": "218bb915a08c234d",
+   "DataFrame.schema": "12692589e1d69e2a",
+   "DataFrame.select": "3667dee68feb841a",
+   "DataFrame.selectExpr": "6d7b673b45f2eefd",
+   "DataFrame.semanticHash": "78d21b0f95d24f4b",
+   "DataFrame.show": "c65f5dc2bd050115",
+   "DataFrame.sort": "a08da9f3bc828186",
+   "DataFrame.sortWithinPartitions": "418b75dd0d7f8f44",
+   "DataFrame.sparkSession": "cfde1586222309af",
+   "DataFrame.stat": "565bd08e63c64837",
+   "DataFrame.storageLevel": "62e43465cf3435c1",
+   "DataFrame.subtract": "bb617b930502c0c6",
+   "DataFrame.summary": "ad57fbd638df5af0",
+   "DataFrame.tail": "b6fc122c3748b308",
+   "DataFrame.take": "8e2e6f0fbff21e75",
+   "DataFrame.to": "7a71b3b980575ffa",
+   "DataFrame.toArrow": "220bd9365961cba7",
+   "DataFrame.toDF": "a13b9b77c8f35954",
+   "DataFrame.toJSON": "9b02bc0842bb284c",
+   "DataFrame.toLocalIterator": "5c0170d986d4aab2",
+   "DataFrame.toPandas": "6203614dffb04774",
+   "DataFrame.transform": "6a9ac2f6b710f9fe",
+   "DataFrame.transpose": "1190ac7e5453a611",
+   "DataFrame.union": "8234c30b02aaa8e7",
+   "DataFrame.unionAll": "f66e0152adbba97f",
+   "DataFrame.unionByName": "c13db565ba32c364",
+   "DataFrame.unpersist": "56e43f4cee3cbc8c",
+   "DataFrame.unpivot": "31b9c5a9556855e7",
+   "DataFrame.where": "85bebad2ce56c320",
+   "DataFrame.withColumn": "bb34b88a460aab8c",
+   "DataFrame.withColumnRenamed": "dbf2064779774d74",
+   "DataFrame.withColumns": "ed9e822056133265",
+   "DataFrame.withColumnsRenamed": "a68302b815b3b926",
+   "DataFrame.withMetadata": "9d0817bb04e0374f",
+   "DataFrame.withWatermark": "68db0a88e16741f5",
+   "DataFrame.write": "b99ab15f7a95f1e0",
+   "DataFrame.writeStream": "4f0085356a3c12e7",
+   "DataFrame.writeTo": "8085fd6b7e6fda70",
+   "DataFrame.zip": "341802bd4aee0a69",
+   "DataFrame.zipWithIndex": "f0613df1ea3e6a9b",
    "DataFrameNaFunctions": "9ed19c477acf2818",
    "DataFrameNaFunctions.__init__": {
     "getdoc": "15432c8b93cc48ea"
    },
+   "DataFrameNaFunctions.drop": "458a7b254801c278",
+   "DataFrameNaFunctions.fill": "f2f903051f896b3e",
+   "DataFrameNaFunctions.replace": "0adbbf65554b1ba7",
    "DataFrameStatFunctions": "9c6ac8ae0989da8a",
    "DataFrameStatFunctions.__init__": {
     "getdoc": "15432c8b93cc48ea"
-   }
+   },
+   "DataFrameStatFunctions.approxQuantile": "962620df3868828a",
+   "DataFrameStatFunctions.corr": "b74ba556876b9abb",
+   "DataFrameStatFunctions.cov": "3f486260ce10fd33",
+   "DataFrameStatFunctions.crosstab": "8db1a0ad5fa7c83d",
+   "DataFrameStatFunctions.freqItems": "dd4ef509cf65054d",
+   "DataFrameStatFunctions.sampleBy": "f2db960f4d4e078d"
   },
   "pyspark.sql.datasource": {
    "": null,
