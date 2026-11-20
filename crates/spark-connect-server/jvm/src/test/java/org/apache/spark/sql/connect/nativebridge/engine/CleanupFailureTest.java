@@ -17,13 +17,16 @@
 
 package org.apache.spark.sql.connect.nativebridge.engine;
 
-import java.lang.reflect.Field;
+import static org.apache.spark.sql.connect.nativebridge.engine.TestSupport.cleanup;
+import static org.apache.spark.sql.connect.nativebridge.engine.TestSupport.field;
+import static org.apache.spark.sql.connect.nativebridge.engine.TestSupport.registry;
+import static org.apache.spark.sql.connect.nativebridge.engine.TestSupport.require;
+
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
-import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -62,10 +65,10 @@ public final class CleanupFailureTest {
       unpublishedSessionFailure(spark);
       nativeFactoryFailure(spark, arguments[0]);
       require(!spark.sparkContext().isStopped(), "failed cleanup stopped the shared SparkContext");
-      System.out.println("CLEANUP_FAILURE_OK: task/query/session/factory failures retain "
-          + "owners and original errors, including a live worker, without replaying cleanup; "
-          + "native stop keeps "
-          + "its retry handle and reports repeated Java cleanup failure after listener close");
+      System.out.println("CLEANUP_FAILURE_OK: cancellation delivery can recover; "
+          + "partial query/session/factory cleanup retains owners and original errors "
+          + "without replaying cleanup; native stop keeps its retry handle and reports repeated "
+          + "Java cleanup failure after listener close");
     } finally {
       spark.stop();
     }
@@ -85,15 +88,17 @@ public final class CleanupFailureTest {
     };
     field(task, "running").set(task, running);
     expectSame(failure, task::cancel);
-    // A real interrupted call clears running in Task.run's finally block. Its later close
-    // must still report the cancellation failure even after that worker has left.
-    field(task, "running").set(task, null);
-    expectSame(failure, task::close);
-    expectSame(failure, task::close);
     require(registry(engine, "tasks").contains(task), "failed Task cleanup lost its owner");
     expectSame(failure, engine::close);
-    expectSame(failure, engine::close);
-    require(attempts.get() == 1, "failed task cancellation was replayed");
+    // A real interrupted call clears running in Task.run's finally block. Once that
+    // work has left, cancellation and delegated engine close can finish on a retry.
+    field(task, "running").set(task, null);
+    task.close();
+    task.close();
+    engine.close();
+    engine.close();
+    require(!registry(engine, "tasks").contains(task), "recovered Task owner was retained");
+    require(attempts.get() == 2, "failed cancellation delivery was not retried");
   }
 
   private static void cancellationFailureWithLiveWorker(SparkSession spark) throws Exception {
@@ -111,7 +116,8 @@ public final class CleanupFailureTest {
         .setQuery("SELECT " + function + "(id) AS id FROM range(0, 2, 1, 2)"))
         .build().toByteArray(), task);
     RuntimeException failure = new IllegalStateException("injected live worker interruption failure");
-    FailingCleanupPlan cleanup = new FailingCleanupPlan(failure);
+    RuntimeException planFailure = new IllegalStateException("injected plan cleanup failure");
+    FailingCleanupPlan cleanup = new FailingCleanupPlan(planFailure);
     ExecutorService pool = Executors.newFixedThreadPool(2);
     Thread worker = null;
     SparkPlan originalPlan = null;
@@ -124,7 +130,8 @@ public final class CleanupFailureTest {
         synchronized (results) {
           worker = (Thread) field(query, "worker").get(query);
           List<?> slots = (List<?>) field(query, "partitionBatches").get(query);
-          if (slots != null && slots.get(1) != null) break;
+          if (slots != null && slots.get(1) != null
+              && Files.exists(directory.resolve("entered"))) break;
         }
         require(!pending.isDone() && System.nanoTime() < deadline,
             "gated query did not buffer its later partition");
@@ -140,12 +147,14 @@ public final class CleanupFailureTest {
           public void interrupt() { throw failure; }
         });
       }
-      // A blocking join would time out while partition zero's gate remains closed.
+      // Cursor release must wake admission and cancel jobs even when Task.interrupt fails.
       Future<?> closing = pool.submit(() -> expectSame(failure, query::close));
       closing.get(5, TimeUnit.SECONDS);
-      require(worker.isAlive(), "failed cancellation unexpectedly stopped the worker");
-      require(cleanup.attempts.get() == 0
-              && !field(query, "planCleanupAttempted").getBoolean(query),
+      require(cleanup.attempts.get() <= 1
+              && field(query, "planCleanupAttempted").getBoolean(query)
+                  == (cleanup.attempts.get() == 1),
+          "failed close replayed or lost plan cleanup");
+      require(cleanup.attempts.get() == 0 || !worker.isAlive(),
           "failed cancellation cleaned the plan while its worker was alive");
       synchronized (results) {
         require(field(query, "partitionBatches").get(query) == null,
@@ -162,18 +171,25 @@ public final class CleanupFailureTest {
                 && ((SparkJvmEngine.EngineException) error.getCause()).code() == 1,
             "failed close returned the wrong pull error: " + error.getCause());
       }
-      Files.write(directory.resolve("allow"), new byte[0]);
       worker.join(15000);
-      require(!worker.isAlive(), "worker did not exit after its gate opened");
+      require(!worker.isAlive() && field(query, "workerFinished").getBoolean(query),
+          "cursor release did not independently cancel and drain its worker");
+      require(!Files.exists(directory.resolve("allow")),
+          "fixture opened the partition gate before cancellation drained");
+      deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
+      while (!Files.exists(directory.resolve("exited"))) {
+        require(System.nanoTime() < deadline, "cursor release left its gated partition running");
+        Thread.sleep(5);
+      }
       require(field(query, "partitionBatches").get(query) == null,
           "late callback repopulated the closed cursor");
-      expectSame(failure, query::close);
-      expectSame(failure, query::close);
+      expectSame(planFailure, query::close);
+      expectSame(planFailure, query::close);
       require(cleanup.attempts.get() == 1,
           "retry did not clean the terminated worker's plan exactly once");
-      require(registry(engine, "tasks").contains(task)
+      require(!registry(engine, "tasks").contains(task)
               && registry(session, "queries").contains(query),
-          "retry discarded owners of the retained cancellation failure");
+          "retry did not separate recovered cancellation from partial plan cleanup");
     } catch (Throwable error) {
       primaryFailure = error;
       throw error;
@@ -211,17 +227,6 @@ public final class CleanupFailureTest {
     // This isolated engine and its deliberately failed owners remain until the test JVM exits.
   }
 
-  @FunctionalInterface
-  private interface CheckedAction { void run() throws Exception; }
-
-  private static Throwable cleanup(Throwable original, CheckedAction action) {
-    try { action.run(); } catch (Throwable error) {
-      if (original == null) return error;
-      if (error != original) original.addSuppressed(error);
-    }
-    return original;
-  }
-
   private static final class WaitingPartition implements UDF1<Long, Long> {
     private static final long serialVersionUID = 1L;
     private final String directory;
@@ -231,13 +236,24 @@ public final class CleanupFailureTest {
     @Override
     public Long call(Long value) throws Exception {
       if (TaskContext.get().partitionId() == 0) {
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
-        while (!Files.exists(Path.of(directory).resolve("allow"))) {
-          if (TaskContext.get().isInterrupted() || Thread.currentThread().isInterrupted()) {
-            throw new InterruptedException("cleanup fixture partition cancelled");
+        Path folder = Path.of(directory);
+        Files.write(folder.resolve("entered"), new byte[0]);
+        try {
+          long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+          while (!Files.exists(folder.resolve("allow"))) {
+            if (TaskContext.get().isInterrupted() || Thread.currentThread().isInterrupted()) {
+              throw new InterruptedException("cleanup fixture partition cancelled");
+            }
+            require(System.nanoTime() < deadline, "cleanup fixture gate timed out");
+            Thread.sleep(5);
           }
-          require(System.nanoTime() < deadline, "cleanup fixture gate timed out");
-          Thread.sleep(5);
+        } finally {
+          boolean restoreInterrupt = Thread.interrupted();
+          try {
+            Files.write(folder.resolve("exited"), new byte[0]);
+          } finally {
+            if (restoreInterrupt) Thread.currentThread().interrupt();
+          }
         }
       }
       return value;
@@ -394,16 +410,6 @@ public final class CleanupFailureTest {
     public boolean canEqual(Object other) { return other instanceof FailingCleanupPlan; }
   }
 
-  private static Field field(Object owner, String name) throws ReflectiveOperationException {
-    Field field = owner.getClass().getDeclaredField(name);
-    field.setAccessible(true);
-    return field;
-  }
-
-  private static Set<?> registry(Object owner, String name) throws ReflectiveOperationException {
-    return (Set<?>) field(owner, name).get(owner);
-  }
-
   private static void expectSame(RuntimeException expected, Runnable close) {
     try {
       close.run();
@@ -411,9 +417,5 @@ public final class CleanupFailureTest {
     } catch (RuntimeException actual) {
       require(actual == expected, "cleanup replaced the original failure: " + actual);
     }
-  }
-
-  private static void require(boolean condition, String message) {
-    if (!condition) throw new AssertionError(message);
   }
 }

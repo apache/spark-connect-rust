@@ -26,8 +26,8 @@ import hashlib
 import json
 import logging
 from pathlib import Path
-import time
 import tempfile
+import time
 import traceback
 import uuid
 
@@ -505,22 +505,31 @@ def main():
             session = raw_session()
             key = "spark.sql.classic.shuffleDependency.fileCleanup.enabled"
             previous = session.config("get_all", base.ConfigRequest.GetAll())
-            try:
-                session.config("set", base.ConfigRequest.Set(pairs=[base.KeyValue(key=key, value="true")]))
-                failure = expect_rpc_error(
-                    lambda: session.collect(sql("SELECT SUM(id) AS total FROM range(100)")),
-                    {grpc.StatusCode.UNIMPLEMENTED})
-                session.config("set", base.ConfigRequest.Set(pairs=[base.KeyValue(key=key, value="false")]))
-                assert session.collect(sql("SELECT 2 AS answer")) == [{"answer": 2}]
-            finally:
-                if key in previous:
-                    session.config("set", base.ConfigRequest.Set(pairs=[base.KeyValue(key=key, value=previous[key])]))
-                else:
-                    session.config("unset", base.ConfigRequest.Unset(keys=[key]))
-            restored = session.config("get_all", base.ConfigRequest.GetAll())
-            assert (key in restored) == (key in previous), (previous, restored)
-            assert restored.get(key) == previous.get(key), (previous, restored)
-            return {"unsupported_setting": failure, "session_recovered": True}
+            rejected = ("true", "TRUE", " true", "true ", "\ttrue", " \tTrUe \n")
+            failures = []
+            for value in rejected:
+                failures.append(expect_rpc_error(
+                    lambda value=value: session.config("set", base.ConfigRequest.Set(
+                        pairs=[base.KeyValue(key=key, value=value)])),
+                    {grpc.StatusCode.UNIMPLEMENTED}))
+                restored = session.config("get_all", base.ConfigRequest.GetAll())
+                assert restored == previous, "rejected Set changed the previous configuration"
+                request = base.ConfigRequest(
+                    **session.identity(), operation=base.ConfigRequest.Operation(
+                        set=base.ConfigRequest.Set(silent=True,
+                            pairs=[base.KeyValue(key=key, value=value)])))
+                response = session.stub.Config(request, timeout=args.timeout)
+                session.observe(response)
+                assert not response.pairs and len(response.warnings) == 1, response
+                assert "UNSUPPORTED_EXECUTION_SETTING" in response.warnings[0], response
+                restored = session.config("get_all", base.ConfigRequest.GetAll())
+                assert restored == previous, "rejected SilentSet changed the previous configuration"
+            session.config("set", base.ConfigRequest.Set(
+                pairs=[base.KeyValue(key=key, value="false")]))
+            assert session.collect(sql("SELECT 2 AS answer")) == [{"answer": 2}]
+            return {"unsupported_setting": failures, "silent_warnings": len(rejected),
+                    "config_rolled_back": True,
+                    "session_recovered": True}
 
         check("raw_shuffle_file_cleanup_is_rejected", shuffle_cleanup_guard)
 

@@ -940,8 +940,8 @@ enum CatalogGuard<'a> {
     Write { _guard: RwLockWriteGuard<'a, ()> },
 }
 impl CatalogAccess {
-    // JNI Config ABI: 1..=5 are read-only, 6/7/8 mutate. Unknown opcodes stay
-    // exclusive conservatively. The Java adapter mirrors this contract.
+    // JNI Config ABI: 1..=5 are read-only, 6/7/8 mutate. Rust conservatively
+    // takes exclusive access for unknown opcodes; Java rejects them before locking.
     fn config(opcode: i32) -> Self {
         match opcode {
             1..=5 => Self::Read,

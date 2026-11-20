@@ -17,6 +17,9 @@
 
 package org.apache.spark.sql.connect.nativebridge.engine;
 
+import static org.apache.spark.sql.connect.nativebridge.engine.TestSupport.require;
+import static org.apache.spark.sql.connect.nativebridge.engine.TestSupport.sql;
+
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
@@ -27,8 +30,8 @@ import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.Arrays;
 import java.util.AbstractMap;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.NoSuchElementException;
@@ -59,35 +62,34 @@ import org.apache.spark.connect.proto.Project;
 import org.apache.spark.connect.proto.Range;
 import org.apache.spark.connect.proto.Read;
 import org.apache.spark.connect.proto.Relation;
-import org.apache.spark.connect.proto.SQL;
 import org.apache.spark.connect.proto.ScalarScalaUDF;
 import org.apache.spark.connect.proto.SubqueryAlias;
 import org.apache.spark.connect.proto.TypedAggregateExpression;
 import org.apache.spark.connect.proto.WithRelations;
+import org.apache.spark.ml.linalg.VectorUDT;
 import org.apache.spark.scheduler.SparkListener;
 import org.apache.spark.scheduler.SparkListenerJobStart;
-import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.Row;
+import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.SparkSessionExtensions;
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan;
 import org.apache.spark.sql.catalyst.rules.Rule;
-import org.apache.spark.sql.connect.service.SparkConnectService$;
 import org.apache.spark.sql.connect.common.InvalidPlanInput;
-import org.apache.spark.sql.util.ArrowUtils$;
-import org.apache.spark.ml.linalg.VectorUDT;
+import org.apache.spark.sql.connect.service.SparkConnectService$;
 import org.apache.spark.sql.types.DataType;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.Metadata;
 import org.apache.spark.sql.types.MetadataBuilder;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
+import org.apache.spark.sql.util.ArrowUtils$;
 import org.sparkproject.connect.protobuf.Message;
 
 import scala.Option;
 import scala.runtime.AbstractFunction1;
 import scala.runtime.BoxedUnit;
 
-/** Direct Catalyst/Arrow tests. This program does not load the native library. */
+/** Direct Catalyst/Arrow planning, execution and lifecycle tests. */
 public final class EngineSmokeTest {
   private static final AtomicReference<AnalysisGate> ANALYSIS_GATE = new AtomicReference<>();
   private static final AtomicReference<AnalysisJob> ANALYSIS_JOB = new AtomicReference<>();
@@ -96,6 +98,12 @@ public final class EngineSmokeTest {
 
   public static void main(String[] arguments) throws Exception {
     shutdownHelpers();
+    try {
+      new SparkJvmEngine(null);
+      throw new AssertionError("null host session was accepted");
+    } catch (NullPointerException error) {
+      require("session".equals(error.getMessage()), "null host session lost its diagnostic");
+    }
     SparkSession spark = SparkSession.builder().appName("Typed JVM Engine Smoke")
         .config("spark.sql.artifact.isolation.enabled", "true")
         .config("spark.sql.artifact.isolation.alwaysApplyClassloader", "true")
@@ -141,6 +149,7 @@ public final class EngineSmokeTest {
         plannerInputFailures(engine, first);
         configSetterFailureRollsBackPartialWrite(engine, first);
         failedTaskScopeCaptureCanRetry(engine, first);
+        completedTasksCannotBeReused(engine, first);
         configCancellationDoesNotWaitForMutation(engine, first);
         cancelledBeforePrepare(engine, first);
         commandsCannotMutateCatalog(engine, first);
@@ -173,10 +182,6 @@ public final class EngineSmokeTest {
   private static Relation range(long count) {
     return Relation.newBuilder().setRange(Range.newBuilder()
         .setStart(0).setEnd(count).setStep(1).setNumPartitions(2)).build();
-  }
-
-  private static Relation sql(String text) {
-    return Relation.newBuilder().setSql(SQL.newBuilder().setQuery(text)).build();
   }
 
   private static SparkJvmEngine.Query query(SparkJvmEngine engine, SparkJvmEngine.Session session,
@@ -291,7 +296,7 @@ public final class EngineSmokeTest {
       if (entered.compareAndSet(false, true)) {
         // A real analyzer extension can submit Spark work before result fetching begins.
         // The atomic guard prevents this test's nested query from recursively submitting jobs.
-        spark.sql("SELECT sum(id) AS total FROM range(1000000000000)").collectAsList();
+        spark.sql("SELECT max(id) AS total FROM range(1000000000000)").collectAsList();
       }
     }
   }
@@ -586,13 +591,13 @@ public final class EngineSmokeTest {
   private static void shuffleCleanupIsRejected(SparkJvmEngine engine,
       SparkJvmEngine.Session session) throws Exception {
     String key = "spark.sql.classic.shuffleDependency.fileCleanup.enabled";
-    String before = config(engine, session, 4).get(key);
-    config(engine, session, 6, key, "true");
-    try {
-      matchingMetadataFailure(engine, session, range(1).toByteArray(), 12);
-    } finally {
-      config(engine, session, before == null ? 7 : 6, key, before);
+    Map<String, String> before = config(engine, session, 4);
+    byte[] rejected = encode(key, "true");
+    try (SparkJvmEngine.Task task = engine.newTask("unsupported shuffle cleanup setting")) {
+      expectCode(12, () -> session.config(6, rejected, task));
     }
+    require(before.equals(config(engine, session, 4)),
+        "shuffle-cleanup rejection changed the previous configuration");
     try (SparkJvmEngine.Query recovered = query(engine, session, range(1))) {
       require(recovered.schemaIpc().length > 0, "shuffle-cleanup rejection poisoned the session");
     }
@@ -789,7 +794,6 @@ public final class EngineSmokeTest {
       thread.setContextClassLoader(previousLoader);
       if (previousSession.isDefined()) SparkSession.setActiveSession(previousSession.get());
       else SparkSession.clearActiveSession();
-      SparkEnv.set(previousEnv);
       if (previousInterrupted) thread.interrupt();
     }) {
       thread.setContextClassLoader(callerLoader);
@@ -1272,6 +1276,40 @@ public final class EngineSmokeTest {
     }
   }
 
+  private static void completedTasksCannotBeReused(SparkJvmEngine engine,
+      SparkJvmEngine.Session session) throws Exception {
+    byte[] relation = range(1).toByteArray();
+    byte[] empty = encode();
+    for (int operation = 0; operation < 4; operation++) {
+      SparkJvmEngine.Session opened = null;
+      try (SparkJvmEngine.Task task = engine.newTask("completed task reuse " + operation)) {
+        if (operation == 0) {
+          opened = engine.openSession("smoke-user", UUID.randomUUID().toString(), task);
+        } else if (operation == 1) {
+          session.analyze(0, relation, task);
+        } else if (operation == 2) {
+          session.config(4, empty, task);
+        } else {
+          try (SparkJvmEngine.Query query = session.prepare(relation, task)) {
+            require(Arrays.equals(consume(query), new long[] {1, 0}),
+                "completed-task fixture did not consume its real Spark query");
+            require(query.nextIpcBatch() == null, "completed-task fixture EOF changed");
+          }
+        }
+        require(flag(task, "completed"), "successful operation did not complete its Task");
+        expectCode(9, () -> engine.openSession("smoke-user", UUID.randomUUID().toString(), task));
+        expectCode(9, () -> session.analyze(0, relation, task));
+        expectCode(9, () -> session.config(4, empty, task));
+        expectCode(9, () -> session.prepare(relation, task));
+        require(flag(task, "completed") && !flag(task, "cancelled"),
+            "rejected Task reuse changed its completed state");
+      } finally {
+        if (opened != null) opened.close();
+      }
+    }
+    require(registry(session, "activeTasks").isEmpty(), "Task reuse retained an active operation");
+  }
+
   private static void failedTaskScopeCaptureCanRetry(SparkJvmEngine engine,
       SparkJvmEngine.Session session) throws Exception {
     byte[] empty = encode();
@@ -1525,8 +1563,8 @@ public final class EngineSmokeTest {
           "INSERT OVERWRITE DIRECTORY '" + location + "' USING parquet SELECT 99 AS id",
       }) {
         matchingMetadataFailure(engine, session, sql(statement).toByteArray(), 12);
-        // matchingMetadataFailure exercises prepare and every Analyze opcode; opcode zero
-        // is also the typed validation used by the native frontend's SqlCommand path.
+        // Exercise preparation and every analysis mode against each mutating statement;
+        // analysis opcode zero also validates the native SqlCommand path.
         require(Arrays.equals(tableValues(sessionSpark, table), new long[] {1, 7}),
             "rejected SQL mutated its target: " + statement);
       }
@@ -1585,7 +1623,7 @@ public final class EngineSmokeTest {
     ExecutorService executor = Executors.newSingleThreadExecutor();
     try (SparkJvmEngine.Task task = engine.newTask("running cancellation");
          SparkJvmEngine.Query query = first.prepare(
-             sql("SELECT sum(id) AS total FROM range(1000000000000)").toByteArray(), task)) {
+             sql("SELECT max(id) AS total FROM range(1000000000000)").toByteArray(), task)) {
       Future<NativeIpcBatch> fetch = executor.submit(query::nextIpcBatch);
       long limit = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
       while (spark.sparkContext().statusTracker().getActiveJobIds().length == 0
@@ -1672,9 +1710,5 @@ public final class EngineSmokeTest {
       require(error.code() == code, "unexpected engine error: " + error);
       return error;
     }
-  }
-
-  private static void require(boolean condition, String message) {
-    if (!condition) throw new AssertionError(message);
   }
 }

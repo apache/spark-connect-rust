@@ -28,12 +28,12 @@ PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 "${NATIVE_TEST_PYTHON:-python3}" -B - "$PROJECT_DIR" "$SPARK_HOME" "$1" <<'PY'
 import json
 import os
+from pathlib import Path
 import re
 import subprocess
 import sys
 import tempfile
 import time
-from pathlib import Path
 
 root, spark_home, library = (Path(value).resolve(strict=True) for value in sys.argv[1:])
 reports = root / ".build" / "jvm-native"
@@ -64,7 +64,8 @@ try:
     print(content, end="", flush=True)
     if result.returncode != 0:
         raise RuntimeError("real JNI smoke failed; see " + str(log_path))
-    if re.search(r"WARNING in native method|FATAL ERROR in native method", content):
+    if re.search(r"WARNING in native method|FATAL ERROR in native method|WARNING: JNI local refs:",
+                 content):
         raise RuntimeError("real JNI smoke triggered a JNI diagnostic; see " + str(log_path))
     if "NATIVE_JNI_SMOKE_OK:" not in content:
         raise RuntimeError("real JNI smoke success marker missing; see " + str(log_path))
