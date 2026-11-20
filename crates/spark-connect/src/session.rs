@@ -730,9 +730,10 @@ impl SparkSession {
         self.tags.has_current()
     }
 
-    /// Start a brand-new session over the same connection. Mirrors
-    /// `SparkSession.newSession` — a fresh server-side session (new session id),
-    /// with its own tags and plan IDs.
+    /// Start a brand-new session of the same endpoint, over the connection of the process to it,
+    /// as PySpark's client of a new session makes a channel of the subchannels of the process.
+    /// Mirrors `SparkSession.newSession` — a fresh server-side session (new session id), with its
+    /// own tags and plan IDs.
     pub fn new_session(&self) -> SparkSession {
         self.new_session_of(self.client.with_new_session_id())
     }
@@ -776,6 +777,8 @@ impl SparkSession {
     /// the id `new_session_id`, a UUID, if one is given, mirroring
     /// `SparkSession.cloneSession(new_session_id)`.
     pub fn clone_session_with_id(&self, new_session_id: Option<&str>) -> Result<SparkSession> {
+        // Of the one client that the clone makes, as PySpark's: a channel of the proxy of the
+        // environment, which logs what grpcio logs of it once.
         let client = block_on(self.client.clone_session(new_session_id))?;
         Ok(self.new_session_of(client))
     }
@@ -1459,6 +1462,30 @@ impl SparkSession {
     /// has the default policy, as PySpark's new client does.
     pub fn set_retry_policy(&self, policy: spark_connect_core::retries::RetryPolicy) {
         self.client.replace_retry_policy(policy);
+    }
+
+    /// Read the user agent of the requests of this session again (see
+    /// [`spark_connect_core::client::SparkConnectClient::refresh_user_agent`]). Not a stable API.
+    #[doc(hidden)]
+    pub fn refresh_user_agent(&self) {
+        self.client.refresh_user_agent();
+    }
+
+    /// The per-RPC deadlines of the calls of this session (see
+    /// [`spark_connect_core::client::RpcDeadlines`]).
+    pub fn rpc_deadlines(&self) -> spark_connect_core::client::RpcDeadlines {
+        self.client.rpc_deadlines().clone()
+    }
+
+    /// Make `decider` decide the retries of the RPCs of this session and of its clones that start
+    /// from now on, in place of its retry policy, or the policy again with none (see
+    /// [`spark_connect_core::retries::RetryDecider`]). A new session has none. Not a stable API.
+    #[doc(hidden)]
+    pub fn set_retry_decider(
+        &self,
+        decider: Option<Arc<dyn spark_connect_core::retries::RetryDecider>>,
+    ) {
+        self.client.set_retry_decider(decider);
     }
 
     /// Make the executions of this session reattachable or not, from the next one on, as PySpark's
@@ -4699,17 +4726,22 @@ mod tests {
         use std::time::{Duration, Instant};
 
         let server = UnansweringServer::start();
-        let builder =
-            ChannelBuilder::parse(&format!("sc://127.0.0.1:{}", server.port)).expect("valid URL");
-        let new_session = || {
+        // Of two keepalives, so that each session has a connection of its own, by which the
+        // release of each is seen: the sessions of one target share a connection.
+        let new_session = |keepalive_ms: u64| {
+            let builder = ChannelBuilder::parse(&format!(
+                "sc://127.0.0.1:{}/;grpc_keepalive_time_ms={keepalive_ms}",
+                server.port
+            ))
+            .expect("valid URL");
             let mut client =
                 block_on(SparkConnectClient::connect(&builder)).expect("failed to build client");
             // The release fails at once when its connection closes.
             client.set_retry_policy(spark_connect_core::retries::RetryPolicy::no_retries());
             SparkSession::new(client)
         };
-        let first_session = new_session();
-        let second_session = new_session();
+        let first_session = new_session(10_000);
+        let second_session = new_session(20_000);
         let aborted = Arc::new(AtomicBool::new(false));
         let watch: Arc<WaitWatch> = {
             let aborted = Arc::clone(&aborted);

@@ -8,8 +8,12 @@ pub mod artifact;
 pub mod bytes_codec;
 pub mod channel;
 pub mod client;
+mod connector;
 pub mod error;
+#[doc(hidden)]
+pub mod fork;
 pub mod grpc_log;
+mod metadata;
 mod proxy;
 pub mod reattach;
 pub mod retries;
@@ -24,6 +28,8 @@ pub use artifact::{
 };
 pub use channel::ChannelBuilder;
 pub use client::{ExecutePlanHook, ResultChunking, RpcDeadlines, SparkConnectClient};
+#[doc(hidden)]
+pub use connector::set_grpcio_dialect;
 pub use error::{QueryContext, QueryContextType, Result, SparkError, SparkErrorKind};
 pub use reattach::ExecutePlanResponseReattachableIterator;
 pub use retries::{RetryPolicy, RetryPolicyState, DEFAULT_MAX_RETRY_EXCEPTION_ELAPSED_TIME};

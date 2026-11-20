@@ -127,9 +127,12 @@ enum ProxyUriError {
     Invalid(String),
 }
 
-/// An HTTP proxy: its `host:port`, and the `Proxy-Authorization` value of its credentials.
+/// An HTTP proxy: its `host:port`, its host (an IPv6 address without brackets) and its port, and
+/// the `Proxy-Authorization` value of its credentials.
 pub(crate) struct HttpProxy {
     pub(crate) authority: String,
+    pub(crate) host: String,
+    pub(crate) port: u16,
     pub(crate) authorization: Option<String>,
 }
 
@@ -204,6 +207,8 @@ impl HttpProxy {
             (!userinfo.is_empty()).then(|| format!("Basic {}", STANDARD.encode(userinfo)));
         Ok(Self {
             authority,
+            host: host.to_string(),
+            port,
             authorization,
         })
     }

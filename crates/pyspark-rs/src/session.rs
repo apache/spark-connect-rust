@@ -659,21 +659,34 @@ pub(crate) fn url_of_channel_builder(connection: &Bound<'_, PyAny>) -> PyResult<
     };
     let mut url = format!("sc://{endpoint}");
     // Preserve connection params (token/use_ssl/user_id/...) if present as `_params`.
-    if let Ok(params) = channel_builder.getattr("_params") {
-        if let Ok(dict) = params.cast::<pyo3::types::PyDict>() {
-            if !dict.is_empty() {
-                let mut parts: Vec<String> = Vec::new();
-                for (k, v) in dict.iter() {
-                    parts.push(format!(
-                        "{}={}",
-                        k.str()?,
-                        quote_param(&v.str()?.to_string())
-                    ));
-                }
-                url.push_str("/;");
-                url.push_str(&parts.join(";"));
+    let mut params: Vec<(String, String)> = Vec::new();
+    if let Ok(dict) = channel_builder.getattr("_params") {
+        if let Ok(dict) = dict.cast::<pyo3::types::PyDict>() {
+            for (k, v) in dict.iter() {
+                params.push((k.str()?.to_string(), v.str()?.to_string()));
             }
         }
+    }
+    // As PySpark's client, which reads the user ID and the token of the builder's properties,
+    // those of a subclass that overrides them, when it is made: they replace the parameters.
+    for (property, param) in [("userId", "user_id"), ("token", "token")] {
+        let Ok(value) = channel_builder.getattr(property) else {
+            continue;
+        };
+        if value.is_none() {
+            continue;
+        }
+        let value = value.str()?.to_string();
+        params.retain(|(key, _)| key != param);
+        params.push((param.to_string(), value));
+    }
+    if !params.is_empty() {
+        let parts: Vec<String> = params
+            .iter()
+            .map(|(key, value)| format!("{key}={}", quote_param(value)))
+            .collect();
+        url.push_str("/;");
+        url.push_str(&parts.join(";"));
     }
     Ok(url)
 }
@@ -987,6 +1000,7 @@ fn new_session(py: Python<'_>, url: &str) -> PyResult<Py<PySparkSession>> {
         .remote(url)
         .get_or_create()
         .to_pyerr()?;
+    log_rpc_deadlines(py, &session)?;
     session_object(py, &session)
 }
 
@@ -1363,6 +1377,57 @@ fn set_default_and_active(py: Python<'_>, session: &Py<PySparkSession>) -> PyRes
         }
     });
     Ok(())
+}
+
+/// Log the RPC deadlines of the client of `session`, a new session, as PySpark's
+/// `SparkConnectClient` logs them when it is made (`Spark Connect RPC deadlines: ...`): of the
+/// seconds of each, an int when it is whole, as PySpark's `RpcDeadlines` has them by default.
+/// Only where the logger of Spark Connect writes it, as `pyspark.sql.connect.client`, of its
+/// `RpcDeadlines`, imports grpc. An error of the log is dropped, but the KeyboardInterrupt of a
+/// signal, which the creation of the session raises, as PySpark's raises it out of its log.
+fn log_rpc_deadlines(py: Python<'_>, session: &SparkSession) -> PyResult<()> {
+    let deadlines = session.rpc_deadlines();
+    let logged = (|| -> PyResult<()> {
+        if !crate::client::connect_logger_enabled_for(py, crate::client::LOG_INFO)? {
+            return Ok(());
+        }
+        let kwargs = PyDict::new(py);
+        let fields = [
+            (
+                "reattachable_execute_plan",
+                deadlines.reattachable_execute_plan,
+            ),
+            ("reattach_execute", deadlines.reattach_execute),
+            ("analyze_plan", deadlines.analyze_plan),
+            ("add_artifacts", deadlines.add_artifacts),
+            ("config", deadlines.config),
+            ("interrupt", deadlines.interrupt),
+            ("release_session", deadlines.release_session),
+            ("artifact_status", deadlines.artifact_status),
+            ("clone_session", deadlines.clone_session),
+            ("get_status", deadlines.get_status),
+            ("fetch_error_details", deadlines.fetch_error_details),
+        ];
+        for (name, deadline) in fields {
+            match deadline {
+                None => kwargs.set_item(name, py.None())?,
+                Some(deadline) if deadline.subsec_nanos() == 0 => {
+                    kwargs.set_item(name, deadline.as_secs())?
+                }
+                Some(deadline) => kwargs.set_item(name, deadline.as_secs_f64())?,
+            }
+        }
+        py.import("pyspark.sql.connect.client")?
+            .getattr("_log_rpc_deadlines")?
+            .call((), Some(&kwargs))?;
+        Ok(())
+    })();
+    match logged {
+        Err(error) if error.is_instance_of::<pyo3::exceptions::PyKeyboardInterrupt>(py) => {
+            Err(error)
+        }
+        _ => Ok(()),
+    }
 }
 
 /// Emit a one-time INFO log identifying this as the Rust-backed Spark Connect
@@ -4100,6 +4165,7 @@ impl PySparkSession {
     ) -> PyResult<()> {
         let py = slf.py();
         let session = connected_session(py, connection, userId.as_ref(), |builder| builder)?;
+        log_rpc_deadlines(py, &session)?;
         let value = PySparkSession::new(session.clone());
         let replaced = std::mem::replace(&mut *slf.borrow_mut(), value);
         // The objects of the session that it replaces, dropped once it is not borrowed, as their
@@ -4216,6 +4282,13 @@ impl PySparkSession {
         file: Bound<'_, PyAny>,
     ) -> PyResult<()> {
         self.upload_artifact_paths(py, &path, &[pyfile, archive, file])
+    }
+
+    /// Make PySpark's `Retrying` of `policies`, a list of its retry policies, decide the retries
+    /// of the RPCs of the session that start from now on, in place of the retry policy of the
+    /// transport, or the policy again with None (see [`crate::client::PolicyRetries`]).
+    fn _set_retry_decider(&self, policies: Option<Bound<'_, PyList>>) {
+        crate::client::set_retry_decider(&self.session, policies);
     }
 
     /// The retry policy of the RPCs of the session, as the keyword arguments of PySpark's
@@ -4802,7 +4875,9 @@ impl PySparkSession {
         py: Python<'_>,
         user_id: Option<String>,
     ) -> PyResult<Py<PySparkSession>> {
-        session_object(py, &self.session.new_session_of_user(user_id))
+        let session = self.session.new_session_of_user(user_id);
+        log_rpc_deadlines(py, &session)?;
+        session_object(py, &session)
     }
 
     /// The clone of `cloneSession(new_session_id)`, without the client state of this one, for
@@ -4827,6 +4902,7 @@ impl PySparkSession {
                     .map_err(Box::new)
             }
         })?;
+        log_rpc_deadlines(py, &session)?;
         session_object(py, &session)
     }
 }

@@ -31,8 +31,12 @@ use spark_connect::dataframe::PlanExecution;
 use spark_connect::plan::BuiltOutside;
 use spark_connect::session::{ExecutionInfo, SparkSession};
 use spark_connect_core::client::{ResultChunking, RpcDeadlines};
+use spark_connect_core::error::GrpcCall;
 use spark_connect_core::error::SparkError;
-use spark_connect_core::retries::{RetriesExceeded, RetriesListener, RetryPolicy};
+use spark_connect_core::retries::{
+    BackgroundFailure, BackgroundRequest, CallRetries, Decision, Delivery, RetriesExceeded,
+    RetriesListener, RetryDecider, RetryPolicy,
+};
 use spark_connect_proto as proto;
 
 use crate::interrupt::interruptible;
@@ -233,33 +237,372 @@ pub(crate) struct RetryParameters {
 /// `Retrying._wait` warns `[RETRIES_EXCEEDED]`: it warns as PySpark does, with
 /// `_warn_retries_exceeded` of `pyspark.sql.connect.client`, on the thread of the call, and the
 /// exception of the warning, of a filter of `"error"`, is the error of the call in place of its
-/// failure, as PySpark raises it out of `_wait`.
+/// failure, as PySpark raises it out of `_wait`. A call of a thread of the runtime, which no
+/// caller waits for, warns on the delivery thread, as PySpark's warns from the thread that sends
+/// it, and its failure stays its error. It logs to the logger of Spark Connect what PySpark's
+/// `Retrying` logs of the retries of the calls, and the failure of a request that the transport
+/// sent in the background as PySpark's sender logs it.
 struct RetriesWarning;
+
+/// Warn as PySpark's `Retrying._wait` warns once retries are spent, with `_warn_retries_exceeded`
+/// of `pyspark.sql.connect.client`: the exception of the warning, of a filter of `"error"`.
+fn warn_retries_exceeded(py: Python<'_>, exceeded: RetriesExceeded) -> PyResult<()> {
+    py.import("pyspark.sql.connect.client")?.call_method1(
+        "_warn_retries_exceeded",
+        (exceeded == RetriesExceeded::RetryException,),
+    )?;
+    Ok(())
+}
+
+/// The levels of `logging` of the logs of the client.
+pub(crate) const LOG_INFO: i32 = 20;
+const LOG_ERROR: i32 = 40;
+
+/// Whether the logger of Spark Connect (`pyspark.sql.connect.logging`), which is disabled unless
+/// `SPARK_CONNECT_LOG_LEVEL` is set, writes a log of `level`.
+pub(crate) fn connect_logger_enabled_for(py: Python<'_>, level: i32) -> PyResult<bool> {
+    py.import("pyspark.sql.connect.logging")?
+        .getattr("logger")?
+        .call_method1("isEnabledFor", (level,))?
+        .extract()
+}
+
+/// Log `message` at the level `level` to the logger of Spark Connect
+/// (`pyspark.sql.connect.logging`), as PySpark's client logs it, on the thread of the caller when
+/// it is a thread of Python, else on the delivery thread. An error of the logging is dropped, as
+/// the logging module reports its own errors, but for the KeyboardInterrupt of a signal.
+fn log_to_connect_logger(level: &'static str, message: String) {
+    crate::deliver::run_dropping_errors(move |py| {
+        py.import("pyspark.sql.connect.logging")?
+            .getattr("logger")?
+            .call_method1(level, (message,))?;
+        Ok(())
+    });
+}
 
 impl RetriesListener for RetriesWarning {
     fn retries_exceeded(&self, exceeded: RetriesExceeded) -> spark_connect_core::error::Result<()> {
-        // Only on a thread of Python, as that of a call of the client is: a thread of the runtime,
-        // which runs what no caller waits for, has no thread state of Python, and does not wait
-        // for the GIL.
-        // SAFETY: reads the thread state that the interpreter keeps for this thread, without the
-        // GIL, which it does not need.
-        if unsafe { pyo3::ffi::PyGILState_GetThisThreadState() }.is_null() {
+        // On a thread of the runtime, of a request that no caller waits for, the warning is the
+        // delivery thread's, and the failure stays the error of the request.
+        if !crate::deliver::on_python_thread() {
+            // The exception of the warning, of a filter of "error", is dropped, as PySpark's
+            // senders in the background catch it (`except Exception`).
+            crate::deliver::run(move |py| drop(warn_retries_exceeded(py, exceeded)));
             return Ok(());
         }
-        Python::attach(|py| {
-            py.import("pyspark.sql.connect.client")?.call_method1(
-                "_warn_retries_exceeded",
-                (exceeded == RetriesExceeded::RetryException,),
-            )?;
-            Ok(())
-        })
-        .map_err(crate::errors::callback_error)
+        Python::attach(|py| warn_retries_exceeded(py, exceeded))
+            .map_err(crate::errors::callback_error)
     }
 
-    fn caught(&self, error: SparkError) {
-        // As PySpark's `except Exception`, which drops the exception of the warning.
+    fn caught(&self, error: SparkError) -> Option<SparkError> {
+        // As PySpark's `except Exception`, which drops the exception of the warning, or of a
+        // policy, but lets a `BaseException` only out, as a KeyboardInterrupt.
+        if crate::errors::is_base_exception_only(&error) {
+            return Some(error);
+        }
         drop(crate::errors::callback_exception(&error));
+        None
     }
+
+    fn background_failure(
+        &self,
+        request: BackgroundRequest,
+        exceeded: Option<RetriesExceeded>,
+        failure: BackgroundFailure<'_>,
+    ) {
+        let failure = match failure {
+            BackgroundFailure::Rpc(text) => Ok(text.to_string()),
+            BackgroundFailure::Error(error) => Err(error),
+        };
+        crate::deliver::run(move |py| {
+            // As PySpark's sender, which warns from its thread once the retries are spent, and
+            // catches the failure, or the exception of the warning of a filter of "error", or of
+            // a policy, which it logs as `{e}`.
+            let error = match exceeded.map(|exceeded| warn_retries_exceeded(py, exceeded)) {
+                Some(Err(raised)) => raised.value(py).to_string(),
+                _ => match failure {
+                    Ok(text) => text,
+                    Err(error) => match crate::errors::callback_exception(&error) {
+                        Some(raised) => raised.value(py).to_string(),
+                        None => error.message(),
+                    },
+                },
+            };
+            let logged = match request {
+                // `ReleaseExecute failed with exception: ...` of PySpark's iterator, and
+                // `RemoveRemoteCachedRelation failed with exception: ...` of its finalizer.
+                BackgroundRequest::ReleaseExecute => {
+                    format!("ReleaseExecute failed with exception: {error}.")
+                }
+                BackgroundRequest::RemoveCachedRemoteRelation => {
+                    format!("RemoveRemoteCachedRelation failed with exception: {error}.")
+                }
+            };
+            if let Err(error) = py
+                .import("pyspark.sql.connect.logging")
+                .and_then(|logging| logging.getattr("logger"))
+                .and_then(|logger| logger.call_method1("warning", (logged,)))
+            {
+                crate::deliver::keep_interrupt(py, &error);
+            }
+        });
+    }
+
+    fn retrying(&self, error: &str, wait_ms: u64, policy: &str) {
+        log_to_connect_logger(
+            "debug",
+            format!("Got error: {error}. Will retry after {wait_ms} ms (policy: {policy})"),
+        );
+    }
+
+    fn retrying_at_once(&self, error: &str) {
+        log_to_connect_logger("debug", format!("Got error: {error}. Retrying."));
+    }
+
+    fn given_up(&self, error: &str) {
+        log_to_connect_logger("debug", format!("Given up on retrying. error: {error}"));
+    }
+
+    fn server_retry_delay(&self, delay_ms: u64) {
+        log_to_connect_logger(
+            "debug",
+            format!("The server has sent a retry delay of {delay_ms} ms."),
+        );
+    }
+
+    fn rpc_error(&self, error: &spark_connect_core::error::GrpcioError) -> Delivery {
+        let error = error.clone();
+        // A handler of the log may wait forever on the error (see `may_wait_forever`).
+        let apart = may_wait_forever(&error);
+        delivered(apart, move |py| {
+            // The error of grpcio, of `pyspark.sql.connect.client`, which imports grpc, is made
+            // only for a log that is written.
+            if !connect_logger_enabled_for(py, LOG_ERROR)? {
+                return Ok(());
+            }
+            py.import("pyspark.sql.connect.client")?
+                .call_method1("_log_rpc_error", grpc_error_args(py, &error))?;
+            Ok(())
+        })
+    }
+
+    fn error_info(&self, text: &str) -> Delivery {
+        let message = format!("Received ErrorInfo: {text}");
+        delivered(false, move |py| {
+            py.import("pyspark.sql.connect.logging")?
+                .getattr("logger")?
+                .call_method1("debug", (message,))?;
+            Ok(())
+        })
+    }
+}
+
+/// Run `log`, a log of the error of a call, whose error is dropped, as [`log_to_connect_logger`]
+/// runs a log: at once on a thread of Python, and else on the delivery thread, or on a thread of
+/// its own (`apart`, see [`crate::deliver::call_apart`]), of the delivery that the call awaits, so
+/// that the log precedes what the call does next with its error, as PySpark's client logs on the
+/// thread of the call before it raises.
+fn delivered(
+    apart: bool,
+    log: impl FnOnce(Python<'_>) -> PyResult<()> + Send + 'static,
+) -> Delivery {
+    let log = move |py: Python<'_>| {
+        if let Err(error) = log(py) {
+            crate::deliver::keep_interrupt(py, &error);
+        }
+    };
+    if crate::deliver::on_python_thread() {
+        Python::attach(log);
+        return None;
+    }
+    Some(if apart {
+        Box::pin(async move {
+            crate::deliver::call_apart(log).await;
+        })
+    } else {
+        Box::pin(async move {
+            crate::deliver::call(log).await;
+        })
+    })
+}
+
+/// Whether Python code that is given grpcio's `error` may wait forever on it: grpcio's error of a
+/// stream of responses, `_MultiThreadedRendezvous`, of no `debug_error_string`, as of a response
+/// that the client failed to decode, whose `debug_error_string()` waits for one, which nothing
+/// sets, as grpcio's does. Such code runs apart from the delivery thread, where it would hold
+/// every later delivery of the process, as it holds only its own call in grpcio (see
+/// [`crate::deliver::call_apart`]).
+fn may_wait_forever(error: &spark_connect_core::error::GrpcioError) -> bool {
+    error.call == GrpcCall::ServerStreaming && error.debug_error_string.is_none()
+}
+
+/// The arguments of `_grpc_error` of `pyspark.sql.connect.client` of grpcio's `error`: whether
+/// its call is of a stream of responses, its code, its details, its `debug_error_string`, None
+/// when it has none, its trailing metadata, and its text, of which an error of no grpcio is made.
+#[allow(clippy::type_complexity)]
+pub(crate) fn grpc_error_args<'py>(
+    py: Python<'py>,
+    error: &spark_connect_core::error::GrpcioError,
+) -> (
+    bool,
+    i32,
+    String,
+    Option<String>,
+    Vec<(String, Bound<'py, PyBytes>)>,
+    String,
+) {
+    (
+        error.call == GrpcCall::ServerStreaming,
+        error.code as i32,
+        error.details.clone(),
+        error.debug_error_string.clone(),
+        error
+            .trailing_metadata
+            .iter()
+            .map(|(key, value)| (key.clone(), PyBytes::new(py, value)))
+            .collect(),
+        error.text.clone(),
+    )
+}
+
+/// The retries of the calls of a session whose retry policies the transport does not retry with
+/// itself, of their own methods, which PySpark's `Retrying` decides, as PySpark's client asks it:
+/// `_CallRetries` of `pyspark.sql.connect.client`, a `Retrying` of the policies of each call, of
+/// grpcio's `RpcError` of each failed attempt. The Python of a call of a thread of Python runs on
+/// that thread, the `to_state` of the policies as the call starts; that of a request that the
+/// transport sends in the background runs on the delivery thread, from its first failure on.
+pub(crate) struct PolicyRetries {
+    /// The list of the policies, which a thread of the runtime clones without the GIL.
+    policies: std::sync::Arc<Py<PyAny>>,
+}
+
+/// The retries of one call of [`PolicyRetries`]: its `_CallRetries`, once it is made, or the error
+/// of its making, which fails the call at its first failure.
+struct PolicyCallRetries {
+    policies: std::sync::Arc<Py<PyAny>>,
+    streaming: bool,
+    retries: Option<PyResult<Py<PyAny>>>,
+}
+
+/// The `_CallRetries` of `policies`, a `Retrying` of their states.
+fn call_retries(py: Python<'_>, policies: &Py<PyAny>) -> PyResult<Py<PyAny>> {
+    Ok(py
+        .import("pyspark.sql.connect.client")?
+        .getattr("_CallRetries")?
+        .call1((policies.clone_ref(py),))?
+        .unbind())
+}
+
+impl RetryDecider for PolicyRetries {
+    fn start(&self, call: GrpcCall) -> Box<dyn CallRetries> {
+        // The `to_state` of the policies, on the thread of the call, as it starts; a thread of
+        // the runtime does not wait for the GIL, and makes them at its first failure.
+        let retries = if crate::deliver::on_python_thread() {
+            Python::try_attach(|py| call_retries(py, &self.policies))
+        } else {
+            None
+        };
+        Box::new(PolicyCallRetries {
+            policies: std::sync::Arc::clone(&self.policies),
+            streaming: call == GrpcCall::ServerStreaming,
+            retries,
+        })
+    }
+}
+
+impl CallRetries for PolicyCallRetries {
+    fn decide<'a>(
+        &'a mut self,
+        status: &'a tonic::Status,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Decision> + Send + 'a>> {
+        let streaming = self.streaming;
+        let call = if streaming {
+            GrpcCall::ServerStreaming
+        } else {
+            GrpcCall::Unary
+        };
+        let error = spark_connect_core::error::grpcio_error(status, call);
+        let apart = may_wait_forever(&error);
+        let policies = std::sync::Arc::clone(&self.policies);
+        let retries = self.retries.take();
+        Box::pin(async move {
+            let decide_of = move |py: Python<'_>| {
+                let retries = match retries {
+                    Some(retries) => retries,
+                    None => call_retries(py, &policies),
+                };
+                let decided = match &retries {
+                    Ok(retries) => decide(py, retries, streaming, &error),
+                    Err(failed) => Err(failed.clone_ref(py)),
+                };
+                let decision = match decided {
+                    Ok(Some(seconds)) => Decision::Retry(
+                        std::time::Duration::try_from_secs_f64(seconds)
+                            .unwrap_or(std::time::Duration::MAX),
+                    ),
+                    Ok(None) => Decision::GiveUp,
+                    Err(raised) => {
+                        Decision::Failed(Box::new(crate::errors::callback_error(raised)))
+                    }
+                };
+                (decision, retries)
+            };
+            // A policy may wait forever on the error (see `may_wait_forever`).
+            let decided = if apart {
+                crate::deliver::call_apart(decide_of).await
+            } else {
+                crate::deliver::call(decide_of).await
+            };
+            match decided {
+                Some((decision, retries)) => {
+                    self.retries = Some(retries);
+                    decision
+                }
+                // The interpreter exits: the failure is the error of the call.
+                None => Decision::GiveUp,
+            }
+        })
+    }
+}
+
+/// What the `_CallRetries` `retries` decides of the attempt that failed of grpcio's `error`: the
+/// wait in seconds before the retry, or None when the failure is the error of the call.
+fn decide(
+    py: Python<'_>,
+    retries: &Py<PyAny>,
+    streaming: bool,
+    error: &spark_connect_core::error::GrpcioError,
+) -> PyResult<Option<f64>> {
+    let metadata: Vec<(&str, Bound<'_, PyBytes>)> = error
+        .trailing_metadata
+        .iter()
+        .map(|(key, value)| (key.as_str(), PyBytes::new(py, value)))
+        .collect();
+    retries
+        .bind(py)
+        .call_method1(
+            "decide",
+            (
+                streaming,
+                error.code as i32,
+                error.details.as_str(),
+                error.debug_error_string.as_deref(),
+                metadata,
+                error.text.as_str(),
+            ),
+        )?
+        .extract()
+}
+
+/// Make PySpark's `Retrying` of `policies` decide the retries of the calls of `session` from now
+/// on, or the policy of the transport with None (see [`PolicyRetries`]).
+pub(crate) fn set_retry_decider(session: &SparkSession, policies: Option<Bound<'_, PyList>>) {
+    let decider = policies.map(|policies| {
+        std::sync::Arc::new(PolicyRetries {
+            policies: std::sync::Arc::new(policies.into_any().unbind()),
+        }) as std::sync::Arc<dyn RetryDecider>
+    });
+    session.set_retry_decider(decider);
 }
 
 /// Make the client warn as PySpark's when the retries of a call are spent (see
@@ -268,23 +611,22 @@ pub(crate) fn warn_of_spent_retries() {
     spark_connect_core::retries::set_listener(Some(std::sync::Arc::new(RetriesWarning)));
 }
 
-/// Make the client log the errors of its channels that grpcio logs, as PySpark's client shows
-/// them: the line of gRPC's C core on stderr, which `_log_grpc_error` of
-/// `pyspark.sql.connect.client` writes, on the thread of the channel. Unless `GRPC_VERBOSITY` is
-/// `NONE` when the extension loads, as grpcio reads it when it initializes and then logs no error.
+/// Make the client log what its channels log as grpcio does, as PySpark's client shows it: the
+/// line of gRPC's C core on stderr, written at once by the thread that logs it, of the channel or
+/// of its connections, as gRPC's core writes it (see [`grpc_log_line`]). As grpcio reads
+/// `GRPC_VERBOSITY` when it initializes, the variable as the extension loads decides what is
+/// logged: nothing for `NONE`, the errors only for `ERROR`, and the information too otherwise,
+/// such as the failure of a TLS handshake, as grpcio does by default.
 pub(crate) fn log_grpc_errors() {
-    let silenced = std::env::var("GRPC_VERBOSITY")
-        .is_ok_and(|verbosity| verbosity.eq_ignore_ascii_case("NONE"));
-    if silenced {
+    use spark_connect_core::grpc_log::Severity;
+    let verbosity = std::env::var("GRPC_VERBOSITY").unwrap_or_default();
+    if verbosity.eq_ignore_ascii_case("NONE") {
         return;
     }
+    let errors_only = verbosity.eq_ignore_ascii_case("ERROR");
     spark_connect_core::grpc_log::set_listener(Some(std::sync::Arc::new(
-        |logged: &spark_connect_core::grpc_log::Logged| {
-            // Only on a thread of Python, as that of a channel of a session is: a thread of the
-            // runtime has no thread state of Python, and does not wait for the GIL.
-            // SAFETY: reads the thread state that the interpreter keeps for this thread, without
-            // the GIL, which it does not need.
-            if unsafe { pyo3::ffi::PyGILState_GetThisThreadState() }.is_null() {
+        move |logged: &spark_connect_core::grpc_log::Logged| {
+            if errors_only && logged.severity != Severity::Error {
                 return;
             }
             let location = logged.location;
@@ -292,18 +634,101 @@ pub(crate) fn log_grpc_errors() {
                 .file()
                 .rsplit(['/', '\\'])
                 .next()
-                .unwrap_or_default();
-            Python::attach(|py| {
-                // An error that cannot be logged is dropped, as gRPC's core goes on.
-                let _ = py.import("pyspark.sql.connect.client").and_then(|client| {
-                    client.call_method1(
-                        "_log_grpc_error",
-                        (file, location.line(), logged.message.as_str()),
-                    )
-                });
-            });
+                .unwrap_or_default()
+                .to_string();
+            write_grpc_log(
+                logged.severity.letter(),
+                file,
+                location.line(),
+                logged.message.clone(),
+            );
         },
     )));
+}
+
+/// Write the line of gRPC's core of `message`, of the severity `severity` and of the source
+/// `file` and `line`, to stderr, at once, as gRPC's core writes its log, whatever the thread: to
+/// the descriptor itself, without the lock of Rust's stderr, which a thread of the runtime that
+/// logs while another thread forks would hold forever in the child of the fork.
+#[cfg(unix)]
+fn write_grpc_log(severity: char, file: String, line: u32, message: String) {
+    let entry = grpc_log_line(severity, &file, line, &message);
+    let mut unwritten = entry.as_bytes();
+    while !unwritten.is_empty() {
+        // SAFETY: writes the bytes of `unwritten`, which it is given the length of, to stderr.
+        let written = unsafe { libc::write(2, unwritten.as_ptr().cast(), unwritten.len()) };
+        match usize::try_from(written) {
+            Ok(written) if written > 0 => unwritten = &unwritten[written..],
+            _ if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted => {}
+            // As gRPC's core, which goes on when stderr is closed.
+            _ => break,
+        }
+    }
+}
+
+/// As on Unix, by the Python of the client, which has the local time.
+#[cfg(not(unix))]
+fn write_grpc_log(severity: char, file: String, line: u32, message: String) {
+    // An error that cannot be logged is dropped, as gRPC's core goes on.
+    crate::deliver::run_dropping_errors(move |py| {
+        py.import("pyspark.sql.connect.client")?.call_method1(
+            "_log_grpc_error",
+            (file, line, message, severity.to_string()),
+        )?;
+        Ok(())
+    });
+}
+
+/// The line of gRPC's core of `message`: `E<month><day> <time> <thread> <file>:<line>]
+/// <message>`, of the local time to the microsecond and the native ID of the calling thread, as
+/// `threading.get_native_id()` gives it, where gRPC's names the source of its own call.
+#[cfg(unix)]
+fn grpc_log_line(severity: char, file: &str, line: u32, message: &str) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let seconds = now.as_secs() as libc::time_t;
+    // SAFETY: `localtime_r` writes the local time of `seconds` to the `tm` it is given, which is
+    // read only once it returned it.
+    let tm = unsafe {
+        let mut tm = std::mem::MaybeUninit::<libc::tm>::zeroed();
+        libc::localtime_r(&seconds, tm.as_mut_ptr());
+        tm.assume_init()
+    };
+    format!(
+        "{severity}{:02}{:02} {:02}:{:02}:{:02}.{:06} {:7} {file}:{line}] {message}\n",
+        tm.tm_mon + 1,
+        tm.tm_mday,
+        tm.tm_hour,
+        tm.tm_min,
+        tm.tm_sec,
+        now.subsec_micros(),
+        native_thread_id(),
+    )
+}
+
+/// The native ID of the calling thread, as `threading.get_native_id()` gives it: of the system
+/// call, as the wheels link a glibc older than its `gettid` wrapper (2.30).
+#[cfg(target_os = "linux")]
+fn native_thread_id() -> u64 {
+    // SAFETY: the `gettid` system call takes no argument and cannot fail.
+    unsafe { libc::syscall(libc::SYS_gettid) as u64 }
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn native_thread_id() -> u64 {
+    let mut id = 0u64;
+    // SAFETY: writes the ID of the calling thread to `id`.
+    #[cfg(target_os = "macos")]
+    unsafe {
+        libc::pthread_threadid_np(0, &mut id);
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        // SAFETY: always safe to call.
+        id = unsafe { libc::pthread_self() } as u64;
+    }
+    id
 }
 
 /// Set the retry policy of `session` to `parameters`, from the calls that start from now on.
@@ -363,5 +788,31 @@ pub(crate) fn result_chunking(
     ResultChunking {
         allow_arrow_batch_chunking,
         preferred_arrow_chunk_size,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_the_error_of_a_stream_of_no_debug_string_may_wait_forever() {
+        // grpcio's `debug_error_string()` of a stream waits for a debug string that a response
+        // that does not decode never gets; a unary error, or one of a debug string, does not.
+        let error =
+            |call, debug_error_string: Option<&str>| spark_connect_core::error::GrpcioError {
+                call,
+                code: tonic::Code::Internal,
+                details: "Exception deserializing response!".to_string(),
+                debug_error_string: debug_error_string.map(str::to_string),
+                trailing_metadata: Vec::new(),
+                text: String::new(),
+            };
+        assert!(may_wait_forever(&error(GrpcCall::ServerStreaming, None)));
+        assert!(!may_wait_forever(&error(GrpcCall::Unary, None)));
+        assert!(!may_wait_forever(&error(
+            GrpcCall::ServerStreaming,
+            Some("INTERNAL:boom")
+        )));
     }
 }

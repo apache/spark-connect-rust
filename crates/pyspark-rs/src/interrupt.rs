@@ -77,7 +77,7 @@ impl ConversionBudget {
             Ok(py.eval(c"lambda: None", Some(&globals), None)?.unbind())
         })?;
         checkpoint.bind(py).call0()?;
-        py.check_signals()?;
+        crate::deliver::check_signals(py)?;
         self.steps_until_checkpoint
             .store(CONVERSION_STEPS_PER_CHECKPOINT - 1, Ordering::Relaxed);
         Ok(())
@@ -131,7 +131,7 @@ impl SignalWatch {
                 // handler that is an `Exception` ends the part of the call that PySpark's `except
                 // Exception` covers, if one runs, such as the lookup of the plan compression
                 // settings, and the call goes on, as PySpark's does (see `runtime::catching`).
-                let raised = Python::attach(|py| match py.check_signals() {
+                let raised = Python::attach(|py| match crate::deliver::check_signals(py) {
                     Ok(()) => None,
                     Err(signal)
                         if signal.is_instance_of::<pyo3::exceptions::PyException>(py)
@@ -164,7 +164,7 @@ impl SignalWatch {
                     return Watch::Abort;
                 }
                 // After the interrupt, a second signal ends the wait, as PySpark's wait does.
-                return match Python::attach(|py| py.check_signals()) {
+                return match Python::attach(crate::deliver::check_signals) {
                     Ok(()) => Watch::Continue,
                     Err(_) => Watch::Abort,
                 };
@@ -245,7 +245,7 @@ pub(crate) fn abortable_without_session<T: Send>(
                 return Watch::Abort;
             }
             // Takes the GIL for the check only, as the wait runs without it.
-            match Python::attach(|py| py.check_signals()) {
+            match Python::attach(crate::deliver::check_signals) {
                 Ok(()) => Watch::Continue,
                 Err(raised) => {
                     *error = Some(raised);
@@ -971,6 +971,9 @@ fn run_interruptible<T: Send, E: Send + Into<Box<SparkError>>>(
     let call = Call::enter(session);
     let refreshed = refresh_request_context(py, session, context)?;
     call.of_copy(py, refreshed.copy_token.as_ref());
+    // As PySpark's requests, which read `SPARK_CONNECT_USER_AGENT` of `os.environ` as each is
+    // built: of the environment as the call starts, read under the GIL, as Python changes it.
+    session.refresh_user_agent();
     let outcome = wait_interruptible(py, session, f, catch_interrupt_failure);
     let read_tags = refreshed.without_tags && session.has_thread_tags();
     let handled_error = context.handles_errors() && matches!(outcome, Ok(Err(_)));
@@ -997,7 +1000,14 @@ fn wait_interruptible<T: Send, E: Send + Into<Box<SparkError>>>(
         Arc::new(move || watch.poll())
     };
     let output = py.detach(|| with_wait_watch(poll, f));
-    let signal = watch.error.lock().unwrap_or_else(|e| e.into_inner()).take();
+    // Of a handler of a signal, or a KeyboardInterrupt that Python code of the client raised in
+    // the call after the last check of the wait, as PySpark raises it out of the call there.
+    let signal = watch
+        .error
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take()
+        .or_else(crate::deliver::take_interrupt);
     let interrupt_failure = watch
         .interrupt_failure
         .lock()

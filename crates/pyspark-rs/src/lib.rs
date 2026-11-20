@@ -23,6 +23,7 @@ mod conf;
 mod connect_bridge;
 mod dataframe;
 mod datasource;
+mod deliver;
 mod errors;
 mod functions;
 mod gc;
@@ -108,9 +109,43 @@ pub(crate) fn encode_on_grown_stack<M: prost::Message + Send>(message: M) -> Vec
     on_grown_stack(move || message.encode_to_vec())
 }
 
+/// The bundle of root certificates of grpcio, `roots.pem` of its package, which its channels
+/// trust by default, if grpcio is installed: found by `importlib.util.find_spec`, which does not
+/// import it.
+fn grpcio_roots_file(py: Python<'_>) -> Option<std::path::PathBuf> {
+    let spec = py
+        .import("importlib.util")
+        .ok()?
+        .call_method1("find_spec", ("grpc",))
+        .ok()?;
+    let origin: String = spec.getattr("origin").ok()?.extract().ok()?;
+    let roots = std::path::Path::new(&origin)
+        .parent()?
+        .join("_cython")
+        .join("_credentials")
+        .join("roots.pem");
+    roots.is_file().then_some(roots)
+}
+
 #[pymodule(gil_used = false)]
 fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     origin::listen_to_plan_builds();
+    // As grpcio's fork support, which registers its handlers as it loads: a child of a `fork()`
+    // is of a generation of its own, whatever thread used the client first.
+    spark_connect_core::fork::watch_forks();
+    // As grpcio, the gRPC library of PySpark's client: the texts of the failures of the
+    // connections, and the `User-Agent` of the CONNECT request of a proxy.
+    spark_connect_core::set_grpcio_dialect(true);
+    // As PySpark's `ChannelBuilder.userAgent`, which ends with the version of Python.
+    let python_version: String = _py
+        .import("platform")?
+        .call_method0("python_version")?
+        .extract()?;
+    spark_connect_core::channel::set_user_agent_language(&format!("python/{python_version}"));
+    // The bundle of roots of grpcio, which its channels trust by default, where it is installed,
+    // found without importing grpc: trusted besides the roots of the system's store, so that the
+    // drop-in trusts what PySpark trusts, and what the system trusts too.
+    spark_connect_core::client::set_bundled_ssl_roots_file(grpcio_roots_file(_py));
     client::warn_of_spent_retries();
     client::log_grpc_errors();
     // The requests of the finalizers of a session read the state of its client when they are
@@ -124,6 +159,8 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     // So do the requests of the failure of a call, of the details of its error and of the configs
     // of its stack trace, as PySpark's `_handle_error` builds them.
     spark_connect_core::client::set_failure_requests_hook(interrupt::before_failure_requests);
+    m.add_function(wrap_pyfunction!(deliver::_stop_deliveries, m)?)?;
+    deliver::stop_at_exit(m)?;
     m.add_class::<PySparkSession>()?;
     m.add_function(wrap_pyfunction!(session::_close_sessions_at_exit, m)?)?;
     m.add_function(wrap_pyfunction!(session::_refuse_releases, m)?)?;

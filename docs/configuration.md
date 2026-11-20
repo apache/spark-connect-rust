@@ -86,7 +86,11 @@ let spark = SparkSessionBuilder::default()
 
 As PySpark's client (through grpcio), the client reaches the server through the HTTP proxy of the
 environment, with an HTTP/1.1 `CONNECT` tunnel. TLS is negotiated with the Spark server inside the
-tunnel and checked against the server's name, so the proxy sees neither the token nor the data.
+tunnel and checked against the server's name, so the proxy sees neither the token nor the data. As
+grpcio, the client connects to the addresses of the proxy as to those of a server, the next one
+250 ms after the previous one, each with a connect deadline of 20 s, and its `CONNECT` request
+carries the `Host` and, of a proxy URI with a user, the `Proxy-Authorization` headers, and of the
+Python client grpcio's `User-Agent: grpc-httpcli/0.0` too.
 
 ```bash
 export https_proxy=http://user:password@proxy.example.com:3128
@@ -121,8 +125,11 @@ client connects directly, where grpcio reads its bytes.
 ## TLS Root Certificates
 
 A TLS channel trusts the root certificates of the system's trust store, which `SSL_CERT_FILE` and
-`SSL_CERT_DIR` can replace. As in grpcio, `GRPC_DEFAULT_SSL_ROOTS_FILE_PATH` names a PEM file whose
-certificates are trusted instead, such as the CA of a corporate proxy that inspects TLS:
+`SSL_CERT_DIR` can replace, and, of the Python client where grpcio is installed (PySpark's retry
+policies need it), those of grpcio's own bundle too, the `roots.pem` of the installed `grpc`
+package, which grpcio's channels trust by default. As in grpcio, `GRPC_DEFAULT_SSL_ROOTS_FILE_PATH`
+names a PEM file whose certificates are trusted instead, such as the CA of a corporate proxy that
+inspects TLS:
 
 ```bash
 export GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=/etc/ssl/corporate-ca.pem
@@ -131,27 +138,43 @@ export GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=/etc/ssl/corporate-ca.pem
 The file replaces the other roots rather than adding to them. As in grpcio, the variable and the
 file are read once, when the first TLS session of the process is made, and an empty file is as no
 file. A file that cannot be read is logged as an error (see [Errors on stderr](#errors-on-stderr)),
-and the client uses the system's roots. grpcio's default roots are its own bundle, not the
-system's, so a CA that is only in the system's trust store is trusted here but not by PySpark, and
-a system without roots fails every TLS session when it is made (`Failed to configure TLS`), where
-PySpark's bundle works. The client takes the system's store rather than a bundle of its own as it
-holds the CAs that the administrator of the machine installs, and is kept up to date with the
-system rather than with the releases of the client.
+and the client uses the default roots. A file without a certificate does not fail the session when
+it is made, as in grpcio: each call fails `UNAVAILABLE`, `Failed to create security handshaker.`,
+and so does each call of a system without roots, where neither grpcio nor a file gives some.
+
+The Python client trusts more than PySpark does, on purpose: a CA of the system's trust store, such
+as the private CA of a company that its administrators install, is trusted, which PySpark, of
+grpcio's bundle alone, does not trust. So a program whose server has such a CA keeps connecting when
+grpcio is installed as a dependency of another package, and every server that PySpark's client
+trusts is trusted. The Rust API takes the system's store rather than a bundle of its own as it holds
+the CAs that the administrator of the machine installs, and is kept up to date with the system
+rather than with the releases of the client.
 
 ## Errors on stderr
 
-PySpark's own code says nothing of a proxy variable that is not a proxy, or of a roots file that
-cannot be read: gRPC's C core, in grpcio, logs them to stderr as errors. The client logs them
-there as lines of the same form, which name the Rust source of the call, where grpcio's name its
-own:
+PySpark's own code says nothing of a proxy variable that is not a proxy, of a roots file that cannot
+be read, of a TLS handshake that fails or of a proxy that refuses the tunnel: gRPC's C core, in
+grpcio, logs them to stderr, the failure of a TLS handshake as information (`I`) and the others as
+errors (`E`). The Python client logs them there as lines of the same form, which name the Rust
+source of the call, where grpcio's name its own:
 
 ```text
-E1118 16:53:41.241267 4026384 http_proxy_mapper.cc:159] 'https' scheme not supported in proxy URI
-E1118 17:37:31.168823  299507 proxy.rs:100] the 'https' scheme of the proxy URI is not supported in https_proxy; not using a proxy
+E1118 16:53:41.241267 4026384 http_proxy_mapper.cc:<line>] 'https' scheme not supported in proxy URI
+E1118 17:37:31.168823  299507 proxy.rs:<line>] the 'https' scheme of the proxy URI is not supported in https_proxy; not using a proxy
+I1119 01:06:45.505781 3300774 ssl_transport_security.cc:<line>] Handshake failed with error SSL_ERROR_SSL: error:1000007d:SSL routines:OPENSSL_internal:CERTIFICATE_VERIFY_FAILED: unable to get local issuer certificate
+I1119 02:15:41.966502  505468 connector.rs:<line>] Handshake failed with error SSL_ERROR_SSL: error:1000007d:SSL routines:OPENSSL_internal:CERTIFICATE_VERIFY_FAILED: unable to get local issuer certificate
+E1119 01:03:42.670473 3254142 http_connect_client_handshaker.cc:<line>] HTTP proxy handshake with ipv4:127.0.0.1:3128 failed: UNKNOWN: HTTP proxy returned response code 403
+E1119 02:15:42.060818  505955 connector.rs:<line>] HTTP proxy handshake with ipv4:127.0.0.1:3128 failed: UNKNOWN: HTTP proxy returned response code 403
 ```
 
-As in grpcio, a proxy variable is logged for each session that is connected, and the roots file
-once, when it is read; a session of `newSession()` or `cloneSession()` shares the connection of its
-session and logs nothing, where PySpark's makes a channel of its own, which logs again. Nothing
-is logged when `GRPC_VERBOSITY` is `NONE` as the client is imported, as grpcio reads it when it
-initializes. The Rust API gives these errors to `tracing`, as warnings.
+The `<line>` is the line of the source file that logs it.
+
+As in grpcio, a proxy variable is logged for each session that is connected, once for a session of
+`newSession()` and of `cloneSession()` too, whose channel reads it again, the roots file once, when
+it is read, a TLS handshake that fails at each attempt to connect, in the background too, and a
+tunnel that fails once a minute at most, whatever the attempts in between, as gRPC's core limits the
+line of its source. Nothing is logged when `GRPC_VERBOSITY` is `NONE` as the client is imported, and
+only the errors when it is `ERROR`, as grpcio reads it when it initializes; of `INFO` or `DEBUG`,
+the client logs what it logs by default, without the other lines that gRPC's core logs then. The
+Rust API gives the errors of the variables and of the roots file to `tracing`, as warnings; the
+failures of its connections are in the errors of its calls.

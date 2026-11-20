@@ -289,18 +289,30 @@ warning that the server sends with the model of a fit, and
 failure, as the retry policies of PySpark's client of no `DefaultPolicy` retry none, and
 `RetryPolicy::no_retries` is such a policy. A struct expression of `RetryPolicy` that names every
 field adds it, or takes the others of `..RetryPolicy::default()`. The core tells the listener of
-`retries::set_listener` (a `RetriesListener`, not a stable API) when the retries of a failure that
-a policy retries are spent, where PySpark's `Retrying` warns `[RETRIES_EXCEEDED]`, and its error is
-the error of the call. The listener is one of the process, for the calls of every client: the
-Python binding sets it, to warn from the thread of the call. `SparkError` adds a hidden
-`pyspark_message`, the message of PySpark's exception of a gRPC failure whose status carries no
-error of the server, which the Python binding raises: the text of grpcio's error of the call, as
-PySpark's `_handle_rpc_error` raises it. The message of the error of the Rust API is still the
-description of the code in brackets and the message of the status. A struct expression of
-`SparkError` that names every field adds it, or takes the others of an error of its constructors,
-such as `..SparkError::connect_msg(message)`. `SparkError::from_grpc_status_of` converts the status
-of a call of a stream of responses (`GrpcCall::ServerStreaming`, of grpcio's
-`_MultiThreadedRendezvous`).
+`retries::set_listener` (a `RetriesListener`, not a stable API) when the retries of a failure that a
+policy retries are spent, where PySpark's `Retrying` warns `[RETRIES_EXCEEDED]`, and its error is
+the error of the call; when a request that it sends in the background, which no caller waits for,
+fails (`background_failure`, of a `retries::BackgroundRequest` and a `retries::BackgroundFailure`),
+where PySpark's sender warns and logs; and of what PySpark's client logs of its retries and of its
+errors (`retrying`, `retrying_at_once`, `given_up`, `server_retry_delay`, `rpc_error` and
+`error_info`). These methods have default bodies that do nothing. The listener is one of the
+process, for the calls of every client: the Python binding sets it, to warn from the thread of the
+call and to log to the logger of Spark Connect. `SparkError` adds a hidden `pyspark_message`, the
+message of PySpark's exception of a gRPC failure whose status carries no error of the server, which
+the Python binding raises: the text of grpcio's error of the call, as PySpark's `_handle_rpc_error`
+raises it; and a hidden `grpcio`, grpcio's error of a failed call that PySpark's client leaves to
+grpc, which the Python binding raises as grpcio's `RpcError` (an `error::GrpcioError` of
+`error::grpcio_error`, not a stable API), set only in the dialect of grpcio (see below). The message
+of the error of the Rust API is still the description of the code in brackets and the message of the
+status. A struct expression of `SparkError` that names every field adds them, or takes the others of
+an error of its constructors, such as `..SparkError::connect_msg(message)`.
+`SparkError::from_grpc_status_of` converts the status of a call of a stream of responses
+(`GrpcCall::ServerStreaming`, of grpcio's `_MultiThreadedRendezvous`). The retries of the calls of a
+client are decided by its `RetryPolicy`, or by a `retries::RetryDecider` that
+`SparkConnectClient::set_retry_decider` and `SparkSession::set_retry_decider` set in its place, of a
+`retries::CallRetries` for each call that gives a `retries::Decision` of each failed attempt: as the
+Python binding runs PySpark's `Retrying` of policies that the core does not retry with. These are
+not a stable API.
 
 `SparkConnectClient::read_plan_compression` reads the plan compression settings of the server
 before a plan is sent, as PySpark's client reads them when it builds its first plan: before the
@@ -314,50 +326,175 @@ the registrations of the core do.
 `SparkSession` adds the settings of PySpark's client: `retry_policy` and `set_retry_policy`, as
 PySpark's `get_retry_policies` and `set_retry_policies`; `reattachable_execute` and
 `set_reattachable_execute`, as its `enable_reattachable_execute` and `disable_reattachable_execute`;
-`token_parameter`, the `token` parameter of the connection string; and
-`set_global_user_context_extensions`, which replaces the global user context extensions, as a change
-of PySpark's `global_user_context_extensions`. `SparkConnectClient` adds them too (it had
-`set_retry_policy`), with `replace_retry_policy`, which sets the policy of a client in use, and
-`result_chunking` and `set_result_chunking`, the result chunking of its executions, a
-`ResultChunking` of PySpark's `allow_arrow_batch_chunking` and `preferred_arrow_chunk_size`, which
-by default allows chunks of no preferred size, as before. The clones of a client share its retry
-policy, where each clone had a policy of its own, and the client of a new session, of
-`SparkConnectClient::with_new_session_id`, has the default policy and chunking, as PySpark's
-`newSession` and `clone`, where it kept the policy of the client. An execution that is not
-reattachable, as `ExecutePlanResponseReattachableIterator::not_reattachable` makes its iterator, is
-one `ExecutePlan`, sent again from the start when its stream fails in a way that the retry policy
-retries, and never released, as PySpark's. `SparkSession::cache_artifacts` caches blobs as artifacts
-of their SHA-256 hashes, as PySpark's `SparkConnectClient.cache_artifacts`, and
-`SparkSession::add_artifacts_of_flags` adds files as PySpark's `SparkConnectClient.add_artifacts`
-names them by its flags.
+`token_parameter`, the `token` parameter of the connection string; `rpc_deadlines`, the
+`RpcDeadlines` of its calls; and `set_global_user_context_extensions`, which replaces the global
+user context extensions, as a change of PySpark's `global_user_context_extensions`.
+`SparkConnectClient` adds them too (it had `set_retry_policy`), with `replace_retry_policy`, which
+sets the policy of a client in use, and `result_chunking` and `set_result_chunking`, the result
+chunking of its executions, a `ResultChunking` of PySpark's `allow_arrow_batch_chunking` and
+`preferred_arrow_chunk_size`, which by default allows chunks of no preferred size, as before. The
+clones of a client share its retry policy, where each clone had a policy of its own, and the client
+of a new session, of `SparkConnectClient::with_new_session_id` and `clone_session` (and so of
+`SparkSession::new_session` and `clone_session`), has the default policy and chunking and no decider
+of its retries, as PySpark's `newSession` and `clone`, where it kept the policy of the client. An
+execution that is not reattachable, as `ExecutePlanResponseReattachableIterator::not_reattachable`
+makes its iterator, is one `ExecutePlan`, sent again from the start when its stream fails in a way
+that the retry policy retries, and never released, as PySpark's. `SparkSession::cache_artifacts`
+caches blobs as artifacts of their SHA-256 hashes, as PySpark's
+`SparkConnectClient.cache_artifacts`, and `SparkSession::add_artifacts_of_flags` adds files as
+PySpark's `SparkConnectClient.add_artifacts` names them by its flags.
 
-A connection has grpcio's connect deadline, 20 s from its start, which its TCP connection, the
-tunnel of a proxy, its TLS handshake and, of a plaintext connection, the HTTP/2 settings that the
-server sends first share: one that does not complete in it fails with `UNAVAILABLE`, which the retry
-policy retries. Before, a direct connection bounded its TCP connection only, by 10 s, so a TLS
-handshake that the server never answered held a call until its deadline, and a plaintext server that
-never answered until the keepalive of the connection (see
-[What "drop-in" means](#what-drop-in-means) for what stays different from grpcio). The user agent is
-sent as the client type of the requests only, as PySpark sends it, and the HTTP `user-agent` header
-is tonic's own, so a user agent of a control character connects, where its connection failed. A user
-agent longer than 2048 characters after URL escaping, and a `SPARK_CONNECT_USER_AGENT` that is not
-UTF-8, are the error of each request that carries the user agent, as PySpark's `userAgent` raises
-them when a request is built, where the first failed the connection of the session and the second
-sent `_SPARK_CONNECT_PYTHON` in its place. A tab, CR or LF in the connection string is removed, as
-`urllib.parse.urlsplit` removes them, where it failed. The `session_id` of the connection string is
-checked as PySpark's `uuid.UUID(session_id, version=4)` checks it, of Python's messages, and is sent
-as it is given, where it was checked as a UUID of the uuid crate, of the origin `invalid UUID`. A
-retry policy of no `max_backoff_ms` keeps its initial backoff, as PySpark's does, where its backoff
-grew by its multiplier.
+A channel connects to the addresses of its host, or of its proxy, as grpcio's: the next one 250 ms
+after the previous one or once the previous one failed, each with a connect deadline of 20 s of its
+own, which its TCP connection, the tunnel of a proxy, its TLS handshake and the HTTP/2 settings that
+the server sends first share, of a TLS connection too, and which bounds the lookup of the name too.
+A connection is the process's: the clients of the same target, of the same host and port, proxy and
+its credentials, TLS and keepalive, and of no token, share it, as gRPC's global subchannel pool
+shares the connections of the channels of a process: the clients of
+`SparkConnectClient::with_new_session_id` and `clone_session` share the connection of their client,
+as before, and so does a client of another `connect` of the same target, which had a connection of
+its own. A client of a connection string of a token has a connection of its own, also of a new
+session or a clone of it, and of another `connect` of the same token, as grpcio's channels of the
+credentials of a token share no connection, where its new sessions shared the connection of the
+client; the clones of a client (`Clone`) share its connection. The window of a connection is the
+largest of HTTP/2, so that the results that a client does not read on, as of executions that it
+holds open, do not hold the calls of the other clients of the connection, nor its other calls, where
+a connection of five such results of 2 MiB waited, as gRPC's connections, whose windows grow with
+those of their streams, do not wait; the window of each stream, of 2 MiB, bounds what it holds
+unread. The channels run on the shared runtime of the core (`runtime::get_runtime`), not on the
+runtime of the caller, as they are the process's: a caller's runtime, or its paused clock of a test,
+does not drive their timers. A child of a `fork()` gets a shared runtime and channels of its own, as
+a parent's runtime has no thread there: the clients of the parent take a channel of the child's in
+the child, as grpcio's fork support resets the channels of a parent, and `runtime::fork_generation`
+(not a stable API) tells the generation of the process, of which a handler of `pthread_atfork` makes
+another in each child. The child leaves the objects of its parent's runtime as they are, never
+dropped there: a client of the parent that the child drops leaves the connection of its channel to
+the parent, where the drop removed the socket of a connection that the channel held from the epoll
+instance that the child shares with its parent, so that the parent's next call on it waited forever,
+and a stream of an execution of the parent that the child drops is not released, as the parent reads
+it. As the fork returns, the child closes the sockets of the connections of its parent and the epoll
+instances of its parent's runtime, without a call on the epoll instance, so that a connection of the
+parent ends on the server with the parent, as grpcio's fork support closes the descriptors of the
+event engine of a parent, and makes the eventfd of the runtime of each of its parents an eventfd of
+its own, rather than closing it: an object of the parent that wakes a task of that runtime writes to
+it, which a descriptor of the child could take the number of. A child then holds one descriptor of
+each generation before it, where it held the three of the runtime of each of its parents, and the
+sockets of their connections. The state that the threads of the process keep under a lock is of each
+generation, or read without one, so that a lock that a thread of the parent held at the fork does
+not hold the child: the runtime, the channels, the limit of the logs of the failed tunnels of a
+proxy, the jitter of the retries, which a child draws of a seed of its own, as Python seeds `random`
+again in a child, and, of a client, its session IDs and its retry policy, which a child keeps, and
+its executions in flight, of which a child has none of its parent's. A fork while another thread
+makes a call can leave the child waiting, as grpcio's fork support asks that no other thread makes a
+call then, and so can a fork while the client makes a call in the background (a release of an
+execution, the removal of a cached relation or of a model, the reads of `to_local_iterator` of
+`prefetch_partitions` and of the events of the streaming query listeners), which holds the lock of
+the hook, the user context extensions, the plan compression or the last execution of its session for
+the moment that it reads them. The per-thread state of the other threads of the parent, of their
+tags and user context extensions, stays in the child, which never forgets it, as those threads end
+in the parent only: a leak bounded by the threads of the parent. The first call of a connection
+waits for the settings of the server before its request is sent, a round trip, as grpcio's does. One
+that does not connect fails its calls with `UNAVAILABLE`, which the retry policy retries, and the
+next call that needs a connection connects again (see [What "drop-in" means](#what-drop-in-means)
+for what stays different from grpcio). Before, a direct connection bounded its TCP connection only,
+by 10 s, the addresses of a proxy were tried in turn within one deadline, so a TLS handshake that
+the server never answered held a call until its deadline, and a plaintext server that never answered
+until the keepalive of the connection. The status of a channel that cannot connect has the client's
+message, of the last error of its addresses, such as `failed to connect to all addresses; last
+error: 127.0.0.1:1: tcp connect error: Connection refused (os error 111)`, or of a name that does
+not resolve, `dns error: failed to look up <host>:<port>: ...`, of one whose lookup timed out, `dns
+error: failed to look up <host>:<port>: timed out`, where it was tonic's `tcp connect error`, and a
+call that the end of its connection fails has tonic's message of it. The Python binding sets the
+dialect of grpcio instead, with `set_grpcio_dialect` (not a stable API): the texts of grpcio, the
+`User-Agent: grpc-httpcli/0.0` of grpcio's `CONNECT` request of a proxy, `localhost` and the names
+under it as the loopback of both families, as c-ares resolves them, and the state of gRPC's channel,
+whose calls fail at once once it failed to connect, while it connects again in the background with
+gRPC's backoff, until a call takes the connection that it made there, until 30 minutes without a
+call, or until no open client uses the channel (`SparkConnectClient::close`), which a Rust client
+does not have, as its calls recover from an outage at once. The binding sets the end of the user
+agent too, `python/<version>` where the Rust API's is `python/rust`, with
+`channel::set_user_agent_language` (not a stable API either). The user agent is sent as the client
+type of the requests only, as PySpark sends it, and the HTTP `user-agent` header is tonic's own, so
+a user agent of a control character connects, where its connection failed. A user agent longer than
+2048 characters after URL escaping, and a `SPARK_CONNECT_USER_AGENT` that is not UTF-8, are the
+error of each request that carries the user agent, as PySpark's `userAgent` raises them when a
+request is built, where the first failed the connection of the session and the second sent
+`_SPARK_CONNECT_PYTHON` in its place. The user agent of a client is read when the client is made, of
+the connection string, else of `SPARK_CONNECT_USER_AGENT`, a client of a new session keeps it, and
+`SparkConnectClient::refresh_user_agent` and `SparkSession::refresh_user_agent` (not a stable API)
+read it again, as the Python binding does as each of its calls starts. A tab, CR or LF in the
+connection string is removed, as `urllib.parse.urlsplit` removes them, where it failed. The
+`session_id` of the connection string is checked as PySpark's `uuid.UUID(session_id, version=4)`
+checks it, of Python's messages, and is sent as it is given, where it was checked as a UUID of the
+uuid crate, of the origin `invalid UUID`. A retry policy of no `max_backoff_ms` keeps its initial
+backoff, as PySpark's does, where its backoff grew by its multiplier.
 
 `GRPC_DEFAULT_SSL_ROOTS_FILE_PATH` and its file are read once in a process, when its first TLS
 session is made, as grpcio reads them, where each client read them when it connected, and an empty
-file is as no file, without a warning. An invalid proxy address of the environment fails only the
-sessions of the hosts that the proxy applies to, as grpcio connects the others directly, where it
-failed the sessions of every host. The errors of a channel that grpcio logs, of a proxy variable
-that is not a proxy and of a roots file that cannot be read, also go to the listener of
-`grpc_log::set_listener` (a `grpc_log::Listener`, not a stable API), as they go to `tracing`; the
-Python client writes them to stderr, as grpcio does.
+file is as no file, without a warning. A TLS channel trusts the roots of that file alone, as grpcio,
+else those of the system's trust store, as before, and the roots of the file of
+`client::set_bundled_ssl_roots_file` (not a stable API) besides, which the Python binding sets to
+grpcio's bundle where grpcio is installed. A roots file without a certificate does not fail the
+session when it is made: each call fails `UNAVAILABLE`, as grpcio fails to make the handshaker of
+its sessions, where the session failed with `Failed to configure TLS`, and so does a system of no
+root. The core no longer enables tonic's `tls-ring` and `tls-native-roots` features, which it does
+not use, as it makes the TLS sessions itself: a program that uses tonic's own TLS enables them. An
+invalid proxy address of the environment fails only the sessions of the hosts that the proxy applies
+to, as grpcio connects the others directly, where it failed the sessions of every host. What grpcio
+logs of a channel, of a proxy variable that is not a proxy, of a roots file that cannot be read,
+and, in the dialect of grpcio, of a TLS handshake that fails and of a proxy that refuses the tunnel,
+also goes to the listener of `grpc_log::set_listener` (a `grpc_log::Listener`, not a stable API), as
+it goes to `tracing`, of the `grpc_log::Severity` of grpcio's line, which `grpc_log::Logged` adds as
+its `severity`, `Info` or `Error`; the Python client writes it to stderr, as grpcio does. The client
+of a new session logs the variables of the proxy again, as it reads them again for its channel.
+`RetriesListener::caught` returns the error that the call fails with, of one that PySpark's `except
+Exception` does not catch, as a `KeyboardInterrupt` of a retry policy of the Python binding, and so
+`SparkConnectClient::read_plan_compression` returns a `Result`.
+
+A message over the size limit of a call, of 128 MiB, fails the call with `RESOURCE_EXHAUSTED` (8),
+as grpc-python's: a response, which tonic does not read, where `SparkError::grpc_code` was tonic's
+`OUT_OF_RANGE` (11), and a request, which the client does not send, as it checks its length before
+the call, where tonic's check, as it encodes the request in the body of the call, reset the stream
+of the call, of the error `INTERNAL` (13), `h2 protocol error: http2 error`, of no cause. The texts
+are tonic's (`Error, decoded message length too large: found <length> bytes, the limit is: <limit>
+bytes`, and `encoded` of a request), and in the dialect of grpcio those of gRPC's core (`Stream
+removed (CLIENT: Received message larger than max (<length> vs. <limit>))`, and `CLIENT: Sent
+message larger than max (<length> vs. <limit>)` of a request). As tonic checks the length of a
+response before any codec reads it, its status of it is told by its code, its text and the limit of
+the client, 134217728: a status of a server of the same code, text and limit, of no details, as a
+server of tonic whose own limit is 128 MiB too sends of a request over it, is read as the client's,
+where the status of a server of another limit, as of tonic's default of 4 MiB, is the server's; the
+client's own status of a request that it does not send is tagged as the client's. A TLS session is
+never resumed, as grpcio does not resume one by default, where rustls kept the sessions of its
+connections in a cache, whose lock a child of a `fork()` shared with its parent. grpcio's error of a
+response that the client fails to decode has no `debug_error_string`
+(`GrpcioError::debug_error_string` is an `Option`, not a stable API), as grpcio's, where it had the
+name of the code and prost's message, in the error that a retry policy of the Python binding is
+asked of, in the log of the errors of the calls and in the warning of a release that fails in the
+background. The metadata of a response, its headers, or its trailers, that reaches gRPC's hard
+limit of 16 KiB, of HPACK's sizes of its entries (of the name, the value and 32 bytes each), fails
+the call with `RESOURCE_EXHAUSTED` of gRPC core's text (`received metadata size exceeds hard limit
+(value length <length> vs. 16384)`, of an entry whose value, or whose name, reaches it alone with 32
+bytes, or `(<size> vs. 16384);  <entries>`, of the entries as gRPC's core lists them, the headers
+that it knows first), where hyper's limit of a header list of 16 KiB reset the stream of the call,
+of `INTERNAL`, or ended the connection of a far larger one, of `UNAVAILABLE`, which the retry policy
+retried: hyper now takes a header list of up to 16 MiB, which the channel checks, while the
+connection still advertises 16 KiB as the size of a header list that it takes, as grpcio's channel
+does, so that a server that honours it, as grpc-java's, resets the stream of a call of more rather
+than sending it. A binary value (of a name ending in `-bin`) that is not base64 fails the call
+`INTERNAL`, `Error parsing '<name>' metadata: illegal base64 encoding`, where tonic panicked of such
+a `grpc-status-details-bin`. A stream that the server resets fails its call of the code that gRPC's
+core gives the reason, `CANCELLED` of `CANCEL`, `UNAVAILABLE` of `REFUSED_STREAM`,
+`RESOURCE_EXHAUSTED` of `ENHANCE_YOUR_CALM`, `PERMISSION_DENIED` of `INADEQUATE_SECURITY` and
+`INTERNAL` of any other, where tonic's channel gave them all `UNKNOWN`, which
+`retries::grpc_python_code` made `INTERNAL`. In the dialect of grpcio, the metadata past gRPC's soft
+limit of 8 KiB fails its call at random too, as gRPC's core fails it, the more often the larger it
+is, of `received metadata size exceeds soft limit (<size> vs. 8192);  <entries>`, of the details of
+the server's error, which gRPC's core still gives the call; a reset stream has gRPC core's details,
+`Stream removed (RST_STREAM (Received RST_STREAM with error code <reason>))`; and a failure whose
+`google.rpc.Status` (its `grpc-status-details-bin`) is not of its code or its details, as of
+metadata past the soft limit, is the `ValueError` of grpc_status's `rpc_status.from_call` where
+PySpark's client reads the status (see `SparkError::grpcio`, not a stable API).
 
 `PythonUDFPayload` and `LogicalPlan::CommonInlineUdtf` add a `pickler` field, which is not a
 stable API: the pickling of the command of a UDF or UDTF of the Python client, which a request
@@ -2131,18 +2268,23 @@ differences that remain are in `dev/parity/known-differences.md` ("Client sessio
 `client` kept apart from its session").
 
 The retry policies of `get_retry_policies` and `set_retry_policies` are PySpark's own
-(`pyspark.sql.connect.client.retries`, vendored from v4.3.0, which needs `grpcio`,
-`grpcio-status` and `googleapis-common-protos`). The transport retries a failure with the
-parameters of the first `DefaultPolicy` of the list, its retries, backoffs, jitter and the delay
-that the server asks for, as PySpark's `Retrying` does, of the failures that
-`DefaultPolicy.can_retry` retries; a `RetryPolicy` retries none. It reads the parameters when the
-policies are set, so a change to a policy afterwards applies once the policies are set again. A
-policy of its own `can_retry` or `to_state`, which the transport does not call, as it decides each
-retry in Rust, without the GIL, of the parameters that it read of the policies, and a backoff,
-jitter or delay that is not a whole number of milliseconds raise `NOT_IMPLEMENTED`. The client of a
-new session has the default policy, as PySpark's `newSession` and `clone` do. With
-`disable_reattachable_execute`, an execution has no reattach option and no deadline, is never
-released, and is sent again when it fails in a way that its policy retries, as PySpark's.
+(`pyspark.sql.connect.client.retries`, vendored from v4.3.0, which needs `grpcio`, `grpcio-status`
+and `googleapis-common-protos`). Policies of PySpark's classes `DefaultPolicy` and `RetryPolicy`
+themselves, of backoffs, a jitter and a delay of whole milliseconds, are retried by the transport,
+without Python: of the parameters of the first `DefaultPolicy` of the list, its retries, backoffs,
+jitter and the delay that the server asks for, as PySpark's `Retrying` retries with them, of the
+failures that `DefaultPolicy.can_retry` retries; a `RetryPolicy` retries none. It reads the
+parameters when the policies are set, so a change to a policy afterwards applies once the policies
+are set again. Any other policies, such as those of a subclass of a `can_retry` or a `to_state` of
+its own, are run by PySpark's `Retrying`, which the transport makes for each call, as PySpark's
+client makes one, and asks of each failed RPC, of grpcio's `RpcError` of it (`_InactiveRpcError`, or
+`_MultiThreadedRendezvous` of a stream of responses): `Retrying` calls the methods of the policies,
+and logs and warns as in PySpark, with the GIL, on the thread of the call, or on the delivery thread
+of the drop-in for a request that the transport sends in the background, and the transport waits the
+backoff that it gives. The client of a new session has the default policy, as PySpark's `newSession`
+and `clone` do. With `disable_reattachable_execute`, an execution has no reattach option and no
+deadline, is never released, and is sent again when it fails in a way that its policy retries, as
+PySpark's.
 
 The relation of a DataFrame's plan (`df._plan.plan(client)`) is a placeholder that holds the
 relation of the DataFrame, which the core builds at the call, as PySpark's `plan` builds the
@@ -2220,10 +2362,12 @@ the action, and none is set. The error of collecting them that the server report
 reference cycle through the attributes, as through the result dict, is freed.
 
 The errors of the RPCs that PySpark's client leaves to grpc, those of `clone` (and
-`SparkSession.cloneSession`) and of `copy_from_local_to_fs` (and `SparkSession.copyFromLocalToFs`),
-which raise grpc's `RpcError` there (`_InactiveRpcError`), are converted as those of the other
-RPCs: they are the exception of their error class, such as `UnknownException` or
-`UnsupportedOperationException`, as the drop-in has no grpc.
+`SparkSession.cloneSession`), of `copy_from_local_to_fs` (and `SparkSession.copyFromLocalToFs`) and
+of `cache_artifacts`, are grpcio's `RpcError` (`_InactiveRpcError`), as they are there: of the code,
+the details, the `debug_error_string` and the trailing metadata of the failed call, neither
+converted nor logged, where grpcio is installed. Without grpcio, whose classes they are of, they are
+converted as those of the other RPCs: they are the exception of their error class, such as
+`UnknownException` or `UnsupportedOperationException`.
 
 The clients of a session share their attributes, as PySpark's session has one client: an
 attribute that is set on `spark.client` is there the next time, and so are its lock, its
@@ -2474,24 +2618,43 @@ messages, such as `from pyspark.sql.connect.proto import base_pb2`, has no warni
 stub is PySpark's (`base_pb2.pyi`), and the module, which the drop-in's protobuf runtime makes at
 run time, has a file of the package as its source.
 
-The drop-in parses the protobufs that a pickled Column or DataFrame carries, and the requests
-that session hooks see, at any depth that PySpark's serializer reaches, where the parsers of
-protobuf and prost stop at 100 nested messages. Its Rust client enables prost's
-`no-recursion-limit` feature, which applies to every message the drop-in decodes. So it also
-decodes server responses deeper than 100 nested messages, such as the schema of a struct nested
-34 levels deep, which PySpark's client rejects with "Exception deserializing response!", and so do
-the actions of a DataFrame of the observed metrics of a struct nested as deep (`collect()`,
-`toPandas()`, its `executionInfo` and the `Observation`'s `get`) and the messages of the responses
-that `SparkSession.client` parses (of `schema`, `config`, `to_table`, the results of commands and
-the statuses of operations), of the runtime's parse of any depth. A response that does not parse,
-of the drop-in's Rust client or of `SparkSession.client`, raises PySpark's error of a response that
-gRPC's deserializer refuses: the `SparkConnectGrpcException` of the status `INTERNAL`, of the text
-of grpc's error of the call (`_InactiveRpcError`, or `_MultiThreadedRendezvous` of an execution)
-whose details are "Exception deserializing response!" (and whose `debug_error_string` is `None`),
-where the error of the Rust API is prost's (`[Internal] failed to decode Protobuf message: ...`):
-the codec of the client tags its own failure, so a status of the server of the same text (of a
-server of tonic that fails to decode a request) is the server's error. The server is trusted, as
-SECURITY.md sets out, so this is not a bound on the responses.
+The drop-in parses the protobufs that a pickled Column or DataFrame carries, and the requests that
+session hooks see, at any depth that PySpark's serializer reaches, where the parsers of protobuf and
+prost stop at 100 nested messages. Its Rust client enables prost's `no-recursion-limit` feature,
+which applies to every message the drop-in decodes. So it also decodes server responses deeper than
+100 nested messages, such as the schema of a struct nested 34 levels deep, which PySpark's client
+rejects with "Exception deserializing response!", and so do the actions of a DataFrame of the
+observed metrics of a struct nested as deep (`collect()`, `toPandas()`, its `executionInfo` and the
+`Observation`'s `get`) and the messages of the responses that `SparkSession.client` parses (of
+`schema`, `config`, `to_table`, the results of commands and the statuses of operations), of the
+runtime's parse of any depth. A response that does not parse, of the drop-in's Rust client or of
+`SparkSession.client`, raises PySpark's error of a response that gRPC's deserializer refuses: the
+`SparkConnectGrpcException` of the status `INTERNAL`, of the text of grpc's error of the call
+(`_InactiveRpcError`, or `_MultiThreadedRendezvous` of an execution) whose details are "Exception
+deserializing response!" (and whose `debug_error_string` is `None`), where the error of the Rust API
+is prost's (`[Internal] failed to decode Protobuf message: ...`): the codec of the client tags its
+own failure, so a status of the server of the same text (of a server of tonic that fails to decode a
+request) is the server's error. The server is trusted, as SECURITY.md sets out, so this is not a
+bound on the responses. The error of grpcio of such a response, of those details and no
+`debug_error_string`, is also the one that PySpark's client sees elsewhere: the error that a retry
+policy is asked of (its `details()`, and its `debug_error_string()`, `None`), the error that the
+`GRPC Error received` log gives, the warning of a release that fails in the background
+(`ReleaseExecute failed with exception: ...`), and the error of a call that PySpark leaves to grpc
+(`cloneSession()`, the uploads of `copyFromLocalToFs` and of the caching of artifacts). As grpcio's,
+the `debug_error_string()` of such an error of a stream, `_MultiThreadedRendezvous`, waits forever
+for a debug string that nothing sets; a policy that the client asks of a stream that it reads in the
+background, as of the events of the streaming query listeners or of the removal of a model, and the
+log of such an error, run on a thread of their own (`pyspark-apart`), so that such a wait holds only
+its call, as in grpcio, and not the delivery thread of the client, which runs the Python of every
+other request in the background. A call that the client makes in the background awaits the log of
+its error (`GRPC Error received`, and `Received ErrorInfo`) before it goes on with it, so that the
+log precedes what follows, such as the warning that the listener bus ends with, as PySpark's handler
+thread logs the error before it warns. The query context loggers log grpcio's error of the call that
+failed as the exception that PySpark handles as it builds its exception, of its text:
+`_InactiveRpcError` of a call of one response, such as `AnalyzePlan`, and `_MultiThreadedRendezvous`
+of a stream, of the `debug_error_string` of grpcio 1.85, the name of the code and the details, where
+it was a `_MultiThreadedRendezvous` of either, of the `debug_error_string` of an older grpcio
+(`UNKNOWN:Error received from peer {grpc_message:...}`).
 
 The drop-in also sends a plan that PySpark's client cannot encode: from about 50 nested
 expressions, PySpark raises upb's `DecodeError: Exceeded upb_DecodeOptions_MaxDepth` before it
@@ -2849,11 +3012,12 @@ Nor does a session that the program dropped send anything, of which no object is
 or a `client` of it: neither the session nor a DataFrame, reader, writer, catalog, stream or ML
 object of it. PySpark's session object closes its client when it is freed, and the exit sends
 nothing for a closed client. The drop-in drops such a session, closes its client, and closes the
-connection of the client once no session uses it (a `newSession()` or a `cloneSession()` shares
-the connection of its session). Once its `catalog` or `streams` is read, PySpark's session object
-is in a reference cycle, which only the garbage collector frees, so that until a collection its
-exit still cleans its ML cache; the drop-in's session has no such cycle and is freed at once, as
-PySpark's is by a collection.
+connection of the process to its server once no session uses it, which the sessions of
+`newSession()` and `cloneSession()` share, as PySpark's channels share their subchannels, but a
+session of a token, whose connection is its own. Once its `catalog` or `streams` is read,
+PySpark's session object is in a reference cycle, which only the garbage collector frees, so that
+until a collection its exit still cleans its ML cache; the drop-in's session has no such cycle and
+is freed at once, as PySpark's is by a collection.
 A client that no session object owns, of `SparkConnectClient(...)` or of its `newSession()` or
 `clone()`, lives until the exit, as PySpark's `atexit` registration keeps it, so its ML cache
 is cleaned at exit unless it is closed, even when the program dropped it.
@@ -3414,79 +3578,142 @@ directly whatever that address, as in grpcio, which resolves it only for a host 
 As grpcio, the client logs a proxy variable that is not a proxy, and a roots file that cannot be
 read, as errors on stderr (see [Errors on stderr](configuration.md#errors-on-stderr)).
 
-As in grpcio, a connection has 20 s, its connect deadline, to complete: one deadline from its
-start, which the TCP connection, the tunnel of a proxy, the TLS handshake and the HTTP/2 settings
-that the server sends first share. One that does not complete fails with `UNAVAILABLE`, which the
-retry policy retries: of a plaintext server that accepts the connection and never answers, with
-grpcio's `connection attempt timed out before receiving SETTINGS frame`. Three differences remain.
-Once a connection has failed, grpcio fails the later calls of the channel at once, with its error,
-while it connects again in the background, until a connection succeeds; here each call, and each
-retry, waits for a connection of its own, as the transport has no state of the channel between its
-connections. So against a server that never answers, the first plan of a session without retries
-fails after 40 s, its lookup of the plan compression and its execution waiting 20 s each, where
-PySpark's fails after 20 s, and the release of the session at exit waits 20 s more, where
-PySpark's fails at once.
-The settings of the server of a TLS connection are not bounded: one whose handshake completes and
-whose server never sends them ends at the keepalive of the connection, 80 s by default
-(`grpc_keepalive_time_ms` and `grpc_keepalive_timeout_ms`), or at the deadline of the call without
-a keepalive, as they come inside the TLS session, which tonic reads above the connector that bounds
-them. And for a host of several addresses, grpcio starts a connection to the next address 250 ms
-after the previous one while that one is not done, each with a deadline of its own, while here,
-for a direct connection, the TCP connections to the addresses of a family are tried in turn, each
-for an equal share of the 20 s, those to the other family from 300 ms on, and the TLS handshake is
-made on the first that connects, as hyper-util's connector, tonic's own, which the client connects
-with, tries them; through a proxy, its addresses are tried in turn within the one 20 s, where
-grpcio starts them as those of a host.
+As grpcio's, a channel connects to the addresses of its host, or of its proxy, as the system's
+resolver gives them, within the connect deadline, but those of `localhost` and of the names under
+it, the loopback of both families, as c-ares, grpcio's resolver, gives them (`::1`, then
+`127.0.0.1`): to the first, then to each next one 250 ms after the previous one, or at once once the
+previous one failed, while none is done, each with a connect deadline of 20 s of its own, which its
+TCP connection, the tunnel of the proxy, the TLS handshake and the HTTP/2 settings that the server
+sends first share. The first to complete is the connection, and the others are dropped. The
+connection is the process's: the sessions of the same server, proxy, TLS and keepalive, and of no
+token, share it, as gRPC's global subchannel pool shares the subchannels of PySpark's channels, so a
+session of `newSession()`, `cloneSession()` or the `clone` of a client, and any other session of the
+same connection string, uses the connection of its session, while each reads the variables of the
+proxy again, as grpcio's channel of a new client does; a session of a token has a connection of its
+own, also of `newSession()` and `cloneSession()`, as grpcio's channels of the credentials of a
+token, of each session, share none. The window of a connection is the largest of HTTP/2, so that the
+results that a session holds open and does not read on, as of `toLocalIterator()`, do not hold the
+calls of the other sessions of the connection, nor its other calls, as gRPC's connections, whose
+windows grow with those of their streams; the window of each stream, of 2 MiB, bounds what it holds
+unread. A child of `os.fork()` makes the threads, the runtime and the channels of the client again,
+as grpcio's fork support does, so that its sessions, and those of its parent, run queries there, and
+leaves those of its parent to the parent: a session of the parent that the child frees or stops
+leaves the connection of its channel to the parent, which reads it on, and an execution of the
+parent that the child drops is not released. The child closes the sockets of the connections of its
+parent and the epoll instances of its parent's runtime as the fork returns, as grpcio's fork support
+closes the descriptors of the event engine of a parent, so that a connection of the parent ends on
+the server with the parent; the eventfd of its parent's runtime stays, an eventfd of the child's
+own, which an object of the parent writes to when it wakes a task of that runtime, one descriptor of
+each generation (see `dev/parity/known-differences.md`). The client writes the lines of gRPC's core
+to stderr without the lock of Rust's stderr, and the state that its threads keep is of each
+generation or read without a lock, so that a lock that a thread of the parent held at the fork does
+not hold the child. A fork while another thread makes a call can leave the child waiting, as
+grpcio's fork support asks that no other thread makes a call then, and so can a fork while the
+client makes a call in the background (a release of an execution, the removal of a cached relation
+or of a model, the events of the streaming query listeners), which holds the lock of the hooks, the
+user context extensions, the plan compression or the last execution of its session for the moment
+that it reads them, and so can a fork while a thread of the client releases a Python object without
+the GIL, as of a retry policy, whose release PyO3 defers under a lock of its own, which the next
+call of the child into the client waits for. The tags and the user context extensions of the other
+threads of the parent stay in the child, which never forgets them, as those threads end in the
+parent only: a leak bounded by the threads of the parent. A message over the size limit of a call,
+128 MiB, as PySpark's channel sets `grpc.max_receive_message_length` and
+`grpc.max_send_message_length`, fails the call with grpcio's `RESOURCE_EXHAUSTED`, of the details of
+gRPC's core: `Stream removed (CLIENT: Received message larger than max (<length> vs. <limit>))` of a
+response, and `CLIENT: Sent message larger than max (<length> vs. <limit>)` of a request, which is
+not sent. So does the metadata of a response, its headers or its trailers, past gRPC's limits of the
+metadata that a call receives, of HPACK's sizes of its entries: at 16 KiB
+(`grpc.absolute_max_metadata_size`), `Stream removed (received metadata size exceeds hard limit
+(value length <length> vs. 16384))` of an entry too large alone, or `(<size> vs. 16384);
+<entries>`, at once, also of metadata far larger, where the drop-in failed with `INTERNAL`
+(`transport error`) or retried an `UNAVAILABLE` of the end of its connection; and past 8 KiB
+(`grpc.max_metadata_size`), at random, the more often the larger it is, of `soft limit`, of the
+entries as gRPC's core lists them. The connection advertises the hard limit as the size of a header
+list that it takes, as grpcio's channel does, so that Spark's server, of grpc-java, resets the
+stream of a call whose metadata would reach it, as an error whose message has a few hundred CJK
+characters gives, of grpcio's `INTERNAL`, `Stream removed (RST_STREAM (Received RST_STREAM with error
+code 1))`, where the drop-in raised the hard limit of the metadata that it received; a stream that a
+server resets fails so of the code of the reason, as gRPC's core gives it. Past the soft limit, the
+call still has the details of the server's error, as grpcio's call does, and its failure is
+PySpark's `ValueError` of grpc_status, `Code in Status proto (StatusCode.INTERNAL) doesn't match
+status code (StatusCode.RESOURCE_EXHAUSTED)`, where it was the `SparkConnectGrpcException` of
+`RESOURCE_EXHAUSTED`: as PySpark reads the `google.rpc.Status` of each failure with
+`rpc_status.from_call`, the failure of a status that its details do not match, of their code or of
+their message, is that `ValueError`, raised as grpcio's error of the call is handled (its
+`__context__`), of no log of the error where the `DefaultPolicy` or the iterator of a reattachable
+execution reads it, and after `GRPC Error received` where `_handle_rpc_error` does (see
+`dev/parity/known-differences.md`). A channel that cannot connect fails its calls with
+`UNAVAILABLE`, which the retry policy retries, of the last error of its addresses: of a plaintext
+server that accepts the connection and never answers, grpcio's `failed to connect to all addresses;
+last error: UNKNOWN: ipv4:127.0.0.1:15002: connection attempt timed out before receiving SETTINGS
+frame`. Once it failed, it fails the later calls at once, of that error, while it connects again in
+the background with gRPC's backoff, 1 s and then 1.6 times longer each time up to 120 s, with a
+jitter of 20 %, each attempt with the longer of its backoff and 20 s as its deadline, until a
+connection succeeds, which the next call takes; once no call came for 30 min, or once every session
+of the connection is stopped, it stops, and the next call connects, as grpcio's channel goes idle,
+or shuts down. A connection that ends is made again by the next call. The Python client logs the
+failures of the connections that gRPC's core logs, on stderr (see [Errors on
+stderr](configuration.md#errors-on-stderr)), and its `CONNECT` request of a proxy has grpcio's
+`User-Agent: grpc-httpcli/0.0`. What stays different, such as the keepalive pings, which are
+hyper's, is in `dev/parity/known-differences.md`.
 
-The user agent, `<user_agent> spark/4.3.0 os/<os> python/rust`, is sent as PySpark sends it: as
-the client type of the requests that PySpark builds with it, and not as a header. The `user-agent`
-header is the client library's own, `tonic/<version>` here and grpcio's in PySpark, such as
-`grpc-python/1.85.1 grpc-c/58.0.0 (linux; chttp2)`. A `user-agent` parameter of the connection
-string is checked as metadata and not sent, as grpcio replaces it with its own. So a user agent
-may hold any character, a control character included. As PySpark's `userAgent`, which its requests
-read when they are built, a user agent longer than 2048 characters after URL escaping, or a
-`SPARK_CONNECT_USER_AGENT` that is not UTF-8, is the error of each request that carries it, which
-is not sent: `SparkConnectException`, or the `UnicodeEncodeError` of `urllib.parse.quote`. The
-session is made all the same, its `stop()` logs the error as that of its release, and the requests
-that PySpark builds without the user agent, of the artifacts and of `CloneSession`, are sent. As
-`urllib.parse.urlsplit` does, a tab, CR or LF anywhere in the connection string is removed.
-`SPARK_CONNECT_USER_AGENT` is read when a session is made of a connection string, and the sessions
-of `newSession` and `cloneSession` have the user agent of the session they are made of, where
-PySpark's requests read the variable each time: the core builds the requests of a session without
-Python, on the threads of its runtime too, which do not wait for the GIL, so it reads the variable
-of the environment of the process when the session is made, rather than `os.environ` for each
-request.
+The user agent, `<user_agent> spark/4.3.0 os/<os> python/<version>` of the version of Python, as
+PySpark's `ChannelBuilder.userAgent` makes it, is sent as PySpark sends it: as the client type of
+the requests that PySpark builds with it, and not as a header. The `user-agent` header is the client
+library's own, `tonic/<version>` here and grpcio's in PySpark, such as `grpc-python/1.85.1
+grpc-c/58.0.0 (linux; chttp2)`. A `user-agent` parameter of the connection string is checked as
+metadata and not sent, as grpcio replaces it with its own. So a user agent may hold any character, a
+control character included. As PySpark's `userAgent`, which its requests read when they are built, a
+user agent longer than 2048 characters after URL escaping, or a `SPARK_CONNECT_USER_AGENT` that is
+not UTF-8, is the error of each request that carries it, which is not sent: `SparkConnectException`,
+or the `UnicodeEncodeError` of `urllib.parse.quote`. The session is made all the same, its `stop()`
+logs the error as that of its release, and the requests that PySpark builds without the user agent,
+of the artifacts and of `CloneSession`, are sent. As `urllib.parse.urlsplit` does, a tab, CR or LF
+anywhere in the connection string is removed. `SPARK_CONNECT_USER_AGENT` is read as each call of the
+client starts, so that a change of `os.environ` applies to the next call, as PySpark's requests read
+the variable when each is built, and a request that the transport builds during a call, such as a
+reattachment or a release in the background, has the user agent of the last call that started.
 
-A gRPC failure whose status carries no error of the server, such as of an unreachable server or of
-a proxy, is the `SparkConnectGrpcException` of its code whose message is the text of grpcio's
-error of the call, as PySpark's `_handle_rpc_error` raises it: `<_InactiveRpcError of RPC that
-terminated with:`, or `<_MultiThreadedRendezvous` for `ExecutePlan` and `ReattachExecute`, and the
-lines of its code (`status = StatusCode.UNAVAILABLE`), its details and its `debug_error_string`,
-as grpcio 1.85 gives them. The message of a call past its deadline begins with that text, as
-PySpark's `f"{error}: RPC deadline exceeded. ..."`, and that of a status of a `google.rpc.Status`
-without an `ErrorInfo` is the message of the status. The details are the message of a status that
-the server sent, and the `debug_error_string` is the name of the code and the details, as in
-grpcio. Those of a failure that the client detects itself, such as a refused connection, are
-tonic's message (`tcp connect error`), where grpcio's are gRPC's C core's (`failed to connect to
-all addresses; ...`); of a connection whose server sends no settings, they are grpcio's last error,
-`connection attempt timed out before receiving SETTINGS frame`, without the address. The errors
-of `copyFromLocalToFs` and `cloneSession`, which PySpark leaves to grpc as its `RpcError`, are
-converted as those of the other calls.
+A gRPC failure whose status carries no error of the server, such as of an unreachable server or of a
+proxy, is the `SparkConnectGrpcException` of its code whose message is the text of grpcio's error of
+the call, as PySpark's `_handle_rpc_error` raises it: `<_InactiveRpcError of RPC that terminated
+with:`, or `<_MultiThreadedRendezvous` for `ExecutePlan` and `ReattachExecute`, and the lines of its
+code (`status = StatusCode.UNAVAILABLE`), its details and its `debug_error_string`, as grpcio 1.85
+gives them. The message of a call past its deadline begins with that text, as PySpark's `f"{error}:
+RPC deadline exceeded. ..."`, and that of a status of a `google.rpc.Status` without an `ErrorInfo`
+is the message of the status. The details are the message of a status that the server sent, and the
+`debug_error_string` is the name of the code and the details, as in grpcio. Those of a failure that
+the client detects itself are those of gRPC's C core: of a channel that cannot connect, `failed to
+connect to all addresses; last error: UNKNOWN: ipv4:127.0.0.1:1: Failed to connect to remote host:
+Connection refused`, of the last error of its addresses, such as a TLS handshake of BoringSSL's
+error or a proxy that refuses the tunnel (`HTTP proxy returned response code 403`), of a name that
+does not resolve, `errors resolving ...`, and of a call that the end of its connection fails,
+`Stream removed (Socket closed)`. The errors of `copyFromLocalToFs` and `cloneSession`, which
+PySpark leaves to grpc, are grpcio's `RpcError`, as there (see
+[SparkSession.client](#sparksessionclient)).
 
 As PySpark's `Retrying`, a call whose retries of a failure that a policy retries are spent warns
-`[RETRIES_EXCEEDED] The maximum number of retries has been exceeded.` before it raises the
-failure: a `UserWarning` of the location of PySpark's `warnings.warn` in
+`[RETRIES_EXCEEDED] The maximum number of retries has been exceeded.` before it raises the failure:
+a `UserWarning` of the location of PySpark's `warnings.warn` in
 `pyspark.sql.connect.client.retries`, and of that module, which its filters and the actions of a
 location take as PySpark's, and which a filter of `"error"` raises in place of the failure. So do
-the lookup of the plan compression of the first plan of a session, whose failure is caught, the
-read of the conf of the server's stack trace as an error of the server is raised, which is retried
-as PySpark's, and the release of the session of `stop()`. Policies none of which is a
-`DefaultPolicy` retry nothing, and do not warn. The requests that the client sends in the
-background, which no caller waits for, do not warn, where PySpark's warn from the threads that send
-them (see `dev/parity/known-differences.md`). `stop()` logs the failure of the release of its
-session to the logger of Spark Connect (`pyspark.sql.connect.logging`), which is disabled unless
+the lookup of the plan compression of the first plan of a session, whose failure is caught, the read
+of the conf of the server's stack trace as an error of the server is raised, which is retried as
+PySpark's, and the release of the session of `stop()`. Policies none of which is a `DefaultPolicy`
+retry nothing, and do not warn. The requests that the client sends in the background, which no
+caller waits for, warn too, and their failures are logged as PySpark's senders log them
+(`ReleaseExecute failed with exception: ...`), from the delivery thread of the drop-in (see
+`dev/parity/known-differences.md`). `stop()` logs the failure of the release of its session to the
+logger of Spark Connect (`pyspark.sql.connect.logging`), which is disabled unless
 `SPARK_CONNECT_LOG_LEVEL` is set, as PySpark's: `session.stop(): Session could not be released.
 Error: $<error>`.
+
+With `SPARK_CONNECT_LOG_LEVEL`, the client logs to the logger of Spark Connect what PySpark's client
+logs of its RPCs, of the same levels and messages: the deadlines of a new client (`Spark Connect RPC
+deadlines: ...`), each retry and the end of the retries of a call (`Given up on retrying. error:
+...`), and each gRPC failure that it converts (`GRPC Error received`, of grpcio's `RpcError`, and
+`Received ErrorInfo: ...` of an error of the server). The debug logs of its plans and of their
+responses are not (see `dev/parity/known-differences.md`).
 
 For TLS roots, including `GRPC_DEFAULT_SSL_ROOTS_FILE_PATH`, see
 [TLS Root Certificates](configuration.md#tls-root-certificates).

@@ -171,6 +171,12 @@ pub struct ServerErrorInfo {
     pub display_stacktrace: bool,
     /// The breaking change that the error comes from, if the server reports one.
     pub breaking_change: Option<BreakingChangeInfo>,
+    /// The kind of the call that failed and the text of grpcio's error of it, `str()` of
+    /// PySpark's `RpcError`, as PySpark Connect handles that error as it builds its exception,
+    /// which the query context loggers of the Python binding log as the exception. None of an
+    /// error that no call failed with. Not a stable API.
+    #[doc(hidden)]
+    pub rpc_error: Option<(GrpcCall, String)>,
 }
 
 /// A breaking change that an error comes from. Mirrors what
@@ -220,6 +226,16 @@ pub struct SparkError {
     /// binding raises it; the message of the Rust API is `[code] details`.
     #[doc(hidden)]
     pub pyspark_message: Option<String>,
+    /// grpcio's error of a failed call that PySpark's client leaves to grpc, as it does not
+    /// convert it (`cloneSession`, `copyFromLocalToFs`, and the caching of artifacts), which the
+    /// Python binding raises as grpcio's `RpcError`; or, of an error of the kind
+    /// [`SparkErrorKind::BuiltinValueError`], the error of the call whose `google.rpc.Status` does
+    /// not match it, of which PySpark raises the `ValueError` of `rpc_status.from_call` as it
+    /// handles it, its `__context__` (see `proto_mismatch_error`). Only in the dialect of
+    /// grpcio (see [`crate::set_grpcio_dialect`]); the Rust client converts these failures as any
+    /// other.
+    #[doc(hidden)]
+    pub grpcio: Option<Box<GrpcioError>>,
 }
 
 /// The PySpark exception hierarchy leaf we map to.
@@ -358,6 +374,7 @@ impl SparkError {
             operation_id: None,
             server: None,
             pyspark_message: None,
+            grpcio: None,
         }
     }
 
@@ -390,6 +407,7 @@ impl SparkError {
             operation_id: None,
             server: None,
             pyspark_message: None,
+            grpcio: None,
         }
     }
 
@@ -442,6 +460,7 @@ impl SparkError {
             operation_id: None,
             server: None,
             pyspark_message: None,
+            grpcio: None,
         }
     }
 
@@ -519,6 +538,7 @@ impl SparkError {
             operation_id: None,
             server: None,
             pyspark_message: None,
+            grpcio: None,
         }
     }
 
@@ -600,17 +620,20 @@ impl SparkError {
             )
         } else {
             match parse_error_info(&details) {
-                Some(info) => (Self::from_error_info(info, message), None),
+                Some(info) => {
+                    let mut err = Self::from_error_info(info, message);
+                    if let Some(server) = err.server.as_mut() {
+                        server.rpc_error = Some((call, grpcio_status(&status).text(call)));
+                    }
+                    (err, None)
+                }
                 None => {
                     // The `grpc-status-details-bin` of the status is the `google.rpc.Status` of
                     // `rpc_status.from_call`, whose message is that of the call.
                     let pyspark_message = if !details.is_empty() {
                         message.clone()
-                    } else if is_decode_failure(&status) {
-                        // As grpcio's error of a response that it fails to deserialize.
-                        grpc_call_text_of(call, code, DESERIALIZE_FAILURE, "None")
                     } else {
-                        grpc_call_text(call, code, &message)
+                        grpcio_status(&status).text(call)
                     };
                     let err = Self::connect_msg(format!("[{code}] {message}"));
                     (err, Some(pyspark_message))
@@ -660,6 +683,7 @@ impl SparkError {
                 ..Default::default()
             })),
             pyspark_message: None,
+            grpcio: None,
         };
         err.kind = err.server_kind();
         err
@@ -695,6 +719,7 @@ impl SparkError {
                 ..Default::default()
             })),
             pyspark_message: None,
+            grpcio: None,
         };
         err.kind = err.server_kind();
         let details = spark_connect_proto::FetchErrorDetailsResponse {
@@ -949,11 +974,288 @@ fn grpc_call_text_of(
 /// `debug_error_string` (`None`), as PySpark raises it of a corrupt response.
 const DESERIALIZE_FAILURE: &str = "Exception deserializing response!";
 
+/// What grpcio's error of a failed call holds of its status: the code, as grpc-python reports it
+/// (see [`crate::retries::grpc_python_code`]), the details, as grpcio gives them (see
+/// [`crate::client::status_details`]), and the `debug_error_string` of gRPC's C core, the name of
+/// the code and the details; but of a response that the client failed to decode, grpcio's of a
+/// response that it fails to deserialize, `Exception deserializing response!` of no
+/// `debug_error_string`.
+pub(crate) struct GrpcioStatus {
+    pub(crate) code: tonic::Code,
+    pub(crate) details: String,
+    pub(crate) debug_error_string: Option<String>,
+}
+
+impl GrpcioStatus {
+    /// `str()` of grpcio's error of a failed call of the kind `call` of this status, whose
+    /// `debug_error_string` reads `None` when it has none.
+    pub(crate) fn text(&self, call: GrpcCall) -> String {
+        grpc_call_text_of(
+            call,
+            self.code,
+            &self.details,
+            self.debug_error_string.as_deref().unwrap_or("None"),
+        )
+    }
+}
+
+/// What grpcio's error of the failed call that ended with `status` holds of it (see
+/// [`GrpcioStatus`]).
+pub(crate) fn grpcio_status(status: &Status) -> GrpcioStatus {
+    let code = crate::retries::grpc_python_code(status);
+    if is_decode_failure(status) {
+        return GrpcioStatus {
+            code,
+            details: DESERIALIZE_FAILURE.to_string(),
+            debug_error_string: None,
+        };
+    }
+    let details = crate::client::status_details(status);
+    let name = status_code_name(code);
+    let debug_error_string = if details.is_empty() {
+        name.to_string()
+    } else {
+        format!("{name}:{details}")
+    };
+    GrpcioStatus {
+        code,
+        details,
+        debug_error_string: Some(debug_error_string),
+    }
+}
+
 /// Whether `status` is the client's own of a response that it failed to decode, of the codec of
 /// the generated client, which tags it (see [`spark_connect_proto::ClientCodec`]): a status of the
 /// same code and text that a server sends, as of its failure to decode a request, is not.
 fn is_decode_failure(status: &Status) -> bool {
     status.code() == tonic::Code::Internal && spark_connect_proto::is_client_decode_error(status)
+}
+
+/// grpcio's error of a failed call: its code, its details and its `debug_error_string`, its
+/// trailing metadata, and its text, `str()` and `repr()` of PySpark's `RpcError`, which its logs
+/// show. Not a stable API.
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub struct GrpcioError {
+    /// The kind of the call, which names the class of the error.
+    pub call: GrpcCall,
+    /// The code, as grpc-python reports it (see [`crate::retries::grpc_python_code`]).
+    pub code: tonic::Code,
+    /// The details, as grpcio gives them (see [`crate::client::status_details`]).
+    pub details: String,
+    /// The `debug_error_string` of gRPC's C core: the name of the code and the details, or None
+    /// of a response that the client failed to decode, as grpcio's error of a response that it
+    /// fails to deserialize has none.
+    pub debug_error_string: Option<String>,
+    /// The trailing metadata of the call: the ASCII entries, then the binary ones, of which the
+    /// `grpc-status-details-bin` of a `google.rpc.Status`.
+    pub trailing_metadata: Vec<(String, Vec<u8>)>,
+    /// `str()` of the error: `<_InactiveRpcError of RPC that terminated with: ...>`.
+    pub text: String,
+}
+
+/// grpcio's error of the failed call of the kind `call` that ended with `status`. Not a stable
+/// API.
+#[doc(hidden)]
+pub fn grpcio_error(status: &Status, call: GrpcCall) -> GrpcioError {
+    let grpcio = grpcio_status(status);
+    let mut trailing_metadata = Vec::new();
+    // As grpcio's metadata, of which gRPC's core keeps the headers that it reads itself.
+    let reserved = |key: &str| {
+        key.starts_with(':')
+            || matches!(
+                key,
+                "content-type"
+                    | "te"
+                    | "user-agent"
+                    | "host"
+                    | "content-encoding"
+                    | "accept-encoding"
+                    | "grpc-encoding"
+                    | "grpc-accept-encoding"
+                    | "grpc-status"
+                    | "grpc-message"
+                    | "grpc-timeout"
+                    | "grpc-internal-encoding-request"
+                    | "grpc-previous-rpc-attempts"
+                    | "grpc-retry-pushback-ms"
+                    | "grpc-server-stats-bin"
+                    | "grpc-tags-bin"
+                    | "grpc-trace-bin"
+            )
+    };
+    for entry in status.metadata().iter() {
+        let key = match &entry {
+            tonic::metadata::KeyAndValueRef::Ascii(key, _) => key.as_str(),
+            tonic::metadata::KeyAndValueRef::Binary(key, _) => key.as_str(),
+        };
+        if reserved(key) {
+            continue;
+        }
+        match entry {
+            tonic::metadata::KeyAndValueRef::Ascii(key, value) => trailing_metadata
+                .push((key.as_str().to_string(), value.as_encoded_bytes().to_vec())),
+            tonic::metadata::KeyAndValueRef::Binary(key, value) => {
+                if let Ok(value) = value.to_bytes() {
+                    trailing_metadata.push((key.as_str().to_string(), value.to_vec()));
+                }
+            }
+        }
+    }
+    if !status.details().is_empty() {
+        trailing_metadata.push((
+            "grpc-status-details-bin".to_string(),
+            status.details().to_vec(),
+        ));
+    }
+    GrpcioError {
+        call,
+        code: grpcio.code,
+        text: grpcio.text(call),
+        details: grpcio.details,
+        debug_error_string: grpcio.debug_error_string,
+        trailing_metadata,
+    }
+}
+
+/// `str()` of grpcio's error of the failed call of the kind `call` that ended with `status`, as
+/// PySpark's logs show it.
+pub(crate) fn grpcio_error_text(status: &Status, call: GrpcCall) -> String {
+    grpcio_status(status).text(call)
+}
+
+/// In the dialect of grpcio, the `ValueError` that `grpc_status.rpc_status.from_call` raises of
+/// grpcio's error of the failed call of the kind `call` that ended with `status`, whose
+/// `google.rpc.Status`, of its `grpc-status-details-bin`, is not of its code or of its details, as
+/// of metadata past gRPC's soft limit, whose call fails `RESOURCE_EXHAUSTED` of the details of an
+/// error of the server (see [`crate::metadata`]): PySpark's client reads the status of each failed
+/// call of it as it handles it (`_handle_rpc_error`), and so does its `DefaultPolicy`, of a
+/// `RetryInfo`, and the iterator of a reattachable execution (`_call_iter`), which raise this in
+/// place of the error, its context. Its text is that of grpc_status: `Code in Status proto
+/// (StatusCode.INTERNAL) doesn't match status code (StatusCode.RESOURCE_EXHAUSTED)`, of a code
+/// that is not one of gRPC's `Invalid status code <code>`, or `Message in Status proto (...)
+/// doesn't match status details (...)`. None of a status of no details, or of details that the
+/// status matches, and out of the dialect of grpcio.
+pub(crate) fn proto_mismatch_error(status: &Status, call: GrpcCall) -> Option<SparkError> {
+    proto_mismatch_error_in(status, call, crate::connector::grpcio_dialect())
+}
+
+/// As [`proto_mismatch_error`], in the dialect of grpcio if `grpcio`.
+fn proto_mismatch_error_in(status: &Status, call: GrpcCall, grpcio: bool) -> Option<SparkError> {
+    if !grpcio || status.details().is_empty() {
+        return None;
+    }
+    let proto = RpcStatus::decode(status.details()).ok()?;
+    let grpcio = grpcio_status(status);
+    let message = if proto.code != grpcio.code as i32 {
+        if (0..=16).contains(&proto.code) {
+            format!(
+                "Code in Status proto (StatusCode.{}) doesn't match status code (StatusCode.{})",
+                status_code_name(tonic::Code::from_i32(proto.code)),
+                status_code_name(grpcio.code)
+            )
+        } else {
+            format!("Invalid status code {}", proto.code)
+        }
+    } else if proto.message != grpcio.details {
+        format!(
+            "Message in Status proto ({}) doesn't match status details ({})",
+            proto.message, grpcio.details
+        )
+    } else {
+        return None;
+    };
+    let mut error = SparkError::builtin_value_msg(message);
+    error.grpcio = Some(Box::new(grpcio_error(status, call)));
+    Some(error)
+}
+
+/// A `google.rpc.ErrorInfo` of the entries of its metadata as they are on the wire.
+#[derive(Clone, PartialEq, Message)]
+struct RpcErrorInfoEntries {
+    #[prost(string, tag = "1")]
+    reason: String,
+    #[prost(string, tag = "2")]
+    domain: String,
+    #[prost(message, repeated, tag = "3")]
+    metadata: Vec<MetadataEntry>,
+}
+
+/// An entry of the map of the metadata of an `ErrorInfo`, as it is on the wire.
+#[derive(Clone, PartialEq, Message)]
+struct MetadataEntry {
+    #[prost(string, tag = "1")]
+    key: String,
+    #[prost(string, tag = "2")]
+    value: String,
+}
+
+/// The text of the `google.rpc.ErrorInfo` of the `grpc-status-details-bin` `details` of a status,
+/// if it has one, as `str()` of Python's protobuf (upb) prints it, which PySpark's client logs
+/// (`Received ErrorInfo: ...`): the text format of the fields that are set, of the entries of the
+/// metadata in the order of upb, of the octal escapes of the bytes that are not printable ASCII.
+pub(crate) fn error_info_text(details: &[u8]) -> Option<String> {
+    if details.is_empty() {
+        return None;
+    }
+    let info = RpcStatus::decode(details)
+        .ok()?
+        .details
+        .into_iter()
+        .filter(|detail| detail.type_url == "type.googleapis.com/google.rpc.ErrorInfo")
+        .find_map(|detail| RpcErrorInfoEntries::decode(&detail.value[..]).ok())?;
+    let mut text = String::new();
+    let field = |text: &mut String, indent: &str, name: &str, value: &str| {
+        if !value.is_empty() {
+            text.push_str(&format!(
+                "{indent}{name}: \"{}\"\n",
+                text_format_escape(value)
+            ));
+        }
+    };
+    field(&mut text, "", "reason", &info.reason);
+    field(&mut text, "", "domain", &info.domain);
+    // A map of the entries, of the last of a key, in the order of upb's text encoder, which
+    // sorts the keys by their bytes, descending, and a key before the longer ones it begins.
+    let mut entries: Vec<MetadataEntry> = Vec::new();
+    for entry in info.metadata {
+        entries.retain(|kept| kept.key != entry.key);
+        entries.push(entry);
+    }
+    entries.sort_by(|a, b| {
+        let (a, b) = (a.key.as_bytes(), b.key.as_bytes());
+        let common = a.len().min(b.len());
+        a[..common]
+            .cmp(&b[..common])
+            .reverse()
+            .then(a.len().cmp(&b.len()))
+    });
+    for entry in &entries {
+        text.push_str("metadata {\n");
+        field(&mut text, "  ", "key", &entry.key);
+        field(&mut text, "  ", "value", &entry.value);
+        text.push_str("}\n");
+    }
+    Some(text)
+}
+
+/// `value` escaped as Python protobuf's `text_format` escapes a string (`CEscape`, not as UTF-8):
+/// each byte of its UTF-8 that is not printable ASCII is an octal escape.
+fn text_format_escape(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for &byte in value.as_bytes() {
+        match byte {
+            b'\n' => escaped.push_str("\\n"),
+            b'\r' => escaped.push_str("\\r"),
+            b'\t' => escaped.push_str("\\t"),
+            b'"' => escaped.push_str("\\\""),
+            b'\'' => escaped.push_str("\\'"),
+            b'\\' => escaped.push_str("\\\\"),
+            0x20..=0x7e => escaped.push(char::from(byte)),
+            _ => escaped.push_str(&format!("\\{byte:03o}")),
+        }
+    }
+    escaped
 }
 
 /// The `google.rpc.ErrorInfo` of a gRPC status, from its `grpc-status-details-bin`: the
@@ -1953,6 +2255,115 @@ mod tests {
     }
 
     #[test]
+    fn the_error_info_of_a_status_is_the_text_of_upb_as_pyspark_logs_it() {
+        // As `str()` of the ErrorInfo of Python's protobuf (upb), which PySpark's client logs: the
+        // fields that are set, the entries of the map sorted by upb's comparison of their keys,
+        // descending, a key before the longer ones that it begins, of the last value of a key,
+        // and the octal escapes of the bytes that are not printable ASCII.
+        let mut metadata = vec![
+            ("x1", "one"),
+            ("x10", "ten"),
+            ("x2", "two"),
+            ("classes", "[\"a\"]"),
+            ("x1", "last"),
+            ("quote", "it's \\ é\n"),
+        ];
+        let entries = metadata
+            .drain(..)
+            .map(|(key, value)| MetadataEntry {
+                key: key.to_string(),
+                value: value.to_string(),
+            })
+            .collect();
+        let info = RpcErrorInfoEntries {
+            reason: "org.apache.spark.SparkException".to_string(),
+            domain: String::new(),
+            metadata: entries,
+        };
+        let status = RpcStatus {
+            code: 13,
+            message: "boom".to_string(),
+            details: vec![RpcAny {
+                type_url: "type.googleapis.com/google.rpc.ErrorInfo".to_string(),
+                value: info.encode_to_vec(),
+            }],
+        };
+        assert_eq!(
+            error_info_text(&status.encode_to_vec()).unwrap(),
+            "reason: \"org.apache.spark.SparkException\"\n\
+             metadata {\n  key: \"x2\"\n  value: \"two\"\n}\n\
+             metadata {\n  key: \"x1\"\n  value: \"last\"\n}\n\
+             metadata {\n  key: \"x10\"\n  value: \"ten\"\n}\n\
+             metadata {\n  key: \"quote\"\n  value: \"it\\'s \\\\ \\303\\251\\n\"\n}\n\
+             metadata {\n  key: \"classes\"\n  value: \"[\\\"a\\\"]\"\n}\n"
+        );
+        assert_eq!(error_info_text(&[]), None);
+    }
+
+    #[test]
+    fn grpcio_s_error_of_a_response_that_does_not_decode_has_no_debug_error_string() {
+        // As grpcio's error of a response that it fails to deserialize, which a policy, the logs
+        // and the calls left to grpc see: its details, of no `debug_error_string`, whose text
+        // reads `None`, of a unary call and of a stream alike.
+        let mut undecodable = Status::internal("failed to decode Protobuf message: invalid varint");
+        undecodable.set_source(std::sync::Arc::new(spark_connect_proto::ClientDecodeError));
+        for (call, class) in [
+            (GrpcCall::Unary, "_InactiveRpcError"),
+            (GrpcCall::ServerStreaming, "_MultiThreadedRendezvous"),
+        ] {
+            let error = grpcio_error(&undecodable, call);
+            assert_eq!(error.code, tonic::Code::Internal);
+            assert_eq!(error.details, "Exception deserializing response!");
+            assert_eq!(error.debug_error_string, None);
+            let text = format!(
+                "<{class} of RPC that terminated with:\n\tstatus = StatusCode.INTERNAL\n\
+                 \tdetails = \"Exception deserializing response!\"\n\
+                 \tdebug_error_string = \"None\"\n>"
+            );
+            assert_eq!(error.text, text);
+            assert_eq!(grpcio_error_text(&undecodable, call), text);
+        }
+        // A status of the server of the same text is the server's, of its debug string.
+        let of_server = Status::internal("failed to decode Protobuf message: invalid varint");
+        let error = grpcio_error(&of_server, GrpcCall::Unary);
+        assert_eq!(error.details, of_server.message());
+        assert_eq!(
+            error.debug_error_string.as_deref(),
+            Some("INTERNAL:failed to decode Protobuf message: invalid varint")
+        );
+    }
+
+    #[test]
+    fn grpcio_s_error_of_a_status_keeps_the_metadata_that_grpcio_gives() {
+        // As grpcio's `RpcError`, whose trailing metadata does not hold the headers that gRPC's
+        // core reads itself, and holds the `google.rpc.Status` of the details.
+        let mut metadata = tonic::metadata::MetadataMap::new();
+        metadata.insert("content-type", "application/grpc".parse().unwrap());
+        metadata.insert("x-mine", "kept".parse().unwrap());
+        let status = Status::with_details_and_metadata(
+            tonic::Code::Internal,
+            "boom",
+            bytes::Bytes::from_static(b"details"),
+            metadata,
+        );
+        let error = grpcio_error(&status, GrpcCall::ServerStreaming);
+        assert_eq!(error.code, tonic::Code::Internal);
+        assert_eq!(
+            (error.details.as_str(), error.debug_error_string.as_deref()),
+            ("boom", Some("INTERNAL:boom"))
+        );
+        let keys: Vec<&str> = error
+            .trailing_metadata
+            .iter()
+            .map(|(key, _)| key.as_str())
+            .collect();
+        assert_eq!(keys, ["x-mine", "grpc-status-details-bin"]);
+        assert!(error
+            .text
+            .starts_with("<_MultiThreadedRendezvous of RPC that terminated with:"));
+    }
+
+    #[test]
     fn test_accessor_methods_get_condition() {
         // Test with error class
         let err = SparkError::classed(
@@ -2269,5 +2680,64 @@ mod tests {
             &[("message", "Invalid plan")],
         );
         assert_eq!(err.kind, SparkErrorKind::InvalidPlanInput);
+    }
+
+    #[test]
+    fn a_status_whose_google_rpc_status_does_not_match_it_is_grpc_status_s_value_error() {
+        // As `grpc_status.rpc_status.from_call` of grpcio's error, which PySpark's client calls as
+        // it reads a failure: of its code first, then of its details, of grpc_status's texts, and
+        // of grpcio's error of the call as the context of the ValueError.
+        let proto = |code: i32, message: &str| {
+            RpcStatus {
+                code,
+                message: message.to_string(),
+                details: Vec::new(),
+            }
+            .encode_to_vec()
+        };
+        let mismatch = |status: &Status, call| {
+            proto_mismatch_error_in(status, call, true).map(|error| {
+                assert_eq!(error.kind, SparkErrorKind::BuiltinValueError);
+                let grpcio = error.grpcio.as_deref().unwrap();
+                assert_eq!(grpcio.call, call);
+                assert_eq!(grpcio.code, status.code());
+                assert!(grpcio
+                    .trailing_metadata
+                    .iter()
+                    .any(|(key, value)| key == "grpc-status-details-bin"
+                        && value[..] == status.details()[..]));
+                error.message()
+            })
+        };
+        let code = Status::with_details(
+            tonic::Code::ResourceExhausted,
+            "failed",
+            proto(13, "failed").into(),
+        );
+        assert_eq!(
+            mismatch(&code, GrpcCall::ServerStreaming).as_deref(),
+            Some(
+                "Code in Status proto (StatusCode.INTERNAL) doesn't match status code \
+                 (StatusCode.RESOURCE_EXHAUSTED)"
+            )
+        );
+        let invalid =
+            Status::with_details(tonic::Code::Internal, "failed", proto(99, "failed").into());
+        assert_eq!(
+            mismatch(&invalid, GrpcCall::Unary).as_deref(),
+            Some("Invalid status code 99")
+        );
+        let message =
+            Status::with_details(tonic::Code::Internal, "failed", proto(13, "other").into());
+        assert_eq!(
+            mismatch(&message, GrpcCall::Unary).as_deref(),
+            Some("Message in Status proto (other) doesn't match status details (failed)")
+        );
+        // A status that its details match, one of no details, and the Rust client's dialect.
+        let matched =
+            Status::with_details(tonic::Code::Internal, "failed", proto(13, "failed").into());
+        assert!(mismatch(&matched, GrpcCall::Unary).is_none());
+        assert!(mismatch(&Status::internal("failed"), GrpcCall::Unary).is_none());
+        assert!(proto_mismatch_error_in(&code, GrpcCall::Unary, false).is_none());
     }
 }

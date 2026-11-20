@@ -720,10 +720,16 @@ class TestStreamingListenerLifecycle:
             assert service.release_session_calls == 1
             assert spark.streams._sqlb._listener_bus == []
             assert service.wait_listener_streams_finished(1)
+            # Those of stop(), and not those that PySpark's client logs of the other requests: the
+            # `GRPC Error received` of each failed RPC that it converts, such as the lookups of the
+            # confs that the mock fails, and the failure of a release of the results of an
+            # execution, which a thread of its own sends, whose log comes whenever it fails.
             messages = [
                 record.message
                 for record in caplog.records
                 if record.name.startswith("pyspark")
+                and record.message != "GRPC Error received"
+                and not record.message.startswith("ReleaseExecute failed with exception")
             ]
             if release_failure:
                 # Of the `str()` of grpcio's error of a status of no details, which PySpark's

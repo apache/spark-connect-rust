@@ -7,22 +7,35 @@
 use std::cell::RefCell;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Once, OnceLock};
+use std::sync::{Arc, OnceLock};
 use tokio::runtime::Runtime;
 
-static RUNTIME_INIT: Once = Once::new();
-static RUNTIME: OnceLock<Runtime> = OnceLock::new();
+/// The shared runtime of each generation of the process, leaked: a child of a `fork()` has none of
+/// the threads of its parent's runtime, and makes its own, and the runtime of the parent, which
+/// cannot be shut down there, is left as it is (see [`crate::fork`]).
+static RUNTIME: crate::fork::PerGeneration<OnceLock<&'static Runtime>> =
+    crate::fork::PerGeneration::new();
+
+/// The generation of the process, which the state of a process that threads of its own keep, such
+/// as its channels, is of: a child of a `fork()` makes its own (see [`crate::fork`]). Not a stable
+/// API.
+#[doc(hidden)]
+pub fn fork_generation() -> u64 {
+    crate::fork::generation()
+}
 
 /// Get or initialize the shared tokio runtime.
 ///
-/// Returns a reference to a multi-threaded runtime that is created once
-/// and reused for all async operations.
+/// Returns a reference to a multi-threaded runtime that is created once and reused for all
+/// async operations, once in each process: a child of a `fork()`, which has none of the threads
+/// of its parent's runtime, gets a runtime of its own, as grpcio's fork support makes the threads
+/// of a child again.
 pub fn get_runtime() -> &'static Runtime {
-    RUNTIME_INIT.call_once(|| {
-        let rt = Runtime::new().expect("Failed to create tokio runtime");
-        let _ = RUNTIME.set(rt);
-    });
-    RUNTIME.get().expect("Runtime should be initialized")
+    RUNTIME.get_or_init(|_| OnceLock::new()).get_or_init(|| {
+        let runtime = Runtime::new().expect("Failed to create tokio runtime");
+        crate::fork::record_runtime(&runtime);
+        Box::leak(Box::new(runtime))
+    })
 }
 
 /// Block on a future using the shared runtime.

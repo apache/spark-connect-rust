@@ -36,3 +36,7 @@ stacker = "0.1"
 # The hash table of the positions of the keys of a map of the protobuf runtime (`pbmsg`), which
 # holds no copy of the keys; the wheel bundles this version through Arrow already.
 hashbrown = { version = "0.17", default-features = false }
+
+[target.'cfg(unix)'.dependencies]
+# The local time and the thread of the lines of gRPC's log that the client writes to stderr.
+libc = "0.2"

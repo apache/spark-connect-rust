@@ -3,7 +3,7 @@
 use pyo3::exceptions;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList, PyString};
-use spark_connect_core::error::{ServerErrorInfo, SparkError, SparkErrorKind};
+use spark_connect_core::error::{GrpcCall, ServerErrorInfo, SparkError, SparkErrorKind};
 
 /// Raise a `pyspark.errors` exception (`class_name`) carrying the given `error_class`
 /// condition and message parameters, mirroring the reference Column guard-rails.
@@ -248,6 +248,14 @@ fn server_error_to_py<'py>(
     // A server error always comes from a gRPC status; UNKNOWN is the reference default.
     kwargs.set_item("grpc_status_code", err.grpc_code.unwrap_or(2))?;
     kwargs.set_item("breaking_change_info", breaking_change)?;
+    // grpcio's error of the call, which the query context loggers log as the exception.
+    kwargs.set_item(
+        "rpc_error",
+        server
+            .rpc_error
+            .as_ref()
+            .map(|(call, text)| (*call == GrpcCall::ServerStreaming, text.as_str())),
+    )?;
     py.import("pyspark.errors.exceptions.connect")?.call_method(
         "_convert_server_error",
         (),
@@ -285,20 +293,38 @@ static CALLBACK_EXCEPTIONS: std::sync::LazyLock<
 
 static NEXT_CALLBACK_EXCEPTION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// The parameter of the error of the core of an exception of a callback that is a
+/// `BaseException` only, as a `KeyboardInterrupt` or a `SystemExit`, which an `except Exception`
+/// of PySpark does not catch (see [`is_base_exception_only`]).
+const BASE_EXCEPTION_ONLY: &str = "base_exception_only";
+
 /// The error of the core of `exception`, the exception of a Python callback that the core calls,
 /// which [`spark_error_to_py_exception`] raises as it is: as PySpark raises the exception of a
 /// hook from the execution that calls it.
 pub(crate) fn callback_error(exception: PyErr) -> SparkError {
+    let base_only =
+        Python::attach(|py| !exception.is_instance_of::<pyo3::exceptions::PyException>(py));
     let id = NEXT_CALLBACK_EXCEPTION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     CALLBACK_EXCEPTIONS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .insert(id, exception);
-    SparkError::classed(
-        SparkErrorKind::Python,
-        PYTHON_CALLBACK_ERROR,
-        &[("callback_id", &id.to_string())],
-    )
+    let id = id.to_string();
+    let mut params = vec![("callback_id", id.as_str())];
+    if base_only {
+        params.push((BASE_EXCEPTION_ONLY, "true"));
+    }
+    SparkError::classed(SparkErrorKind::Python, PYTHON_CALLBACK_ERROR, &params)
+}
+
+/// Whether `err` is the error of an exception of a callback that is a `BaseException` only, as a
+/// `KeyboardInterrupt` or a `SystemExit`, which an `except Exception` does not catch.
+pub(crate) fn is_base_exception_only(err: &SparkError) -> bool {
+    callback_id(err).is_some()
+        && err
+            .params
+            .get(BASE_EXCEPTION_ONLY)
+            .is_some_and(|value| value == "true")
 }
 
 /// The ID of the exception of the Python callback that `err` is the error of, if it is one.
@@ -655,9 +681,92 @@ fn unicode_encode_error(utf32le: &[u8], err: &SparkError) -> PyErr {
     })
 }
 
+/// grpcio's `RpcError` of `error`, which PySpark's client leaves to grpc, unconverted (see
+/// `SparkError::grpcio`), as `_grpc_error` of `pyspark.sql.connect.client` makes it: None without
+/// grpcio, whose classes cannot be had, when the error is converted as any other.
+fn grpcio_exception(error: &spark_connect_core::error::GrpcioError) -> Option<PyErr> {
+    Python::attach(|py| {
+        let exception = py.import("pyspark.sql.connect.client").and_then(|client| {
+            client.call_method1("_grpc_error", crate::client::grpc_error_args(py, error))
+        });
+        match exception {
+            Ok(exception) => Some(PyErr::from_value(exception)),
+            // As PySpark, where the KeyboardInterrupt of a signal that comes while the error is
+            // made is raised in its place.
+            Err(error) if error.is_instance_of::<pyo3::exceptions::PyKeyboardInterrupt>(py) => {
+                Some(error)
+            }
+            Err(_) => None,
+        }
+    })
+}
+
+/// PySpark's `ValueError` of `grpc_status.rpc_status.from_call` of the failed call of `grpcio`,
+/// whose `google.rpc.Status` does not match it (see
+/// `spark_connect_core::error::SparkError::grpcio`): raised as grpcio's error of the call is
+/// handled, its `__context__`, and of the operation ID of an execution, which PySpark's
+/// `_handle_error` sets on any exception of it. Without grpcio, its context is an exception of the
+/// class name and the text of grpcio's error (see `pyspark.sql.connect.client._InactiveRpcError`).
+fn rpc_status_value_error(
+    err: &SparkError,
+    grpcio: &spark_connect_core::error::GrpcioError,
+) -> PyErr {
+    Python::attach(|py| {
+        let context = grpcio_exception(grpcio).or_else(|| {
+            let class = if grpcio.call == GrpcCall::ServerStreaming {
+                "_MultiThreadedRendezvous"
+            } else {
+                "_InactiveRpcError"
+            };
+            py.import("pyspark.sql.connect.client")
+                .and_then(|client| client.getattr(class))
+                .and_then(|class| class.call1((grpcio.text.as_str(),)))
+                .ok()
+                .map(PyErr::from_value)
+        });
+        // As PySpark, where the KeyboardInterrupt of a signal that comes while the error is made
+        // is raised in its place.
+        if let Some(context) = context.as_ref() {
+            if context.is_instance_of::<pyo3::exceptions::PyKeyboardInterrupt>(py) {
+                return context.clone_ref(py);
+            }
+        }
+        let message = err.message();
+        // As grpc_status's `code_to_grpc_status_code`, whose ValueError of a code that is not one
+        // of gRPC's is raised as it handles the KeyError of its lookup.
+        let context = match message
+            .strip_prefix("Invalid status code ")
+            .and_then(|code| code.parse::<i64>().ok())
+        {
+            Some(code) => {
+                let lookup = pyo3::exceptions::PyKeyError::new_err(code);
+                if let Some(context) = context {
+                    set_context(py, lookup.value(py), context);
+                }
+                Some(lookup)
+            }
+            None => context,
+        };
+        let raised = exceptions::PyValueError::new_err(message);
+        if let Some(context) = context {
+            set_context(py, raised.value(py), context);
+        }
+        stamp_operation_id(raised.value(py).as_any(), err.operation_id.as_deref());
+        raised
+    })
+}
+
 /// Maps a SparkError to a Python exception, attempting to raise the correct typed
 /// exception based on the error kind. Falls back to PyRuntimeError if import fails.
 pub fn spark_error_to_py_exception(err: SparkError) -> PyErr {
+    if let Some(grpcio) = err.grpcio.as_deref() {
+        if err.kind == SparkErrorKind::BuiltinValueError {
+            return rpc_status_value_error(&err, grpcio);
+        }
+        if let Some(exception) = grpcio_exception(grpcio) {
+            return exception;
+        }
+    }
     if let Some(exception) = callback_exception(&err) {
         // As PySpark's `_handle_error`, which stamps the operation ID of an execution on any
         // exception of it, such as that of the warning of its spent retries of a filter of

@@ -349,8 +349,9 @@ impl ChannelBuilder {
             )));
         }
         Ok(format!(
-            "{ua} spark/{SPARK_VERSION} os/{} python/rust",
-            os_name(std::env::consts::OS)
+            "{ua} spark/{SPARK_VERSION} os/{} {}",
+            os_name(std::env::consts::OS),
+            user_agent_language()
         ))
     }
 
@@ -387,6 +388,29 @@ impl ChannelBuilder {
             .and_then(|v| python_int(v))
             .unwrap_or(default)
     }
+}
+
+/// The language of the user agent of the requests, which ends it: `python/rust` of the Rust
+/// client, unless [`set_user_agent_language`] sets another.
+static USER_AGENT_LANGUAGE: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
+
+/// Make `language` the language that the user agents of the requests end with, of the sessions
+/// made from now on, in place of `python/rust`: as the Python binding gives it PySpark's
+/// `python/<version>` of the interpreter (`platform.python_version()`). Not a stable API.
+#[doc(hidden)]
+pub fn set_user_agent_language(language: &str) {
+    *USER_AGENT_LANGUAGE
+        .write()
+        .unwrap_or_else(|e| e.into_inner()) = Some(language.to_string());
+}
+
+/// The language that the user agent ends with (see [`set_user_agent_language`]).
+fn user_agent_language() -> String {
+    USER_AGENT_LANGUAGE
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .unwrap_or_else(|| "python/rust".to_string())
 }
 
 /// The name of the operating system `os` (of `std::env::consts::OS`) as Python's
