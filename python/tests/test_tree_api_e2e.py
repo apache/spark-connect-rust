@@ -7,7 +7,6 @@ scripts/capture_tree_api_cases_golden.py). Official PySpark runs them too, as th
 
 import json
 import os
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -30,10 +29,10 @@ def session():
 
 
 @pytest.mark.parametrize("name", list(CLASSES))
-def test_live_cases_are_pyspark_mls(name, session):
+def test_live_cases_are_pyspark_mls(name, session, tmp_path):
     # The saves go to a scratch directory of the local file system, of the server that the tests
     # run against on the same machine, as in CI.
-    ours = live_cases(name, session, tempfile.mkdtemp(prefix="tree-api-cases-"))
+    ours = live_cases(name, session, str(tmp_path))
     golden = CASES[name]["live"]
     assert sorted(ours) == sorted(golden)
     differ = {tag: (ours[tag], golden[tag]) for tag in golden if ours[tag] != golden[tag]}

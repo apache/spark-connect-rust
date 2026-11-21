@@ -2683,10 +2683,14 @@ elif mode == "importer_alias":
     importer.StructType = None if argument == "none" else native.LongType
 else:
     raise AssertionError(mode)
-class Factory:
-    def mktemp(self, name):
-        return Path(tempfile.mkdtemp(prefix=name))
-with capture._arrow_input_service(capture.protocol.__wrapped__(Factory())) as (spark, state):
+with tempfile.TemporaryDirectory(prefix="arrow-handoff-") as directory:
+    class Factory:
+        def mktemp(self, name):
+            path = Path(directory) / name
+            path.mkdir()
+            return path
+    messages = capture.protocol.__wrapped__(Factory())
+with capture._arrow_input_service(messages) as (spark, state):
     # Sends the plan as `_to_table` does: toArrow converts the schema to Arrow first,
     # with the classes that this script patches.
     spark.createDataFrame(frame, schema)._to_table()
@@ -3269,10 +3273,14 @@ elif mode == "importer_alias":
     importer.StructType = None
 else:
     raise AssertionError(mode)
-class Factory:
-    def mktemp(self, name):
-        return Path(tempfile.mkdtemp(prefix=name))
-with capture._arrow_input_service(capture.protocol.__wrapped__(Factory()), capture_tables=True) as (spark, state):
+with tempfile.TemporaryDirectory(prefix="arrow-handoff-") as directory:
+    class Factory:
+        def mktemp(self, name):
+            path = Path(directory) / name
+            path.mkdir()
+            return path
+    messages = capture.protocol.__wrapped__(Factory())
+with capture._arrow_input_service(messages, capture_tables=True) as (spark, state):
     # Sends the plan as `_to_table` does: toArrow converts the schema to Arrow first,
     # with the classes that this script patches.
     spark.createDataFrame(frame, schema)._to_table()
@@ -3926,10 +3934,14 @@ else:
                  "metadata": {"changed": True}}[attribute]
         replacement = property(lambda self: value)
     setattr(cls, attribute, replacement)
-class Factory:
-    def mktemp(self, name):
-        return Path(tempfile.mkdtemp(prefix=name))
-with _arrow_input_service(protocol.__wrapped__(Factory())) as (spark, state):
+with tempfile.TemporaryDirectory(prefix="arrow-handoff-") as directory:
+    class Factory:
+        def mktemp(self, name):
+            path = Path(directory) / name
+            path.mkdir()
+            return path
+    messages = protocol.__wrapped__(Factory())
+with _arrow_input_service(messages) as (spark, state):
     # Sends the plan as `_to_table` does: toArrow converts the schema to Arrow first,
     # with the classes that this script patches.
     spark.createDataFrame(frame, schema)._to_table()
@@ -3992,10 +4004,14 @@ else:
     sys.modules.pop("pyspark.sql.pandas.types", None)
     setattr(T, class_name, replacement)
     assert "pyspark.sql.pandas.types" not in sys.modules
-class Factory:
-    def mktemp(self, name):
-        return Path(tempfile.mkdtemp(prefix=name))
-with capture._arrow_input_service(capture.protocol.__wrapped__(Factory())) as (spark, state):
+with tempfile.TemporaryDirectory(prefix="arrow-handoff-") as directory:
+    class Factory:
+        def mktemp(self, name):
+            path = Path(directory) / name
+            path.mkdir()
+            return path
+    messages = capture.protocol.__wrapped__(Factory())
+with capture._arrow_input_service(messages) as (spark, state):
     # Sends the plan as `_to_table` does: toArrow converts the schema to Arrow first,
     # with the classes that this script patches.
     spark.createDataFrame(frame, schema)._to_table()
@@ -5231,10 +5247,13 @@ else:
 # types by their names: the frame takes the row path, as it does without PyArrow.
 assert _pandas_input.prepare_string_input(frame, schema) is None
 assert not _pandas_input.accepts_pandas_schema(schema)
-class Factory:
-    def mktemp(self, name):
-        return Path(tempfile.mkdtemp(prefix=name))
-protocol = capture.protocol.__wrapped__(Factory())
+with tempfile.TemporaryDirectory(prefix="arrow-handoff-") as directory:
+    class Factory:
+        def mktemp(self, name):
+            path = Path(directory) / name
+            path.mkdir()
+            return path
+    protocol = capture.protocol.__wrapped__(Factory())
 tables = []
 for row_control in (False, True):
     with pytest.MonkeyPatch.context() as control:
@@ -6315,10 +6334,14 @@ else:
                  "dataType": T.StringType(), "nullable": False, "metadata": {"changed": True}}[attribute]
         replacement = property(lambda self: value)
     setattr(cls, attribute, replacement)
-class Factory:
-    def mktemp(self, name):
-        return Path(tempfile.mkdtemp(prefix=name))
-with _arrow_input_service(protocol.__wrapped__(Factory())) as (spark, state):
+with tempfile.TemporaryDirectory(prefix="arrow-handoff-") as directory:
+    class Factory:
+        def mktemp(self, name):
+            path = Path(directory) / name
+            path.mkdir()
+            return path
+    messages = protocol.__wrapped__(Factory())
+with _arrow_input_service(messages) as (spark, state):
     # Sends the plan as `_to_table` does: toArrow converts the schema to Arrow first,
     # with the classes that this script patches.
     spark.createDataFrame(frame, schema)._to_table()
@@ -7108,10 +7131,14 @@ capture = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = capture
 spec.loader.exec_module(capture)
 _arrow_input_service, protocol = capture._arrow_input_service, capture.protocol
-class Factory:
-    def mktemp(self, name):
-        return Path(tempfile.mkdtemp(prefix=name))
-with _arrow_input_service(protocol.__wrapped__(Factory())) as (spark, state):
+with tempfile.TemporaryDirectory(prefix="arrow-handoff-") as directory:
+    class Factory:
+        def mktemp(self, name):
+            path = Path(directory) / name
+            path.mkdir()
+            return path
+    messages = protocol.__wrapped__(Factory())
+with _arrow_input_service(messages) as (spark, state):
     # Sends the plan as `_to_table` does: toArrow converts the schema to Arrow first,
     # with the classes that this script patches.
     spark.createDataFrame(frame, schema)._to_table()
@@ -7309,10 +7336,14 @@ elif mode == "importer_function":
     setattr(importer, argument, None)
 else:
     raise AssertionError(mode)
-class Factory:
-    def mktemp(self, name):
-        return Path(tempfile.mkdtemp(prefix=name))
-with capture._arrow_input_service(capture.protocol.__wrapped__(Factory())) as (spark, state):
+with tempfile.TemporaryDirectory(prefix="arrow-handoff-") as directory:
+    class Factory:
+        def mktemp(self, name):
+            path = Path(directory) / name
+            path.mkdir()
+            return path
+    messages = capture.protocol.__wrapped__(Factory())
+with capture._arrow_input_service(messages) as (spark, state):
     # Sends the plan as `_to_table` does: toArrow converts the schema to Arrow first,
     # with the classes that this script patches.
     spark.createDataFrame(frame, schema)._to_table()

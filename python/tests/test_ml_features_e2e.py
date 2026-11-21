@@ -96,19 +96,17 @@ def test_scaler_transforms_held_out_values_using_fitted_statistics(session):
     assert_values(model.transform(held).select("out").collect(), [[[2., 4.]]])
 
 
-def test_regex_tokenizer_saves_its_gaps_of_no_converter(session):
+def test_regex_tokenizer_saves_its_gaps_of_no_converter(session, tmp_path):
     # As PySpark's save, whose `serialize_ml_params` serializes every param of `_paramMap`: `gaps`,
     # which has no converter, is saved of its value, so that a load of the stage, also of a
     # pipeline model of it (whose stages save by their own writers), tokenizes as the stage does.
-    import tempfile
-
     if REFERENCE:
         from pyspark.ml import Pipeline, PipelineModel
     else:
         from pyspark.ml.connect.pipeline import Pipeline, PipelineModel
 
     frame = session.createDataFrame([("a1b22c",)], ["text"])
-    path = tempfile.mkdtemp(prefix="ml-regex-tokenizer-gaps-")
+    path = str(tmp_path)
     tokenizer = algorithm("RegexTokenizer")
     for stage in [
         tokenizer(inputCol="text", outputCol="w", pattern="\\d+", gaps=False),

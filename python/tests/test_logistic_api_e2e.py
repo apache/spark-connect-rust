@@ -7,7 +7,6 @@ scripts/capture_logistic_api_cases_golden.py). Official PySpark runs them too, a
 
 import json
 import os
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -29,10 +28,10 @@ def session():
     spark.stop()
 
 
-def test_live_cases_are_pyspark_mls(session):
+def test_live_cases_are_pyspark_mls(session, tmp_path):
     # The saves go to a scratch directory of the local file system, of the server that the tests
     # run against on the same machine, as in CI.
-    ours = live_cases("LogisticRegression", session, tempfile.mkdtemp(prefix="logistic-api-"))
+    ours = live_cases("LogisticRegression", session, str(tmp_path))
     golden = CASES["LogisticRegression"]["live"]
     assert sorted(ours) == sorted(golden)
     differ = {tag: (ours[tag], golden[tag]) for tag in golden if ours[tag] != golden[tag]}
