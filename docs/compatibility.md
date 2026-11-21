@@ -243,7 +243,10 @@ These are the changes for Rust users after v4.3.0, on `master`, which ship in 4.
 `SparkErrorKind` adds `BuiltinAttributeError` and `BuiltinAssertionError`, Python's `AttributeError`
 and `AssertionError` as PySpark's client raises them, which `SparkError::builtin_attribute` and
 `SparkError::builtin_assertion` make. `SparkErrorKind` is not `#[non_exhaustive]`, so an exhaustive
-match of it must handle them.
+match of it must handle them. `ServerErrorInfo` adds a hidden `rpc_error`, the kind of the call that
+failed and the text of grpcio's error of it, which is not a stable API: a struct expression of
+`ServerErrorInfo` that names every field adds it, or takes the others of
+`..ServerErrorInfo::default()`.
 
 `LiteralExpression` adds a hidden `ByteArray { value, rendered }` variant, the literal of a Python
 `bytearray`, which the Python client makes: it is sent as a `Binary` literal of `value`, and its
@@ -286,9 +289,11 @@ warning that the server sends with the model of a fit, and
 [Native ML objects](#native-ml-objects-fetch-summaries-save-and-load-rust-api)).
 
 `RetryPolicy` adds a `retries_failures` field, true by default: a policy of false retries no
-failure, as the retry policies of PySpark's client of no `DefaultPolicy` retry none, and
-`RetryPolicy::no_retries` is such a policy. A struct expression of `RetryPolicy` that names every
-field adds it, or takes the others of `..RetryPolicy::default()`. The core tells the listener of
+failure, as PySpark's own `RetryPolicy`, whose `can_retry` takes no failure, retries none, and
+`RetryPolicy::no_retries` is such a policy. The jitter of each retry is a draw of its own, uniform
+over its range, as PySpark's `random.uniform(0, jitter)` draws it, where the retries of calls that
+failed together waited the same jitter. A struct expression of `RetryPolicy` that names every field
+adds it, or takes the others of `..RetryPolicy::default()`. The core tells the listener of
 `retries::set_listener` (a `RetriesListener`, not a stable API) when the retries of a failure that a
 policy retries are spent, where PySpark's `Retrying` warns `[RETRIES_EXCEEDED]`, and its error is
 the error of the call; when a request that it sends in the background, which no caller waits for,
@@ -312,7 +317,9 @@ client are decided by its `RetryPolicy`, or by a `retries::RetryDecider` that
 `SparkConnectClient::set_retry_decider` and `SparkSession::set_retry_decider` set in its place, of a
 `retries::CallRetries` for each call that gives a `retries::Decision` of each failed attempt: as the
 Python binding runs PySpark's `Retrying` of policies that the core does not retry with. These are
-not a stable API.
+not a stable API. The reads of the configs of the server's stack trace, as the error of the server
+of a call is converted, are retried under the retry policy of the client, as PySpark's `config()`
+retries them, where each was read once.
 
 `SparkConnectClient::read_plan_compression` reads the plan compression settings of the server
 before a plan is sent, as PySpark's client reads them when it builds its first plan: before the
@@ -329,20 +336,31 @@ PySpark's `get_retry_policies` and `set_retry_policies`; `reattachable_execute` 
 `token_parameter`, the `token` parameter of the connection string; `rpc_deadlines`, the
 `RpcDeadlines` of its calls; and `set_global_user_context_extensions`, which replaces the global
 user context extensions, as a change of PySpark's `global_user_context_extensions`.
-`SparkConnectClient` adds them too (it had `set_retry_policy`), with `replace_retry_policy`, which
-sets the policy of a client in use, and `result_chunking` and `set_result_chunking`, the result
-chunking of its executions, a `ResultChunking` of PySpark's `allow_arrow_batch_chunking` and
-`preferred_arrow_chunk_size`, which by default allows chunks of no preferred size, as before. The
-clones of a client share its retry policy, where each clone had a policy of its own, and the client
-of a new session, of `SparkConnectClient::with_new_session_id` and `clone_session` (and so of
-`SparkSession::new_session` and `clone_session`), has the default policy and chunking and no decider
-of its retries, as PySpark's `newSession` and `clone`, where it kept the policy of the client. An
-execution that is not reattachable, as `ExecutePlanResponseReattachableIterator::not_reattachable`
-makes its iterator, is one `ExecutePlan`, sent again from the start when its stream fails in a way
-that the retry policy retries, and never released, as PySpark's. `SparkSession::cache_artifacts`
-caches blobs as artifacts of their SHA-256 hashes, as PySpark's
-`SparkConnectClient.cache_artifacts`, and `SparkSession::add_artifacts_of_flags` adds files as
-PySpark's `SparkConnectClient.add_artifacts` names them by its flags.
+`SparkConnectClient` adds them too (it had `set_retry_policy`, `rpc_deadlines` and
+`set_rpc_deadlines`), with `replace_retry_policy`, which sets the policy of a client in use, and
+`result_chunking` and `set_result_chunking`, the result chunking of its executions, a
+`ResultChunking` of PySpark's `allow_arrow_batch_chunking` and `preferred_arrow_chunk_size`, which
+by default allows chunks of no preferred size, as before. The clones of a client share its retry
+policy, where each clone had a policy of its own, and the client of a new session, of
+`SparkConnectClient::with_new_session_id` and `clone_session` (and so of `SparkSession::new_session`
+and `clone_session`), has the default policy and chunking and no decider of its retries, as
+PySpark's `newSession` and `clone`, where it kept the policy of the client. An execution that is not
+reattachable, as `ExecutePlanResponseReattachableIterator::not_reattachable` makes its iterator, is
+one `ExecutePlan`, sent again from the start when its stream fails in a way that the retry policy
+retries, and never released, as PySpark's. `SparkSession::cache_artifacts` caches blobs as artifacts
+of their SHA-256 hashes, as PySpark's `SparkConnectClient.cache_artifacts`, and
+`SparkSession::add_artifacts_of_flags` adds files as PySpark's `SparkConnectClient.add_artifacts`
+names them by its flags.
+
+`RpcDeadlines` adds a `get_status` field, the deadline of the `GetStatus` RPC, of 10 minutes by
+default and none in `RpcDeadlines::disabled()`, as PySpark's `RpcDeadlines.get_status`: a struct
+expression of `RpcDeadlines` that names every field adds it, or takes the others of
+`..RpcDeadlines::default()`. `SparkConnectClient::get_status_proto` sends the `GetStatus` RPC of a
+request, of the session ID, the user, the client type and the observed server-side session ID of the
+client, under its retry policy and the `get_status` deadline, as PySpark's
+`_get_operation_statuses`. `ChannelBuilder::params` gives the parameters of the connection string,
+in the order of their keys, and `ChannelBuilder::remove` removes one, as PySpark's `newSession` pops
+the session ID of the channel builder of its client.
 
 A channel connects to the addresses of its host, or of its proxy, as grpcio's: the next one 250 ms
 after the previous one or once the previous one failed, each with a connect deadline of 20 s of its
@@ -438,18 +456,20 @@ grpcio's bundle where grpcio is installed. A roots file without a certificate do
 session when it is made: each call fails `UNAVAILABLE`, as grpcio fails to make the handshaker of
 its sessions, where the session failed with `Failed to configure TLS`, and so does a system of no
 root. The core no longer enables tonic's `tls-ring` and `tls-native-roots` features, which it does
-not use, as it makes the TLS sessions itself: a program that uses tonic's own TLS enables them. An
-invalid proxy address of the environment fails only the sessions of the hosts that the proxy applies
-to, as grpcio connects the others directly, where it failed the sessions of every host. What grpcio
-logs of a channel, of a proxy variable that is not a proxy, of a roots file that cannot be read,
-and, in the dialect of grpcio, of a TLS handshake that fails and of a proxy that refuses the tunnel,
-also goes to the listener of `grpc_log::set_listener` (a `grpc_log::Listener`, not a stable API), as
-it goes to `tracing`, of the `grpc_log::Severity` of grpcio's line, which `grpc_log::Logged` adds as
-its `severity`, `Info` or `Error`; the Python client writes it to stderr, as grpcio does. The client
-of a new session logs the variables of the proxy again, as it reads them again for its channel.
-`RetriesListener::caught` returns the error that the call fails with, of one that PySpark's `except
-Exception` does not catch, as a `KeyboardInterrupt` of a retry policy of the Python binding, and so
-`SparkConnectClient::read_plan_compression` returns a `Result`.
+not use, as it makes the TLS sessions itself: a program that uses tonic's own TLS enables them. The
+crates enable tonic's `channel` and `codegen` features only, of its client, where they enabled its
+default features, of its server (`server` and `router`) too: a program that uses tonic's server
+enables them. An invalid proxy address of the environment fails only the sessions of the hosts that
+the proxy applies to, as grpcio connects the others directly, where it failed the sessions of every
+host. What grpcio logs of a channel, of a proxy variable that is not a proxy, of a roots file that
+cannot be read, and, in the dialect of grpcio, of a TLS handshake that fails and of a proxy that
+refuses the tunnel, also goes to the listener of `grpc_log::set_listener` (a `grpc_log::Listener`,
+not a stable API), as it goes to `tracing`, of the `grpc_log::Severity` of grpcio's line, which
+`grpc_log::Logged` adds as its `severity`, `Info` or `Error`; the Python client writes it to stderr,
+as grpcio does. The client of a new session logs the variables of the proxy again, as it reads them
+again for its channel. `RetriesListener::caught` returns the error that the call fails with, of one
+that PySpark's `except Exception` does not catch, as a `KeyboardInterrupt` of a retry policy of the
+Python binding, and so `SparkConnectClient::read_plan_compression` returns a `Result`.
 
 A message over the size limit of a call, of 128 MiB, fails the call with `RESOURCE_EXHAUSTED` (8),
 as grpc-python's: a response, which tonic does not read, where `SparkError::grpc_code` was tonic's
@@ -701,11 +721,16 @@ does), where a response decoded at any depth and one of some thousands of levels
 the codec of the generated client, `apache-spark-connect-proto`'s `ClientCodec`, scans the bytes of
 each response for the levels of their messages before prost decodes them, and so do the raw RPCs of
 `SparkConnectClient` (`execute_plan_raw`, `reattach_execute_raw` and `analyze_plan_raw`) and the
-reads of the `grpc-status-details-bin` of a failure. The generated server of the `server` feature,
-whose bindings share the codec, decodes the requests that it receives as prost does, of no limit of
-the responses. `ClientCodec` and its `ClientDecodeError`, the source of the status of a response
-that the client fails to decode, are new, and so is `prost::Name` of each message of the proto
-crate, of its full name in the package `spark.connect` and of the type URL
+reads of the `grpc-status-details-bin` of a failure. `apache-spark-connect-proto` adds a `server`
+feature, off by default, which generates tonic's server bindings (`spark_connect_service_server`),
+of the codec of the client: the generated server decodes the requests that it receives as prost
+does, of no limit of the responses. `ClientCodec`, of its `ClientDecoder`, and its
+`ClientDecodeError`, the source of the status of a response that the client fails to decode, which
+`is_client_decode_error` tells, are new, as is `bytes_codec::ClientBytesCodec<U>`, of its
+`ClientBytesDecoder<U>`, the `BytesCodec` of a client whose responses nest within the limit of the
+responses of the client: a deeper one fails with the status of prost's error of the limit, tagged as
+the client's (`ClientDecodeError`). So is `prost::Name` of each message of the proto crate, of its
+full name in the package `spark.connect` and of the type URL
 `type.googleapis.com/spark.connect.<name>`, so that `prost_types::Any::from_msg` packs it.
 
 The core also adds doc-hidden items that the Python client uses, which are not a stable API, such as
@@ -740,49 +765,47 @@ sent them, and the RPCs of the artifacts of a closed client fail with that `Buil
 rather than `NO_ACTIVE_SESSION`. A client that is marked closed (`set_closed(true)`,
 `SparkSession::mark_closed`), as a response of another server-side session and
 `INVALID_HANDLE.SESSION_CHANGED` mark it, keeps its channel open: it uploads artifacts, as PySpark's
-ArtifactManager does, and sends its RPCs again once it is open. `SparkConnectClient::release_session`
-of a closed client raises `NO_ACTIVE_SESSION`. The client of `with_new_session_id` and
-`clone_session`, and so the session of `SparkSession::new_session` and `clone_session`, is of the
-`user_id` of the connection, else of the user of the requests of the client that makes it, which the
-doc-hidden `set_request_user_id` sets (the user of the artifacts stays that of the client). The
-doc-hidden `set_thread_request_context` gives the requests of the current thread a session ID, a
-user and global user context extensions of their own, which `client_session_id`,
-`request_user_id` and `global_user_context_extensions` give on that thread. The doc-hidden
-`SparkConnectClient::with_new_session_id_of_user` and `clone_session_of_user`, and
+ArtifactManager does, and sends its RPCs again once it is open.
+`SparkConnectClient::release_session` of a closed client raises `NO_ACTIVE_SESSION`. The client of
+`with_new_session_id` and `clone_session`, and so the session of `SparkSession::new_session` and
+`clone_session`, is of the `user_id` of the connection, else of the user of the requests of the
+client that makes it, which the doc-hidden `set_request_user_id` sets (the user of the artifacts
+stays that of the client). The doc-hidden `set_thread_request_context` gives the requests of the
+current thread a session ID, a user and global user context extensions of their own, which
+`client_session_id`, `request_user_id` and `global_user_context_extensions` give on that thread. The
+doc-hidden `SparkConnectClient::with_new_session_id_of_user` and `clone_session_of_user`, and
 `SparkSession::new_session_of_user` and `clone_session_with_id_of_user`, make the client or the
 session of a new session or of a clone of the user that they are given, as it is, also when the
 connection has a `user_id`, which `with_new_session_id`, `clone_session`, `new_session` and
 `clone_session_with_id` take in its place. The doc-hidden `SparkSession::has_thread_tags` tells
-whether the current thread has a set of tags, and `SparkSession::keep_thread_request_context`
-keeps the context of the requests of the calling thread (the session ID, the user and the global
+whether the current thread has a set of tags, and `SparkSession::keep_thread_request_context` keeps
+the context of the requests of the calling thread (the session ID, the user and the global
 extensions of `set_thread_request_context`, the extensions of the thread and its tags) until the
 guard that it returns drops, of `SparkConnectClient::thread_request_state` and
 `restore_thread_request_state`. The doc-hidden `spark_connect::session::set_finalizer_request_hook`
-sets, once for the process, the `FinalizerRequestHook` of the functions that a session calls on
-the thread of a finalizer around the release of the relation of a checkpoint or of a cached ML
-object whose last handle dropped: `before`, before the request is built, which is not sent when it
-returns false, and `after`, once the thread has its context of before `before` again. The
-doc-hidden `spark_connect_core::client::set_failure_requests_hook` sets, once for the process, a
-function that a client calls on the thread that converts the failure of a call, an error of the
-server, which it is given, before it builds the requests of the details of the error and of the
-configs of its stack trace, and which returns whether to send them: when it does not, the error of
-the server is the error of the call as it is, and an error of the function is the error of the call
-in place of it.
+sets, once for the process, the `FinalizerRequestHook` of the functions that a session calls on the
+thread of a finalizer around the release of the relation of a checkpoint or of a cached ML object
+whose last handle dropped: `before`, before the request is built, which is not sent when it returns
+false, and `after`, once the thread has its context of before `before` again. The doc-hidden
+`spark_connect_core::client::set_failure_requests_hook` sets, once for the process, a function that
+a client calls on the thread that converts the failure of a call, an error of the server, which it
+is given, before it builds the requests of the details of the error and of the configs of its stack
+trace, and which returns whether to send them: when it does not, the error of the server is the
+error of the call as it is, and an error of the function is the error of the call in place of it.
 The per-thread state of a session and of its client (its tags, its user context extensions and its
 request context) is that of `spark_connect_core::runtime::calling_thread_id`: a future of a call
-that `block_on` polls on another thread, inside a `current_thread` runtime, reads and sets the
-state of the thread that calls, which ends with that thread, and the future of a
-`Watch::Interrupt` runs as a call of the thread that waits. A failed
-`SparkConnectClient::clone_session` (and so
-`SparkSession::clone_session`) raises the error of the status of its RPC without the details and
-the stack trace of the server, which it no longer requests, as PySpark's `clone` leaves its
-failure to grpc, and its response is not checked against the session of the client (a session ID
-or a server-side session ID of the response that differs is not an error, and does not close the
-client), as PySpark's `clone` does not check it; the details of a failure are not requested once
-the wait watch of the call returned a `Watch::Interrupt`. The doc-hidden
-`spark_connect::session::Tag` adds `NotText` and `NotUtf8`, tags that protobuf's string field does
-not take, with which each execution of the thread fails; exhaustive matches on it must handle them,
-or have a wildcard arm.
+that `block_on` polls on another thread, inside a `current_thread` runtime, reads and sets the state
+of the thread that calls, which ends with that thread, and the future of a `Watch::Interrupt` runs
+as a call of the thread that waits. A failed `SparkConnectClient::clone_session` (and so
+`SparkSession::clone_session`) raises the error of the status of its RPC without the details and the
+stack trace of the server, which it no longer requests, as PySpark's `clone` leaves its failure to
+grpc, and its response is not checked against the session of the client (a session ID or a
+server-side session ID of the response that differs is not an error, and does not close the client),
+as PySpark's `clone` does not check it; the details of a failure are not requested once the wait
+watch of the call returned a `Watch::Interrupt`. The doc-hidden `spark_connect::session::Tag` is a
+tag of a thread, which the doc-hidden `SharedTags::new`, `replace` and `tags` take and give: `Text`,
+`Unencodable`, of a str that UTF-8 cannot encode, and `NotText` and `NotUtf8`, tags that protobuf's
+string field does not take, with which each execution of the thread fails.
 
 The doc-hidden `plan::BuiltOutside` is a message that a client built outside the core, with the type
 URLs of the placeholders of DataFrames in the encoding that `BuiltOutside::decoded` decodes it of:
@@ -871,18 +894,18 @@ evaluation, feature, fpm, recommendation, regression and tuning modules, and for
 They live in the package of PySpark's deprecated `pyspark.ml.connect` (deprecated since Spark 4.0,
 of pandas and PyTorch training), as `pyspark.ml` itself stays PySpark's vendored classes over Spark
 Connect, and replace its classes of the same names: `LogisticRegression`, `StandardScaler`,
-`MaxAbsScaler`, `CrossValidator` and `Pipeline` (and their models), and its
-`RegressionEvaluator`, `BinaryClassificationEvaluator` and `MulticlassClassificationEvaluator`. So
-the package and its modules have the native classes and an `__all__` of them (PySpark's
-`pyspark.ml.connect` exports `Estimator`, `Evaluator`, `Model`, `Pipeline`, `PipelineModel`,
-`Transformer` and its modules, which have no `__all__`); the constructors take the params of
-`pyspark.ml`, so the PyTorch params of the deprecated `LogisticRegression` (`numTrainWorkers`,
-`batchSize`, `learningRate`, `momentum` and `seed`) raise the `TypeError` of an unexpected keyword
-argument; and they fit, transform and evaluate Spark DataFrames only, so a pandas DataFrame raises
-the `AttributeError` of its `sparkSession`, where the deprecated classes fit it. The base classes
-`Estimator`, `Transformer`, `Model` and `Evaluator` of the package, its `ArrayAssembler`, its
-`summarizer` and its other helper modules stay PySpark's deprecated ones, unchanged. Each class
-has, where its PySpark class has them:
+`MaxAbsScaler`, `CrossValidator` and `Pipeline` (and their models), and its `RegressionEvaluator`,
+`BinaryClassificationEvaluator` and `MulticlassClassificationEvaluator`. So the package and its
+modules have the native classes and an `__all__` of them, but for `pyspark.ml.connect.pipeline`, the
+module of `Pipeline` and `PipelineModel`, which has none (PySpark's `pyspark.ml.connect` exports
+`Estimator`, `Evaluator`, `Model`, `Pipeline`, `PipelineModel`, `Transformer` and its modules, which
+have no `__all__`); the constructors take the params of `pyspark.ml`, so the PyTorch params of the
+deprecated `LogisticRegression` (`numTrainWorkers`, `batchSize`, `learningRate`, `momentum` and
+`seed`) raise the `TypeError` of an unexpected keyword argument; and they fit, transform and
+evaluate Spark DataFrames only, so a pandas DataFrame raises the `AttributeError` of its
+`sparkSession`, where the deprecated classes fit it. The base classes `Estimator`, `Transformer`,
+`Model` and `Evaluator` of the package, its `ArrayAssembler`, its `summarizer` and its other helper
+modules stay PySpark's deprecated ones, unchanged. Each class has, where its PySpark class has them:
 
 - **The Params API of `pyspark.ml.param.Params`, as PySpark's own code**: `params`, `getParam`,
   `hasParam`, `isSet`, `isDefined`, `hasDefault`, `getOrDefault`, `explainParam(s)`,
@@ -1446,24 +1469,23 @@ implementations through Connect. Vector-valued inputs must use `VectorUDT`; conv
 arrays explicitly with `pyspark.ml.functions.array_to_vector`. `StandardScaler` defaults to
 `withMean=False, withStd=True`, matching standard `pyspark.ml`.
 
-The Rust `LogisticRegression` and `LogisticRegressionModel` have the params of `pyspark.ml`, with one
-generated getter and setter per param (`set_max_iter` and `max_iter()`, `set_features_col` and
-`features_col()`, and so on), and `PARAM_NAMES` lists them. `LogisticRegression::feature_col`
-and `set_feature_col`, the names of v4.2.0, stay as deprecated aliases of `features_col` and
-`set_features_col`. `threshold()`, `thresholds()`,
-`set_threshold` and `set_thresholds` follow `_LogisticRegressionParams`: the getters check that
-the two agree to 1e-5 and `threshold()` requires two thresholds. The setters leave the other
-param set, as over Spark Connect, where the `clear` of `pyspark.ml` does nothing, so a
-disagreement raises the getters' error. Their arithmetic is PySpark's, in Python: a zero divisor
-of the equivalent threshold of two thresholds, `1 / (1 + t0 / t1)` (a zero `t1`, or a ratio of
--1), is the error "float division by zero" of its `ZeroDivisionError`, of `threshold()` and,
-with a threshold set too, of `thresholds()`.
-The model has the typed members of `LinearSVCModel` above, plus `coefficient_matrix()` and
-`intercept_vector()`; `coefficients()` and `intercept()` raise the server's error of a multinomial
-model, as PySpark does. The model's `summary()` is binary for at most two classes, of the
-`numClasses` that it fetches when called (PySpark fetches it at the fit), and `evaluate` makes
-the same choice on its dataset. `has_summary()` is client side. The
-Rust API differs from `pyspark.ml` as the LinearSVC section says.
+The Rust `LogisticRegression` and `LogisticRegressionModel` have the params of `pyspark.ml`, with
+one generated getter and setter per param (`set_max_iter` and `max_iter()`, `set_features_col` and
+`features_col()`, and so on), and `PARAM_NAMES` lists them. `LogisticRegression::feature_col` and
+`set_feature_col`, the names of v4.2.0, stay as deprecated aliases of `features_col` and
+`set_features_col`. `threshold()`, `thresholds()`, `set_threshold` and `set_thresholds` follow
+`_LogisticRegressionParams`: the getters check that the two agree to 1e-5 and `threshold()` requires
+two thresholds. The setters leave the other param set, as over Spark Connect, where the `clear` of
+`pyspark.ml` does nothing, so a disagreement raises the getters' error. Their arithmetic is
+PySpark's, in Python: a zero divisor of the equivalent threshold of two thresholds, `1 / (1 + t0 /
+t1)` (a zero `t1`, or a ratio of -1), is the error "float division by zero" of its
+`ZeroDivisionError`, of `threshold()` and, with a threshold set too, of `thresholds()`. The model
+has the typed members of `LinearSVCModel` (see "Native LinearSVC" below), plus
+`coefficient_matrix()` and `intercept_vector()`; `coefficients()` and `intercept()` raise the
+server's error of a multinomial model, as PySpark does. The model's `summary()` is binary for at
+most two classes, of the `numClasses` that it fetches when called (PySpark fetches it at the fit),
+and `evaluate` makes the same choice on its dataset. `has_summary()` is client side. The Rust API
+differs from `pyspark.ml` as the LinearSVC section says.
 
 ## Native RandomForestRegressor
 
@@ -1938,34 +1960,33 @@ errors are the runtime's `DecodeError` and `EncodeError`. The differences:
 
 - its types are of `pyspark.sql.connect.proto`, not of upb's `google._upb._message`: its metaclass
   is `pyspark.sql.connect.proto._rust.MessageMeta`, its classes subclass the runtime's `Message`
-  (`pyspark.sql.connect.proto.Message`), its maps of scalars and of messages are its
-  `ScalarMapContainer` and `MessageMapContainer`, of a base `MapContainer`, and its messages take
-  weak references, which upb's refuse, as the runtime's unset messages and containers hold the
-  message that they set weakly. The runtime's `Message` has the `__reduce__`, `__getstate__` and
-  `__setstate__` of the results of protobuf's (of upb's pickles), which take less time than
-  protobuf's Python ones, and a `__copy__`, which copies a message of its fields (of upb's bytes
-  past the limit of a parse), where upb's `copy.copy` is protobuf's `__reduce__`, a parse of the
-  bytes: so `dir()` of a class and of a message list `__copy__`, which upb's do not. The metaclass
-  gives the attributes of a class (the wrappers of the nested enums, the numbers of their values
-  and of the fields) when it makes the class, where upb's binds each when it is read, so that a
-  read of an attribute of a class takes no more time than of a Python class: `dir()` and `vars()`
-  of a class list them before they are read, and the `AttributeError` of a name that a class
-  lacks is Python's (`type object 'Join' has no attribute 'nope'`), where upb's is of the name
-  only (`nope`); as upb's, a name of the suffix `_FIELD_NUMBER` is only the number of a field,
-  not a nested enum or a value of one of the name. The methods of its containers take their
-  arguments as upb's do, positionally
+  (`pyspark.sql.connect.proto._rust.Message`, whose module is named `pyspark.sql.connect.proto`,
+  which does not export it), its maps of scalars and of messages are its `ScalarMapContainer` and
+  `MessageMapContainer`, of a base `MapContainer`, and its messages take weak references, which
+  upb's refuse, as the runtime's unset messages and containers hold the message that they set
+  weakly. The runtime's `Message` has the `__reduce__`, `__getstate__` and `__setstate__` of the
+  results of protobuf's (of upb's pickles), which take less time than protobuf's Python ones, and a
+  `__copy__`, which copies a message of its fields (of upb's bytes past the limit of a parse), where
+  upb's `copy.copy` is protobuf's `__reduce__`, a parse of the bytes: so `dir()` of a class and of a
+  message list `__copy__`, which upb's do not. The metaclass gives the attributes of a class (the
+  wrappers of the nested enums, the numbers of their values and of the fields) when it makes the
+  class, where upb's binds each when it is read, so that a read of an attribute of a class takes no
+  more time than of a Python class: `dir()` and `vars()` of a class list them before they are read,
+  and the `AttributeError` of a name that a class lacks is Python's (`type object 'Join' has no
+  attribute 'nope'`), where upb's is of the name only (`nope`); as upb's, a name of the suffix
+  `_FIELD_NUMBER` is only the number of a field, not a nested enum or a value of one of the name.
+  The methods of its containers take their arguments as upb's do, positionally
   (`RepeatedScalarContainer.append() takes no keyword arguments`), with upb's errors, of the names
   of upb's classes of the maps too (`ScalarMapContainer.MergeFrom() takes exactly one argument (0
-  given)`). A dunder method of a map called directly with the wrong arguments
-  (`map.__eq__()`) is an exception: its error is that of CPython's slot wrapper of the native type
-  (`expected 1 argument, got 0`), where upb's `__eq__` of a map is `Mapping.__eq__`, a Python
-  function. So is a keyword argument of `setdefault`, `insert`, `pop` or `__deepcopy__` (upb's
-  `METH_VARARGS` methods) called through a bound method object (`f = map.setdefault; f(key="k")`):
-  CPython's error of upb's names the method only (`setdefault() takes no keyword arguments`), as of
-  a bound builtin method, and the runtime's method, which cannot tell that call from one of the map,
-  names the class too. Before Python 3.12, while a trace or a profile function is set (`coverage`, a
-  debugger), CPython calls each such method as a bound method, and the runtime's error then names
-  the method only too;
+  given)`). A dunder method of a map called directly with the wrong arguments (`map.__eq__()`) is an
+  exception: its error is that of CPython's slot wrapper of the native type (`expected 1 argument,
+  got 0`), where upb's `__eq__` of a map is `Mapping.__eq__`, a Python function. So is a keyword
+  argument of `setdefault`, `insert`, `pop` or `__deepcopy__` (upb's `METH_VARARGS` methods) called
+  through a bound method object (`f = map.setdefault; f(key="k")`): CPython's error of upb's names
+  the method only (`setdefault() takes no keyword arguments`), as of a bound builtin method, and the
+  runtime's method, which cannot tell that call from one of the map, names the class too. Before
+  Python 3.12, while a trace or a profile function is set (`coverage`, a debugger), CPython calls
+  each such method as a bound method, and the runtime's error then names the method only too;
 - where Python code that a method of a container runs (an `__index__`, an `__eq__`, an iterable)
   shortens the container, a read past its end raises `IndexError` and an insertion or a deletion
   takes the container as it is, where upb reads or writes past the end of its array, which can
@@ -2443,14 +2464,15 @@ pass.
 
 ## Spark Declarative Pipelines CLI
 
-The CLI of Spark Declarative Pipelines (`python -m pyspark.pipelines.cli init`, `run` and
-`dry-run`) and its modules are Apache Spark's own, vendored from v4.3.0, and Apache Spark's
-tests of them pass with this client. The CLI needs `pyyaml`, which `pyspark-client-rust`
-depends on, as `pyspark-client` does. The user context extensions of a
-client (`spark.client.add_threadlocal_user_context_extension` and
-`add_global_user_context_extension`), which the CLI adds for the analyses of a pipeline, are
-sent with the requests of executions, analyses, configurations, error details and interrupts,
-as PySpark sends them.
+The CLI of Spark Declarative Pipelines (`python -m pyspark.pipelines.cli init`, `run` and `dry-run`)
+and its modules are Apache Spark's own, vendored from v4.3.0, but for those that run a pipeline over
+the client (`spark_connect_pipeline` and `spark_connect_graph_element_registry`), which build its
+commands in the Rust core, and Apache Spark's tests of them pass with this client. The CLI needs
+`pyyaml`, which `pyspark-client-rust` depends on, as `pyspark-client` does. The user context
+extensions of a client (`spark.client.add_threadlocal_user_context_extension` and
+`add_global_user_context_extension`), which the CLI adds for the analyses of a pipeline, are sent
+with the requests of executions, analyses, configurations, error details and interrupts, as PySpark
+sends them.
 
 ## How parity is verified
 
@@ -2623,24 +2645,24 @@ a private import, of PySpark's `__all__`, as with `pyspark-client`. A call costs
 wrapper too, as with `pyspark-client`, which is more than that of most functions of
 `pyspark.sql.connect.functions`, of the Rust core.
 
-The functions of `pyspark.sql.connect.functions` are the drop-in's, which build their columns in
-the Rust core: those that `scripts/gen_fn_dispatch.py` generates of PySpark Connect's functions
+The functions of `pyspark.sql.connect.functions` are the drop-in's, which build their columns in the
+Rust core: those that `scripts/gen_fn_dispatch.py` generates of PySpark Connect's functions
 (`pyspark/sql/connect/functions/_generated.py`), which run in the namespace of
-`pyspark.sql.connect.functions.builtin`, so that they call its `lit`, `column` and `_to_col` as
-it has them at the call, as PySpark Connect's do, and those that the module writes. As PySpark
-Connect's, they are of that module, and have the docstrings of PySpark's functions (but
-`date_part`, `datepart` and `uuid`, which PySpark Connect leaves without one) and their
-annotations; `pyspark.sql.connect.functions.partitioning` is PySpark Connect's, as it is. The
-differences: the frames of a traceback of a generated function are of `_generated.py`, where
-PySpark Connect's are of `builtin.py`; `col` is not wrapped by PySpark's `_with_origin`, so it has
-no `__wrapped__` (the drop-in captures the call site of a Column in the Rust core); the module
-has none of the classes of PySpark Connect's expressions that its module imports (`CaseWhen`,
-`ColumnReference`, ...), nor `np`, and the private helpers of the Rust core are its own; and the
-annotations name the class of `pyspark.sql.column.Column`, which is PySpark Connect's class (see
-below), where those of `pyspark-client` name its classic class. An import of a module of
-messages, such as `from pyspark.sql.connect.proto import base_pb2`, has no warning of pyright: its
-stub is PySpark's (`base_pb2.pyi`), and the module, which the drop-in's protobuf runtime makes at
-run time, has a file of the package as its source.
+`pyspark.sql.connect.functions.builtin`, so that they call its `lit`, `column` and `_to_col` as it
+has them at the call, as PySpark Connect's do, and those that the module writes. As PySpark
+Connect's, they are of that module, and have the docstrings of PySpark's functions (but `date_part`,
+`datepart` and `uuid`, which PySpark Connect leaves without one) and their annotations;
+`pyspark.sql.connect.functions.partitioning` is PySpark Connect's, as it is. The differences: the
+frames of a traceback of a generated function are of `_generated.py`, where PySpark Connect's are of
+`builtin.py`; `col` is not wrapped by PySpark's `_with_origin`, so it has no `__wrapped__` (the
+drop-in captures the call site of a Column in the Rust core); the module has none of the classes of
+PySpark Connect's expressions that its module imports (`CaseWhen`, `ColumnReference`, ...), nor
+`np`, and the private helpers of the Rust core are its own. Its annotations name PySpark's classic
+`Column` of `pyspark.sql.column`, as those of `pyspark-client` do, of which the Columns of a session
+are instances (see below). An import of a module of messages, such as `from
+pyspark.sql.connect.proto import base_pb2`, has no warning of pyright: its stub is PySpark's
+(`base_pb2.pyi`), and the module, which the drop-in's protobuf runtime makes at run time, has a file
+of the package as its source.
 
 The drop-in parses the protobufs that a pickled Column or DataFrame carries, and the requests that
 session hooks see, at any depth that PySpark's serializer reaches, where the parsers of protobuf and
@@ -2699,15 +2721,16 @@ and the types of as many levels that the user makes: they are made, compared, wr
 lowered for the requests on stacks that grow with their levels, so that their `==`, `repr()`,
 `json()`, `jsonValue()`, `fromJson`, `simpleString()`, `treeString()`, `toNullable()`,
 `needConversion()`, `hash()` and pickling give on a thread of 128 KiB what they give on the main
-thread, and so do `copy.deepcopy` and unpickling, which parse the JSON of the type with Python's
-`json` module, on one of 256 KiB (they overflow one of 128 KiB from about 200 nested structs, where
+thread, and so do `copy.deepcopy` and unpickling, which convert the JSON of the type in Python,
+on one of 256 KiB (they overflow one of 128 KiB from about 200 nested structs, where
 PySpark's overflow it from about 100). On the main thread, `json()`, `jsonValue()` and `fromJson`
 raise the `RecursionError` of Python's `json` module of a JSON of more than about 1,000 levels (of
-about 330 nested structs), and so do `copy.deepcopy` and unpickling, and `hash()` and `repr()` raise
-their own of about 500 structs, while `==`, `simpleString()`, `treeString()`, `toNullable()` and
-pickling take the types of 500 structs, as far as tried. PySpark's raise their `RecursionError` from
-about 100 nested structs (`copy.deepcopy`), 150 (`==` and pickling), 200 (`hash()` and `repr()`),
-300 (`json()`) and 340 (`simpleString()` and `treeString()`), and its `repr()` overflows a thread of
+about 330 nested structs), `copy.deepcopy` and unpickling raise one from about 250 nested structs,
+and `hash()` and `repr()` raise their own of about 500 structs, while `==`, `simpleString()`,
+`treeString()`, `toNullable()` and pickling take the types of 600 structs, as far as tried. On
+Python 3.11, PySpark's raise their `RecursionError` from about 100 nested structs (`copy.deepcopy`),
+125 (pickling), 145 (`==`), 165 (`hash()` and `repr()`), 250 (`json()` and `simpleString()`) and 330
+(`treeString()`), and its `repr()` overflows a thread of
 256 KiB from about 150. The `grpc-status-details-bin` of a failure is read within the same limit;
 one past it is of no error of the server, as one that does not decode, where PySpark raises
 protobuf's `DecodeError` of the `google.rpc.Status`. The server is trusted, as SECURITY.md sets out,
@@ -2734,18 +2757,18 @@ as `AnalyzePlan`, and `_MultiThreadedRendezvous` of a stream, of the `debug_erro
 1.85, the name of the code and the details, where it was a `_MultiThreadedRendezvous` of either, of
 the `debug_error_string` of an older grpcio (`UNKNOWN:Error received from peer {grpc_message:...}`).
 
-The drop-in also sends a plan that PySpark's client cannot encode: from about 50 nested
-expressions, PySpark raises upb's `DecodeError: Exceeded upb_DecodeOptions_MaxDepth` before it
-sends the plan, where the drop-in sends it, and the server runs it within its own limits. It
-parses a request of up to `spark.connect.grpc.marshallerRecursionLimit` nested messages (1024),
-so 509 nested `abs` run and 510 fail with `[Unknown error] Application error processing RPC`,
-and its analyzer resolves a plan in up to `spark.sql.analyzer.maxIterations` (100) iterations,
-so a chain of 98 `+` fails with its `AnalysisException` ("Max iterations (100) reached for batch
-Resolution").
-A Column of 745 levels or more raises a `RecursionError` when it is pickled, of the drop-in's own
-message. PySpark's pickler raises one from about 550 levels, under Python's default recursion limit,
-so a Column of 550 to 744 levels pickles in the drop-in only. `copy.copy` and `copy.deepcopy` of a
-Column share its expression, of which a deep copy makes again only the levels above the UDFs whose
+The drop-in also sends a plan that PySpark's client cannot encode: from about 50 nested expressions,
+PySpark raises upb's `DecodeError: Exceeded upb_DecodeOptions_MaxDepth` before it sends the plan,
+where the drop-in sends it, and the server runs it within its own limits. It parses a request of up
+to `spark.connect.grpc.marshallerRecursionLimit` nested messages (1024), so 508 nested `abs` of a
+`select` run and 509 fail, with the `SparkConnectGrpcException` of `UNKNOWN` (`Application error
+processing RPC`), and its analyzer resolves a plan in up to `spark.sql.analyzer.maxIterations` (100)
+iterations, so a chain of 98 `+` fails with its `AnalysisException` ("Max iterations (100) reached
+for batch Resolution"). A Column of more than 745 levels raises a `RecursionError` when it is
+pickled, of the drop-in's own message (`an expression may be at most 745 levels deep`). On Python
+3.11, PySpark's pickler raises one from about 200 levels, under Python's default recursion limit, so
+a Column of about 200 to 745 levels pickles in the drop-in only. `copy.copy` and `copy.deepcopy` of
+a Column share its expression, of which a deep copy makes again only the levels above the UDFs whose
 functions it copies, so they copy a Column of any depth, as PySpark's `copy.copy` does; PySpark's
 `copy.deepcopy` raises a `RecursionError` from about 165 levels.
 
@@ -3007,28 +3030,28 @@ as it is, a float as Python's `repr` writes it, of the shortest digits that read
 an even last digit of a tie (`1e-07`, and `74334700308107.62` of `74334700308107.625`), `NaN` and
 `Infinity`, and the keys sorted as `sort_keys` sorts them, of the ints and floats by their values
 (`{10: "a", 9: "b"}` is `{"9":"b","10":"a"}`). The core holds the metadata of the JSON of
-`json.dumps` of the dict, of its values as they are written, so a plan sends that text, as
-PySpark's `pyspark_types_to_proto_types` sends the metadata of a field, and the readers and
-`createDataFrame` the `json()` of the schema, as it is, of any depth, also of the metadata of the
-fields of the `sqlType()` of a `UserDefinedType`, as PySpark's: of a schema that was given, or of
-one inferred of local rows, of the `__UDT__` objects of their values, of their own `jsonValue()`.
+`json.dumps` of the dict, of its values as they are written, so a plan sends that text, as PySpark's
+`pyspark_types_to_proto_types` sends the metadata of a field, and so do the readers and
+`createDataFrame` in the JSON of the schema that they send, of any depth, also of the metadata of
+the fields of the `sqlType()` of a `UserDefinedType`, as PySpark's: of a schema that was given, or
+of one inferred of local rows, of the `__UDT__` objects of their values, of their own `jsonValue()`.
 The server keeps the low 64 bits of such an int (`10**30` becomes `5076944270305263616`), and
 refuses a float that is not finite. The Arrow schema of `createDataFrame` of a pyarrow Table holds
 `json.dumps` of the metadata of each field, as PySpark's `to_arrow_schema` writes it; that of local
 rows, of a pandas DataFrame, of each of its conversions of a column, and of a numpy array holds it
-on the fields of the `sqlType()` of a `UserDefinedType` only, as PySpark's `_deduplicate_field_names`
-drops the metadata of the others, which names the fields of each struct of the schema (`a_0`,
-`a_1`), of the top level too for a pandas DataFrame, but not those of the `sqlType()`. A dict that
-`json.dumps` refuses, such as one of a set or of a key of a tuple, is kept, and only the uses that
-write its JSON raise the error of `json.dumps`, as PySpark's: `json()`, of its sorted keys too (`'<'
-not supported between instances of 'str' and 'int'`), each request of a plan of the type, such as
-of a cast, also of one made in the `sqlType()` that `jsonValue()` calls, and `createDataFrame`,
-after it converts the data, of the error of its Arrow schema first where that holds the metadata
-(`keys must be str, int, float, bool or None, not tuple`). `mapInPandas`, `mapInArrow`,
-`applyInPandas` and `applyInArrow`, after they read the columns of the DataFrame, and those of a
-cogroup raise PySpark's `NOT_IMPLEMENTED` of the return type of such a schema, of their UDF's check
-of its Arrow type. The JSON of a type writes each character of its names and strings that is not
-printable ASCII as the `\u` escape of `json.dumps`, as PySpark's `json()`.
+on the fields of the `sqlType()` of a `UserDefinedType` only, as PySpark's
+`_deduplicate_field_names` drops the metadata of the others, which names the fields of each struct
+of the schema (`a_0`, `a_1`), of the top level too for a pandas DataFrame, but not those of the
+`sqlType()`. A dict that `json.dumps` refuses, such as one of a set or of a key of a tuple, is kept,
+and only the uses that write its JSON raise the error of `json.dumps`, as PySpark's: `json()`, of
+its sorted keys too (`'<' not supported between instances of 'str' and 'int'`), each request of a
+plan of the type, such as of a cast, also of one made in the `sqlType()` that `jsonValue()` calls,
+and `createDataFrame`, after it converts the data, of the error of its Arrow schema first where that
+holds the metadata (`keys must be str, int, float, bool or None, not tuple`). `mapInPandas`,
+`mapInArrow`, `applyInPandas` and `applyInArrow`, after they read the columns of the DataFrame, and
+those of a cogroup raise PySpark's `NOT_IMPLEMENTED` of the return type of such a schema, of their
+UDF's check of its Arrow type. The JSON of a type writes each character of its names and strings
+that is not printable ASCII as the `\u` escape of `json.dumps`, as PySpark's `json()`.
 
 A `TableArg`, of `DataFrame.asTable()`, pickles at every protocol, plainly and by cloudpickle, as
 PySpark's, of its user-set attributes, and `copy.copy` and `copy.deepcopy` copy it as PySpark's. Its
@@ -3542,33 +3565,32 @@ only, of which the drop-in's native readers and writers are not: their MRO is th
 PySpark's classes are plain Python classes, which a user subclasses. So are these of the drop-in:
 the DataFrame, `Observation`, and the `SparkSession`, `Catalog`, `DataSourceRegistration`,
 `DataFrameReader` and `DataStreamReader` of `pyspark.sql.connect`, which construct of their PySpark
-arguments
-(`SparkSession(connection=...)`, `Catalog(spark)`, `DataFrameReader(spark)`), also a subclass of an
-`__init__` of its own, and whose setters, copies and pickles are of the subclass (but those of a
-session, which are the active session of its ID, as PySpark's);
-`SparkSession.Hook`, `StorageLevel` and `PythonEvalType`; and the data types, from
-`StringType` and `DecimalType` to `ArrayType`, `StructField` and `StructType` (see above). A
-session of a subclass is the session that its DataFrames, readers and catalogs give back, as in
-PySpark. The `__init__` of the class gives an object its session, as PySpark's `__init__` sets it:
-the session of a new client, of `SparkSession(connection, userId=None, hook_factories=None)`, and
-the session of its argument for the others, which must be a session, where PySpark's keeps any
-object until it is used, which raises its `AttributeError` then. Until it runs, as for a subclass
-whose `__init__` does not call it, a session, a reader or a catalog is of a session of no server,
-whose requests raise `NO_ACTIVE_SESSION`, where PySpark's raise the `AttributeError` of `_client`
-or `_sparkSession` (a reader or a catalog is of the first session among the arguments of a
+arguments (`SparkSession(connection=...)`, `Catalog(spark)`, `DataFrameReader(spark)`), also a
+subclass of an `__init__` of its own, and whose setters, copies and pickles are of the subclass (but
+those of a session, which are the active session of its ID, as PySpark's); `SparkSession.Hook`,
+`StorageLevel` and `PythonEvalType`; and the data types, from `StringType` and `DecimalType` to
+`ArrayType`, `StructField` and `StructType` (see above). A session of a subclass is the session that
+its DataFrames, readers and catalogs give back, as in PySpark. The `__init__` of the class gives an
+object its session, as PySpark's `__init__` sets it: the session of a new client, of
+`SparkSession(connection, userId=None, hook_factories=None)`, and the session of its argument for
+the others, which must be a session, where PySpark's keeps any object until it is used, which raises
+its `AttributeError` then. Until it runs, as for a subclass whose `__init__` does not call it, a
+session, a reader or a catalog is of a session of no server, whose requests raise
+`NO_ACTIVE_SESSION`, where PySpark's raise the `AttributeError` of the first attribute that the
+method reads: `_client` of a session, `_sparkSession` of a catalog, and `_options`, `_schema` or
+`_format` of a reader (a reader or a catalog is of the first session among the arguments of a
 subclass, if any, which then works), and a registration has no `sparkSession`, as PySpark's. So a
 pickle of PySpark, which makes an object of its class without arguments and then sets its
 `__dict__`, loads in the drop-in: a reader, of the `_client`, `_format`, `_schema` and `_options`
-(and `_source_name`) of its state, which it sets as its setters do, a catalog of its
-`_sparkSession` and a registration of its `sparkSession`; and the drop-in's pickles of them load in
-PySpark, of their classes, as PySpark's own do: where the session of their ID is active.
-The other native classes, of which the Connect `Column`, `DataFrameNaFunctions`,
-`DataFrameStatFunctions`, `WindowSpec` and `TableArg` are, cannot be subclassed
-(`TypeError: type 'Column' is not an acceptable base type`), and do not construct
-(`TypeError: cannot create '...' instances`): their objects are made of the state of the Rust core,
-a plan, an expression or a query, which the arguments of PySpark's constructors, the Python objects
-of its client, do not give, as the drop-in does not have them, so a subclass would have no
-`__init__` to call:
+(and `_source_name`) of its state, which it sets as its setters do, a catalog of its `_sparkSession`
+and a registration of its `sparkSession`; and the drop-in's pickles of them load in PySpark, of
+their classes, as PySpark's own do: where the session of their ID is active. The other native
+classes, of which the Connect `Column`, `DataFrameNaFunctions`, `DataFrameStatFunctions`,
+`WindowSpec` and `TableArg` are, cannot be subclassed (`TypeError: type 'Column' is not an
+acceptable base type`), and do not construct (`TypeError: cannot create '...' instances`): their
+objects are made of the state of the Rust core, a plan, an expression or a query, which the
+arguments of PySpark's constructors, the Python objects of its client, do not give, as the drop-in
+does not have them, so a subclass would have no `__init__` to call:
 - `Column` takes an `Expression` of `pyspark.sql.connect.expressions`; the drop-in's expressions
   are the Rust core's.
 - `DataFrameWriter`, `DataFrameWriterV2`, `DataStreamWriter` and `MergeIntoWriter` take the
@@ -3793,8 +3815,11 @@ a `UserWarning` of the location of PySpark's `warnings.warn` in
 location take as PySpark's, and which a filter of `"error"` raises in place of the failure. So do
 the lookup of the plan compression of the first plan of a session, whose failure is caught, the read
 of the conf of the server's stack trace as an error of the server is raised, which is retried as
-PySpark's, and the release of the session of `stop()`. Policies none of which is a `DefaultPolicy`
-retry nothing, and do not warn. The requests that the client sends in the background, which no
+PySpark's, and the release of the session of `stop()`. A policy retries the failures that its
+`can_retry` takes, as PySpark's `Retrying` asks it, also a subclass of `RetryPolicy` that is not a
+`DefaultPolicy`, and warns when its retries are spent; policies none of which takes a failure, such
+as PySpark's own `RetryPolicy`, retry nothing, and do not warn. The requests that the client sends
+in the background, which no
 caller waits for, warn too, and their failures are logged as PySpark's senders log them
 (`ReleaseExecute failed with exception: ...`), from the delivery thread of the drop-in (see
 `dev/parity/known-differences.md`). `stop()` logs the failure of the release of its session to the
@@ -3940,12 +3965,12 @@ of the transform of the training dataset, as PySpark's), and save and load. The 
 
 ## Native FMClassifier
 
-`spark_connect::ml::FMClassifier` and
-`pyspark.ml.connect.classification.FMClassifier` fit Spark's binary factorization
-machine classifier. All 18 PySpark constructor parameters have Rust builder
-setters/getters and named Python setters. Fitted models produce prediction,
-probability and raw-prediction columns, with configurable thresholds. Both the
-`gd` and `adamW` solvers run on the Spark server.
+`spark_connect::ml::FMClassifier` and `pyspark.ml.connect.classification.FMClassifier` fit Spark's
+binary factorization machine classifier. The 17 parameters of PySpark's constructor have Rust
+builder setters and getters and named Python setters; `weightCol`, a param of the class that
+PySpark's constructor does not take and that PySpark has no setter of, has a Rust getter only.
+Fitted models produce prediction, probability and raw-prediction columns, with configurable
+thresholds. Both the `gd` and `adamW` solvers run on the Spark server.
 
 The Rust `FMClassificationModel` has `factors`, `linear`, `intercept`, `predict`, `predictRaw`
 and `predictProbability` of one vector, `numClasses`, `numFeatures`, and `load`.
@@ -3963,14 +3988,14 @@ API of `pyspark.ml` (see "Native ML classes of the full pyspark.ml API"): the Pa
 
 ## Native MultilayerPerceptronClassifier
 
-`spark_connect::ml::MultilayerPerceptronClassifier` and its native Python binding
-support all 14 PySpark constructor parameters, including `thresholds`. Configure
-`layers` before fitting; input and output sizes must match the feature dimension
-and number of classes. `initialWeights` accepts dense or sparse ML vectors:
-Rust uses `MlVector` (a `Vec<f64>` or array also converts to a dense vector), and
-Python accepts the values supported by PySpark's `TypeConverters.toVector`.
-Layer arrays and vector parameters are encoded in Rust and checked against
-fixtures captured with official PySpark.
+`spark_connect::ml::MultilayerPerceptronClassifier` and its native Python binding support the 14
+params of PySpark's class: the 13 of its keyword-only constructor, and `thresholds`, which the
+constructor does not take, as PySpark's does not, and which `setThresholds` (`set_thresholds` in
+Rust) sets. Configure `layers` before fitting; input and output sizes must match the feature
+dimension and number of classes. `initialWeights` accepts dense or sparse ML vectors: Rust uses
+`MlVector` (a `Vec<f64>` or array also converts to a dense vector), and Python accepts the values
+supported by PySpark's `TypeConverters.toVector`. Layer arrays and vector parameters are encoded in
+Rust and checked against fixtures captured with official PySpark.
 
 The fitted model produces multiclass prediction, probability and raw-prediction
 columns. Both `l-bfgs` and `gd` are supported. As in PySpark, fitting an empty
