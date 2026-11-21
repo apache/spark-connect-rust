@@ -22,14 +22,15 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
-import stat
 import shutil
+import stat
 import struct
 import subprocess
 import sys
 import tempfile
 import unittest
 from unittest.mock import patch
+import warnings
 import zipfile
 
 
@@ -399,7 +400,6 @@ class NativePackagingTests(unittest.TestCase):
 
     def test_duplicate_archive_entries_are_rejected(self):
         jar = self.package("linux-x86_64")
-        import warnings
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", UserWarning)
             with zipfile.ZipFile(jar, "a") as archive:
