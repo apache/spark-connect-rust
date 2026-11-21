@@ -7,7 +7,6 @@ scripts/capture_ml_api_cases_golden.py). Official PySpark runs them too, as the 
 
 import json
 import os
-import tempfile
 from pathlib import Path
 
 import _ml_unbound_cases
@@ -32,10 +31,10 @@ def session():
 
 
 @pytest.mark.parametrize("name", list(CLASSES))
-def test_live_cases_are_pyspark_mls(name, session):
+def test_live_cases_are_pyspark_mls(name, session, tmp_path):
     # The saves go to a scratch directory of the local file system, of the server that the tests
     # run against on the same machine, as in CI.
-    ours = live_cases(name, session, tempfile.mkdtemp(prefix="ml-api-cases-"))
+    ours = live_cases(name, session, str(tmp_path))
     golden = CASES[name]["live"]
     assert sorted(ours) == sorted(golden)
     differ = {tag: (ours[tag], golden[tag]) for tag in golden if ours[tag] != golden[tag]}
@@ -54,7 +53,7 @@ def test_models_of_no_server_object_are_pyspark_mls(name, session):
     assert _ml_unbound_cases.outcomes(session, name) == UNBOUND["models"][name]
 
 
-def test_objects_of_this_client_are_of_the_classes_of_pyspark_mls_modules(session):
+def test_objects_of_this_client_are_of_the_classes_of_pyspark_mls_modules(session, tmp_path):
     # Every object that this client makes, as PySpark's do, is of the class of its module, of every
     # base of PySpark's class (test_ml_api_offline.py): of a fit (of a param map, of fitMultiple),
     # a copy, a load, a summary, the trees of an ensemble (regression models of a classifier), the
@@ -74,7 +73,7 @@ def test_objects_of_this_client_are_of_the_classes_of_pyspark_mls_modules(sessio
 
     rows = [(float(i % 2), Vectors.dense([float(i), float(i % 3)])) for i in range(12)]
     df = session.createDataFrame(rows, ["label", "features"]).coalesce(1)
-    path = tempfile.mkdtemp(prefix="ml-public-classes-")
+    path = str(tmp_path)
     lr = cls("classification", "LogisticRegression")(maxIter=3)
     model = check(lr.fit(df), "classification")
     check(model.summary, "classification")
@@ -149,7 +148,7 @@ def test_the_param_maps_of_the_model_of_a_validator_are_in_pysparks_order(sessio
         assert [p.name for p in model.extractParamMap()][: len(defaults)] == defaults, name
 
 
-def test_the_param_maps_and_the_metadata_of_a_one_vs_rest_are_in_pysparks_order(session):
+def test_the_param_maps_and_the_metadata_of_a_one_vs_rest_are_in_pysparks_order(session, tmp_path):
     # A OneVsRest's model of a fit and of `OneVsRestModel(models)` has the defaults of the
     # constructor in its order (test_ml_offline.py). A load is of `_resetUid`, of the defaults in
     # the order of their names, and sets the classifier and then the params of the metadata in its
@@ -174,7 +173,7 @@ def test_the_param_maps_and_the_metadata_of_a_one_vs_rest_are_in_pysparks_order(
 
     rows = [(float(i % 3), Vectors.dense([float(i % 3) + 0.1 * i, float(i % 2)]), 1.0) for i in range(12)]
     df = session.createDataFrame(rows, ["label", "features", "w"]).coalesce(1)
-    path = tempfile.mkdtemp(prefix="ml-one-vs-rest-order-")
+    path = str(tmp_path)
     estimator = cls("OneVsRest")(classifier=cls("LogisticRegression")(maxIter=2), weightCol="w")
     model = estimator.fit(df)
     constructor = ["parallelism", "predictionCol", "featuresCol", "labelCol", "rawPredictionCol"]
@@ -196,7 +195,7 @@ def test_the_param_maps_and_the_metadata_of_a_one_vs_rest_are_in_pysparks_order(
         assert metadata(path + at + "-copy") == (resaved + ["weightCol"], resaved)
 
 
-def test_a_subclass_reads_the_jvm_class_of_its_python_name(session):
+def test_a_subclass_reads_the_jvm_class_of_its_python_name(session, tmp_path):
     # PySpark's RemoteMLReader names the JVM class of a load of the Python class (its module, of
     # org.apache.spark for pyspark, and its name), so a subclass of the user's reads a class that
     # the server does not have, and raises its UNSUPPORTED_EXCEPTION; the class's own load, and a
@@ -209,7 +208,7 @@ def test_a_subclass_reads_the_jvm_class_of_its_python_name(session):
     Binarizer = cls("feature", "Binarizer")
     MyLR = type("MyLR", (LR,), {})
     MyPipeline = type("MyPipeline", (Pipeline,), {})
-    path = tempfile.mkdtemp(prefix="ml-subclass-load-")
+    path = str(tmp_path)
     LR(maxIter=3).save(path + "/lr")
     Pipeline(stages=[Binarizer(threshold=0.5, inputCol="a", outputCol="b")]).save(path + "/pipeline")
     with pytest.raises(Exception, match=r"UNSUPPORTED_EXCEPTION.*Unsupported read for .*\.MyLR"):
@@ -218,7 +217,7 @@ def test_a_subclass_reads_the_jvm_class_of_its_python_name(session):
     assert type(MyPipeline.load(path + "/pipeline")) is Pipeline
 
 
-def test_a_writer_reads_the_params_of_its_object_at_its_save(session):
+def test_a_writer_reads_the_params_of_its_object_at_its_save(session, tmp_path):
     # As PySpark's `RemoteMLWriter.save`, which reads the params of its `_instance` at the save:
     # a param set after `write()` is saved, of an estimator, a model and a Pipeline's stage.
     def cls(module, name):
@@ -227,7 +226,7 @@ def test_a_writer_reads_the_params_of_its_object_at_its_save(session):
     LR = cls("classification", "LogisticRegression")
     Pipeline = cls("pipeline", "Pipeline")
     Binarizer = cls("feature", "Binarizer")
-    path = tempfile.mkdtemp(prefix="ml-writer-at-save-")
+    path = str(tmp_path)
     lr = LR(maxIter=3)
     writer = lr.write()
     assert writer._instance is lr
@@ -243,7 +242,7 @@ def test_a_writer_reads_the_params_of_its_object_at_its_save(session):
     assert Pipeline.load(path + "/pipeline").getStages()[0].getThreshold() == 0.9
 
 
-def test_a_writer_and_a_reader_save_and_load_of_their_attributes_as_pysparks(session):
+def test_a_writer_and_a_reader_save_and_load_of_their_attributes_as_pysparks(session, tmp_path):
     # As PySpark's `RemoteMLWriter.save` and `RemoteMLReader.load`, which read the writer's
     # `_instance`, `shouldOverwrite` and `optionMap` and the reader's `_clazz` at the call, of a
     # copy and a pickle of them too: a `Write` takes an int as its bool of the overwrite, and a save
@@ -258,7 +257,7 @@ def test_a_writer_and_a_reader_save_and_load_of_their_attributes_as_pysparks(ses
     LR = cls("classification", "LogisticRegression")
     Pipeline = cls("pipeline", "Pipeline")
     Binarizer = cls("feature", "Binarizer")
-    path = tempfile.mkdtemp(prefix="ml-writer-attributes-")
+    path = str(tmp_path)
     writer = LR(maxIter=3).write()
     writer._instance = LR(maxIter=9)
     writer.save(path + "/lr")

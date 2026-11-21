@@ -76,27 +76,23 @@ def test_transform_and_evaluate_run_the_primitives_of_a_subclass(frame):
     assert evaluations == [evaluator.uid] * 2
 
 
-def test_pysparks_readers_and_writers_save_and_load_native_objects(frame):
+def test_pysparks_readers_and_writers_save_and_load_native_objects(frame, tmp_path):
     # PySpark's own writer and reader of a Pipeline, over the param maps of the native objects.
-    import tempfile
-
     import pyspark.ml.connect.pipeline as pipeline
 
     Binarizer = _cls("feature", "Binarizer")
     stage = Binarizer(threshold=4.5, inputCol="x", outputCol="b")
-    path = tempfile.mkdtemp(prefix="ml-pyspark-writers-") + "/pipeline"
+    path = str(tmp_path) + "/pipeline"
     pipeline.PipelineWriter(pipeline.Pipeline(stages=[stage])).save(path)
     loaded = pipeline.PipelineReader(pipeline.Pipeline).load(path)
     assert [s.getThreshold() for s in loaded.getStages()] == [4.5]
     assert loaded.getStages()[0].uid == stage.uid
 
 
-def test_a_set_param_of_a_subclass_is_sent_and_refused_by_the_server(frame):
+def test_a_set_param_of_a_subclass_is_sent_and_refused_by_the_server(frame, tmp_path):
     # PySpark's `serialize_ml_params` sends every param of `_paramMap` of a fit, a transform, an
     # evaluate and a save: the server refuses a param of a Python subclass that is set ("Param
     # myParam does not exist."), and a param of only a default is not sent.
-    import tempfile
-
     from pyspark.errors.exceptions.connect import SparkConnectGrpcException
     from pyspark.ml.param import Param, Params
 
@@ -119,7 +115,7 @@ def test_a_set_param_of_a_subclass_is_sent_and_refused_by_the_server(frame):
     estimator = MyLR(maxIter=2)
     assert type(estimator.fit(frame)).__name__ == "LogisticRegressionModel"
     estimator._set(myParam=5)
-    path = tempfile.mkdtemp(prefix="ml-subclass-param-") + "/estimator"
+    path = str(tmp_path) + "/estimator"
     tokenizer = MyTokenizer(inputCol="x", outputCol="w")._set(myParam="v")
     evaluator = MyEvaluator(predictionCol="x")._set(myParam=0.5)
     for call in [
@@ -132,7 +128,7 @@ def test_a_set_param_of_a_subclass_is_sent_and_refused_by_the_server(frame):
             call()
 
 
-def test_the_metadata_of_a_subclass_of_a_meta_algorithm_is_of_its_class(frame):
+def test_the_metadata_of_a_subclass_of_a_meta_algorithm_is_of_its_class(frame, tmp_path):
     # PySpark's `DefaultParamsWriter` writes the class of the object (`instance.__module__ + "." +
     # instance.__class__.__name__`), so of a Python subclass. Its readers of a OneVsRest and a
     # Pipeline load the file as of their own class; those of the validators read the grid of a
@@ -140,7 +136,6 @@ def test_the_metadata_of_a_subclass_of_a_meta_algorithm_is_of_its_class(frame):
     # a pipeline loads of its class, which a class of a function is not an attribute of its module of.
     import glob
     import json
-    import tempfile
 
     from pyspark.ml.tuning import ParamGridBuilder
 
@@ -167,7 +162,7 @@ def test_the_metadata_of_a_subclass_of_a_meta_algorithm_is_of_its_class(frame):
         "estimatorParamMaps": ParamGridBuilder().addGrid(lr.maxIter, [1, 2]).build(),
         "evaluator": _cls("evaluation", "BinaryClassificationEvaluator")(),
     }
-    base = tempfile.mkdtemp(prefix="ml-subclass-metadata-")
+    base = str(tmp_path)
     for obj, cls in [
         (MyOVR(classifier=lr), OneVsRest),
         (MyPipeline(stages=[lr]), Pipeline),
@@ -190,14 +185,13 @@ def test_the_metadata_of_a_subclass_of_a_meta_algorithm_is_of_its_class(frame):
             Pipeline.load(f"{path}-in-pipeline")
 
 
-def test_the_metadata_of_a_subclass_has_the_params_of_the_subclass(frame):
+def test_the_metadata_of_a_subclass_has_the_params_of_the_subclass(frame, tmp_path):
     # PySpark's writers write the params of `extractParamMap()` (of a validator and a OneVsRest,
     # but its estimator, evaluator, grid and classifier, which they save of their own) and the
     # defaults of `_defaultParamMap`, of the Params of a Python subclass too; a Pipeline's params
     # are its `stageUids` and `language`, of its defaults.
     import glob
     import json
-    import tempfile
 
     from pyspark.ml.param import Param, Params, TypeConverters
     from pyspark.ml.tuning import ParamGridBuilder
@@ -216,7 +210,7 @@ def test_the_metadata_of_a_subclass_has_the_params_of_the_subclass(frame):
         "estimatorParamMaps": ParamGridBuilder().addGrid(lr.maxIter, [1]).build(),
         "evaluator": _cls("evaluation", "BinaryClassificationEvaluator")(),
     }
-    base = tempfile.mkdtemp(prefix="ml-subclass-params-")
+    base = str(tmp_path)
     for obj, set_in_params in [
         (subclass(_cls("tuning", "CrossValidator"))(**shared), True),
         (subclass(_cls("tuning", "TrainValidationSplit"))(**shared), True),
@@ -233,13 +227,12 @@ def test_the_metadata_of_a_subclass_has_the_params_of_the_subclass(frame):
         assert metadata["paramMap"].get("myParam") == (7 if set_in_params else None), type(obj)
 
 
-def test_the_save_of_a_pipeline_of_a_one_shot_iterator_writes_no_stage(frame):
+def test_the_save_of_a_pipeline_of_a_one_shot_iterator_writes_no_stage(frame, tmp_path):
     # PySpark's writers iterate the stages to check them (`validateStages`), then for their uids
     # and then to save them: a generator of stages is consumed by the check, so the metadata has
     # no `stageUids` and no stage is saved, and a fit after it fits none, as of PySpark's.
     import glob
     import json
-    import tempfile
 
     Pipeline = _cls("pipeline", "Pipeline")
     PipelineModel = _cls("pipeline", "PipelineModel")
@@ -247,7 +240,7 @@ def test_the_save_of_a_pipeline_of_a_one_shot_iterator_writes_no_stage(frame):
     def stages():
         return [_cls("feature", "Binarizer")(threshold=0.5, inputCol="x", outputCol="b")]
 
-    base = tempfile.mkdtemp(prefix="ml-pipeline-iterator-")
+    base = str(tmp_path)
     pipeline = Pipeline(stages=(stage for stage in stages()))
     model = PipelineModel(stages=(stage for stage in Pipeline(stages=stages()).fit(frame).stages))
     for obj, name in [(pipeline, "pipeline"), (model, "model")]:
@@ -340,12 +333,10 @@ def test_copy_deepcopy_and_pickle_of_a_model_and_its_summary(frame):
         assert copied.transform(frame).columns[-1] == "b"
 
 
-def test_the_models_and_summaries_have_pysparks_java_obj_of_their_call_java(frame):
+def test_the_models_and_summaries_have_pysparks_java_obj_of_their_call_java(frame, tmp_path):
     # As PySpark's: the `_java_obj` of a model of a fit, a load, a copy, of a tree of a forest and
     # of a class method is the RemoteModelRef of its object, and that of a summary the id of its
     # object and methods, which PySpark's `_call_java` reads.
-    import tempfile
-
     from pyspark.ml.util import RemoteModelRef
 
     LR = _cls("classification", "LogisticRegression")
@@ -353,7 +344,7 @@ def test_the_models_and_summaries_have_pysparks_java_obj_of_their_call_java(fram
     RF = _cls("classification", "RandomForestClassifier")
     Indexer = _cls("feature", "StringIndexerModel")
     model = LR(maxIter=2).fit(frame)
-    path = tempfile.mkdtemp(prefix="ml-java-obj-") + "/model"
+    path = str(tmp_path) + "/model"
     model.save(path)
     tree = RF(numTrees=2, maxDepth=2, seed=1).fit(frame).trees[0]
     for obj, method, value in [

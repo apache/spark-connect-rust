@@ -13,7 +13,6 @@ import math
 import os
 import re
 import shutil
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -87,10 +86,10 @@ def session():
 
 
 @pytest.mark.parametrize("name", list(CLASSES))
-def test_live_cases_are_pyspark_mls(name, session):
+def test_live_cases_are_pyspark_mls(name, session, tmp_path):
     # The saves go to a scratch directory of the local file system, of the server that the tests
     # run against on the same machine, as in CI.
-    ours = live_cases(name, session, tempfile.mkdtemp(prefix="fpm-recommendation-api-cases-"))
+    ours = live_cases(name, session, str(tmp_path))
     golden = CASES[name]["live"]
     assert sorted(ours) == sorted(golden)
     differ = {tag: (ours[tag], golden[tag]) for tag in golden if not _close(ours[tag], golden[tag])}
@@ -113,12 +112,12 @@ def _of_its_class(obj):
     return obj
 
 
-def test_objects_of_this_client_are_of_the_classes_of_pyspark_mls(session):
+def test_objects_of_this_client_are_of_the_classes_of_pyspark_mls(session, tmp_path):
     # Every FPGrowth, PrefixSpan and ALS object that this client makes is of the class of its
     # module, as PySpark's: an estimator, its copy (of extra params too) and its load (of its class
     # and of read()), its fit (of a param map, of a list of them and of fitMultiple), and the copy
     # and the load of its model.
-    base = tempfile.mkdtemp(prefix="fpm-recommendation-api-classes-")
+    base = str(tmp_path)
     try:
         prefix_span = _of_its_class(_class_of("PrefixSpan")(minSupport=0.5))
         _of_its_class(prefix_span.copy())
@@ -148,7 +147,7 @@ def test_objects_of_this_client_are_of_the_classes_of_pyspark_mls(session):
         shutil.rmtree(base, ignore_errors=True)
 
 
-def test_the_validators_of_pyspark_ml_save_and_load_an_als_and_its_evaluator(session):
+def test_the_validators_of_pyspark_ml_save_and_load_an_als_and_its_evaluator(session, tmp_path):
     # pyspark.ml's own validators over an ALS and a RegressionEvaluator: their fit makes the best
     # model, of the class of its module, and their saves write the estimator and the evaluator with
     # their own writers, as they are MLWritable. Their loads read them as PySpark's classes, and the
@@ -169,7 +168,7 @@ def test_the_validators_of_pyspark_ml_save_and_load_an_als_and_its_evaluator(ses
     df = session.createDataFrame(rows, ["user", "item", "rating"]).coalesce(1)
     als = _class_of("ALS")(rank=2, maxIter=2, seed=1, coldStartStrategy="drop")
     grid = ParamGridBuilder().addGrid(als.regParam, [0.1, 0.5]).build()
-    base = tempfile.mkdtemp(prefix="fpm-recommendation-api-validators-")
+    base = str(tmp_path)
     try:
         for validator, model_class, kwargs in (
             (CrossValidator, CrossValidatorModel, {"numFolds": 2}),

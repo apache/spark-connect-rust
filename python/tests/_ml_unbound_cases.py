@@ -59,16 +59,17 @@ def outcomes(spark, name):
         return repr(value).replace(uid, "uid")
 
     params = sorted(a for a in dir(cls) if type(getattr(cls, a, None)).__name__ == "Param")
-    path = tempfile.mkdtemp(prefix="ml-unbound-") + "/model"
-    return {
-        "uid": [uid.startswith(name + "_"), len(uid) - len(name)],
-        "params": {p: [model.isSet(p), model.hasDefault(p), default(p)] for p in params},
-        "params_walk": _outcome(lambda: len(model.params))[0],
-        "explainParams": _outcome(lambda: len(model.explainParams()) > 0)[0],
-        "extractParamMap": _outcome(lambda: len(model.extractParamMap())),
-        "copy": _outcome(lambda: type(model.copy()).__name__),
-        "repr": _outcome(lambda: repr(model)),
-        "transform": _outcome(lambda: model.transform(spark.range(1)))[0],
-        "write": _outcome(lambda: model.write())[0] if hasattr(cls, "write") else None,
-        "save": _outcome(lambda: model.save(path))[0] if hasattr(cls, "save") else None,
-    }
+    with tempfile.TemporaryDirectory(prefix="ml-unbound-") as directory:
+        path = directory + "/model"
+        return {
+            "uid": [uid.startswith(name + "_"), len(uid) - len(name)],
+            "params": {p: [model.isSet(p), model.hasDefault(p), default(p)] for p in params},
+            "params_walk": _outcome(lambda: len(model.params))[0],
+            "explainParams": _outcome(lambda: len(model.explainParams()) > 0)[0],
+            "extractParamMap": _outcome(lambda: len(model.extractParamMap())),
+            "copy": _outcome(lambda: type(model.copy()).__name__),
+            "repr": _outcome(lambda: repr(model)),
+            "transform": _outcome(lambda: model.transform(spark.range(1)))[0],
+            "write": _outcome(lambda: model.write())[0] if hasattr(cls, "write") else None,
+            "save": _outcome(lambda: model.save(path))[0] if hasattr(cls, "save") else None,
+        }
