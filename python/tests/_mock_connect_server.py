@@ -392,6 +392,7 @@ def serve(connection):
             self.local = None
             self.local_failure = False
             self.execute_requests = []
+            self.execute_authorizations = []
             # The requests of forgotten sessions that were answered, by kind: "execute", "analyze",
             # "config", "release_session", "release_execute", "reattach", "interrupt", "clone",
             # "fetch_error_details".
@@ -763,6 +764,10 @@ def serve(connection):
                 recorded = self.is_recorded(request, "execute")
                 if recorded:
                     self.execute_requests.append(request)
+                    # The `authorization` of the metadata of the call, if it has one.
+                    self.execute_authorizations.append(
+                        dict(context.invocation_metadata()).get("authorization")
+                    )
                     self.rpc_events.append("execute")
                     self.execute_calls += 1
                 execute_epoch = self.listener_epoch

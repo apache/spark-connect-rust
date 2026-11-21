@@ -2586,6 +2586,289 @@ def test_channel_builders_of_any_object_fail_when_the_session_is_made_as_pyspark
         session.stop()
 
 
+def test_a_session_of_a_default_channel_builder_connects_to_its_endpoint_as_pyspark(mock_connect):
+    # As PySpark's client, which connects through toChannel, whose channel of a
+    # DefaultChannelBuilder connects to its `endpoint`, of `_host` and `_port`, of a subclass too:
+    # neither of its `host`, which the client shows, nor of a `port` of its own. The endpoint is
+    # gRPC's target: bytes or the `encode("utf8")` of another object, the address of a URI of the
+    # schemes `dns:`, `ipv4:` and `ipv6:`, else a `host[:port]` of gRPC's default port, 443. Its
+    # channel is TLS of the builder's `use_ssl`, a subclass's too.
+    import socket
+
+    from pyspark.errors import PySparkNotImplementedError
+    from pyspark.errors.exceptions.connect import SparkConnectGrpcException
+    from pyspark.sql.connect.client import DefaultChannelBuilder
+    from pyspark.sql.connect.session import SparkSession
+
+    _, service = mock_connect
+    live = service.remote[len("sc://"):]
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    dead = f"127.0.0.1:{probe.getsockname()[1]}"
+    probe.close()
+
+    def builder_of(url, **members):
+        overrides = {}
+        for name, value in members.items():
+            if name in ("_host", "_port"):
+                continue
+            overrides[name] = property(lambda self, value=value: value)
+        builder = type("Builder", (DefaultChannelBuilder,), overrides)(url)
+        for name in ("_host", "_port"):
+            if name in members:
+                setattr(builder, name, members[name])
+        return builder
+
+    def outcome(builder):
+        session = SparkSession.builder.channelBuilder(builder).create()
+        try:
+            session.client.set_retry_policies([])
+            before = len(service.execute_requests)
+            try:
+                session.range(1).collect()
+            except SparkConnectGrpcException as error:
+                return str(error)
+            assert len(service.execute_requests) == before + 1
+            return "reached", session.client.host
+        finally:
+            session.stop()
+
+    host, port = live.rsplit(":", 1)
+    assert outcome(builder_of(f"sc://{live}", host="unreachable.invalid")) == (
+        "reached", "unreachable.invalid")
+    assert dead in outcome(builder_of(f"sc://{dead}", host=host))
+    assert outcome(builder_of(f"sc://{dead}", endpoint=live)) == ("reached", "127.0.0.1")
+    assert dead in outcome(builder_of(f"sc://{live}", endpoint=dead))
+    assert outcome(builder_of(f"sc://{live}", port=1))[0] == "reached"
+    assert outcome(builder_of(f"sc://{dead}", _port=int(port)))[0] == "reached"
+    assert outcome(builder_of(f"sc://unreachable.invalid:{port}", _host=host)) == (
+        "reached", host)
+    for endpoint in (
+        live.encode(), f"dns:///{live}", f"dns://8.8.8.8/{live}", f"dns:{live}",
+        f"ipv4:{live},127.0.0.1:1",
+    ):
+        assert outcome(builder_of(f"sc://{dead}", endpoint=endpoint))[0] == "reached", endpoint
+    assert f"{host}:443" in outcome(builder_of(f"sc://{live}", endpoint=host))
+    # TLS of the builder's use_ssl, of a subclass that overrides it: the plaintext server refuses
+    # its handshake, and a builder whose use_ssl is false is plaintext of a URL of use_ssl=true.
+    assert "reached" not in outcome(builder_of(f"sc://{live}", use_ssl=True))
+    assert outcome(builder_of(f"sc://{live}/;use_ssl=true", use_ssl=False))[0] == "reached"
+    # The port of a URL of none is DefaultChannelBuilder.default_port(), as PySpark's takes it,
+    # not that of a subclass.
+    class OwnDefaultPort(DefaultChannelBuilder):
+        @staticmethod
+        def default_port():
+            return int(port)
+
+    assert OwnDefaultPort(f"sc://{host}").endpoint == f"{host}:15002"
+    # The errors of the endpoint are those of PySpark's toChannel when the session is made.
+    with pytest.raises(AttributeError, match="^'int' object has no attribute 'encode'$"):
+        SparkSession.builder.channelBuilder(builder_of(f"sc://{live}", endpoint=5)).create()
+    with pytest.raises(PySparkNotImplementedError) as error:
+        SparkSession.builder.channelBuilder(
+            builder_of(f"sc://{live}", endpoint="unix:/tmp/spark.sock")).create()
+    assert error.value.getCondition() == "NOT_IMPLEMENTED"
+
+
+def test_the_channel_of_a_default_channel_builder_is_secured_as_pysparks_to_channel(
+    mock_connect, monkeypatch,
+):
+    # As PySpark's DefaultChannelBuilder.toChannel, of the properties of the builder, a subclass's
+    # own too: a channel of no security, which sends no token, unless it is `secure`, and then of
+    # gRPC's local credentials, plaintext and of the token, when it is not `use_ssl` and its
+    # `_host` is `localhost`, over a connection of the loopback only, else of TLS, which the
+    # plaintext server refuses.
+    import socket
+    import sys
+
+    from pyspark.errors.exceptions.connect import SparkConnectGrpcException
+    from pyspark.sql.connect.client import DefaultChannelBuilder
+    from pyspark.sql.connect.session import SparkSession
+
+    _, service = mock_connect
+    port = service.remote.rsplit(":", 1)[1]
+    monkeypatch.delenv("SPARK_CONNECT_AUTHENTICATE_TOKEN", raising=False)
+
+    def builder_of(url, **members):
+        overrides = {name: property(lambda self, v=value: v) for name, value in members.items()}
+        return type("Builder", (DefaultChannelBuilder,), overrides)(url)
+
+    def sent(builder):
+        # The authorization that the server received, or the error of the call.
+        session = SparkSession.builder.channelBuilder(builder).create()
+        try:
+            session.client.set_retry_policies([])
+            before = len(service.execute_requests)
+            try:
+                session.range(1).collect()
+            except SparkConnectGrpcException as error:
+                return str(error)
+            assert len(service.execute_requests) == before + 1
+            return ("reached", service.execute_authorizations[-1])
+        finally:
+            session.stop()
+
+    local, loopback = f"localhost:{port}", f"127.0.0.1:{port}"
+    assert sent(builder_of(f"sc://{local}/;token=t")) == ("reached", "Bearer t")
+    assert sent(builder_of(f"sc://{local}/;token=t", secure=False)) == ("reached", None)
+    assert sent(builder_of(f"sc://{loopback}/;token=t", secure=False)) == ("reached", None)
+    assert sent(builder_of(f"sc://{local}", secure=True)) == ("reached", None)
+    assert sent(builder_of(f"sc://{local}/;token=t", endpoint=loopback)) == (
+        "reached", "Bearer t")
+    # gRPC reads the local address of the connection, which is of the loopback to `0.0.0.0` too.
+    if sys.platform.startswith("linux"):
+        assert sent(builder_of(f"sc://{local}/;token=t", endpoint=f"0.0.0.0:{port}")) == (
+            "reached", "Bearer t")
+    assert sent(builder_of(f"sc://{local}", token="p")) == ("reached", "Bearer p")
+    for tls in (
+        builder_of(f"sc://{loopback}/;token=t"),
+        builder_of(f"sc://{loopback}", secure=True),
+        builder_of(f"sc://{loopback}/;token=t", endpoint=local),
+        builder_of(f"sc://{local}/;token=t", use_ssl=True),
+    ):
+        assert "reached" not in sent(tls)
+    monkeypatch.setenv("SPARK_CONNECT_AUTHENTICATE_TOKEN", "e")
+    assert sent(builder_of(f"sc://{loopback}", secure=False)) == ("reached", None)
+    assert sent(builder_of(f"sc://{local}")) == ("reached", "Bearer e")
+    monkeypatch.delenv("SPARK_CONNECT_AUTHENTICATE_TOKEN")
+
+    class SecureRaises(DefaultChannelBuilder):
+        @property
+        def secure(self):
+            raise KeyError("secure")
+
+    # Its errors are those of PySpark's toChannel when the session is made.
+    with pytest.raises(KeyError, match="secure"):
+        SparkSession.builder.channelBuilder(SecureRaises(f"sc://{local}")).create()
+    # Local credentials refuse a connection that is not of the loopback, of grpcio's text, as to
+    # an address of the host outside the loopback, of a listener of every address.
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        probe.connect(("192.0.2.1", 9))
+        outside = probe.getsockname()[0]
+    except OSError:
+        outside = None
+    finally:
+        probe.close()
+    if outside is None or outside.startswith("127."):
+        return
+    listener = socket.socket()
+    listener.bind(("0.0.0.0", 0))
+    listener.listen(8)
+    try:
+        address = f"{outside}:{listener.getsockname()[1]}"
+        text = sent(builder_of(f"sc://{local}/;token=t", endpoint=address))
+        assert (
+            f"last error: UNKNOWN: ipv4:{address}: Endpoint is neither UDS or TCP loopback "
+            "address."
+        ) in text, text
+    finally:
+        listener.close()
+
+
+def test_no_connection_string_nor_endpoint_sets_the_channel_of_a_builder(
+    mock_connect, monkeypatch,
+):
+    # The credentials of a DefaultChannelBuilder are the session's apart from its URL: a
+    # parameter of any name, of a connection string of remote(), SPARK_REMOTE or a session of a
+    # str, or of the `_params` of a builder, is a parameter, which a key of capitals fails as
+    # metadata, as gRPC refuses it, and changes neither the TLS nor the token. An endpoint that is
+    # not of a host and a port, of a character of the URL, is refused when the session is made.
+    from pyspark.errors import PySparkValueError
+    from pyspark.sql.connect.client import ChannelBuilder, DefaultChannelBuilder
+    from pyspark.sql.connect.session import SparkSession
+
+    _, service = mock_connect
+    port = service.remote.rsplit(":", 1)[1]
+    key = "SPARK_CONNECT_RUST_CREDENTIALS"
+    url = f"sc://127.0.0.1:{port}/;use_ssl=true;token=t;{key}=insecure"
+    before = len(service.execute_requests), len(service.config_requests)
+    invalid = pytest.raises(ValueError, match=f"metadata was invalid: '{key}'")
+    with invalid:
+        SparkSession.builder.remote(url).create()
+    with invalid:
+        SparkSession(connection=url)
+    with invalid:
+        SparkSession.builder.channelBuilder(DefaultChannelBuilder(url)).create()
+
+    class Own(ChannelBuilder):
+        def __init__(self):
+            super().__init__()
+            self._params.update({"token": "t", key: "local"})
+
+        @property
+        def host(self):
+            return "127.0.0.1"
+
+        @property
+        def port(self):
+            return int(port)
+
+        def toChannel(self):
+            return None
+
+    with invalid:
+        SparkSession.builder.channelBuilder(Own()).create()
+    monkeypatch.setenv("SPARK_REMOTE", url)
+    import pyspark.sql
+
+    with invalid:
+        pyspark.sql.SparkSession.builder.create()
+    monkeypatch.delenv("SPARK_REMOTE")
+    assert (len(service.execute_requests), len(service.config_requests)) == before
+    # A key of the parameters of a builder that gRPC does not take, of a character of the URL too,
+    # raises the transport's error of the key as it is, of a connection string or of `set`.
+    for key, of_url in [("x hdr", True), ("a%41", True), ("Bad:Key", False),
+                        ("a=b;use_ssl", False), ("x%2Dy", False), ("", False)]:
+        if of_url:
+            builder = DefaultChannelBuilder(f"sc://127.0.0.1:{port}/;{key}=v")
+        else:
+            builder = DefaultChannelBuilder(f"sc://127.0.0.1:{port}")
+            builder.set(key, "true")
+        with pytest.raises(ValueError) as error:
+            SparkSession.builder.channelBuilder(builder).create()
+        assert type(error.value) is ValueError
+        assert str(error.value) == (
+            f"metadata was invalid: '{key}' is not a gRPC metadata key, which is of the "
+            "characters [0-9a-z_.-]"
+        ), key
+    assert (len(service.execute_requests), len(service.config_requests)) == before
+
+    def builder_of(endpoint):
+        return type("Builder", (DefaultChannelBuilder,), {"endpoint": property(
+            lambda self: endpoint)})(f"sc://localhost:{port}/;use_ssl=true")
+
+    for endpoint in (f"127.0.0.1:{port}?", f"127.0.0.1:{port}?x=1", f"127.0.0.1:{port}#",
+                     f"dns:///127.0.0.1:{port}?", f"127.0.0.1:{port}/x", f"127.0.0.1:{port};a=b",
+                     f"user@127.0.0.1:{port}", f"127.0.0.1 :{port}"):
+        with pytest.raises(PySparkValueError) as error:
+            SparkSession.builder.channelBuilder(builder_of(endpoint)).create()
+        assert error.value.getCondition() == "INVALID_CONNECT_URL", endpoint
+    assert (len(service.execute_requests), len(service.config_requests)) == before
+
+    # As PySpark's toChannel, which reads the token twice, as it checks it and gives it to grpcio.
+    reads = []
+
+    def logged(name):
+        # Of a property, or of an attribute that `__init__` sets, such as `_host`.
+        base = getattr(DefaultChannelBuilder, name, None)
+
+        def get(self):
+            reads.append(name)
+            return base.fget(self) if isinstance(base, property) else self.__dict__["_" + name]
+
+        def set_(self, value):
+            self.__dict__["_" + name] = value
+
+        return property(get, set_)
+
+    names = ("secure", "use_ssl", "token", "_host", "endpoint")
+    logging = type("Logging", (DefaultChannelBuilder,), {name: logged(name) for name in names})
+    SparkSession.builder.channelBuilder(logging(f"sc://localhost:{port}/;token=t")).create()
+    assert reads[reads.index("secure"):] == [
+        "secure", "use_ssl", "token", "use_ssl", "_host", "token", "token", "endpoint", "_host"]
+
+
 def test_functions_udtf_and_arrow_decorators():
     from pyspark.sql import functions as F
     from pyspark.sql.types import IntegerType

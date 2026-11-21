@@ -29,6 +29,23 @@ pub const PARAM_GRPC_KEEPALIVE_ENABLED: &str = "grpc_keepalive_enabled";
 pub const PARAM_GRPC_KEEPALIVE_TIME_MS: &str = "grpc_keepalive_time_ms";
 pub const PARAM_GRPC_KEEPALIVE_TIMEOUT_MS: &str = "grpc_keepalive_timeout_ms";
 pub const PARAM_GRPC_KEEPALIVE_WITHOUT_CALLS: &str = "grpc_keepalive_without_calls";
+/// The credentials of a channel, as PySpark's `DefaultChannelBuilder.toChannel` gives them to
+/// grpcio's channel: of no security unless the builder is `secure`, and then gRPC's local
+/// credentials when it is not `use_ssl` and its `_host` is `localhost`, else TLS, both with the
+/// token. A builder of them ([`ChannelBuilder::with_credentials`], which the Python binding sets
+/// of its channel builders) has them, in place of [`ChannelBuilder::secure`]'s rule of its
+/// parameters and its host; a connection string never sets them. Not a stable API.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Credentials {
+    /// `grpc.insecure_channel`: plaintext, and no token, of the parameters or of the environment.
+    Insecure,
+    /// `grpc.local_channel_credentials()`: plaintext, of the token of the parameters, to a peer of
+    /// a loopback address only, as gRPC's local credentials of TCP take no other.
+    Local,
+    /// `grpc.ssl_channel_credentials()`: TLS, of the token of the parameters.
+    Ssl,
+}
 
 const GRPC_DEFAULT_KEEPALIVE_ENABLED: bool = true;
 const GRPC_DEFAULT_KEEPALIVE_TIME_MS: i64 = 60 * 1000;
@@ -41,6 +58,9 @@ pub struct ChannelBuilder {
     params: BTreeMap<String, String>,
     host: String, // display host; IPv6 wrapped in [ ]
     port: u16,
+    /// The [`Credentials`] that the binding gave the builder, apart from its parameters, which
+    /// no connection string sets.
+    credentials: Option<Credentials>,
 }
 
 /// The gRPC/HTTP2 keepalive of a channel: PINGs after `time` without activity, a connection that
@@ -75,6 +95,7 @@ impl std::fmt::Debug for ChannelBuilder {
             .field("params", &params)
             .field("host", &self.host)
             .field("port", &self.port)
+            .field("credentials", &self.credentials)
             .finish()
     }
 }
@@ -159,7 +180,12 @@ impl ChannelBuilder {
             hostname
         };
 
-        Ok(Self { params, host, port })
+        Ok(Self {
+            params,
+            host,
+            port,
+            credentials: None,
+        })
     }
 
     pub fn get(&self, key: &str) -> Option<&str> {
@@ -203,23 +229,55 @@ impl ChannelBuilder {
             .unwrap_or(false)
     }
 
-    /// Token from the connection string, falling back to the env var.
+    /// Token from the connection string, falling back to the env var. Of [`Credentials`], the
+    /// token is that of the parameters, which the binding gave as PySpark's `toChannel` reads it,
+    /// and none of a channel of no security.
     pub fn token(&self) -> Option<String> {
-        self.params
-            .get(PARAM_TOKEN)
-            .cloned()
-            .or_else(|| std::env::var("SPARK_CONNECT_AUTHENTICATE_TOKEN").ok())
+        match self.credentials() {
+            Some(Credentials::Insecure) => None,
+            Some(_) => self.params.get(PARAM_TOKEN).cloned(),
+            None => self
+                .params
+                .get(PARAM_TOKEN)
+                .cloned()
+                .or_else(|| std::env::var("SPARK_CONNECT_AUTHENTICATE_TOKEN").ok()),
+        }
+    }
+
+    /// The [`Credentials`] that the builder was given ([`ChannelBuilder::with_credentials`]), if
+    /// any. Not a stable API.
+    #[doc(hidden)]
+    pub fn credentials(&self) -> Option<Credentials> {
+        self.credentials
+    }
+
+    /// This builder, of the credentials `credentials`, which decide its TLS and its token in
+    /// place of the rule of its parameters (see [`ChannelBuilder::secure`]), as the Python binding
+    /// gives them of a channel builder of PySpark's `toChannel`. Not a stable API.
+    #[doc(hidden)]
+    pub fn with_credentials(mut self, credentials: Credentials) -> Self {
+        self.credentials = Some(credentials);
+        self
     }
 
     /// Whether the channel uses TLS, which is the scheme `SparkConnectClient::connect` dials.
     ///
     /// The reference client (`core.py` `ChannelBuilder.secure`) is TLS when `use_ssl` is set
     /// or a token is present, except for a token on `localhost`, which stays plaintext for
-    /// local development (`core.py` `toChannel` uses local channel credentials there). A
-    /// token is therefore never sent in cleartext to any other host, `127.0.0.1` and `[::1]`
-    /// included.
+    /// local development (`core.py` `toChannel` uses local channel credentials there). Of this
+    /// rule, of the parameters, a token is never sent in cleartext to any other host, `127.0.0.1`
+    /// and `[::1]` included.
+    ///
+    /// Of [`Credentials`] ([`ChannelBuilder::with_credentials`]), it is TLS of
+    /// [`Credentials::Ssl`] only, and the token of [`Credentials::Local`] is sent in cleartext,
+    /// whatever the host, over a connection of the loopback only, as gRPC's local credentials of
+    /// TCP send it: as PySpark's channel of a `DefaultChannelBuilder` of a `_host` of `localhost`
+    /// and an endpoint of `127.0.0.1` sends it.
     pub fn secure(&self) -> bool {
-        self.use_ssl() || (self.token().is_some() && !self.is_localhost())
+        match self.credentials() {
+            Some(credentials) => credentials == Credentials::Ssl,
+            None => self.use_ssl() || (self.token().is_some() && !self.is_localhost()),
+        }
     }
 
     /// Whether the host is `localhost`. The reference client compares `localhost` after
@@ -1277,6 +1335,74 @@ mod tests {
             "{shown}"
         );
         assert!(!shown.contains("SECRET"), "{shown}");
+    }
+
+    #[test]
+    fn the_credentials_of_the_binding_decide_the_tls_and_the_token() {
+        // As PySpark's `toChannel`, whose credentials the Python binding gives the builder of a
+        // `DefaultChannelBuilder` (`with_credentials`): of no security, plaintext and no token, of
+        // the parameters or the environment; of local credentials, plaintext and the token of the
+        // parameters, whatever the host; of TLS, TLS whatever the host.
+        let _env = set_env(&[("SPARK_CONNECT_AUTHENTICATE_TOKEN", Some("ENV"))]);
+        for (url, credentials, tls, token) in [
+            (
+                "sc://example.com/;token=T",
+                Credentials::Insecure,
+                false,
+                None,
+            ),
+            (
+                "sc://example.com/;use_ssl=true",
+                Credentials::Insecure,
+                false,
+                None,
+            ),
+            (
+                "sc://127.0.0.1/;token=T",
+                Credentials::Local,
+                false,
+                Some("T"),
+            ),
+            (
+                "sc://example.com/;use_ssl=true",
+                Credentials::Local,
+                false,
+                None,
+            ),
+            ("sc://localhost", Credentials::Ssl, true, None),
+            ("sc://localhost/;token=T", Credentials::Ssl, true, Some("T")),
+        ] {
+            let c = ChannelBuilder::parse(url)
+                .unwrap()
+                .with_credentials(credentials);
+            assert_eq!(c.credentials(), Some(credentials), "{url}");
+            assert_eq!(c.secure(), tls, "{url}");
+            assert_eq!(c.token().as_deref(), token, "{url}");
+        }
+    }
+
+    #[test]
+    fn a_connection_string_never_sets_the_credentials() {
+        // A parameter of the name of a field of the builder is a parameter as any other, which is
+        // sent as metadata: of a key of a capital, which gRPC refuses, as PySpark's channel and
+        // master refused it. The rule of the parameters decides the TLS and the token.
+        let _env = set_env(&[("SPARK_CONNECT_AUTHENTICATE_TOKEN", None)]);
+        for url in [
+            "sc://127.0.0.1/;use_ssl=true;SPARK_CONNECT_RUST_CREDENTIALS=insecure",
+            "sc://127.0.0.1/;use_ssl=true;token=t;SPARK_CONNECT_RUST_CREDENTIALS=local",
+            "sc://127.0.0.1/;token=t;credentials=insecure",
+        ] {
+            let c = ChannelBuilder::parse(url).unwrap();
+            assert_eq!(c.credentials(), None, "{url}");
+            assert!(c.secure(), "{url}");
+            assert!(
+                c.metadata()
+                    .iter()
+                    .any(|(k, v)| k.to_ascii_lowercase().ends_with("credentials")
+                        && (v == "insecure" || v == "local")),
+                "{url}"
+            );
+        }
     }
 
     #[test]

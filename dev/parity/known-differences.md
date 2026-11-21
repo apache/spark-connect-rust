@@ -536,24 +536,63 @@ requests of the unpickled object pickle as it is then. This case still differs:
   `DefaultChannelBuilder` parse the connection string and hold its parameters, `host`, `endpoint`,
   `get`, `set`, `userId`, `token`, `session_id`, `use_ssl`, `secure`, `userAgent`, the keepalive
   properties and `metadata()`, and the drop-in's `DefaultChannelBuilder` has a `port` too, which
-  PySpark's has not (it keeps the port in `_port`). The transport reads the `host`, the `port`
-  (15002 without one), the `_params`, the `userId` and the `token` of a channel builder when a
-  session is made of it, also when a subclass overrides them. PySpark's client reads the `userId`
-  and the `token` so, but connects through `toChannel`, which, of a `DefaultChannelBuilder`,
-  connects to its `endpoint`, of `_host` and `_port`: a subclass that overrides `host` changes the
-  address of the drop-in's session and not of PySpark's, and one that overrides `endpoint` that of
-  PySpark's and not of the drop-in's. The members of a gRPC channel are not there: `toChannel`,
-  which the transport calls of a builder of its own for its errors only (see "A channel builder
-  without a host"), `add_interceptor` and `setChannelOption`, and a `channelOptions` argument raises
-  `NOT_IMPLEMENTED` instead of being ignored. The transport sends its requests over the HTTP/2
-  connections of tonic, from Rust and from the threads of its runtime, and not over a channel of
-  grpcio: it has no `grpc.Channel` to give, cannot run an interceptor of grpcio, whose
-  `continuation` calls a grpcio channel and returns grpcio's `Call`, and has none of the channel
-  arguments of gRPC's core that the options set. It takes the keepalive of PySpark's channel options
-  from the parameters, as PySpark's channel does. `SPARK_CONNECT_USER_AGENT` is read as each call
-  starts, where PySpark reads it as each request is built, so a request that the transport builds
-  during a call, such as a reattachment or a release in the background, has the user agent of the
-  last call that started.
+  PySpark's has not (it keeps the port in `_port`). When a session is made of a channel builder, the
+  transport reads its `_params`, of a `DefaultChannelBuilder` its `secure`, `use_ssl`, `_host` and
+  `token` in the order of PySpark's `toChannel`, and of a builder of its own its `token`, also when
+  a subclass overrides them, and its `userId` three times, or four when it is set, where PySpark's
+  client reads it once, or twice; it does not read the keepalive properties or the `metadata()` of
+  a subclass, which PySpark's client reads as it makes its channel, as the keepalive of the
+  transport's channel and the metadata of its requests are of the parameters. It connects as the
+  channel of PySpark's `toChannel` of a `DefaultChannelBuilder` does: to its `endpoint`, of `_host`
+  and `_port` (of `DefaultChannelBuilder.default_port()` without one), a subclass's too, and not to
+  its `host`, which the client shows, nor to a `port` of its own; of no security, and no token,
+  unless it is `secure`, else of gRPC's local credentials and the token when it is not `use_ssl`
+  and its `_host` is `localhost`, over a connection whose local address is of the loopback only, as
+  their handshake takes it, else of TLS and the token. The endpoint is read as gRPC reads a target,
+  bytes as they are, else the `encode("utf8")` of the object, a `host[:port]` of gRPC's default
+  port, 443, without one, but of the forms of a target that the transport does not take as gRPC
+  does:
+  - of a URI of `dns:[//authority/]`, its address, which the transport resolves as a host, where
+    gRPC's resolver asks the DNS server of the authority, and fails the first call of an authority
+    that is not an IP address and a port (`Cannot parse authority`), and of no address,
+    `INVALID_CONNECT_URL` when the session is made, where gRPC fails the first call (`the target uri
+    is not valid`);
+  - of `ipv4:` and `ipv6:`, their first entry, as a `host[:port]` of the port 443 without one, and
+    of no first entry, `INVALID_CONNECT_URL` when the session is made, where gRPC tries each address
+    in turn, skips an empty entry, and fails the first call of an entry that is not an address of
+    the family and a port (`the target uri is not valid`), and of no entry (`empty address list`);
+  - of `unix:` and `unix-abstract:`, `NOT_IMPLEMENTED` when the session is made, as the transport
+    connects over TCP;
+  - of a `/`, `?`, `#`, `;`, `@` or whitespace, `INVALID_CONNECT_URL` when the session is made,
+    where gRPC's URI parser drops a fragment and a query that is not empty, so that PySpark's
+    channel connects to `127.0.0.1:15002#`, `127.0.0.1:15002#frag`, `127.0.0.1:15002?x=1` and
+    `dns:///127.0.0.1:15002?x=1`, and to `localhost: 15002`, of the port that gRPC parses, and
+    fails the first call of the others (`127.0.0.1:15002?`, `localhost:15002/x`,
+    `localhost:15002;a=b`, `user@localhost:15002`, `local host:15002`);
+  - of a port that is not a number of 0 to 65535, the `ValueError` of the transport's URL when the
+    session is made, where gRPC takes a port of a sign (`localhost:+15002`), wraps one out of the
+    range (`localhost:99999` connects to 34463, `localhost:-1` to 65535), and fails the first call
+    of another (`localhost:abc`, `Failed to parse port in name`), and of an empty port
+    (`localhost:`), the port 15002, where gRPC's is 443;
+  - and of percent-encoded bytes, which gRPC decodes, the bytes as they are: `loc%61lhost:15002`,
+    which PySpark's channel connects to as `localhost:15002`, raises when the session is made
+    (`Invalid endpoint: invalid authority`), and the zone of `[fe80::1%25eth0]:15002`, as
+    `DefaultChannelBuilder` makes the endpoint of `sc://[fe80::1%25eth0]:15002`, is not `eth0`, so
+    its first call fails, where PySpark's connects.
+
+  The members of a gRPC channel are not there: `toChannel`, which the transport calls of a builder
+  of its own for its errors only, so a subclass whose `toChannel` connects elsewhere is of its
+  endpoint, and a builder of its own of its `host` and `port` (see "A channel builder without a
+  host"), where PySpark's connects through the channel, `add_interceptor` and `setChannelOption`,
+  and a `channelOptions` argument raises `NOT_IMPLEMENTED` instead of being ignored. The transport
+  sends its requests over the HTTP/2 connections of tonic, from Rust and from the threads of its
+  runtime, and not over a channel of grpcio: it has no `grpc.Channel` to give, cannot run an
+  interceptor of grpcio, whose `continuation` calls a grpcio channel and returns grpcio's `Call`,
+  and has none of the channel arguments of gRPC's core that the options set. It takes the keepalive
+  of PySpark's channel options from the parameters, as PySpark's channel does.
+  `SPARK_CONNECT_USER_AGENT` is read as each call starts, where PySpark reads it as each request is
+  built, so a request that the transport builds during a call, such as a reattachment or a release
+  in the background, has the user agent of the last call that started.
 - **The modules and names of `pyspark.sql.connect.client`** (intentional; the transport is
   native). The package is PySpark's, and its `core` defines PySpark's classes and functions, of
   PySpark's `__all__` (see `docs/compatibility.md`). PySpark's `core` imports the modules
@@ -874,10 +913,12 @@ requests of the unpickled object pickle as it is then. This case still differs:
   builders, with its errors: `CONNECT_URL_NOT_SET`, a `PySparkRuntimeError`, and
   `SESSION_NEED_CONN_STR_OR_BUILDER`, a `PySparkValueError`, also for both a URL and a channel
   builder. `channelBuilder(...)` takes any object, and the session fails when it is made, of the
-  errors of PySpark's client: the transport connects to the `sc://` URL of the `host`, the `port`
-  and the `_params` of the builder, and calls the `toChannel` of a `ChannelBuilder` that is not a
-  `DefaultChannelBuilder` for its errors only, so a builder of its own `toChannel` and no `host`
-  raises the error of the `host` of `ChannelBuilder`, where PySpark's connects through its channel.
+  errors of PySpark's client: the transport connects to the `sc://` URL of the `endpoint` of a
+  `DefaultChannelBuilder`, or of the `host` and the `port` of a builder of its own, and of the
+  `_params` of the builder (see "Custom gRPC channels"), and calls the `toChannel` of a
+  `ChannelBuilder` that is not a `DefaultChannelBuilder` for its errors only, so a builder of its
+  own `toChannel` and no `host` raises the error of the `host` of `ChannelBuilder`, where PySpark's
+  connects through its channel.
 - **Plan logging of a deep DataFrame** (intentional; DESIGN). `DataFrame._plan` is a
   placeholder over the relation of the Rust core, whose `to_proto(client)` is the `Plan` of the
   placeholder, `plan(client)`, which the client's `_set_relation_in_plan` sets as the root, or

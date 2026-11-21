@@ -494,6 +494,18 @@ checks it, of Python's messages, and is sent as it is given, where it was checke
 uuid crate, of the origin `invalid UUID`. A retry policy of no `max_backoff_ms` keeps its initial
 backoff, as PySpark's does, where its backoff grew by its multiplier.
 
+A `ChannelBuilder` of `ChannelBuilder::with_credentials` (of `channel::Credentials`, with
+`ChannelBuilder::credentials` and `SparkSessionBuilder::channel_credentials`, not a stable API),
+which the Python binding gives the channel of a `DefaultChannelBuilder` as PySpark's `toChannel`
+decides them, has those credentials in place of the rule of `ChannelBuilder::secure`, of `use_ssl`
+and of a token on a host that is not `localhost`: `Insecure` is plaintext and sends no token, of the
+connection string or of `SPARK_CONNECT_AUTHENTICATE_TOKEN`; `Local`, gRPC's local credentials, is
+plaintext, of the token of the connection string, over a connection whose local address is
+`127.0.0.1` or `::1` only, as gRPC's handshake takes it, else the call fails of its `Endpoint is
+neither UDS or TCP loopback address.`; and `Ssl` is TLS, of the token of the connection string. A
+connection string never sets them: one of a parameter of any name is as before, so the connection
+strings of `remote()`, `SPARK_REMOTE` and the Rust API are unchanged.
+
 `GRPC_DEFAULT_SSL_ROOTS_FILE_PATH` and its file are read once in a process, when its first TLS
 session is made, as grpcio reads them, where each client read them when it connected, and an empty
 file is as no file, without a warning. A TLS channel trusts the roots of that file alone, as grpcio,

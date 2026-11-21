@@ -1696,7 +1696,10 @@ impl SparkConnectClient {
             origin,
             keepalive: builder.keepalive(),
             own_connection: builder.token().is_some(),
-            target: crate::connector::Target::new(builder.host(), builder.port(), proxy, tls),
+            target: crate::connector::Target::new(builder.host(), builder.port(), proxy, tls)
+                .of_local_credentials(
+                    builder.credentials() == Some(crate::channel::Credentials::Local),
+                ),
         });
         let transport = std::sync::Arc::new(Transport::new(std::sync::Arc::clone(&factory)));
 
@@ -1721,7 +1724,8 @@ impl SparkConnectClient {
         if let Some(tok) = builder.token() {
             // The token is sent over TLS, or over plaintext only on `localhost`: the scheme
             // above is `builder.secure()`, which is TLS for a token on any other host, as
-            // the reference client does.
+            // the reference client does. Of local credentials, it is sent over a connection of
+            // the loopback only (`Credentials::Local`).
             let bearer = format!("Bearer {}", tok);
             headers.push((
                 AsciiMetadataKey::from_static(AUTHORIZATION_HEADER),

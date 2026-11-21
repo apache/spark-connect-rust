@@ -527,7 +527,9 @@ class DefaultChannelBuilder(ChannelBuilder):
                 },
             )
         self._host = f"[{self.url.hostname}]" if ":" in self.url.hostname else self.url.hostname
-        self._port = self.url.port if self.url.port is not None else self.default_port()
+        self._port = (
+            self.url.port if self.url.port is not None else DefaultChannelBuilder.default_port()
+        )
 
     @property
     def secure(self) -> bool:
@@ -3128,7 +3130,9 @@ def _checked_channel_builder(connection: Any) -> ChannelBuilder:
     ``TypeError`` of its slicing, of its ``session_id``, of its ``userId``, and of the channel of
     its ``toChannel``, which a ``ChannelBuilder`` that is not a ``DefaultChannelBuilder`` has of
     its own: PySpark's raises without one (``PySparkNotImplementedError``). The Rust transport
-    connects to the ``sc://`` URL of the ``host``, the ``port`` and the ``_params`` of the
+    connects to the ``sc://`` URL of the ``endpoint`` of a ``DefaultChannelBuilder``, of its
+    ``_host`` and ``_port``, or of the ``host`` and the ``port`` of a builder of its own, and of
+    the ``_params`` of the
     builder, and not to the channel of its ``toChannel``, which it calls for its errors only: a
     ``DefaultChannelBuilder`` has none, so that one of a subclass, which may call the one of its
     base, is not called."""
