@@ -156,8 +156,8 @@ fn fm_training_summary(
 
 /// Register the typed classes of the family.
 pub(super) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<PyFMClassificationModel>()?;
-    m.add_class::<PyFMClassificationSummary>()?;
-    m.add_class::<PyFMClassificationTrainingSummary>()?;
+    crate::ml::object::register_class::<PyFMClassificationModel>(m)?;
+    crate::ml::object::register_class::<PyFMClassificationSummary>(m)?;
+    crate::ml::object::register_class::<PyFMClassificationTrainingSummary>(m)?;
     Ok(())
 }

@@ -151,8 +151,8 @@ fn mlp_training_summary(
 
 /// Register the typed classes of the family.
 pub(super) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<PyMultilayerPerceptronClassificationModel>()?;
-    m.add_class::<PyMultilayerPerceptronClassificationSummary>()?;
-    m.add_class::<PyMultilayerPerceptronClassificationTrainingSummary>()?;
+    crate::ml::object::register_class::<PyMultilayerPerceptronClassificationModel>(m)?;
+    crate::ml::object::register_class::<PyMultilayerPerceptronClassificationSummary>(m)?;
+    crate::ml::object::register_class::<PyMultilayerPerceptronClassificationTrainingSummary>(m)?;
     Ok(())
 }

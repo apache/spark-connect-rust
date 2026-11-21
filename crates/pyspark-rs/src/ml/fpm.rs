@@ -369,8 +369,8 @@ native_pymethods! {
 }
 
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<PyFPGrowth>()?;
-    m.add_class::<PyFPGrowthModel>()?;
-    m.add_class::<PyPrefixSpan>()?;
+    super::object::register_class::<PyFPGrowth>(m)?;
+    super::object::register_class::<PyFPGrowthModel>(m)?;
+    super::object::register_class::<PyPrefixSpan>(m)?;
     Ok(())
 }

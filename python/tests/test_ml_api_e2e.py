@@ -53,6 +53,63 @@ def test_models_of_no_server_object_are_pyspark_mls(name, session):
     assert _ml_unbound_cases.outcomes(session, name) == UNBOUND["models"][name]
 
 
+def test_a_model_of_a_remote_model_ref_is_of_its_object_and_releases_it_as_pyspark_mls(session):
+    # A model class constructs of the RemoteModelRef of a server-side object, as PySpark's
+    # `JavaModel(java_model)` over Spark Connect (`LinearSVCModel(RemoteModelRef(id))`): of the
+    # members, transforms and saves of the object, and of its lifetime in the ML cache. Its
+    # collection releases a reference of the RemoteModelRef, once its transforms are gone, which
+    # deletes the object at the last (CONNECT_ML.CACHE_INVALID of the next use of the id), and a
+    # reference of one more (`add_ref`) keeps it.
+    import gc
+
+    from pyspark.errors.exceptions.connect import SparkException
+    from pyspark.ml.linalg import Vectors
+    from pyspark.ml.util import RemoteModelRef
+
+    def cls(module, name):
+        return native_class(f"pyspark.ml.connect.{module}", name, f"pyspark.ml.{module}")
+
+    rows = [(float(i % 2), Vectors.dense([float(i), float(i % 3)])) for i in range(12)]
+    df = session.createDataFrame(rows, ["label", "features"]).coalesce(1)
+    for estimator, model_class, member in [
+        (cls("classification", "LinearSVC")(maxIter=3), cls("classification", "LinearSVCModel"), "coefficients"),
+        (cls("regression", "LinearRegression")(maxIter=3), cls("regression", "LinearRegressionModel"), "intercept"),
+        (cls("clustering", "KMeans")(k=2, maxIter=2, seed=1), cls("clustering", "KMeansModel"), "clusterCenters"),
+        (cls("feature", "StringIndexer")(inputCol="label", outputCol="i"), cls("feature", "StringIndexerModel"), "labelsArray"),
+    ]:
+        fitted = estimator.fit(df)
+        reference = RemoteModelRef(fitted._java_obj.ref_id)
+        # One more reference, which this test keeps: the object outlives the model.
+        reference.add_ref()
+        model = model_class(reference)
+        assert type(model) is model_class and model._java_obj is reference
+        assert model.uid != fitted.uid and model.uid.startswith(model_class.__name__ + "_")
+
+        def value(obj, member=member):
+            got = getattr(obj, member)
+            got = got() if callable(got) else got
+            return [list(item) for item in got] if isinstance(got, list) else got
+
+        assert value(model) == value(fitted)
+        assert model.transform(df).collect() == fitted.transform(df).collect()
+        del model
+        gc.collect()
+        assert reference._ref_count == 1 and value(fitted) is not None
+    # A reference of no more: the object goes with the last of the model and its transforms.
+    fitted = cls("classification", "LinearSVC")(maxIter=3).fit(df)
+    reference = RemoteModelRef(fitted._java_obj.ref_id)
+    model = cls("classification", "LinearSVCModel")(reference)
+    transformed = model.transform(df)
+    del model
+    gc.collect()
+    assert reference._ref_count == 1 and transformed.count() == 12
+    del transformed
+    gc.collect()
+    assert reference._ref_count == 0
+    with pytest.raises(SparkException, match="CONNECT_ML.CACHE_INVALID"):
+        fitted.numFeatures  # noqa: B018
+
+
 def test_objects_of_this_client_are_of_the_classes_of_pyspark_mls_modules(session, tmp_path):
     # Every object that this client makes, as PySpark's do, is of the class of its module, of every
     # base of PySpark's class (test_ml_api_offline.py): of a fit (of a param map, of fitMultiple),
@@ -280,3 +337,52 @@ def test_a_writer_and_a_reader_save_and_load_of_their_attributes_as_pysparks(ses
     writer.shouldOverwrite = 1
     with pytest.raises(Exception, match=r"handleOverwrite\(java\.lang\.String, int\)"):
         writer.save(path + "/pipeline")
+
+
+def test_models_in_cycles_with_their_summaries_are_freed_and_deleted_as_pyspark_mls(session):
+    # A model and its training summary in a reference cycle (`summary.model = model`), of no UDF,
+    # are freed by the garbage collector, fit after fit, and the objects of the models leave the
+    # ML cache of the server, as PySpark's, which hold them as Python attributes: of
+    # LinearRegression, LogisticRegression, LinearSVC and KMeans.
+    import gc
+    import time
+    import weakref
+
+    from pyspark.ml.linalg import Vectors
+
+    def cls(module, name):
+        return native_class(f"pyspark.ml.connect.{module}", name, f"pyspark.ml.{module}")
+
+    def cached():
+        return {json.loads(entry)["id"] for entry in session.client._get_ml_cache_info()}
+
+    rows = [(float(i % 2), Vectors.dense([float(i), float(i % 3)])) for i in range(12)]
+    df = session.createDataFrame(rows, ["label", "features"]).coalesce(1)
+    for make in [
+        lambda: cls("regression", "LinearRegression")(maxIter=2),
+        lambda: cls("classification", "LogisticRegression")(maxIter=2),
+        lambda: cls("classification", "LinearSVC")(maxIter=2),
+        lambda: cls("clustering", "KMeans")(k=2, maxIter=2, seed=1),
+    ]:
+        kept, ids = [], set()
+        # Of no collection until the cycles are made, which keep the objects in the ML cache.
+        gc.disable()
+        try:
+            for _ in range(10):
+                model = make().fit(df)
+                ids.add(model._java_obj.ref_id)
+                summary = model.summary() if callable(model.summary) else model.summary
+                summary.model = model
+                kept.append((weakref.ref(model), weakref.ref(summary)))
+                del model, summary
+            assert ids <= cached()
+        finally:
+            gc.enable()
+        gc.collect()
+        assert [(m(), s()) for m, s in kept] == [(None, None)] * 10
+        # The deletion is sent without waiting for the server.
+        for _ in range(100):
+            if not ids & cached():
+                break
+            time.sleep(0.1)
+        assert not ids & cached()

@@ -686,6 +686,9 @@ pub struct PyMLModel {
     session_id: String,
 }
 
+// Of no helpers, of no Python object.
+impl object::NativeClass for PyMLModel {}
+
 #[pymethods]
 impl PyMLModel {
     /// Apply the model to `dataset`, a Spark DataFrame, as `try_remote_transform_relation` of
@@ -1881,6 +1884,8 @@ pub struct PyOneVsRest {
     /// then the params of the metadata in its order); the defaults of a load are of the names of
     /// the params, as its `_resetUid` makes them.
     set_order: params_api::SetOrder,
+    /// Whether the value is written, which `__traverse__` checks first (see `crate::gc::GcReady`).
+    gc_ready: crate::gc::GcReady,
 }
 
 const ONE_VS_REST_PARAMS: &[(&str, Kind)] = &[
@@ -1955,10 +1960,27 @@ native_pymethods! {
             inner: OneVsRest::new(),
             raw: Vec::new(),
             set_order: params_api::SetOrder::default(),
+            gc_ready: crate::gc::GcReady::new(),
         };
         check_classifier_kwarg(kwargs)?;
         set_ovr_params(&mut this, args.py(), "__init__", args, kwargs)?;
         Ok(this)
+    }
+
+    /// Visit the classifier, of Python's garbage collector, as PySpark's param map holds it.
+    fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
+        if !self.gc_ready.get() {
+            return Ok(());
+        }
+        params_api::visit_values(&self.raw, &visit)
+    }
+
+    /// Break a reference cycle that the garbage collector found unreachable: the estimator drops
+    /// its classifier.
+    fn __clear__(&mut self) {
+        if self.gc_ready.get() {
+            self.raw.clear();
+        }
     }
 
     #[pyo3(
@@ -2341,6 +2363,7 @@ impl params_api::NativeInstance for PyOneVsRest {
                 inner: self.inner.clone(),
                 raw,
                 set_order: self.set_order.clone(),
+                gc_ready: crate::gc::GcReady::new(),
             },
         )
     }

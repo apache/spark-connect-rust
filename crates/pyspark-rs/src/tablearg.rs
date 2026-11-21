@@ -138,6 +138,12 @@ impl PyTableArg {
             let this = slf.borrow();
             (this.inner.clone(), this.of_same_session(this.inner.clone()))
         };
+        // As the deep copy of a Column of a subquery of the plan of a model, which PySpark's copy
+        // of the subquery expression reaches (see `PyColumn::__deepcopy__`).
+        let reach = crate::ml::object::expression_pickle_reach(py, inner.to_column().expression())?;
+        if let Some(error) = crate::ml::object::reach_deepcopy_error(py, &reach, memo)? {
+            return Err(error);
+        }
         let copy = Bound::new(py, copy)?;
         memo.set_item(slf.as_ptr() as usize, &copy)?;
         let copies = crate::udf_command::deep_copied_picklers(py, inner.picklers(), memo)?;
@@ -152,6 +158,22 @@ impl PyTableArg {
             copy.getattr("__dict__")?.set_item(name, value)?;
         }
         Ok(copy)
+    }
+
+    /// The reduce of a pickle, as PySpark's pickle of a table argument, which pickles its subquery
+    /// expression, its plan first, and so the objects of `pyspark.ml` that the plan keeps (of a
+    /// transform of a model, a DataFrame of a method of a model or of a summary), as the pickle of
+    /// a Column of a subquery fails (see `PyColumn::__reduce_ex__`). Else that of `__reduce__`.
+    fn __reduce_ex__<'py>(
+        slf: &Bound<'py, Self>,
+        protocol: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let _ = protocol;
+        let py = slf.py();
+        let column = slf.borrow().inner.to_column();
+        let reach = crate::ml::object::expression_pickle_reach(py, column.expression())?;
+        let reduced = slf.call_method0(pyo3::intern!(py, "__reduce__"))?;
+        crate::ml::object::reach_reduce(py, &reach, reduced)
     }
 
     /// A table argument pickles, as PySpark's, which pickles the objects of its subquery

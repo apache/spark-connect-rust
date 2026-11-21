@@ -1944,7 +1944,8 @@ fn fit_warning_of(info: &proto::ml_command_result::MlOperatorInfo) -> Option<&st
 /// A server-side ML object: a fitted model, or another object that a fetch returns (a submodel, a
 /// tree of an ensemble), shared by its clones and by every DataFrame whose plan reads it (through
 /// the [`RelationOwner`] of their plans). The last owner to drop deletes the cached object on the
-/// server, as PySpark's `RemoteModelRef` does.
+/// server, as PySpark's `RemoteModelRef` does; of an object that this client does not own
+/// ([`MlRef::of_reference`]), it runs the release of the object's owner instead.
 #[derive(Debug, Clone)]
 pub struct MlRef(Arc<CachedModelRef>);
 
@@ -1956,6 +1957,11 @@ struct CachedModelRef {
     session: SparkSession,
     /// The warning that the server sent with the model of a fit (see [`MlRef::fit_warning`]).
     fit_warning: Option<String>,
+    /// The release of an object that this client does not own, which the drop runs in place of
+    /// the deletion of the object (see [`MlRef::of_reference`]).
+    release: Option<Box<dyn FnOnce() + Send + Sync>>,
+    /// Whether the drop keeps the object on the server (see [`MlRef::keep`]).
+    kept: std::sync::atomic::AtomicBool,
 }
 
 impl std::fmt::Debug for CachedModelRef {
@@ -1968,6 +1974,13 @@ impl std::fmt::Debug for CachedModelRef {
 
 impl Drop for CachedModelRef {
     fn drop(&mut self) {
+        if *self.kept.get_mut() {
+            return;
+        }
+        if let Some(release) = self.release.take() {
+            release();
+            return;
+        }
         // Sent without waiting, and its errors (a stopped session, a closed channel) are
         // ignored, as PySpark ignores them when it releases a model.
         self.session
@@ -1989,6 +2002,8 @@ impl CachedModel {
                     model_ref: reference.clone(),
                     session: session.clone(),
                     fit_warning: fit_warning_of(info).map(str::to_string),
+                    release: None,
+                    kept: Default::default(),
                 })))
             }
             _ => Err(spark_connect_core::error::SparkError::connect_msg(format!(

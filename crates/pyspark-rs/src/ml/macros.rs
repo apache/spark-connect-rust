@@ -28,6 +28,35 @@ macro_rules! params_api_block {
         params_only: [ $( $po:literal => $po_attr:ident ),* $(,)? ];
         { $($methods:tt)* }
     ) => {
+        impl $ty {
+            /// The set values and the defaults of the params of `obj`, an object of this class,
+            /// by name, of which the public class makes PySpark's param maps of the object (see
+            /// `params_api::native_params` and `NativeHelpers`).
+            #[allow(dead_code)] // The helper of the class's `NativeClass`.
+            fn __ml_params<'py>(
+                obj: &Bound<'py, PyAny>,
+            ) -> PyResult<(Bound<'py, PyDict>, Bound<'py, PyDict>)> {
+                $crate::ml::params_api::native_params(obj.cast::<Self>()?)
+            }
+
+            /// The uid of the native object of `obj`, an object of this class.
+            #[allow(dead_code)] // The helper of the class's `NativeClass`.
+            fn __ml_uid(obj: &Bound<'_, PyAny>) -> PyResult<String> {
+                Ok($crate::ml::params_api::NativeInstance::uid(&*obj.cast::<Self>()?.try_borrow()?))
+            }
+
+            /// Make the params of `obj`, an object of this class, those of PySpark's param maps of
+            /// the object, of their values by name (see `params_api::sync_params`).
+            #[allow(dead_code)] // The helper of the class's `NativeClass`.
+            fn __ml_sync(
+                obj: &Bound<'_, PyAny>,
+                set: &Bound<'_, PyDict>,
+                defaults: &Bound<'_, PyDict>,
+            ) -> PyResult<()> {
+                $crate::ml::params_api::sync_params(obj.cast::<Self>()?, set, defaults)
+            }
+        }
+
         #[pymethods]
         impl $ty {
             $($methods)*
@@ -39,15 +68,23 @@ macro_rules! params_api_block {
                 $crate::ml::params_api::params(slf.as_any())
             }
 
-            /// The AttributeError of an attribute that the object does not have, as CPython's of
-            /// PySpark's class (see `params_api::no_attribute`).
-            fn __getattr__(slf: &Bound<'_, Self>, name: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-                Err($crate::ml::params_api::no_attribute(slf.as_any(), name))
+            /// An attribute of the object, of CPython's generic lookup, and of PySpark's attributes
+            /// of the object that this client makes at their first read (`uid`, the param maps,
+            /// `_java_obj`, ...), of no second run of a getter that raised the AttributeError (see
+            /// `params_api::get_attribute`). Assignments and deletions are CPython's own, of the
+            /// instance dict, which the native object takes before its members read it (see
+            /// `NativeInstance::apply_attributes`).
+            fn __getattribute__(
+                slf: &Bound<'_, Self>,
+                name: &Bound<'_, PyAny>,
+            ) -> PyResult<Py<PyAny>> {
+                $crate::ml::params_api::get_attribute(slf, name)
             }
 
-            /// `copy.copy`, as of PySpark's object (see `params_api::shallow_copy`).
-            fn __copy__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
-                $crate::ml::params_api::shallow_copy(slf)
+            /// The AttributeError of `__getattribute__`, which PyO3 calls this of (see
+            /// `params_api::missing_attribute`).
+            fn __getattr__(slf: &Bound<'_, Self>, name: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+                Err($crate::ml::params_api::missing_attribute(slf.as_any(), name))
             }
 
             /// The state that `copy.deepcopy` and `pickle` take (see `params_api::get_state`).
@@ -55,8 +92,8 @@ macro_rules! params_api_block {
                 $crate::ml::params_api::get_state(slf)
             }
 
-            /// The reduce of `pickle` and `copy.deepcopy`, as of PySpark's object, at every
-            /// protocol (see `params_api::reduce_ex`).
+            /// The reduce of `pickle`, `copy.copy` and `copy.deepcopy`, as of PySpark's object, at
+            /// every protocol (see `params_api::reduce_ex`).
             fn __reduce_ex__<'py>(
                 slf: &Bound<'py, Self>,
                 protocol: &Bound<'py, PyAny>,
@@ -67,26 +104,6 @@ macro_rules! params_api_block {
             /// The object of a state of `__getstate__` (see `params_api::set_state`).
             fn __setstate__(slf: &Bound<'_, Self>, state: &Bound<'_, PyAny>) -> PyResult<()> {
                 $crate::ml::params_api::set_state(slf, state)
-            }
-
-            /// The set values and the defaults of the params by name, of which the public class
-            /// makes PySpark's param maps of the object (see `params_api::native_params`).
-            #[pyo3(name = "_native_params")]
-            fn __native_params<'py>(
-                slf: &Bound<'py, Self>,
-            ) -> PyResult<(Bound<'py, PyDict>, Bound<'py, PyDict>)> {
-                $crate::ml::params_api::native_params(slf)
-            }
-
-            /// Make the params those of PySpark's param maps of the object, of their values by
-            /// name (see `params_api::sync_params`).
-            #[pyo3(name = "_native_sync")]
-            fn __native_sync(
-                slf: &Bound<'_, Self>,
-                set: &Bound<'_, PyDict>,
-                defaults: &Bound<'_, PyDict>,
-            ) -> PyResult<()> {
-                $crate::ml::params_api::sync_params(slf, set, defaults)
             }
 
             /// `getParam(paramName)`, of PySpark's keyword.
@@ -220,25 +237,22 @@ macro_rules! native_pymethods {
         params_only: [ $( $po:literal => $po_attr:ident ),* $(,)? ];
         $($body:tt)*
     ) => {
+        impl $crate::ml::object::NativeClass for $ty {
+            const HELPERS: $crate::ml::object::NativeHelpers = $crate::ml::object::NativeHelpers {
+                params: Some(<$ty>::__ml_params),
+                sync: Some(<$ty>::__ml_sync),
+                uid: Some(<$ty>::__ml_uid),
+                jvm_class: Some($jvm),
+                ..$crate::ml::object::NativeHelpers::NONE
+            };
+        }
+
         params_api_block! {
             $ty;
             params: [ $( $param => ($getter_py, $getter, $attr) ),* ];
             params_only: [ $( $po => $po_attr ),* ];
             {
                 $($body)*
-
-                /// The uid, as `Identifiable.uid` (see `params_api::uid_of`).
-                #[getter]
-                fn uid(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
-                    $crate::ml::params_api::uid_of(slf)
-                }
-
-                /// Set the uid, as an assignment of PySpark's `uid` of the instance does (and its
-                /// `_resetUid`; see `params_api::assign_uid`).
-                #[setter(uid)]
-                fn __set_uid(slf: &Bound<'_, Self>, uid: String) -> PyResult<()> {
-                    $crate::ml::params_api::assign_uid(slf, &uid)
-                }
 
                 /// The uid, as `Identifiable.__repr__`.
                 fn __repr__(slf: &Bound<'_, Self>) -> PyResult<String> {
@@ -338,25 +352,21 @@ macro_rules! native_pymethods {
         params_only: [ $( $po:literal => $po_attr:ident ),* $(,)? ];
         $($body:tt)*
     ) => {
+        impl $crate::ml::object::NativeClass for $ty {
+            const HELPERS: $crate::ml::object::NativeHelpers = $crate::ml::object::NativeHelpers {
+                params: Some(<$ty>::__ml_params),
+                sync: Some(<$ty>::__ml_sync),
+                uid: Some(<$ty>::__ml_uid),
+                ..$crate::ml::object::NativeHelpers::NONE
+            };
+        }
+
         params_api_block! {
             $ty;
             params: [ $( $param => ($getter_py, $getter, $attr) ),* ];
             params_only: [ $( $po => $po_attr ),* ];
             {
                 $($body)*
-
-                /// The uid, as `Identifiable.uid` (see `params_api::uid_of`).
-                #[getter]
-                fn uid(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
-                    $crate::ml::params_api::uid_of(slf)
-                }
-
-                /// Set the uid, as an assignment of PySpark's `uid` of the instance does (and its
-                /// `_resetUid`; see `params_api::assign_uid`).
-                #[setter(uid)]
-                fn __set_uid(slf: &Bound<'_, Self>, uid: String) -> PyResult<()> {
-                    $crate::ml::params_api::assign_uid(slf, &uid)
-                }
 
                 /// The uid, as `Identifiable.__repr__`.
                 fn __repr__(slf: &Bound<'_, Self>) -> PyResult<String> {
@@ -396,25 +406,21 @@ macro_rules! native_pymethods {
         ];
         $($body:tt)*
     ) => {
+        impl $crate::ml::object::NativeClass for $ty {
+            const HELPERS: $crate::ml::object::NativeHelpers = $crate::ml::object::NativeHelpers {
+                params: Some(<$ty>::__ml_params),
+                sync: Some(<$ty>::__ml_sync),
+                uid: Some(<$ty>::__ml_uid),
+                ..$crate::ml::object::NativeHelpers::NONE
+            };
+        }
+
         params_api_block! {
             $ty;
             params: [ $( $param => ($getter_py, $getter, $attr) ),* ];
             params_only: [];
             {
                 $($body)*
-
-                /// The uid, as `Identifiable.uid` (see `params_api::uid_of`).
-                #[getter]
-                fn uid(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
-                    $crate::ml::params_api::uid_of(slf)
-                }
-
-                /// Set the uid, as an assignment of PySpark's `uid` of the instance does (and its
-                /// `_resetUid`; see `params_api::assign_uid`).
-                #[setter(uid)]
-                fn __set_uid(slf: &Bound<'_, Self>, uid: String) -> PyResult<()> {
-                    $crate::ml::params_api::assign_uid(slf, &uid)
-                }
 
                 /// The uid, as `Identifiable.__repr__`.
                 fn __repr__(slf: &Bound<'_, Self>) -> PyResult<String> {
@@ -537,6 +543,8 @@ macro_rules! native_model {
                 let class = $crate::ml::object::public_class::<Self>(py)
                     .unwrap_or_else(|| py.get_type::<Self>());
                 let model = class.call0()?.cast_into::<Self>()?;
+                // The uid that PySpark's constructor gave the attributes of the object.
+                $crate::ml::params_api::sync_uid(&model)?;
                 let uid = model.try_borrow()?.core.uid();
                 let object = object(&uid)?;
                 model.try_borrow_mut()?.core.bind(object);
@@ -650,7 +658,7 @@ macro_rules! native_model {
 
         impl $crate::ml::params_api::NativeInstance for $ty {
             fn duplicate(&self, py: Python<'_>) -> PyResult<Py<Self>> {
-                (self.make)(py, self.core.duplicate(py))
+                (self.make)(py, self.core.duplicate_of(py)?)
             }
 
             fn uid(&self) -> String {
@@ -662,13 +670,37 @@ macro_rules! native_model {
             }
 
             /// A model of a server-side object is not copied deep nor pickled, as PySpark's of a
-            /// `RemoteModelRef`; one of no server-side object is.
+            /// `RemoteModelRef`; one of no server-side object is, but of a `RemoteModelRef`.
             fn check_picklable(&self) -> PyResult<()> {
-                if self.core.is_unbound() {
+                if self.core.is_of_no_object() {
                     Ok(())
                 } else {
                     Err($crate::ml::params_api::lock_error())
                 }
+            }
+
+            /// The model of the `_java_obj` of its attributes (see `ModelCore::java_obj_change`),
+            /// of a mutable borrow only for a change.
+            fn apply_attributes(slf: &Bound<'_, Self>) -> PyResult<()> {
+                let py = slf.py();
+                let Ok(attributes) = slf.getattr(pyo3::intern!(py, "__dict__")) else {
+                    return Ok(());
+                };
+                let attributes = attributes.cast_into::<PyDict>()?;
+                let change = slf.try_borrow()?.core.java_obj_change(py, &attributes)?;
+                let value = match change {
+                    $crate::ml::object::JavaObjChange::None => return Ok(()),
+                    $crate::ml::object::JavaObjChange::Assign(value) => Some(value),
+                    $crate::ml::object::JavaObjChange::Delete => None,
+                };
+                Self::__ml_set_java_obj(slf.as_any(), value.as_ref())
+            }
+
+            /// The model of the `_java_obj` of its state, which the attributes of the state have,
+            /// or do not have of a deleted one.
+            fn take_state_attributes(slf: &Bound<'_, Self>) -> PyResult<()> {
+                slf.try_borrow()?.core.made_java_obj();
+                <Self as $crate::ml::params_api::NativeInstance>::apply_attributes(slf)
             }
         }
 
@@ -707,7 +739,7 @@ macro_rules! native_model {
             /// Read the cached members, as the `params` walk of PySpark's `_resetUid` does.
             #[allow(clippy::unused_unit, unused_variables)]
             fn __prime(&self, py: Python<'_>) -> PyResult<()> {
-                $( self.core.cached(py, $c_py, || ($c_make)(py, &self.core))?; )*
+                $( self.core.cached(py, $c_py, || ($c_make)(py, self.core.target()?))?; )*
                 Ok(())
             }
 
@@ -723,6 +755,91 @@ macro_rules! native_model {
             pub(crate) fn core_model(&self) -> Box<dyn Model> {
                 self.core.model.clone_box()
             }
+        }
+
+        impl $ty {
+            /// PySpark's `_java_obj` of the model `obj`, the `RemoteModelRef` of its server-side
+            /// object, None of a model of none, of which the public class makes the attribute,
+            /// which its `_call_java` reads (see `_native_classes`): the one of the
+            /// `_remote_model_obj` of its training summary and of its copies (see
+            /// `ModelCore::java_obj`).
+            fn __ml_java_obj(obj: &Bound<'_, PyAny>) -> PyResult<Option<Py<PyAny>>> {
+                let model = obj.cast::<Self>()?;
+                <Self as $crate::ml::params_api::NativeInstance>::apply_attributes(model)?;
+                model.try_borrow()?.core.java_obj(obj.py())
+            }
+
+            /// Make the `_java_obj` attribute of the model `obj` that this client made (of a fit,
+            /// a load, a copy, a fetch), as PySpark's fit and load set it: of its native object,
+            /// but of a deleted one.
+            fn __ml_make_java_obj(obj: &Bound<'_, PyAny>) -> PyResult<()> {
+                let py = obj.py();
+                let Ok(attributes) = obj.getattr(pyo3::intern!(py, "__dict__")) else {
+                    return Ok(());
+                };
+                let attributes = attributes.cast_into::<PyDict>()?;
+                let model = obj.cast::<Self>()?;
+                // A deletion of the attribute first, which makes none again.
+                <Self as $crate::ml::params_api::NativeInstance>::apply_attributes(model)?;
+                if attributes.contains(pyo3::intern!(py, "_java_obj"))? {
+                    return Ok(());
+                }
+                let model = model.try_borrow()?;
+                if let Ok(value) = model.core.java_obj(py) {
+                    attributes.set_item(pyo3::intern!(py, "_java_obj"), value)?;
+                    model.core.made_java_obj();
+                }
+                Ok(())
+            }
+
+            /// Make the model `obj` the model of `value`, its assigned `_java_obj`, or of a
+            /// deleted one (see `ModelCore::assign_java_obj`), of the `__del__` of its class.
+            fn __ml_set_java_obj(
+                obj: &Bound<'_, PyAny>,
+                value: Option<&Bound<'_, PyAny>>,
+            ) -> PyResult<()> {
+                let py = obj.py();
+                let class = obj.get_type();
+                let name = class.name()?.to_string();
+                let deleter = $crate::ml::object::deleter_of(Some(&class));
+                let model = obj.cast::<Self>()?;
+                model.try_borrow_mut()?.core.assign_java_obj(py, value, &name, deleter)
+            }
+
+            /// What PySpark's `__del__` of the model `obj` does (see `ModelCore::finalize`): the
+            /// release of a reference of its `RemoteModelRef`, of no borrow of the model.
+            fn __ml_finalize(obj: &Bound<'_, PyAny>) -> PyResult<()> {
+                let py = obj.py();
+                let model = obj.cast::<Self>()?;
+                <Self as $crate::ml::params_api::NativeInstance>::apply_attributes(model)?;
+                let reference = model.try_borrow()?.core.finalize(py)?;
+                if let Some(reference) = reference {
+                    reference.call_method0(pyo3::intern!(py, "release_ref"))?;
+                }
+                Ok(())
+            }
+
+            /// The shallow copy of the model `obj` of a server-side object, of the same object (see
+            /// `params_api::shallow_copy`), which `copy.copy` of its reduce makes (see
+            /// `params_api::reduce_ex`).
+            fn __ml_copy<'py>(obj: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+                let model = obj.cast::<Self>()?;
+                <Self as $crate::ml::params_api::NativeInstance>::apply_attributes(model)?;
+                $crate::ml::params_api::shallow_copy(model)
+            }
+        }
+
+        impl $crate::ml::object::NativeClass for $ty {
+            const HELPERS: $crate::ml::object::NativeHelpers = $crate::ml::object::NativeHelpers {
+                params: Some(<$ty>::__ml_params),
+                sync: Some(<$ty>::__ml_sync),
+                uid: Some(<$ty>::__ml_uid),
+                jvm_class: None,
+                java_obj: Some(<$ty>::__ml_java_obj),
+                finalize: Some(<$ty>::__ml_finalize),
+                copy: Some(<$ty>::__ml_copy),
+                make_java_obj: Some(<$ty>::__ml_make_java_obj),
+            };
         }
 
         impl $crate::ml::object::ModelObject for $ty {
@@ -742,39 +859,45 @@ macro_rules! native_model {
                 $($body)*
 
                 /// A model of no server-side object, as PySpark's `JavaModel(java_model=None)`
-                /// (see `ModelCore::unbound`). Another `java_model` is the AssertionError of
-                /// PySpark's over Spark Connect, which takes a `RemoteModelRef` only.
+                /// (see `ModelCore::unbound`), or of the server-side object of the
+                /// `RemoteModelRef` `java_model`, as PySpark's over Spark Connect makes one (see
+                /// `ModelCore::of_reference`). Another `java_model` is the AssertionError of
+                /// PySpark's, which takes a `RemoteModelRef` only.
                 #[new]
                 #[pyo3(signature = (java_model=None))]
                 fn __new__(py: Python<'_>, java_model: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
-                    if java_model.is_some() {
-                        return Err(pyo3::exceptions::PyAssertionError::new_err(()));
-                    }
-                    let core = $crate::ml::object::ModelCore::unbound(py, $jvm, $name)?;
+                    let core = match java_model {
+                        None => $crate::ml::object::ModelCore::unbound(py, $jvm, $name)?,
+                        Some(reference) => $crate::ml::object::ModelCore::of_reference(
+                            py,
+                            $jvm,
+                            $name,
+                            reference,
+                            $crate::ml::object::deleter_of(
+                                $crate::ml::object::public_class::<Self>(py).as_ref(),
+                            ),
+                        )?,
+                    };
+                    // PySpark's `JavaWrapper.__init__` sets the `_java_obj` attribute, of which a
+                    // model of the constructor is: an object of none (of a subclass's `__init__` of
+                    // no `super().__init__`, or of `__new__` alone) has a deleted one.
+                    core.made_java_obj();
                     Ok(Self { core, make: Self::__make })
                 }
 
-                /// The uid, as `Identifiable.uid` (see `params_api::uid_of`).
-                #[getter]
-                fn uid(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
-                    $crate::ml::params_api::uid_of(slf)
+                /// Visit the Python objects that the model holds, of Python's garbage collector
+                /// (see `ModelCore::traverse`).
+                fn __traverse__(
+                    &self,
+                    visit: pyo3::PyVisit<'_>,
+                ) -> Result<(), pyo3::PyTraverseError> {
+                    self.core.traverse(&visit)
                 }
 
-                /// PySpark's `_java_obj` of the model, the `RemoteModelRef` of its server-side
-                /// object, None of a model of none, of which the public class makes the attribute,
-                /// which its `_call_java` reads (see `_native_classes`): the one of the
-                /// `_remote_model_obj` of its training summary and of its copies (see
-                /// `ModelCore::java_obj`).
-                #[pyo3(name = "_native_java_obj")]
-                fn __native_java_obj(slf: &Bound<'_, Self>) -> PyResult<Option<Py<PyAny>>> {
-                    slf.try_borrow()?.core.java_obj(slf.py())
-                }
-
-                /// Set the uid, as an assignment of PySpark's `uid` of the instance does (and its
-                /// `_resetUid`; see `params_api::assign_uid`).
-                #[setter(uid)]
-                fn __set_uid(slf: &Bound<'_, Self>, uid: String) -> PyResult<()> {
-                    $crate::ml::params_api::assign_uid(slf, &uid)
+                /// Break a reference cycle that the garbage collector found unreachable (see
+                /// `ModelCore::clear`).
+                fn __clear__(&mut self) {
+                    self.core.clear();
                 }
 
                 /// The transform of `dataset`, as `Transformer.transform`: of a copy of the model
@@ -792,7 +915,9 @@ macro_rules! native_model {
                     }
                     $crate::ml::check_params(params)?;
                     let input = $crate::ml::dataset_of(dataset, "transform")?;
-                    let df = slf.try_borrow()?.core.transform(slf.py(), &input)?;
+                    // Of no borrow while the transform runs (see `ModelCore::transform_job`).
+                    let job = slf.try_borrow()?.core.transform_job(slf.py(), &input)?;
+                    let df = job.run(slf.py(), &input)?;
                     Ok(Py::new(slf.py(), PyDataFrame::new(df))?.into_any())
                 }
 
@@ -813,6 +938,7 @@ macro_rules! native_model {
 
                 /// The server's description of the model, as `JavaModel.__repr__` (its `toString`).
                 fn __repr__(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+                    <Self as $crate::ml::params_api::NativeInstance>::apply_attributes(slf)?;
                     let target = slf.try_borrow()?.core.target()?;
                     let out = $crate::ml::object::fetch_py(slf.py(), &target, "toString", &[])?;
                     $crate::ml::object::fetch_output_to_py(slf.py(), out)
@@ -890,9 +1016,9 @@ macro_rules! native_model {
                     #[getter]
                     #[pyo3(name = $c_py)]
                     fn $c(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
-                        let py = slf.py();
-                        let this = slf.try_borrow()?;
-                        this.core.cached(py, $c_py, || ($c_make)(py, &this.core))
+                        $crate::ml::object::ModelCore::cached_of(
+                            slf, |this| &this.core, false, $c_py, $c_make,
+                        )
                     }
                 )*
 
@@ -902,9 +1028,9 @@ macro_rules! native_model {
                     /// `functools.cache` is of each object.
                     #[pyo3(name = $cm_py)]
                     fn $cm(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
-                        let py = slf.py();
-                        let this = slf.try_borrow()?;
-                        this.core.cached_method(py, $cm_py, || ($cm_make)(py, &this.core))
+                        $crate::ml::object::ModelCore::cached_of(
+                            slf, |this| &this.core, true, $cm_py, $cm_make,
+                        )
                     }
                 )* )?
             }
@@ -935,6 +1061,9 @@ macro_rules! native_summary {
     ) => {
         #[pyclass(subclass, extends = $base, name = $name, module = $module)]
         pub struct $ty;
+
+        // Of the helpers of its base class.
+        impl $crate::ml::object::NativeClass for $ty {}
 
         impl $ty {
             /// The summary of the server-side object `target`.
@@ -994,12 +1123,32 @@ macro_rules! native_summary {
             }
         }
 
+        impl $crate::ml::object::NativeClass for $ty {
+            const HELPERS: $crate::ml::object::NativeHelpers = $crate::ml::object::NativeHelpers {
+                java_obj: Some(<$ty>::__ml_java_obj),
+                ..$crate::ml::object::NativeHelpers::NONE
+            };
+        }
+
         impl $ty {
             /// The summary of PySpark's constructor.
             pub(crate) fn given() -> Self {
                 Self {
                     object: $crate::ml::object::SummaryObject::Given,
                 }
+            }
+
+            /// The `_java_obj` of PySpark's summary `obj` of this client's fit or evaluation: the
+            /// id of its object and the methods of its chain (`"<id>.summary"`); None of a summary
+            /// of PySpark's constructor, whose `__init__` sets its own.
+            fn __ml_java_obj(obj: &Bound<'_, PyAny>) -> PyResult<Option<Py<PyAny>>> {
+                let py = obj.py();
+                Ok(match &obj.cast::<Self>()?.try_borrow()?.object {
+                    $crate::ml::object::SummaryObject::Target(target) => {
+                        Some(pyo3::types::PyString::new(py, &target.id()).into_any().unbind())
+                    }
+                    $crate::ml::object::SummaryObject::Given => None,
+                })
             }
 
             /// The server-side object of the summary `slf`, as its members that fetch read it
@@ -1031,71 +1180,43 @@ macro_rules! native_summary {
                 Self::given()
             }
 
-            /// The AttributeError of an attribute that the summary does not have, as CPython's of
-            /// PySpark's class (see `params_api::no_attribute`). CPython calls `__getattr__` also
-            /// when the getter of a member raised an AttributeError (of a summary of no server-side
-            /// object, or of no `_summary_dataset`): of a member of the class, the error of its
-            /// getter, which runs again (it raises before any request), as PySpark's class has no
-            /// `__getattr__` to raise another.
-            fn __getattr__(slf: &Bound<'_, Self>, name: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-                let get = pyo3::intern!(slf.py(), "__get__");
-                if let Some(member) = $crate::ml::object::class_member(slf.as_any(), name)? {
-                    if member.hasattr(get)? {
-                        return Ok(member.call_method1(get, (slf, slf.get_type()))?.unbind());
+            /// An attribute of the summary, of CPython's generic lookup, and else the
+            /// AttributeError of the lookup as PySpark's class, of no `__getattr__`, raises it:
+            /// that of a getter (of a summary of no server-side object, or of no
+            /// `_summary_dataset`) as it was raised, of no second run of it (see
+            /// `params_api::attribute_error`).
+            fn __getattribute__(
+                slf: &Bound<'_, Self>,
+                name: &Bound<'_, PyAny>,
+            ) -> PyResult<Py<PyAny>> {
+                let obj = slf.as_any();
+                match $crate::ml::params_api::generic_attribute(obj, name) {
+                    Err(error)
+                        if error.is_instance_of::<pyo3::exceptions::PyAttributeError>(slf.py()) =>
+                    {
+                        Err($crate::ml::params_api::attribute_error(obj, name, error)?)
                     }
-                }
-                Err($crate::ml::params_api::no_attribute(slf.as_any(), name))
-            }
-
-            /// `copy.copy`, as of PySpark's summary: of the same server-side object, of the class
-            /// and the attributes of the summary. The copy is made by the class's `__new__` (of no
-            /// `java_obj`), as the native class of a subclass of this one (a training summary) is
-            /// of another deallocator than this one's, of which CPython assigns no `__class__`.
-            fn __copy__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
-                let object = slf.try_borrow()?.object.clone_ref();
-                let class = slf.get_type();
-                let that = class.call_method1("__new__", (&class,))?;
-                that.cast::<Self>()?.try_borrow_mut()?.object = object;
-                $crate::ml::params_api::copy_class_and_attributes(slf.as_any(), &that)?;
-                Ok(that)
-            }
-
-            /// The `_java_obj` of PySpark's summary of this client's fit or evaluation: the id of
-            /// its object and the methods of its chain (`"<id>.summary"`); None of a summary of
-            /// PySpark's constructor, whose `__init__` sets its own.
-            #[pyo3(name = "_native_java_obj")]
-            fn __native_java_obj(&self) -> Option<String> {
-                match &self.object {
-                    $crate::ml::object::SummaryObject::Target(target) => Some(target.id()),
-                    $crate::ml::object::SummaryObject::Given => None,
+                    found => found,
                 }
             }
 
-            /// `copy.deepcopy`, as of PySpark's summary: a summary of the class and of copies of
-            /// the attributes, as of the reduce of a plain object (`__reduce_ex__`), which raises
-            /// the error of the first that does not copy, as PySpark's: the lock of the
-            /// `_remote_model_obj` of the training summary of a fit, after a copy of its
-            /// `_summary_dataset` (of its requests of its schema), and of the model of the summary
-            /// of an evaluation (`__source_transformer__`).
-            fn __deepcopy__<'py>(
-                slf: &Bound<'py, Self>,
-                memo: &Bound<'py, PyAny>,
-            ) -> PyResult<Bound<'py, PyAny>> {
-                let py = slf.py();
-                let reduced = $crate::reduce::plain_reduce(slf.as_any())?;
-                let mut args = vec![slf.clone().into_any(), memo.clone()];
-                args.extend(reduced.iter());
-                py.import("copy")?
-                    .call_method1("_reconstruct", pyo3::types::PyTuple::new(py, args)?)
+            /// The AttributeError of `__getattribute__`, which PyO3 calls this of (see
+            /// `params_api::missing_attribute`).
+            fn __getattr__(slf: &Bound<'_, Self>, name: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+                Err($crate::ml::params_api::missing_attribute(slf.as_any(), name))
             }
 
-            /// `pickle`, as of PySpark's summary: the reduce of a plain object, of the class and of
-            /// its attributes (see `reduce::plain_reduce`), PySpark's of a fit's or an
-            /// evaluation's, whose pickle raises the error of the first that does not pickle, as
-            /// PySpark's: of the training summary of a fit, the session of its `_summary_dataset`
-            /// (or the lock of a model that its plan reads), and else the lock of its
-            /// `_remote_model_obj`; of the summary of an evaluation, the lock of its model
-            /// (`__source_transformer__`).
+            /// `pickle`, `copy.copy` and `copy.deepcopy`, as of PySpark's summary: the reduce of a
+            /// plain object, of the class and of its attributes (see `reduce::plain_reduce`), of
+            /// which `copy.copy` makes a summary of the class's `__new__` (of PySpark's
+            /// constructor) of the same attributes, whose members read its `_java_obj` as PySpark's
+            /// do (see `SummaryObject::target`), PySpark's of a
+            /// fit's or an evaluation's, whose pickle and deep copy raise the error of the first
+            /// that does not pickle or copy, as PySpark's: of the training summary of a fit, the
+            /// session of its `_summary_dataset` of a pickle (or the lock of a model that its plan
+            /// reads), and else the lock of its `_remote_model_obj`, which a deep copy reaches
+            /// after a copy of the `_summary_dataset` (of its requests of its schema); of the
+            /// summary of an evaluation, the lock of its model (`__source_transformer__`).
             fn __reduce_ex__<'py>(
                 slf: &Bound<'py, Self>,
                 protocol: &Bound<'py, PyAny>,

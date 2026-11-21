@@ -181,6 +181,11 @@ impl PyColumnExpression {
         memo: &Bound<'_, PyAny>,
     ) -> PyResult<PyColumnExpression> {
         let expression = self.column.expression();
+        // As the deep copy of a Column of the plan of a model (see `PyColumn::__deepcopy__`).
+        let reach = crate::ml::object::expression_pickle_reach(py, expression)?;
+        if let Some(error) = crate::ml::object::reach_deepcopy_error(py, &reach, memo)? {
+            return Err(error);
+        }
         let copies = crate::udf_command::deep_copied_picklers(py, expression.picklers(), memo)?;
         Ok(PyColumnExpression::new(if copies.is_empty() {
             self.column.clone()
@@ -959,6 +964,15 @@ impl PyColumn {
     ) -> PyResult<Bound<'py, Self>> {
         let py = slf.py();
         let column = &slf.get().column;
+        // As PySpark's deep copy of a Column of a subquery of the plan of a model (`exists()`,
+        // `scalar()`, `isin(df)` of a transform of a model, a DataFrame of a method of a model or
+        // of a summary), which copies the plan and the objects of `pyspark.ml` that it keeps: the
+        // TypeError of the lock of the model, after the copies of the functions of the UDFs before
+        // it and of the summary dataset of a training summary (see `__reduce_ex__`).
+        let reach = crate::ml::object::expression_pickle_reach(py, column.expression())?;
+        if let Some(error) = crate::ml::object::reach_deepcopy_error(py, &reach, memo)? {
+            return Err(error);
+        }
         let copies =
             crate::udf_command::deep_copied_picklers(py, column.expression().picklers(), memo)?;
         let column = if copies.is_empty() {
@@ -974,6 +988,25 @@ impl PyColumn {
             copy.getattr("__dict__")?.call_method1("update", (state,))?;
         }
         Ok(copy)
+    }
+
+    /// The reduce of a pickle, as PySpark's pickle of a Column, which pickles its expression, and
+    /// the plans of its subqueries where they are, and so the objects of `pyspark.ml` that such a
+    /// plan keeps (`exists()`, `scalar()`, `isin(df)` of a transform of a model, a DataFrame of a
+    /// method of a model or of a summary): the reduce of the objects that PySpark's pickle reaches
+    /// first, the functions of its UDFs before them and the lock of the model, or the summary
+    /// dataset of a training summary, whose session a plain pickle refuses, and the lock, as the
+    /// pickle of a DataFrame of the plan fails (see `PyDataFrame::__reduce_ex__`). Else that of
+    /// `__reduce__`.
+    fn __reduce_ex__<'py>(
+        slf: &Bound<'py, Self>,
+        protocol: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let _ = protocol;
+        let py = slf.py();
+        let reach = crate::ml::object::expression_pickle_reach(py, slf.get().column.expression())?;
+        let reduced = slf.call_method0(pyo3::intern!(py, "__reduce__"))?;
+        crate::ml::object::reach_reduce(py, &reach, reduced)
     }
 
     /// A Column pickles, as PySpark Connect's, which pickles its expression: of the bytes of the

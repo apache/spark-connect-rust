@@ -397,6 +397,9 @@ macro_rules! lda_model {
         #[pyclass(subclass, extends = PyLDAModel, name = $name, module = "pyspark.ml.connect.clustering")]
         pub struct $ty;
 
+        // Of the helpers of `PyLDAModel`.
+        impl $crate::ml::object::NativeClass for $ty {}
+
         impl $ty {
             /// The model of a fit (as `native_model!`'s `fitted`), of the base class, which
             /// [`PyLDAModel::into_object`] makes an object of this class of.
@@ -420,9 +423,17 @@ macro_rules! lda_model {
                 let class = crate::ml::object::public_class::<Self>(py)
                     .unwrap_or_else(|| py.get_type::<Self>());
                 let model = class.call0()?.cast_into::<Self>()?;
+                // The uid that PySpark's constructor gave the attributes of the object.
+                params_api::sync_uid(model.as_super())?;
                 let uid = model.as_super().try_borrow()?.core.uid();
                 let object = object(&uid)?;
                 model.as_super().try_borrow_mut()?.core.bind(object);
+                // PySpark's `_java_obj` of the object, the `RemoteModelRef` of its id, in place of
+                // the None of the constructor.
+                if let Ok(attributes) = model.getattr(pyo3::intern!(py, "__dict__")) {
+                    let reference = model.as_super().try_borrow()?.core.java_obj(py)?;
+                    attributes.set_item("_java_obj", reference)?;
+                }
                 Ok(model)
             }
 
@@ -455,6 +466,9 @@ macro_rules! lda_model {
                     return Err(pyo3::exceptions::PyAssertionError::new_err(()));
                 }
                 let core = object::ModelCore::unbound(py, $jvm, $name)?;
+                // The `_java_obj` attribute of PySpark's `JavaWrapper.__init__` (see the base
+                // class's constructor).
+                core.made_java_obj();
                 let base = PyLDAModel { core, make: Self::__make };
                 Ok(PyClassInitializer::from(base).add_subclass(Self))
             }
@@ -494,11 +508,13 @@ macro_rules! lda_model {
 }
 
 /// The LocalLDAModel that `DistributedLDAModel.toLocal` returns, of the server's object of the
-/// model `model`, as PySpark's `LocalLDAModel(RemoteModelRef(...))`: of the constructor of the
+/// model of `target`, as PySpark's `LocalLDAModel(RemoteModelRef(...))`: of the constructor of the
 /// class, of a fresh uid and no params. The cache of `functools.cache` is kept by the model (see
-/// [`object::ModelCore::cached_method`]).
-fn local_model_of_distributed(py: Python<'_>, model: &object::ModelCore) -> PyResult<Py<PyAny>> {
-    let target = model.target()?;
+/// [`object::ModelCore::cached_of`]).
+fn local_model_of_distributed(
+    py: Python<'_>,
+    target: spark_connect::ml::MlTarget,
+) -> PyResult<Py<PyAny>> {
     let object = object::fetch_py(py, &target, "toLocal", &[])?
         .into_object()
         .to_pyerr()?;
@@ -519,10 +535,13 @@ lda_model! {
     /// `functools.cache`: made once per object, which a copy does not share.
     #[pyo3(name = "toLocal")]
     fn to_local(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
-        let py = slf.py();
-        let base = slf.as_super().try_borrow()?;
-        base.core
-            .cached_method(py, "toLocal", || local_model_of_distributed(py, &base.core))
+        object::ModelCore::cached_of(
+            slf.as_super(),
+            |base| &base.core,
+            true,
+            "toLocal",
+            local_model_of_distributed,
+        )
     }
 
     /// The log likelihood of the training set, as `DistributedLDAModel.trainingLogLikelihood`.
@@ -555,14 +574,14 @@ lda_model! {
 
 /// Register the typed clustering models and summaries.
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<PyKMeansModel>()?;
-    m.add_class::<PyKMeansSummary>()?;
-    m.add_class::<PyBisectingKMeansModel>()?;
-    m.add_class::<PyBisectingKMeansSummary>()?;
-    m.add_class::<PyGaussianMixtureModel>()?;
-    m.add_class::<PyGaussianMixtureSummary>()?;
-    m.add_class::<PyLDAModel>()?;
-    m.add_class::<PyLocalLDAModel>()?;
-    m.add_class::<PyDistributedLDAModel>()?;
+    super::object::register_class::<PyKMeansModel>(m)?;
+    super::object::register_class::<PyKMeansSummary>(m)?;
+    super::object::register_class::<PyBisectingKMeansModel>(m)?;
+    super::object::register_class::<PyBisectingKMeansSummary>(m)?;
+    super::object::register_class::<PyGaussianMixtureModel>(m)?;
+    super::object::register_class::<PyGaussianMixtureSummary>(m)?;
+    super::object::register_class::<PyLDAModel>(m)?;
+    super::object::register_class::<PyLocalLDAModel>(m)?;
+    super::object::register_class::<PyDistributedLDAModel>(m)?;
     Ok(())
 }

@@ -191,7 +191,13 @@ difference is intentional or tracked for a fix.
   (`SparkSession.getActiveSession()`): a model of a session that is not the active one (of
   `SparkSession.builder.remote(...).create()`) is deleted from the ML cache of the active
   session, which does not hold it, and stays in its own session's until that session ends, and a
-  model dropped on a thread of no active session is not deleted.
+  model dropped on a thread of no active session is not deleted. A model of a `RemoteModelRef`
+  that a program gives its constructor (`LinearSVCModel(RemoteModelRef(id))`) is not this client's
+  to delete: its `__del__` releases a reference of the `RemoteModelRef` (`release_ref`, PySpark's
+  own), which deletes the object at the last through the active session and waits for the server,
+  as PySpark's does; a model whose transforms still hold its object leaves the release to the last
+  of them, on the thread that drops it, and a drop on a thread of the transport's runtime, which has
+  no active session (the active session of Spark Connect is of its thread), deletes nothing then.
 - **An exception of the `&` of a join's list of conditions that is not of a class that the plan
   carries** (intentional; a plan of the core carries the errors of these classes, not any Python
   exception: it could hold a Python callback that raises it, as the plans of UDFs and of `to` hold
@@ -422,19 +428,26 @@ requests of the unpickled object pickle as it is then. This case still differs:
   and reports it, so a reference cycle through such an object and any of its holders, one or
   several, is collected, as PySpark collects it (see `docs/compatibility.md`). These cases still
   differ:
-  - The native classes of `pyspark.ml.connect`, but for the reader and writer of its `readwrite`
-    module, report to the collector none of the Python objects that they hold in Rust: the training
-    summary of a model (PySpark's `_summary`) and the dataset that the model keeps for it, the
-    model's `_java_obj`, the Python values of their params, and the models of a `OneVsRestModel`, a
-    `CrossValidatorModel` and a `TrainValidationSplitModel`. So a reference cycle through such an
-    object and one of those is never collected: through a model and its summary
-    (`model.summary.model = model`), or a function of a UDF of the summary's dataset that keeps the
-    model, the model is never freed, nor its object in the server's ML cache, where PySpark's model
-    keeps its summary as its `_summary` attribute, and the summary the dataset as its
-    `_summary_dataset`, so that the collector frees both cycles. A cycle through the dataset alone
-    is collected once the model is freed: a `SharedPart` reports its references only while every
-    reference to its part is of a `SharedPart` or an object of the binding that reports it, so the
-    collector never frees an object that such a holder reaches.
+  - The objects of the native classes of `pyspark.ml.connect` report the Python objects that they
+    hold in Rust, as PySpark's objects hold them as attributes: a model its training summary
+    (PySpark's `_summary`), its cached members (`trees`), its own defaults, the `RemoteModelRef` of
+    its object (PySpark's `_java_obj`, of which a copy holds a reference of its own) and the
+    `RemoteModelRef` that it was made of while no transform, writer or call holds its object; an
+    estimator, a transformer, a Pipeline, a PipelineModel, a OneVsRest and its model, a validator
+    and its model the Python values of their params and their attributes (stages, classifier,
+    models, best model, metrics); a `fitMultiple` iterator its estimator, dataset and param maps.
+    So a cycle through a model and its summary (`model.summary.model = model`) is collected, and the
+    model's object is deleted from the server's ML cache, as PySpark's. The DataFrames that a model,
+    its training summary or a `OneVsRestModel` keeps in Rust of its fit (the summary dataset of the
+    training summary, which PySpark's summary keeps as its `_summary_dataset`, and the training
+    dataset and the datasets of the classes of a `OneVsRestModel`) hold references to the parts of
+    their plans that no holder reports, and a `SharedPart` reports its references only while every
+    reference to its part is of a `SharedPart` or an object of the binding that reports it: so the
+    parts of those plans report nothing, and the collector never frees an object that they reach. A
+    cycle through such a dataset alone is collected once the model is freed; one through the dataset
+    and the model, such as a function of a UDF of the training DataFrame that keeps the model
+    (`job.model = model` of a UDF of `job.f`), is never collected: the model is never freed, nor its
+    object in the server's ML cache, where PySpark collects the cycle.
   - While a call of the binding runs without the GIL, a collection frees no cycle through the parts
     that the call may clone or drop, which the call keeps alive anyway; it frees the others, as
     PySpark's collector does. The collector must get the same references of an object in each of

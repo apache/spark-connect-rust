@@ -2218,6 +2218,122 @@ def test_a_fitted_model_and_the_dataframes_that_keep_it_are_not_pickled_as_pyspa
     assert _requests_but_deletes(service) == sent
 
 
+def test_the_columns_and_holders_of_a_plan_of_a_model_are_not_pickled_as_pysparks(ml_mock):
+    # As PySpark's pickle of a Column, which pickles its expression, of a subquery its plan first,
+    # and so the model or the summary that the plan keeps: a Column of `exists()`, `scalar()` or
+    # `isin(df)` of a transform of a model, of a DataFrame of a method of the summary of an
+    # evaluation or of a training summary, of the vendored `pyspark.ml`'s transform, its
+    # expression (`_expr`), a table argument (`asTable()`, of its partitioning too) and its
+    # `_subquery_expr`, the plan object of such a DataFrame (`_plan`), and the grouped data and
+    # the writers of one, which PySpark pickles of the plan of the DataFrame before its session:
+    # the error of the lock of the model at every protocol, or the session of the summary's
+    # `_summary_dataset` of a plain pickle and the lock of cloudpickle; `copy.deepcopy` raises the
+    # TypeError of the lock, and `copy.copy` copies. Cogrouped ops pickle their two grouped data in
+    # their order, each of its DataFrame, of its plan and then of its session: a plain DataFrame
+    # first fails at its session, at every protocol, and cloudpickle, which pickles the session,
+    # at the lock of the model of the second.
+    import copy
+    import pickle
+
+    import pyspark.ml.connect as connect
+    from pyspark import cloudpickle
+    from pyspark.ml.linalg import Vectors
+    from pyspark.ml.regression import LinearRegressionModel
+    from pyspark.ml.util import RemoteModelRef
+    from pyspark.sql import functions as F
+
+    spark, service = ml_mock
+    frame = spark.createDataFrame([(1.0, Vectors.dense(0.0, 1.0))], ["label", "features"])
+    lock = "^cannot pickle '_thread.lock' object$"
+    service.execute_payload = _operator_info("model-of-columns")
+    model = connect.regression.LinearRegression().fit(frame)
+    service.payload_for_request = {b"evaluate": _ml_result(summary="evaluated-of-columns")}
+    evaluated = model.evaluate(frame)
+    vendored = LinearRegressionModel(RemoteModelRef("pysparks-model-of-columns"))
+    sent = _requests_but_deletes(service)
+    for source, blocked in [
+        (model.transform(frame), _lock_pickle_error),
+        (evaluated.predictions, _lock_pickle_error),
+        (vendored.transform(frame), _lock_pickle_error),
+        (model.summary.predictions, _session_pickle_error),
+    ]:
+        one = source.select(F.lit(1).alias("one")).limit(1)
+        plain_first = frame.groupBy("label").cogroup(source.groupBy("label"))
+        for obj in [
+            source.exists(),
+            one.scalar(),
+            F.col("label").isin(one),
+            (F.col("label") > 0) & source.exists(),
+            source.exists()._expr,
+            source.asTable(),
+            source.asTable().partitionBy("label"),
+            source.asTable()._subquery_expr,
+            source._plan,
+            source.groupBy("label"),
+            source.groupBy("label").cogroup(frame.groupBy("label")),
+            plain_first,
+            source.write,
+            source.writeTo("t"),
+        ]:
+            error = _session_pickle_error if obj is plain_first else blocked
+            for protocol in range(pickle.HIGHEST_PROTOCOL + 1):
+                assert _pickle_error(obj, protocol) == error(protocol), (obj, protocol)
+            with pytest.raises(TypeError, match=lock):
+                cloudpickle.dumps(obj)
+            with pytest.raises(TypeError, match=lock):
+                copy.deepcopy(obj)
+            assert type(copy.copy(obj)) is type(obj)
+    # The objects of no model pickle, and a plan of a DataFrame unpickles as the plan of its
+    # relation as it was sent.
+    from pyspark.sql.connect.plan import LogicalPlan
+
+    for obj in [frame.exists(), frame.asTable()]:
+        assert type(pickle.loads(cloudpickle.dumps(obj))) is type(obj)
+    assert isinstance(pickle.loads(cloudpickle.dumps(frame.select("label")._plan)), LogicalPlan)
+    assert _requests_but_deletes(service) == sent
+
+
+def test_the_functions_of_the_udfs_and_the_plan_of_a_model_are_pickled_in_pysparks_order(ml_mock):
+    # PySpark's pickle reaches the function of a UDF and the model that a plan keeps in the order
+    # of its plan objects: of a plan, its child, then the plans of the subqueries of its
+    # expressions (`_references`), then its expressions, and then the model that it keeps; of a
+    # Column, its expression in its order, the plan of a subquery where it is. So a plain pickle
+    # fails at a lambda before the lock of a model where it comes first, and cloudpickle, which
+    # pickles the lambda, at the lock.
+
+    import pyspark.ml.connect as connect
+    from pyspark import cloudpickle
+    from pyspark.ml.linalg import Vectors
+    from pyspark.sql import functions as F
+
+    spark, service = ml_mock
+    frame = spark.createDataFrame([(1.0, Vectors.dense(0.0, 1.0))], ["label", "features"])
+    service.execute_payload = _operator_info("model-of-an-order")
+    model = connect.regression.LinearRegression().fit(frame)
+    transformed = model.transform(frame)
+    of_lambda = F.udf(lambda value: value, "double")
+    lambda_error = _pickle_error(lambda: None, 5)[0]
+    for obj, first in [
+        (frame.select(of_lambda("label").alias("label")).where(transformed.exists()), "lambda"),
+        (frame.where(transformed.exists()).select(of_lambda("label")), "lock"),
+        (frame.select(of_lambda("label"), transformed.exists()), "lock"),
+        (transformed.select(of_lambda("label")), "lock"),
+        (model.summary.predictions.select(of_lambda("label")), "session"),
+        ((of_lambda("label") > 0) & transformed.exists(), "lambda"),
+        (transformed.exists() & (of_lambda("label") > 0), "lock"),
+        (of_lambda("label").isin(transformed.select("label")), "lock"),
+    ]:
+        error = _pickle_error(obj, 5)
+        if first == "lambda":
+            assert error[0] is lambda_error and "<lambda>" in error[1], (obj, error)
+        elif first == "lock":
+            assert error == _lock_pickle_error(5), (obj, error)
+        else:
+            assert error == _session_pickle_error(5), (obj, error)
+        with pytest.raises(TypeError, match="^cannot pickle '_thread.lock' object$"):
+            cloudpickle.dumps(obj)
+
+
 def test_the_dataframes_of_the_models_of_pysparks_own_classes_are_not_pickled_as_pysparks(ml_mock):
     # The plans of PySpark's own classes of `pyspark.ml` (`pyspark.ml.regression.LinearRegression`,
     # where the drop-in's own classes are those of `pyspark.ml.connect`) keep their models and
@@ -2499,6 +2615,100 @@ def test_a_model_deleted_while_an_exception_propagates_does_not_crash(ml_mock, r
         "in the frame: propagates",
         "in the caller: propagates",
     ]
+
+
+def test_a_model_of_a_remote_model_ref_reads_its_object_and_releases_it_as_pysparks(ml_mock):
+    # As PySpark's `JavaModel(java_model)` over Spark Connect, a model class constructs of the
+    # `RemoteModelRef` of a server-side object (`LinearSVCModel(RemoteModelRef(id))`): its
+    # `_java_obj` is the reference, of no reference more, of a new uid of its class and no set
+    # params, and its members and its transforms read the object of the id. When it is collected,
+    # and the DataFrames of its transforms, which keep it, are gone, it releases a reference of it
+    # (`release_ref`), which deletes the object at the last, as PySpark's `__del__` does:
+    # `Params.copy` adds a reference, which the copy releases, and `copy.copy` adds none and
+    # releases one, and so does a subclass of an `__init__` of its own, of its
+    # `super().__init__(java_model)`. On a thread of no active session, its members raise
+    # PySpark's bare AssertionError, and its transform is of the dataset's session. Another
+    # `java_model` is PySpark's bare AssertionError.
+    import copy
+    import threading
+
+    import pyspark.ml.connect as connect
+    from pyspark.ml.linalg import Vectors
+    from pyspark.ml.util import RemoteModelRef
+
+    def deleted():
+        return [ref.id for command in _commands(service)
+                if command.ml_command.HasField("delete")
+                for ref in command.ml_command.delete.obj_refs]
+
+    def collected():
+        gc.collect()
+        return deleted()
+
+    spark, service = ml_mock
+    frame = spark.createDataFrame([(1.0, Vectors.dense(0.0, 1.0))], ["label", "features"])
+    LinearSVCModel = connect.classification.LinearSVCModel
+    service.payload_for_request = {b"numFeatures": _ml_result(param=pb2.Expression.Literal(integer=7))}
+    reference = RemoteModelRef("ref-of-a-model")
+    model = LinearSVCModel(reference)
+    assert model._java_obj is reference and reference._ref_count == 1
+    assert model.uid.startswith("LinearSVCModel_") and model._paramMap == {}
+    assert model.numFeatures == 7
+    assert _commands(service)[-1].ml_command.fetch.obj_ref.id == "ref-of-a-model"
+    transformed = model.transform(frame)
+    assert _relation(transformed).ml_relation.transform.obj_ref.id == "ref-of-a-model"
+    copied = model.copy()
+    assert copied._java_obj is reference and reference._ref_count == 2
+    del copied
+    assert reference._ref_count == 1 and "ref-of-a-model" not in collected()
+    # The transform keeps the model's reference, and then the last one deletes the object.
+    del model
+    assert reference._ref_count == 1 and "ref-of-a-model" not in collected()
+    del transformed
+    assert reference._ref_count == 0 and collected().count("ref-of-a-model") == 1
+    # A shallow copy shares the reference without one of its own, and releases one.
+    reference = RemoteModelRef("ref-of-a-shallow-copy")
+    reference.add_ref()
+    model = LinearSVCModel(reference)
+    shallow = copy.copy(model)
+    assert shallow._java_obj is reference and reference._ref_count == 2
+    del shallow
+    assert reference._ref_count == 1 and "ref-of-a-shallow-copy" not in collected()
+    del model
+    assert reference._ref_count == 0 and collected().count("ref-of-a-shallow-copy") == 1
+    # A subclass of an `__init__` of its own, of the reference of its `super().__init__`, as
+    # PySpark's `JavaWrapper.__init__` sets its `_java_obj`.
+
+    class OfItsOwnInit(LinearSVCModel):
+        def __init__(self, java_model=None, extra=1):
+            super().__init__(java_model)
+            self.extra = extra
+
+    reference = RemoteModelRef("ref-of-a-subclass")
+    subclassed = OfItsOwnInit(reference, extra=2)
+    assert subclassed._java_obj is reference and subclassed.numFeatures == 7
+    assert _commands(service)[-1].ml_command.fetch.obj_ref.id == "ref-of-a-subclass"
+    del subclassed
+    assert reference._ref_count == 0 and collected().count("ref-of-a-subclass") == 1
+    # On a thread of no active session.
+    outcomes = {}
+
+    def on_a_thread():
+        model = LinearSVCModel(RemoteModelRef("ref-of-a-thread"))
+        try:
+            model.numFeatures  # noqa: B018
+        except AssertionError as error:
+            outcomes["member"] = str(error)
+        relation = _relation(model.transform(frame))
+        outcomes["transform"] = relation.ml_relation.transform.obj_ref.id
+
+    thread = threading.Thread(target=on_a_thread)
+    thread.start()
+    thread.join()
+    assert outcomes == {"member": "", "transform": "ref-of-a-thread"}
+    for java_model in ["ref-of-a-model", 1, object()]:
+        with pytest.raises(AssertionError, match="^$"):
+            LinearSVCModel(java_model)
 
 
 def test_the_deletes_of_the_models_of_an_ended_test_are_not_recorded_in_a_later_test(ml_mock):
@@ -5932,3 +6142,559 @@ def test_native_class_falls_back_only_when_the_native_module_is_absent(monkeypat
         with pytest.raises(ModuleNotFoundError, match="numpy") as error:
             native_class("pyspark.ml.connect.clustering", "KMeans", "pyspark.ml.clustering")
         assert error.value is missing
+
+
+def _deleted_ids(service, expected=()):
+    # The ids of the objects that the Deletes of the server deleted, in their order, once those of
+    # `expected` arrived: a release is sent without waiting for it.
+    import time
+
+    deadline = time.monotonic() + 10
+    while True:
+        deleted = [
+            ref.id
+            for command in _commands(service)
+            if command.ml_command.HasField("delete")
+            for ref in command.ml_command.delete.obj_refs
+        ]
+        if all(id in deleted for id in expected) or time.monotonic() > deadline:
+            return deleted
+        time.sleep(0.05)
+
+
+def test_the_cycles_through_the_native_ml_objects_are_collected_as_pysparks(ml_mock):
+    # As PySpark's objects hold their parts as Python attributes, which the garbage collector sees:
+    # a model in a cycle with its training summary (`summary.model = model`), of no UDF, is freed
+    # with its summary, and its object deleted on the server, fit after fit; so are a model of a
+    # `RemoteModelRef` in a cycle with it (`ref.owner = model`), whose `__del__` releases the
+    # reference, a Pipeline and a PipelineModel of their stages, a OneVsRest of its classifier, a
+    # validator model of its best model, and a fitMultiple iterator of its estimator.
+    import pyspark.ml.connect as connect
+    from pyspark.ml.linalg import Vectors
+    from pyspark.ml.util import RemoteModelRef
+
+    spark, service = ml_mock
+    frame = spark.createDataFrame([(1.0, Vectors.dense(0.0, 1.0))], ["label", "features"])
+    gc.collect()
+    for make in [
+        lambda: connect.regression.LinearRegression(maxIter=2),
+        lambda: connect.classification.LinearSVC(maxIter=2),
+        lambda: connect.classification.LogisticRegression(maxIter=2),
+    ]:
+        refs = []
+        for i in range(20):
+            estimator = make()
+            ref = f"cycle-{type(estimator).__name__}-{i}"
+            _answer_fit(service, estimator, ref=ref)
+            model = estimator.fit(frame)
+            summary = model.summary() if callable(model.summary) else model.summary
+            summary.model = model
+            refs.append((ref, weakref.ref(model), weakref.ref(summary)))
+            del model, summary, estimator
+        gc.collect()
+        assert [(m(), s()) for _, m, s in refs] == [(None, None)] * 20
+        deleted = _deleted_ids(service, [ref for ref, _, _ in refs])
+        assert all(deleted.count(ref) == 1 for ref, _, _ in refs), deleted
+    # A model of a reference that the reference keeps: its `__del__` releases the reference, and
+    # the last release deletes the object.
+    reference = RemoteModelRef("ref-in-a-cycle")
+    model = connect.classification.LinearSVCModel(reference)
+    reference.owner = model
+    kept = weakref.ref(model)
+    del model, reference
+    gc.collect()
+    assert kept() is None
+    assert _deleted_ids(service, ["ref-in-a-cycle"]).count("ref-in-a-cycle") == 1
+    # A fitted model and its copy, each of a reference of its own to their `RemoteModelRef`, which
+    # keeps them both (`ref.owner = (model, model.copy())`).
+    estimator = connect.classification.LinearSVC(maxIter=2)
+    _answer_fit(service, estimator, ref="copies-in-a-cycle")
+    model = estimator.fit(frame)
+    copied = model.copy()
+    model._java_obj.owner = (model, copied)
+    kept = [weakref.ref(model), weakref.ref(copied)]
+    del model, copied, estimator
+    gc.collect()
+    assert [alive() for alive in kept] == [None, None]
+    assert _deleted_ids(service, ["copies-in-a-cycle"]).count("copies-in-a-cycle") == 1
+    # The other objects of Python objects of their own.
+    tokenizer = connect.feature.Tokenizer(inputCol="a", outputCol="b")
+    pipeline = connect.pipeline.Pipeline(stages=[tokenizer])
+    tokenizer.pipeline = pipeline
+    pipeline_model = connect.pipeline.PipelineModel([tokenizer])
+    tokenizer.pipeline_model = pipeline_model
+    classifier = connect.classification.LogisticRegression()
+    one_vs_rest = connect.classification.OneVsRest(classifier=classifier)
+    classifier.one_vs_rest = one_vs_rest
+    best = connect.classification.LinearSVCModel()
+    validator_model = connect.tuning.CrossValidatorModel(best)
+    best.validator_model = validator_model
+    iterator = classifier.fitMultiple(frame, [{}])
+    classifier.iterator = iterator
+    kept = [weakref.ref(obj) for obj in [pipeline, pipeline_model, one_vs_rest, validator_model]]
+    kept.append(weakref.ref(iterator))
+    del tokenizer, pipeline, pipeline_model, classifier, one_vs_rest, best, validator_model
+    del iterator
+    gc.collect()
+    assert [ref() for ref in kept] == [None] * len(kept)
+
+
+def test_the_native_ml_objects_traversed_while_they_are_created_do_not_crash(ml_mock):
+    # As test_objects_traversed_while_they_are_created_do_not_crash of test_dropin_offline.py, of
+    # the native ML classes of a `__traverse__` of their own: a collection at every second
+    # allocation meets each object while it is created, before its value is written (see
+    # `crate::gc::GcReady`), of the models, the summaries, the estimators, the transformers, the
+    # composites, their copies and loads, and the fitMultiple iterators.
+    import copy
+
+    import pyspark.ml.connect as connect
+    from pyspark.ml.linalg import Vectors
+    from pyspark.ml.util import RemoteModelRef
+
+    spark, service = ml_mock
+    frame = spark.createDataFrame([(1.0, Vectors.dense(0.0, 1.0))], ["label", "features"])
+    service.execute_payload = _operator_info("model-of-creation")
+    model = connect.regression.LinearRegression().fit(frame)
+    summary = model.summary
+    tokenizer = connect.feature.Tokenizer(inputCol="a", outputCol="b")
+    pipeline_model = connect.pipeline.PipelineModel([tokenizer])
+    makers = [
+        lambda: connect.classification.LinearSVC(), lambda: connect.feature.Tokenizer(),
+        lambda: connect.feature.StringIndexer(), lambda: connect.feature.StringIndexer().copy(),
+        lambda: connect.classification.LinearSVCModel(),
+        lambda: connect.classification.LinearSVCModel(RemoteModelRef("model-of-creation")),
+        lambda: copy.copy(model), lambda: model.copy(), lambda: copy.copy(summary),
+        lambda: connect.classification.LinearSVCSummary("x.summary"),
+        lambda: connect.pipeline.Pipeline(stages=[tokenizer]),
+        lambda: connect.pipeline.PipelineModel([tokenizer]), lambda: copy.copy(pipeline_model),
+        lambda: connect.classification.OneVsRest(), lambda: connect.tuning.CrossValidator(),
+        lambda: connect.tuning.TrainValidationSplit(),
+        lambda: connect.tuning.CrossValidatorModel(model),
+        lambda: connect.tuning.TrainValidationSplitModel(model),
+        lambda: connect.classification.OneVsRestModel([model]),
+        lambda: tokenizer.fitMultiple(frame, [{}]) if hasattr(tokenizer, "fitMultiple") else None,
+        lambda: connect.classification.LinearSVC().fitMultiple(frame, [{}]),
+    ]
+    thresholds = gc.get_threshold()
+    gc.collect()
+    gc.set_threshold(1)
+    try:
+        for make in makers:
+            for shift in range(4):
+                dicts = [{} for _ in range(100)]
+                counted = [object.__new__(type("Counted", (), {})) for _ in range(shift)]
+                made = make()
+                del dicts, counted, made
+    finally:
+        gc.set_threshold(*thresholds)
+    gc.collect()
+
+
+def test_an_assignment_of_java_obj_makes_a_model_of_it_as_pysparks(ml_mock):
+    # PySpark's model is of its `_java_obj`, which its `_call_java`, transform, save and `__del__`
+    # read: an assignment of another `RemoteModelRef` makes the model read its object and release
+    # it, and not the one before; an assignment of None makes its members raise PySpark's
+    # AssertionError and release none; a deletion makes a read of it, and of its members, and its
+    # `__del__` raise PySpark's AttributeError, and release none; a fitted model of another
+    # model's reference reads the other object, and keeps its own.
+    import sys
+
+    import pyspark.ml.connect as connect
+    from pyspark.ml.linalg import Vectors
+    from pyspark.ml.util import RemoteModelRef
+
+    spark, service = ml_mock
+    frame = spark.createDataFrame([(1.0, Vectors.dense(0.0, 1.0))], ["label", "features"])
+    service.payload_for_request = {b"numFeatures": _ml_result(param=pb2.Expression.Literal(integer=7))}
+    LinearSVCModel = connect.classification.LinearSVCModel
+
+    def fresh(id):
+        reference = RemoteModelRef(id)
+        reference.add_ref()
+        return reference, LinearSVCModel(reference)
+
+    unraisable = []
+    hook, sys.unraisablehook = sys.unraisablehook, unraisable.append
+    try:
+        reference, model = fresh("assigned-none")
+        model._java_obj = None
+        with pytest.raises(AssertionError):
+            model.numFeatures  # noqa: B018
+        del model
+        gc.collect()
+        assert reference._ref_count == 2 and unraisable == []
+        reference, model = fresh("assigned-before")
+        other = RemoteModelRef("assigned-other")
+        other.add_ref()
+        model._java_obj = other
+        assert model._java_obj is other and model.numFeatures == 7
+        assert _commands(service)[-1].ml_command.fetch.obj_ref.id == "assigned-other"
+        del model
+        gc.collect()
+        assert (reference._ref_count, other._ref_count) == (2, 1) and unraisable == []
+        reference, model = fresh("deleted")
+        del model._java_obj
+        message = "^'LinearSVCModel' object has no attribute '_java_obj'$"
+        with pytest.raises(AttributeError, match=message):
+            model._java_obj  # noqa: B018
+        with pytest.raises(AttributeError, match=message):
+            model.numFeatures  # noqa: B018
+        del model
+        gc.collect()
+        assert reference._ref_count == 2
+        (error,) = unraisable
+        assert type(error.exc_value) is AttributeError
+        assert error.object.__qualname__ == "JavaWrapper.__del__"
+    finally:
+        sys.unraisablehook = hook
+    service.execute_payload = _operator_info("fitted-own")
+    fitted = connect.classification.LinearSVC().fit(frame)
+    taken = RemoteModelRef("fitted-other")
+    taken.add_ref()
+    fitted._java_obj = taken
+    assert fitted.numFeatures == 7
+    assert _commands(service)[-1].ml_command.fetch.obj_ref.id == "fitted-other"
+    del fitted
+    gc.collect()
+    # The object of its fit stays, as PySpark's model releases its `_java_obj` only.
+    assert "fitted-own" not in _deleted_ids(service) and taken._ref_count == 1
+
+
+def test_a_failing_release_of_a_model_is_unraisable_in_the_del_of_its_class(ml_mock):
+    # PySpark's `JavaWrapper.__del__` releases a reference of the model's `RemoteModelRef`: an
+    # error of the release (of a reference released too often) is unraisable in that `__del__`,
+    # also of a release at the drop of a transform that kept the model's object.
+    import sys
+
+    import pyspark.ml.connect as connect
+    from pyspark.ml.linalg import Vectors
+    from pyspark.ml.util import RemoteModelRef
+
+    spark, service = ml_mock
+    frame = spark.createDataFrame([(1.0, Vectors.dense(0.0, 1.0))], ["label", "features"])
+    unraisable = []
+    hook, sys.unraisablehook = sys.unraisablehook, unraisable.append
+    try:
+        for keep_a_transform in (False, True):
+            reference = RemoteModelRef("released-too-often")
+            model = connect.classification.LinearSVCModel(reference)
+            reference.release_ref()
+            kept = model.transform(frame) if keep_a_transform else None
+            del model
+            del kept
+            gc.collect()
+            (error,) = unraisable
+            assert type(error.exc_value) is AssertionError
+            assert error.object.__qualname__ == "JavaWrapper.__del__", error.object
+            unraisable.clear()
+    finally:
+        sys.unraisablehook = hook
+
+
+def test_the_lazy_attributes_of_the_native_objects_are_of_the_object_as_pysparks(ml_mock):
+    # PySpark's constructor, fit and load set the uid, the param maps, `_params` and the
+    # `_java_obj` as attributes of the object: of no class, which `dir()` of the object lists, and
+    # of which an assignment of the uid gives the requests the new uid.
+    import pyspark.ml.connect as connect
+    from pyspark.ml.linalg import Vectors
+
+    spark, service = ml_mock
+    frame = spark.createDataFrame([(1.0, Vectors.dense(0.0, 1.0))], ["label", "features"])
+    service.execute_payload = _operator_info("model-of-lazy-attributes")
+    model = connect.regression.LinearRegression().fit(frame)
+    for cls in [connect.regression.LinearRegression, type(model), connect.pipeline.Pipeline]:
+        for name in ["uid", "_paramMap", "_defaultParamMap", "_params", "_java_obj", "_summary"]:
+            assert not hasattr(cls, name), (cls, name)
+    # The `_java_obj` of the fit, as PySpark's fit sets it; the others at their first read.
+    assert list(vars(model)) == ["_java_obj"]
+    assert {"uid", "_paramMap", "_defaultParamMap", "_params", "_java_obj"} <= set(dir(model))
+    # The uid alone is the native object's, until the param maps are made, which make it an
+    # attribute.
+    uid = model.uid
+    assert list(vars(model)) == ["_java_obj"]
+    assert model._paramMap == {} and vars(model)["uid"] == uid
+    # Its `_java_obj` deleted before any read of it, as PySpark's; None again, of no AttributeError
+    # of its `__del__`.
+    del model._java_obj
+    assert not hasattr(model, "_java_obj") and "_java_obj" not in dir(model)
+    model._java_obj = None
+    estimator = connect.classification.LinearSVC()
+    assert estimator._java_obj == "org.apache.spark.ml.classification.LinearSVC"
+    estimator.uid = "LinearSVC_assigned"
+    _answer_fit(service, estimator, ref="model-of-an-assigned-uid")
+    estimator.fit(frame)
+    (fit,) = [c for c in _commands_but_deletes(service) if c.ml_command.HasField("fit")][-1:]
+    assert fit.ml_command.fit.estimator.uid == "LinearSVC_assigned"
+
+
+def test_copies_of_the_native_objects_are_of_their_reduce_as_pysparks(ml_mock):
+    # PySpark's objects have no `__copy__`: `copy.copy` copies them of their reduce, of a new
+    # object of their class of their attributes, and of a model of a server-side object, of the same
+    # object, whose pickle and deep copy fail at the lock of its `RemoteModelRef`; a PipelineModel,
+    # a OneVsRestModel and a validator model carry their objects in their state.
+    import copy
+    import pickle
+
+    import pyspark.ml.connect as connect
+    from pyspark.ml.linalg import Vectors
+
+    spark, service = ml_mock
+    frame = spark.createDataFrame([(1.0, Vectors.dense(0.0, 1.0))], ["label", "features"])
+    service.execute_payload = _operator_info("model-of-copies")
+    model = connect.regression.LinearRegression().fit(frame)
+    tokenizer = connect.feature.Tokenizer(inputCol="a", outputCol="b")
+    for obj in [model, model.summary, tokenizer, connect.classification.LinearSVCModel()]:
+        assert "__copy__" not in dir(obj), type(obj)
+        copied = copy.copy(obj)
+        assert type(copied) is type(obj), type(obj)
+    copied = copy.copy(model)
+    assert copied._java_obj is model._java_obj and copied.uid == model.uid
+    for protocol in range(pickle.HIGHEST_PROTOCOL + 1):
+        assert _pickle_error(model, protocol) == _lock_pickle_error(protocol)
+    with pytest.raises(TypeError, match="^cannot pickle '_thread.lock' object$"):
+        copy.deepcopy(model)
+    stages = [tokenizer]
+    pipeline_model = connect.pipeline.PipelineModel(stages)
+    assert "__getnewargs__" not in dir(pipeline_model)
+    assert list(pipeline_model.__getstate__())[-1] == "stages"
+    assert copy.copy(pipeline_model).stages is stages
+    unpickled = pickle.loads(pickle.dumps(pipeline_model))
+    assert [type(stage) for stage in unpickled.stages] == [type(tokenizer)]
+    best = connect.classification.LinearSVCModel()
+    validator_model = connect.tuning.CrossValidatorModel(best, avgMetrics=[0.5])
+    copied = copy.deepcopy(validator_model)
+    assert type(copied.bestModel) is type(best) and copied.avgMetrics == [0.5]
+    with pytest.raises(TypeError, match="missing 1 required positional argument: 'stages'"):
+        connect.pipeline.PipelineModel()
+
+
+def test_the_pickle_of_grouped_maps_takes_their_grouping_columns_first_as_pysparks(ml_mock):
+    # PySpark's plans of `applyInPandas`, of `applyInPandasWithState` and of a cogroup hold their
+    # grouping columns before their function, and a cogroup its other side between them: a plain
+    # pickle fails at the lambda of a UDF of a grouping column before the function and the model of
+    # the other side, as PySpark's. A cogroup of a plain DataFrame first fails at its session.
+    import pyspark.ml.connect as connect
+    from pyspark.ml.linalg import Vectors
+
+    spark, service = ml_mock
+    frame = spark.createDataFrame([(1.0, Vectors.dense(0.0, 1.0))], ["label", "features"])
+    service.execute_payload = _operator_info("model-of-grouped-maps")
+    transformed = connect.regression.LinearRegression().fit(frame).transform(frame)
+
+    def grouping_key(value):
+        return value
+
+    def applied(data):
+        return data
+
+    def cogrouped(left, right):
+        return left
+
+    of_key = F.udf(grouping_key, "double")
+    plain = frame.select("label")
+    for obj in [
+        plain.groupBy(of_key("label")).applyInPandas(applied, "label double"),
+        plain.groupBy(of_key("label"))
+        .applyInPandas(applied, "label double")
+        .where(transformed.exists()),
+        plain.groupBy(of_key("label"))
+        .cogroup(transformed.groupBy("label"))
+        .applyInPandas(cogrouped, "label double"),
+    ]:
+        error = _pickle_error(obj, 5)
+        assert error[0] is AttributeError and error[1].endswith(".grouping_key'"), error
+    cogroup = plain.groupBy("label").cogroup(transformed.groupBy("label"))
+    assert _pickle_error(cogroup, 5) == _session_pickle_error(5)
+
+
+def test_the_plans_of_pysparks_own_ml_classes_reach_the_functions_of_their_dataframes(ml_mock):
+    # PySpark's pickle of the plan of a transform of a model of its own `pyspark.ml` classes takes
+    # its child first, the plan of the transformed DataFrame, of the functions of its UDFs: a plain
+    # pickle fails at the lambda of a UDF there before the lock of the model.
+    from pyspark.ml.regression import LinearRegressionModel
+    from pyspark.ml.util import RemoteModelRef
+
+    spark, service = ml_mock
+    frame = spark.range(1).select(F.col("id").cast("double").alias("label"))
+    of_lambda = F.udf(lambda value: value, "double")
+    model = LinearRegressionModel(RemoteModelRef("pysparks-model-of-a-udf"))
+    error = _pickle_error(model.transform(frame.withColumn("u", of_lambda("label"))), 5)
+    assert error[0] is _pickle_error(lambda: None, 5)[0] and "<lambda>" in error[1], error
+    assert _pickle_error(model.transform(frame), 5) == _lock_pickle_error(5)
+
+
+def test_the_stat_classes_take_weak_references_of_pysparks_weakref():
+    # PySpark's ChiSquareTest, Correlation, KolmogorovSmirnovTest and Summarizer are plain classes,
+    # of `__weakref__`.
+    import pyspark.ml.stat as stat
+
+    for cls in [stat.ChiSquareTest, stat.Correlation, stat.KolmogorovSmirnovTest, stat.Summarizer]:
+        assert "__weakref__" in dir(cls), cls
+        obj = cls()
+        assert weakref.ref(obj)() is obj
+
+
+def test_a_release_at_a_drop_while_an_exception_propagates_keeps_the_exception(_ml_mock_server):
+    # CPython drops the values of a frame that unwinds with the exception still set: the drop of
+    # the last transform of a model of a RemoteModelRef there releases the reference
+    # (`release_ref`) with that exception set aside and set again after, as CPython does around a
+    # finalizer, so the program's own error propagates, the reference is released, and nothing is
+    # unraisable. Of a process of its own, which a SystemError or a crash would end.
+    _, service = _ml_mock_server
+    service.reset()
+    script = textwrap.dedent(
+        f"""
+        import sys
+        from pyspark.sql import SparkSession
+        import pyspark.ml.connect as connect
+        from pyspark.ml.util import RemoteModelRef
+
+        spark = SparkSession.builder.remote({service.remote!r}).getOrCreate()
+        unraisable = []
+        sys.unraisablehook = lambda u: unraisable.append(type(u.exc_value).__name__)
+        reference = RemoteModelRef("released-while-unwinding")
+        frame = spark.range(1)
+
+        def failing():
+            # The TypeError of the argument, of no reference to the DataFrame, which the frame
+            # drops as it unwinds.
+            return connect.classification.LinearSVCModel(reference).transform(frame).select(None)
+
+        for _ in range(3):
+            reference._ref_count = 1
+            try:
+                failing()
+            except Exception as error:
+                print(type(error).__name__, reference._ref_count, unraisable)
+        """
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, timeout=60
+    )
+    assert result.returncode == 0, result.stderr
+    lines = result.stdout.strip().split("\n")
+    assert len(lines) == 3 and all(line == lines[0] for line in lines), lines
+    name, count, unraisable = lines[0].split(" ", 2)
+    assert name != "SystemError" and (count, unraisable) == ("0", "[]"), lines
+
+
+def test_no_traverse_of_a_model_loses_a_reference_without_the_gil(ml_mock, tmp_path):
+    # A collection reads the traverse of a model in each of its passes, with the GIL held, and a
+    # reference that one pass reports and a later one does not is freed while the model holds it:
+    # what the traverses of the native models read grows only with the GIL held, as every call
+    # that runs without it takes its clones of the model first (see `exclusive_reference` of
+    # crates/pyspark-rs/src/ml/object.rs). The watch of the traverses depends on nothing that the
+    # models tell: it holds the GIL, so that no collection runs, and reads what the traverse of
+    # each model reports again and again, so that a reference lost is one of a clone or a lock
+    # without the GIL. The calls of the models (transforms, fetches, writes, copies) run on threads
+    # while the watch and a collector run: it sees none.
+    import copy
+    import random
+    import threading
+    import time
+
+    import pyspark.ml.connect as connect
+    from pyspark._pyspark import _ml_watch_traverses
+    from pyspark.ml.linalg import Vectors
+    from pyspark.ml.util import RemoteModelRef
+
+    spark, service = ml_mock
+    frame = spark.range(3)
+    estimator = connect.classification.LinearSVC(maxIter=1)
+    _answer_fit(service, estimator)
+    fitted = estimator.fit(frame)
+    references = [RemoteModelRef(f"watched-{index}") for index in range(2)]
+    of_references = [connect.classification.LinearSVCModel(r) for r in references]
+    # A shallow copy releases a reference that it does not add, as PySpark's.
+    references[0].add_ref()
+    models = [fitted, *of_references, copy.copy(of_references[0]), of_references[1].copy()]
+    calls = [
+        lambda m: m.transform(frame),
+        lambda m: m.transform(frame).collect(),
+        lambda m: m.numFeatures,
+        lambda m: m.predict(Vectors.dense([1.0])),
+        lambda m: m.evaluate(frame),
+        lambda m: m.write().overwrite().save(str(tmp_path / "model")),
+        lambda m: m.copy().transform(frame),
+        lambda m: repr(m),
+        lambda m: fitted.summary.accuracy,
+        lambda m: copy.copy(fitted).transform(frame),
+    ]
+    stop = threading.Event()
+    ran = []
+    watch = {"calls": 0, "reads": 0, "changes": 0, "logs": []}
+
+    def run_calls(seed):
+        chosen = random.Random(seed)
+        while not stop.is_set():
+            try:
+                chosen.choice(calls)(chosen.choice(models))
+            except Exception:  # noqa: BLE001 - of what the mock server does not answer
+                pass
+            ran.append(1)
+
+    def run_watch():
+        while not stop.is_set():
+            reads, changes, logs = _ml_watch_traverses(models, 300)
+            watch["calls"] += 1
+            watch["reads"] += reads
+            watch["changes"] += changes
+            watch["logs"].extend(logs)
+            time.sleep(0.0002)
+
+    def run_collections():
+        while not stop.is_set():
+            gc.collect()
+            time.sleep(0.01)
+
+    threads = [threading.Thread(target=run_calls, args=(seed,)) for seed in range(4)]
+    threads += [threading.Thread(target=run_watch), threading.Thread(target=run_collections)]
+    for thread in threads:
+        thread.start()
+    time.sleep(6)
+    stop.set()
+    for thread in threads:
+        thread.join(60)
+    assert len(ran) > 100 and watch["calls"] > 100 and watch["reads"] > 0, (len(ran), watch)
+    assert watch["changes"] == 0, "\n".join(watch["logs"][:20])
+
+
+def test_calls_of_one_model_on_threads_run_together_as_pyspark(ml_mock):
+    # PySpark's models are of several threads at once. A call of a native model syncs its param
+    # maps into the native object, which it borrows mutably only for a change, and a transform
+    # runs without the GIL of no borrow of the model (it takes what it needs of it first), so that
+    # a call on one thread never finds the model borrowed by another (`RuntimeError: Already
+    # borrowed`): of a fitted model and of a model of a RemoteModelRef.
+    import threading
+    import time
+
+    import pyspark.ml.connect as connect
+    from pyspark.ml.util import RemoteModelRef
+
+    spark, service = ml_mock
+    frame = spark.range(3)
+    estimator = connect.classification.LinearSVC(maxIter=1)
+    _answer_fit(service, estimator)
+    fitted = estimator.fit(frame)
+    of_reference = connect.classification.LinearSVCModel(RemoteModelRef("of-threads"))
+    stop = threading.Event()
+    calls, errors = [], []
+
+    def run(model):
+        while not stop.is_set():
+            try:
+                model.transform(frame)
+                model.copy()
+                model.getMaxIter()
+            except Exception as error:  # noqa: BLE001 - of the error that the test reports
+                errors.append(f"{type(error).__name__}: {error}")
+            calls.append(1)
+
+    threads = [threading.Thread(target=run, args=(m,)) for m in [fitted, of_reference] * 3]
+    for thread in threads:
+        thread.start()
+    time.sleep(3)
+    stop.set()
+    for thread in threads:
+        thread.join(60)
+    assert len(calls) > 100 and not errors, (len(calls), errors[:5])

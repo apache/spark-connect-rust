@@ -354,6 +354,10 @@ impl params_api::ParamsHolder for PyOneVsRestModel {
 }
 
 impl params_api::NativeInstance for PyOneVsRestModel {
+    fn state_attributes(&self) -> &'static [&'static str] {
+        &["models"]
+    }
+
     fn duplicate(&self, py: Python<'_>) -> PyResult<Py<Self>> {
         let raw = self
             .raw
@@ -411,13 +415,46 @@ native_pymethods! {
         Ok(())
     }
 
+    /// Visit the Python objects that the model holds, of Python's garbage collector, as PySpark's
+    /// model holds its attributes and its param maps: those of its core (see
+    /// `ModelCore::traverse`), its classifier and its `models`. The Python objects below the plans
+    /// of the datasets of its fit (`fit`) are not reported: a cycle through them is not collected.
+    fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
+        if !self.core.gc_ready.get() {
+            return Ok(());
+        }
+        self.core.traverse(&visit)?;
+        params_api::visit_values(&self.raw, &visit)?;
+        if let Ok(models) = self.models.try_lock() {
+            if let Some(models) = models.as_ref() {
+                visit.call(models)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Break a reference cycle that the garbage collector found unreachable: the model drops the
+    /// Python objects that `__traverse__` reported.
+    fn __clear__(&mut self) {
+        if !self.core.gc_ready.get() {
+            return;
+        }
+        self.core.clear();
+        self.raw.clear();
+        if let Ok(models) = self.models.get_mut() {
+            *models = None;
+        }
+    }
+
     /// A model of the given `models`, as PySpark's `OneVsRestModel(models)`: of a new uid and no
     /// set params, with the defaults of the class, and of no classifier. The uid is of the class
     /// of the object, as `Identifiable._randomUID` names it (`MyOneVsRestModel_...` of a Python
     /// subclass).
     #[new]
     #[classmethod]
-    fn new(cls: &Bound<'_, pyo3::types::PyType>, models: Py<PyAny>) -> PyResult<Self> {
+    #[pyo3(signature = (models=None))]
+    fn new(cls: &Bound<'_, pyo3::types::PyType>, models: Option<Py<PyAny>>) -> PyResult<Self> {
+        let models = models.unwrap_or_else(|| cls.py().None());
         let core = object::ModelCore::unbound_named(
             cls.py(),
             "org.apache.spark.ml.classification.OneVsRestModel",
@@ -513,7 +550,7 @@ native_pymethods! {
 
 /// Register the typed classes of the family.
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<PyOneVsRestModel>()?;
+    crate::ml::object::register_class::<PyOneVsRestModel>(m)?;
     Ok(())
 }
 
@@ -757,6 +794,7 @@ pub(crate) fn load_one_vs_rest(
             inner: OneVsRest::new(),
             raw: Vec::new(),
             set_order: params_api::SetOrder::default(),
+            gc_ready: crate::gc::GcReady::new(),
         },
     )?;
     params_api::ParamsHolder::put(

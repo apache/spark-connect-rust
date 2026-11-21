@@ -407,7 +407,7 @@ fn recommend(
 }
 
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<PyALS>()?;
-    m.add_class::<PyALSModel>()?;
+    super::object::register_class::<PyALS>(m)?;
+    super::object::register_class::<PyALSModel>(m)?;
     Ok(())
 }

@@ -47,6 +47,6 @@ native_model! {
 
 /// Register the typed classes of the family.
 pub(super) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<PyNaiveBayesModel>()?;
+    crate::ml::object::register_class::<PyNaiveBayesModel>(m)?;
     Ok(())
 }

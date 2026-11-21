@@ -288,6 +288,14 @@ map to each of its models too, as PySpark's `OneVsRestModel.copy` copies them (s
 warning that the server sends with the model of a fit, and
 `SparkSession::set_ml_fit_warning_handler` sets the handler that each fit calls with it (see
 [Native ML objects](#native-ml-objects-fetch-summaries-save-and-load-rust-api)).
+`MlRef::of_reference` (not a stable API) is an object of the ML cache that the client does not
+own, whose last owner runs a release of its owner in place of its deletion, `MlRef::keep` keeps an
+object on the server at the drop of its last owner, and `MlRef::is_unshared` tells an owner of no
+clone (not stable APIs either), and `PickleReach`, `pickle_reach_with` and
+`expression_pickle_reach_with` of `spark_connect::ml` (not a stable API) give what PySpark's pickle
+of a DataFrame or of an expression reaches of the objects of `pyspark.ml` that its plans keep, and
+the functions of its UDFs before them, in PySpark's order, of the reach that a callback gives of
+the owner of a relation built outside the core.
 
 `RetryPolicy` adds a `retries_failures` field, true by default: a policy of false retries no
 failure, as PySpark's own `RetryPolicy`, whose `can_retry` takes no failure, retries none, and
@@ -929,6 +937,12 @@ classes to build on:
 - `MlRef` is a server-side object: a fitted model (`Model::ml_ref`), or another object that a
   fetch returns, such as a tree of an ensemble. Its clones and the DataFrames whose plans read it
   share it, and the last owner to drop deletes it on the server, as PySpark's `RemoteModelRef`.
+  `MlRef::of_reference(&session, id, release)` (not a stable API) is an object that the client
+  does not own, which the Python client makes of the `RemoteModelRef` that a program gives a
+  model's constructor: its last owner runs `release` in place of the deletion, which releases a
+  reference of the `RemoteModelRef`. `MlRef::keep` (not a stable API) keeps the object on the
+  server at the drop of its last owner, as the Python client keeps the object of a model whose
+  `_java_obj` is assigned another value.
 - `fetch(&MlTarget, method, args)` runs a method of an object, as `_call_java` of `pyspark.ml`
   does over Spark Connect (a `Fetch` command). `MlTarget::object(&model_ref).child("summary")`
   reaches the object of a method chain (`"<id>.summary"`), and `MlTarget::helper(&session)` the
@@ -1046,9 +1060,21 @@ modules stay PySpark's deprecated ones, unchanged. Each class has, where its PyS
   best and sub-models). A writer reads them at its `save`, as PySpark's `RemoteMLWriter` reads
   those of its `_instance`.
   The maps of an object that this client makes (of a fit, a load, a native copy) are made of the
-  native object's values at their first read. The native members have PySpark's docstrings,
-  signatures, modules and qualified names, of the class of PySpark's that defines the member
-  (`JavaMLWritable.write`, `JavaPredictionModel.predict`), and Python binds a call of one as it
+  native object's values at their first read. The native members are functions of PySpark's
+  names, qualified names, modules, docstrings, signatures and annotations, of the class of
+  PySpark's that defines the member (`JavaMLWritable.write`, `JavaPredictionModel.predict`), and so
+  are the getters of the native properties (`LinearSVCModel.coefficients`,
+  `JavaPredictionModel.numFeatures`, `_ClassificationSummary.accuracy` of a summary), the
+  `__repr__` and `__str__` of a class (`Identifiable.__repr__`, `JavaModel.__repr__`) and the
+  `__del__` of a Java wrapper (`JavaWrapper.__del__`, which releases a reference of the
+  `RemoteModelRef` of a model of one, see "A model of a `RemoteModelRef`" below, and raises the
+  `AttributeError` of a deleted `_java_obj`, which Python reports as unraisable in it, as
+  PySpark's; the native object of a fit or a load releases its server-side objects itself), of the
+  globals of PySpark's function, of which
+  `typing.get_type_hints` resolves their annotations (`-> "LinearSVCModel"`). They are not
+  PySpark's code, of which `inspect.getsource` gives none, nor wrappers of it: where PySpark's
+  function is the wrapper of a decorator (`try_remote_attribute_relation`, `try_remote_write`),
+  they have no `__wrapped__`. Python binds a call of one as it
   binds PySpark's function, of the parameters of the wrapper of its decorator (`JavaParams.clear`
   of `try_remote_intercept` takes any positional arguments, a DataFrame method of
   `try_remote_attribute_relation` any arguments): a call that does not bind raises PySpark's
@@ -1063,10 +1089,29 @@ modules stay PySpark's deprecated ones, unchanged. Each class has, where its PyS
   reference; a plain `pickle` of one of the class (`pickle.dumps(LinearSVCModel.summary)`), which
   pickles a function by its qualified name, finds PySpark's function there, and raises
   `PicklingError` (`... it's not the same object as
-  pyspark.ml.classification.LinearSVCModel.summary`), where PySpark's pickles. The objects have the
-  members of the native classes that PySpark's do not, which `dir()` lists: `_native_params`,
-  `_native_sync` and `__setstate__` of an object of params, `_native_java_obj` of a model and of a
-  summary, `__copy__`, `__deepcopy__` of a summary, and the `__signature__` of the class. The Param
+  pyspark.ml.classification.LinearSVCModel.summary`), where PySpark's pickles. The objects have one
+  member of the native classes that PySpark's do not, which `dir()` lists: `__setstate__` of an
+  object of params, which takes the state of a copy and of a pickle, of the objects that the native
+  object holds of a PipelineModel, a OneVsRestModel and a validator's model (`stages`, `models`,
+  `bestModel`, ...), and the state of the pickles of this client's earlier versions (the uid, params
+  and defaults of the native object); and on Python 3.9 and 3.10, whose `object` has no
+  `__getstate__`, `__getstate__` too, which gives PySpark's state of the object. The public class
+  reaches the native state of an object by functions of the native module of its native class
+  (`_ml_params`, `_ml_sync`, `_ml_java_obj`, ...), of no member. The attributes that PySpark's
+  constructor, fit or load sets of each object (`uid`, `_paramMap`, `_defaultParamMap`, `_params`,
+  `_java_obj`, `_summary`) are of the object, as PySpark's, not of the class: of an object that this
+  client makes (of a fit, a load, a native copy), they are made at their first read (but the
+  `_java_obj` of a model, there from its making), by the `__getattribute__` of the native class,
+  which looks an attribute up as `object.__getattribute__` does (of the error of a getter that
+  raises `AttributeError`, raised once) and makes one of them that it does not find (see "The
+  attributes of the objects that this client makes" below); the native class has no
+  `__setattr__` nor `__delattr__`, so `object.__setattr__` of an object of a subclass sets its
+  attribute, as of PySpark's. The client makes such an object of its native params, which the
+  native code that makes it may set after it makes it, and of which a copy of the native state
+  sends no request; `dir()` of the object lists them, but `_summary` before its first read and a
+  deleted `_java_obj` (see there). The class has PySpark's signature of its own `__new__`, and no
+  `__signature__`, as PySpark's has none; a class of no Java wrapper (a Pipeline, a OneVsRest, a
+  validator and their models) has no `__del__`, as PySpark's. The Param
   objects are PySpark's own `pyspark.ml.param.Param`, of the docs,
   converters and defaults of the official class (`crates/pyspark-rs/src/ml/ml_params.json`,
   captured from pyspark-client 4.3.0 by `scripts/capture_ml_api_golden.py`), and a getter per
@@ -1153,7 +1198,9 @@ modules stay PySpark's deprecated ones, unchanged. Each class has, where its PyS
   params.
 - **`_java_obj` and `_call_java`**: a model of a server-side object (of a fit, a load, a copy, a
   fetch or a class method such as `StringIndexerModel.from_labels`) has PySpark's `_java_obj`, the
-  `RemoteModelRef` of its object, and a summary the id of its object and methods
+  `RemoteModelRef` of its object (the one that it was made of, of
+  `LinearSVCModel(RemoteModelRef(id))`, see "A model of a `RemoteModelRef`" below), and a summary
+  the id of its object and methods
   (`"<id>.summary"` of a training summary, the server's id of the summary of an `evaluate`), so
   PySpark's own `_call_java(name, *args)` of either sends PySpark's Fetch (`try_remote_call`). A
   model with a training summary has PySpark's `_summary`, the summary. A training summary has the
@@ -1172,12 +1219,28 @@ modules stay PySpark's deprecated ones, unchanged. Each class has, where its PyS
   the objects that the constructors take, native properties, see "Native validators").
   Those of an object that this client makes in Rust (of a fit, a load, a native copy, a fetch) are
   made at their first read: its param maps, Params, `_params` and uid at the first read of one of
-  its maps (by any member of the Params API, a native member, a copy or a pickle), and its
-  `_java_obj` and `_summary` at their first read, so `vars()` of a fitted model lacks them until
-  then, where PySpark's fit and load set them. Their values are those of PySpark's whenever they are
-  read (of the order of PySpark's maps, see above). They are not made at the fit or the load, which
-  makes the objects of many classes in Rust of their native params, so that a fit or a fetch (of
-  the trees of an ensemble) reads no params of an object for `vars()` alone.
+  them (by any member of the Params API, a native member, a copy or a pickle; a read of the uid
+  alone reads the native object's), and its `_summary` at its first read, which makes the training
+  summary object (of a request of `numClasses` of a logistic regression, as PySpark's fit makes
+  it), so `vars()` of a fitted model, and `inspect.getattr_static` of it, lack them until then,
+  where PySpark's fit and load set them, and `dir()` of it lists `_summary` from then on
+  (`Params.params` reads every attribute that `dir()` lists, and so makes no summary). The state of
+  a copy or a pickle has the param maps and lacks `_summary` until its first read, so a pickle of a
+  model of a training summary and of no server-side object (of a deleted `_java_obj`) pickles,
+  where PySpark's fails at the session of its summary dataset. The `_java_obj` of a model is in
+  `vars()` from its making, as PySpark's. Their values are those of PySpark's whenever they are
+  read (of the order of PySpark's maps, see above), but the Params of an object whose uid was
+  assigned before they were made, which are of the uid then, where PySpark's are of the uid of the
+  fit or the load, and do not belong to the object (`ValueError: Param ... does not belong to
+  ...` of its getters). They are not made at the fit or the load, which makes the objects of many
+  classes in Rust of their native params, so that a fit or a fetch (of the trees of an ensemble)
+  reads no params of an object for `vars()` alone. The attributes are the state of the object, as
+  PySpark's: an assignment or a deletion of the uid or of `_java_obj` (also of
+  `object.__setattr__`, `object.__delattr__` or a write of `__dict__`) is of the native object at
+  its next use (see "A model of a `RemoteModelRef`"), and a deleted `_java_obj` raises PySpark's
+  AttributeError, is not listed by `dir()`, and is deleted in the copies and the pickles of the
+  object, as PySpark's; one of the others deleted after it was made is made again at its next
+  read, where PySpark's raises the AttributeError.
 - **Summaries**: the training summary of a fit (`summary`, `hasSummary`), the same object on every
   call as PySpark's `_summary`, and the summary of `evaluate`; a loaded model has none, and raises
   PySpark's `RuntimeError`. Their DataFrames (`predictions`, `roc`, `cluster`, ...) are of the
@@ -1259,8 +1322,21 @@ modules stay PySpark's deprecated ones, unchanged. Each class has, where its PyS
     attributes, alone and in a Pipeline. `__setstate__` also takes the state of the pickles of this
     client's earlier versions (the uid, the set params and the own defaults of the object by name,
     and its attributes).
-  - A PipelineModel, a OneVsRestModel and a validator's model are made again of their
-    constructor's objects (`stages`, `models`, `bestModel`, ...).
+  - `copy.copy` copies of the reduce, as of PySpark's objects, which have no `__copy__`: an object
+    of the class's `__new__`, of no `__init__`, of the attributes of the object (its param maps,
+    and the `stages`, `models`, `bestModel`, ... of a PipelineModel, a OneVsRestModel and a
+    validator's model, which their state carries after the others, as PySpark's attributes);
+    a model of a server-side object is copied of the same object, of the native copy that its
+    reduce names after a lock (`_column_reduce.unpickled_after`), at which its pickle and its
+    deep copy fail, as PySpark's fail at the lock of its `RemoteModelRef`. So a failed deep copy of
+    such a model makes no object, where PySpark's makes one of the class's `__new__` before it
+    fails at the lock of the state, whose `__del__` prints the unraisable `AttributeError` of its
+    read of `_java_obj`. A model of a server-side object of a Python subclass of a reduce, a state
+    or slots of its own (as above) reduces as PySpark's, of `object.__reduce_ex__` and the
+    attributes of the object, which run the subclass's members: its copy is of its class and
+    slots, a state of its own (one that drops `_java_obj`) copies and pickles of that state, and
+    a failed deep copy prints the unraisable error of PySpark's. A summary is copied of the class's
+    `__new__` and its attributes, whose members read its `_java_obj`, as PySpark's.
   - A model of a server-side object, and its summary, copy, sharing the object, and are not
     copied deep nor pickled, nor is a DataFrame that keeps such a model: PySpark's raise the error
     of the first object that does not pickle, of the pickle of the lock of the model's
@@ -1281,12 +1357,39 @@ modules stay PySpark's deprecated ones, unchanged. Each class has, where its PyS
     `copy.deepcopy` raises the TypeError of the lock, after PySpark's requests of the schemas of
     the DataFrames that it copies on the way (the lookup of `__deepcopy__` of PySpark's DataFrame
     reads its columns).
+  - So are the objects that keep the plan of such a DataFrame, as PySpark's pickle reaches the
+    plan in them: a Column of a subquery of it (`exists()`, `scalar()`, `isin(df)`, also within
+    other expressions) and its expression (`Column._expr`), a table argument of it (`asTable()`,
+    also partitioned, ordered or of a single partition) and its `_subquery_expr`, the plan of the
+    DataFrame (`DataFrame._plan`), and its grouped data, cogrouped data and writers (`groupBy`,
+    `cogroup`, `write`, `writeTo`), of which PySpark pickles the plan before the session. Their
+    pickle raises PySpark's error of the lock of the model, or that of the session of a training
+    summary's `_summary_dataset` (of `pickle`) and of the lock (of cloudpickle), and
+    `copy.deepcopy` the TypeError of the lock; `copy.copy` copies them, sharing the model. Cogrouped
+    data pickle their two grouped data in their order, each of its DataFrame, of its plan and then
+    of its session: a plain DataFrame first fails at its session (the AttributeError of its local
+    function), at every protocol, before the model of the second, and a deep copy requests the
+    schemas of their DataFrames before the TypeError of the lock, as PySpark's.
+  - The pickle of a plan or an expression reaches the functions of its UDFs and the objects of
+    `pyspark.ml` that it keeps in PySpark's order of their plan objects: of a plan, its first input
+    (`_child`), then the plans of the subqueries of its expressions (`_references`), its other
+    inputs (the right side of a join), its expressions, of the functions of their UDFs, and last the
+    objects that it keeps; of a grouped map (`applyInPandas`, `applyInArrow`,
+    `applyInPandasWithState`), its grouping columns before its function, of a cogroup its other
+    side between them, and of a `transformWithState` its initial state and its grouping columns
+    after its function; of a Column, its expression in its order, the plan of a subquery where it
+    is. So a plain pickle fails at the lambda of a UDF that comes before the model
+    (`df.select(udf_of_a_lambda("x")).where(transformed.exists())`,
+    `(udf_of_a_lambda("x") > 0) & transformed.exists()`), and at the lock of the model where the
+    model comes first (`transformed.select(udf_of_a_lambda("x"))`), as PySpark's, and cloudpickle,
+    which pickles the lambda, at the lock.
   - The DataFrames of the models of PySpark's own `pyspark.ml` classes, which build PySpark's
     plans over the drop-in's DataFrames (`pyspark.ml.regression.LinearRegression`, where the
     drop-in's own classes are those of `pyspark.ml.connect`), are refused as PySpark's: a DataFrame
     of such a plan (`DataFrame(plan, session)`) reaches what PySpark's pickle of the plan reaches,
     of the models and the summaries that the plan keeps (`__source_transformer__`,
-    `__source_instance__`), its child first (the plan of a DataFrame of the drop-in). So a transform
+    `__source_instance__`), its child first (the plan of a DataFrame of the drop-in, of the
+    functions of its UDFs, at which a plain pickle fails first). So a transform
     of such a model, and a DataFrame of a method of it or of the summary of its `evaluate`, raise
     the error of the lock of the model, and a DataFrame of a method of its training summary the
     AttributeError of the session of the summary's `_summary_dataset` (of `pickle`) and the
@@ -1302,15 +1405,49 @@ modules stay PySpark's deprecated ones, unchanged. Each class has, where its PyS
     no training summary deletes the object of the original (`CONNECT_ML.CACHE_INVALID` at its next
     use), and that of a model with one, whose summary holds a reference too, survives one copy's
     collection and not two (of copies of the model or of its summary), where this client's
-    original keeps working.
+    original keeps working. A copy of a Python subclass of a reduce of its own, which copies as
+    PySpark's of the attributes of the object (see above), holds the `RemoteModelRef` of its
+    `_java_obj` as a model of it, and so releases it as PySpark's copy does.
 - **A model of no server-side object**: a model class constructs as PySpark's
   `JavaModel(java_model=None)` (`KMeansModel()`, `LDAModel()`), of PySpark's `JavaModel.__init__`,
   a model of a new uid of its class and of its params, none set, whose Params API, `copy` and
   `write()` work, and whose members of the server, `__repr__`, a transform and a save raise
   PySpark's bare `AssertionError`, as does the
   `params` walk of a model of `functools.cached_property` members (`trees`), and so its
-  `explainParams` and `copy`. Another `java_model` is the `AssertionError` of PySpark's over Spark
-  Connect, which takes its `RemoteModelRef` only.
+  `explainParams` and `copy`.
+- **A model of a `RemoteModelRef`**: a model class constructs of the `RemoteModelRef` of a
+  server-side object as PySpark's `JavaModel(java_model)` over Spark Connect
+  (`LinearSVCModel(RemoteModelRef(id))`): a model of a new uid of its class and of its params,
+  none set, whose `_java_obj` is the reference, of no reference more, and whose members, `__repr__`,
+  transforms and saves read the object of its id in the ML cache, of no training summary: of the
+  session that is active when it is made, as the members of this client's models are of their
+  model's session (see the native ML section below), where PySpark's `_call_java` reads the active
+  session of each call. Of a model made on a thread of no active session, they read the session of
+  each call, as PySpark's: a member and a save of the active session, which raise PySpark's bare
+  `AssertionError` of none, and a transform of the dataset's.
+  So does a model whose `_java_obj` is assigned a `RemoteModelRef`, as of the
+  `super().__init__(java_model)` of a Python subclass of an `__init__` of its own, whose
+  `JavaWrapper.__init__` sets it, and also a model of another server-side object (of a fit, of
+  another reference), which gives its object up, as PySpark's model is of its `_java_obj`: it no
+  longer releases the reference before, nor deletes the object of its fit, which stays in the ML
+  cache until the session ends, as PySpark's `__del__` releases a reference of its `_java_obj`
+  only. A model whose `_java_obj` is assigned None (or another value) is of no object (see "A model
+  of no server-side object" below), and one whose `_java_obj` is deleted raises PySpark's
+  `AttributeError` of the attribute at a read of it, of its members and in its `__del__`, of no
+  release. The model keeps its object in the ML cache as PySpark's: the `__del__` of the model
+  releases a reference of the `RemoteModelRef` (`release_ref`) at each call, when it is collected
+  and at an explicit call, as PySpark's, of the model alone, and else the last of its transforms,
+  which keep the object as PySpark's transforms keep their model (`__source_transformer__`),
+  releases one when it is gone, if no `__del__` did (an explicit `__del__` of a model whose
+  transform lives releases none, where PySpark's releases one at each call); the release deletes
+  the object at the last reference, through the active session. An error of the release
+  (an `AssertionError` of a reference released too often) is unraisable in the `__del__` of the
+  model's class (`JavaWrapper.__del__`), as PySpark's. A model of a reference in a reference cycle
+  (`ref.owner = model`) is collected, and its `__del__` releases the reference, as PySpark's.
+  `Params.copy` adds a reference (`add_ref`), which the copy releases, and `copy.copy` adds none and
+  releases one too, as PySpark's copies do, so the collection of a shallow copy of a model of a
+  reference of one deletes the object of the original. Another `java_model` raises PySpark's bare
+  `AssertionError` (of its `assert isinstance(java_model, RemoteModelRef)`).
 
 `tests/golden/ml_api.json` holds the API of every public class of `pyspark.ml`, and
 `python/tests/test_ml_api_offline.py` compares each native class with it: the members, the kinds of
@@ -1427,7 +1564,9 @@ longer supported. The cached model stays available while the model, a clone of
 it, or a DataFrame that it transformed is alive, including when such a DataFrame is
 executed later. When the last of them is dropped, the cached model is deleted on the
 server, as `pyspark.ml` does, without waiting for the server; a fit that is dropped
-at once leaves nothing cached.
+at once leaves nothing cached. A Python model of a `RemoteModelRef` that a program gives its
+constructor releases a reference of the `RemoteModelRef` instead, as PySpark's model does, which
+deletes the object at the last (see "A model of a `RemoteModelRef`" above).
 
 The Rust `transform` of a fitted model rejects a DataFrame of another session. In
 Python, as with PySpark, it returns a DataFrame whose analysis or execution fails
@@ -3573,25 +3712,33 @@ that hold their DataFrame report it too, so a cycle through the DataFrame alone,
 Observation of the plan, and the stream writer of `df.writeStream`, hold the plan of `df` and not
 `df`, as PySpark's hold its plan object, so `df` is freed at its last reference, its attributes with
 it, and a DataFrame that keeps its stream writer too. A `SharedPart` reports nothing while a
-reference to its part is of a holder that the collector does not see, such as the dataset that a
-native model of `pyspark.ml.connect` keeps for its summary: so the collector frees no object that
-such a holder reaches, and a cycle through it is collected once the holder is gone. A cycle through
-the holder itself never is: the native classes of `pyspark.ml.connect`, but for its reader and
-writer, report none of the Python objects that they hold, so a model in a cycle with its summary
-(`model.summary.model = model`) or with a function of a UDF of its summary's dataset is never freed,
-nor its object in the server's ML cache, where PySpark's model is (see
-`dev/parity/known-differences.md`). Nor does a `SharedPart` report anything while a call of the
-binding that may clone or drop its part runs without the GIL, on any thread: a call that builds a
-request of the plans of the objects that it is given, such as an action of a DataFrame, a write, a
-stream's start or a fit of `pyspark.ml.connect`, clones and drops the parts of those plans, of what
-the call keeps alive anyway; the other calls, such as the waits of streaming queries, the calls of
-the configuration, the catalog and the session, and the messages that the Python client builds,
-whose DataFrames the binding replaces in them before the call, clone none. So the collector gets the
-same references of each object in each of its passes, and a cycle through parts that no call clones
-is collected whenever the collector runs, as PySpark's is, except while a listener of the Rust API
-of the session gets an event, which may clone any part. On a free-threaded build of CPython, the
-parts have no `SharedPart`, and a cycle through them is not collected (see "Garbage collection" in
-`dev/parity/known-differences.md`).
+reference to its part is of a holder that the collector does not see, such as the DataFrames that a
+native model of `pyspark.ml.connect` keeps of its fit: the summary dataset of its training summary,
+which the summary keeps too, and the training dataset and the datasets of the classes of a
+OneVsRestModel. So the collector frees no object that such a holder reaches, and a cycle through one
+is collected once the holder is gone. A cycle through the holder and what it keeps never is: a
+function of a UDF of the training DataFrame of a model that keeps the model, or a Python plan of
+that DataFrame that keeps it, keeps the model alive, and its object in the server's ML cache, where
+PySpark collects them (see `dev/parity/known-differences.md`). The objects of the native ML classes
+report the other Python objects that they hold, as PySpark's hold them as attributes: a model its
+training summary, its cached members (`trees`), its own defaults and its `RemoteModelRef`, of which
+a copy holds a reference of its own, and the one that it was made of while no transform, writer or
+call holds its object; an estimator, a transformer, a Pipeline, a PipelineModel, a OneVsRest and its
+model, and a validator and its model the values of their params and their attributes (stages,
+classifier, models, best model, metrics); a `fitMultiple` iterator its estimator, dataset and param
+maps. So a model and its summary in a cycle (`model.summary.model = model`) are collected, fit after
+fit, and the model's object is deleted from the ML cache of the server, as PySpark's. Nor does a
+`SharedPart` report anything while a call of the binding that may clone or drop its part runs
+without the GIL, on any thread: a call that builds a request of the plans of the objects that it is
+given, such as an action of a DataFrame, a write, a stream's start or a fit of `pyspark.ml.connect`,
+clones and drops the parts of those plans, of what the call keeps alive anyway; the other calls,
+such as the waits of streaming queries, the calls of the configuration, the catalog and the session,
+and the messages that the Python client builds, whose DataFrames the binding replaces in them before
+the call, clone none. So the collector gets the same references of each object in each of its
+passes, and a cycle through parts that no call clones is collected whenever the collector runs, as
+PySpark's is, except while a listener of the Rust API of the session gets an event, which may clone
+any part. On a free-threaded build of CPython, the parts have no `SharedPart`, and a cycle through
+them is not collected (see "Garbage collection" in `dev/parity/known-differences.md`).
 An `ArrayType`, a `MapType`, a
 `StructField` and a `StructType` report the type objects, the flags and the metadata dict that they
 hold, and the lists of a struct, as PySpark's `__dict__` holds them, so a cycle through a type that
