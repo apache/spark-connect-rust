@@ -158,6 +158,18 @@ impl Drop for AbortScope {
     }
 }
 
+/// The identity of the watch of the waits of the calling thread (see [`with_wait_watch`]), if any:
+/// of the innermost call that set it, which a call that runs during it, as of a handler of a log
+/// of the client, replaces until it ends.
+pub(crate) fn wait_watch_id() -> Option<usize> {
+    WAIT_WATCH.with(|watch| {
+        watch
+            .borrow()
+            .as_ref()
+            .map(|watch| Arc::as_ptr(watch) as *const () as usize)
+    })
+}
+
 /// Whether the calling thread runs a wait that a watch polls, whose signals end the parts of it
 /// that [`until_abort`] covers. Not a stable API.
 #[doc(hidden)]

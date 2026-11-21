@@ -217,10 +217,11 @@ pub(crate) struct ExecutionStream {
 
 impl ExecutionStream {
     pub(crate) fn new(stream: ReattachableResponseStream, progress: ProgressTracker) -> Self {
+        let chunks = crate::arrow_chunks::ArrowChunkAssembler::logging(stream.logs_responses());
         ExecutionStream {
             stream,
             progress,
-            chunks: Default::default(),
+            chunks,
         }
     }
 
@@ -289,7 +290,14 @@ impl ExecutionStream {
                 Ok(None)
             }
             Ok(Some(response)) => Ok(Some(response)),
-            Err(error) => Err(self.progress.finish_after(error)),
+            // As PySpark's `_handle_error`, which stamps the operation ID of the execution on the
+            // error of the handling of a response, as of its record of an assembled batch.
+            Err(mut error) => {
+                if error.operation_id.is_none() {
+                    error.operation_id = self.progress.operation_id.clone();
+                }
+                Err(self.progress.finish_after(error))
+            }
         }
     }
 }

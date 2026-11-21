@@ -8,6 +8,7 @@ pub mod artifact;
 pub mod bytes_codec;
 pub mod channel;
 pub mod client;
+pub mod client_log;
 mod connector;
 pub mod error;
 #[doc(hidden)]

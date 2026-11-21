@@ -1348,9 +1348,9 @@ class SparkConnectClient:
         Return schema for given plan.
         """
         # The schema of ``plan``, a ``spark.connect.Plan``, as SparkConnectClient's ``schema``:
-        # of its analysis by the server.
+        # of its analysis by the server, of the plan as it is given, which it logs first.
         if logger.isEnabledFor(logging.DEBUG):
-            logger.debug(f"Schema for plan: {self._proto_to_string(plan, True)}")
+            self._log_plan("Schema for plan: ", plan)
         schema = self._analyze(method="schema", plan=plan).schema
         assert schema is not None
         # Server side should populate the struct field which is the schema.
@@ -1363,16 +1363,73 @@ class SparkConnectClient:
         """
         # The explain string of ``plan`` in ``explain_mode``, as SparkConnectClient's
         # ``explain_string``: ``VALUE_NOT_ALLOWED`` for a mode other than ``simple``,
-        # ``extended``, ``codegen``, ``cost`` and ``formatted``.
+        # ``extended``, ``codegen``, ``cost`` and ``formatted``, once it logged the plan, of the
+        # mode as it is given.
         if logger.isEnabledFor(logging.DEBUG):
-            logger.debug(
-                f"Explain (mode={explain_mode}) for plan {self._proto_to_string(plan, True)}"
-            )
+            self._log_plan(f"Explain (mode={explain_mode}) for plan ", plan)
         result = self._analyze(
             method="explain", plan=plan, explain_mode=explain_mode
         ).explain_string
         assert result is not None
         return result
+
+    def _log_plan(self, prefix: str, plan: "pb2.Plan") -> None:
+        # Log ``prefix`` and the text of ``plan``, a ``spark.connect.Plan`` that the client is
+        # given, truncated, as PySpark's client logs it, of the relations of its placeholders, as
+        # the transport sends them: of a caller that checked that the logger writes it.
+        self._session._log_plan(prefix, _plan_of(plan).SerializeToString())
+
+    def _set_relation_in_plan(self, plan: "pb2.Plan", relation: "pb2.Relation") -> None:
+        """Sets the relation in the plan, attempting compression if configured."""
+        import pyspark.sql.connect.proto as pb2
+
+        self._try_compress_and_set_plan(
+            plan=plan,
+            message=relation,
+            op_type=pb2.Plan.CompressedOperation.OpType.OP_TYPE_RELATION,
+        )
+
+    def _set_command_in_plan(self, plan: "pb2.Plan", command: "pb2.Command") -> None:
+        """Sets the command in the plan, attempting compression if configured."""
+        import pyspark.sql.connect.proto as pb2
+
+        self._try_compress_and_set_plan(
+            plan=plan,
+            message=command,
+            op_type=pb2.Plan.CompressedOperation.OpType.OP_TYPE_COMMAND,
+        )
+
+    def _try_compress_and_set_plan(self, plan: "pb2.Plan", message: Any, op_type: int) -> None:
+        """
+        Tries to compress a protobuf message and sets it on the plan.
+        If compression is not enabled, not effective, or not available,
+        it falls back to the original message.
+        """
+        # As SparkConnectClient's, of the plan compression of the transport: its settings, which
+        # the first plan of the session looks up, and the compression of the message, of the
+        # relations of its placeholders, with what PySpark's logs of them. A message that it does
+        # not compress is set as it is, of its placeholders, which the transport sends.
+        import pyspark.sql.connect.proto as pb2
+
+        relation = op_type == pb2.Plan.CompressedOperation.OpType.OP_TYPE_RELATION
+        data = message.SerializeToString()
+        # Of the settings that the session read, a message of no more bytes than the threshold,
+        # or of the compression disabled, is not compressed, and the transport is not called: the
+        # relation that a placeholder holds is of fewer bytes than the placeholder, but that of a
+        # placeholder of its DataFrame alone, which only the transport knows.
+        threshold = self._session._plan_compression_threshold()
+        if threshold is not None and (
+            threshold < 0 or (len(data) <= threshold and _MARKER_PLACEHOLDER not in data)
+        ):
+            compressed = None
+        else:
+            compressed = self._session._compressed_plan(_plan_of_bytes(1 if relation else 2, data))
+        if compressed is not None:
+            plan.compressed_operation.CopyFrom(pb2.Plan.FromString(compressed).compressed_operation)
+        elif relation:
+            plan.root.CopyFrom(message)
+        else:
+            plan.command.CopyFrom(message)
 
     def same_semantics(self, plan: "pb2.Plan", other: "pb2.Plan") -> bool:
         """
@@ -1394,15 +1451,18 @@ class SparkConnectClient:
         assert result is not None
         return result
 
-    def _execute_plan(self, plan: "pb2.Plan", observations: Any, reported: bool) -> Any:
+    def _execute_plan(
+        self, plan: "pb2.Plan", observations: Any, reported: bool, log: Optional[str] = None
+    ) -> Any:
         """Start the execution of ``plan``, a ``spark.connect.Plan`` that the client sends as it
         is, as SparkConnectClient's request of a copy of it: its responses, whose observed metrics
         set the Observations of ``observations``, a dict, by their names, and whose progress
         reaches the progress handlers when ``reported``. Of an ``observations`` that is not a
         dict, such as None or an empty list, none is set: PySpark's client reads it only when
-        observed metrics arrive (see ``_results``)."""
+        observed metrics arrive (see ``_results``). The transport logs what the method of PySpark's
+        client of the name ``log`` logs of the execution, of its plan as it is sent."""
         items = list(observations.items()) if isinstance(observations, Mapping) else []
-        return self._session._execute_plan(plan.SerializeToString(), items, reported)
+        return self._session._execute_plan(plan.SerializeToString(), items, reported, log)
 
     def _results(self, responses: Any, observations: Any) -> Iterator[Any]:
         """The results of ``responses``, as SparkConnectClient's
@@ -1479,7 +1539,11 @@ class SparkConnectClient:
             responses.close()
 
     def _execute_and_fetch(
-        self, plan: "pb2.Plan", observations: Any, self_destruct: bool = False
+        self,
+        plan: "pb2.Plan",
+        observations: Any,
+        self_destruct: bool = False,
+        log: Optional[str] = None,
     ) -> tuple[Any, Optional[StructType], list[Any], list[Any], dict[str, Any], str]:
         """The results of the execution of ``plan``, as SparkConnectClient's
         ``_execute_and_fetch``: the table of its record batches, or None without any, its schema,
@@ -1492,7 +1556,7 @@ class SparkConnectClient:
         schema: Optional[StructType] = None
         properties: dict[str, Any] = {}
 
-        responses = self._execute_plan(plan, observations, True)
+        responses = self._execute_plan(plan, observations, True, log)
         for response in self._results(responses, observations):
             if isinstance(response, StructType):
                 schema = response
@@ -1551,10 +1615,10 @@ class SparkConnectClient:
         # names, and starts with the first item.
         import pyarrow as pa
 
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug(f"Executing plan {self._proto_to_string(plan, True)}")
+        # The transport logs the plan as it sends it, as it is (`Executing plan ...`).
         sent = _plan_of(plan)
-        for response in self._results(self._execute_plan(sent, observations, True), observations):
+        responses = self._execute_plan(sent, observations, True, "to_table_as_iterator")
+        for response in self._results(responses, observations):
             if isinstance(response, StructType):
                 yield response
             elif isinstance(response, pa.RecordBatch):
@@ -1569,11 +1633,10 @@ class SparkConnectClient:
         # The result of ``plan`` as a PyArrow Table, as SparkConnectClient's ``to_table``: the
         # table of the record batches of the server, the schema that it sent, or None, and the
         # ``ExecutionInfo`` of the execution, which sets the Observations of ``observations``.
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug(f"Executing plan {self._proto_to_string(plan, True)}")
+        # The transport logs the plan as it sends it, as it is (`Executing plan ...`).
         sent = _plan_of(plan)
         table, schema, metrics, observed_metrics, _, operation_id = self._execute_and_fetch(
-            sent, observations
+            sent, observations, log="to_table"
         )
         # Create a query execution object.
         ei = ExecutionInfo(metrics, observed_metrics, operation_id)
@@ -1590,9 +1653,10 @@ class SparkConnectClient:
         # each column converted by its Spark type, in the session time zone, of the
         # ``spark.sql.execution.pandas.structHandlingMode``, or of a ``pandasStructHandlingMode``
         # keyword argument, and the ``ExecutionInfo`` of the execution.
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug(f"Executing plan {self._proto_to_string(plan, True)}")
+        # The plan, sent as it is, which is logged before the settings are read.
         sent = _plan_of(plan)
+        if logger.isEnabledFor(logging.DEBUG):
+            self._log_plan("Executing plan ", sent)
 
         # Get all related configs in a batch
         (
@@ -1610,7 +1674,7 @@ class SparkConnectClient:
             structHandlingMode = str(kwargs["pandasStructHandlingMode"])
 
         table, schema, metrics, observed_metrics, _, operation_id = self._execute_and_fetch(
-            sent, observations, selfDestruct == "true"
+            sent, observations, selfDestruct == "true", log="fetch"
         )
         assert table is not None
         ei = ExecutionInfo(metrics, observed_metrics, operation_id)
@@ -1637,10 +1701,10 @@ class SparkConnectClient:
         # as SparkConnectClient converts them (the resources of a GetResourcesCommand, the
         # profile ID of a resource profile, and the DataFrame of a checkpoint), and the
         # ``ExecutionInfo`` of the execution, which sets the Observations of ``observations``.
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug(f"Execute command for command {self._proto_to_string(command, True)}")
+        # The transport logs the command as it builds its request (`Execute command for
+        # command ...`).
         data, _, metrics, observed_metrics, properties, operation_id = self._execute_and_fetch(
-            _plan_of_command(command), observations or {}
+            _plan_of_command(command), observations or {}, log="execute_command"
         )
         # Create a query execution object.
         ei = ExecutionInfo(metrics, observed_metrics, operation_id)
@@ -1659,13 +1723,12 @@ class SparkConnectClient:
         # each response as it arrives, as SparkConnectClient's ``execute_command_as_iterator``:
         # ``UNKNOWN_RESPONSE`` for a result that is not one, such as metrics or a record batch. Its
         # progress does not reach the progress handlers, as PySpark's does not.
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug(
-                f"Execute command as iterator for command {self._proto_to_string(command, True)}"
-            )
+        # The transport logs the command as it builds its request (`Execute command as iterator
+        # for command ...`).
         plan = _plan_of_command(command)
         observations = observations or {}
-        for response in self._results(self._execute_plan(plan, observations, False), observations):
+        responses = self._execute_plan(plan, observations, False, "execute_command_as_iterator")
+        for response in self._results(responses, observations):
             if isinstance(response, dict):
                 yield response
             else:
@@ -1792,6 +1855,155 @@ class SparkConnectClient:
         # As PySpark's request of an interrupt of an operation, which asserts that there is one.
         assert op_id is not None
         return self._session.interruptOperation(op_id)
+
+    @classmethod
+    def _retrieve_stack_frames(cls) -> list[Any]:
+        """
+        Return a list of CallSites representing the relevant stack frames in the callstack.
+        """
+        # As SparkConnectClient's: from the outermost frame to the first frame of the pyspark
+        # package, each of the function of the frame after it.
+        import traceback
+
+        from pyspark.traceback_utils import CallSite
+
+        frames = traceback.extract_stack()
+
+        filtered_stack_frames = []
+        for i, frame in enumerate(frames):
+            filename, lineno, func, _ = frame
+            if _is_pyspark_source(filename):
+                # Do not include PySpark internal frames as they are not user application code
+                break
+            if i + 1 < len(frames):
+                _, _, func, _ = frames[i + 1]
+            filtered_stack_frames.append(CallSite(function=func, file=filename, linenum=lineno))
+
+        return filtered_stack_frames
+
+    @classmethod
+    def _build_call_stack_trace(cls) -> Optional[Any]:
+        """
+        Build a call stack trace for the current Spark Connect action
+        Returns
+        -------
+        FetchErrorDetailsResponse.Error: An Error object containing list of stack frames
+        of the user code packed as Any protobuf
+        """
+        # As SparkConnectClient's, when SPARK_CONNECT_DEBUG_CLIENT_CALL_STACK is set, which its
+        # requests carry. The requests of the Rust transport carry the call stack of their call,
+        # which it reads as the call starts (see `_call_stack_of_call`).
+        import pyspark.sql.connect.proto as pb2
+
+        if os.getenv("SPARK_CONNECT_DEBUG_CLIENT_CALL_STACK", "false").lower() in ("true", "1"):
+            stack_frames = cls._retrieve_stack_frames()
+            call_stack = pb2.FetchErrorDetailsResponse.Error()
+            for call_site in stack_frames:
+                stack_trace_element = pb2.FetchErrorDetailsResponse.StackTraceElement()
+                stack_trace_element.declaring_class = ""  # unknown information
+                stack_trace_element.method_name = call_site.function
+                stack_trace_element.file_name = call_site.file
+                stack_trace_element.line_number = call_site.linenum
+                call_stack.stack_trace.append(stack_trace_element)
+            if len(call_stack.stack_trace) > 0:
+                from pyspark.sql.connect.proto._rust import Any as AnyMessage
+
+                call_stack_details = AnyMessage()
+                call_stack_details.Pack(call_stack)
+                return call_stack_details
+        return None
+
+    def _update_request_with_user_context_extensions(self, req: Any) -> None:
+        # As SparkConnectClient's: the global user context extensions of the client, and those of
+        # the current thread, appended to the user context of ``req``.
+        with self.global_user_context_extensions_lock:
+            for _, extension in self.global_user_context_extensions:
+                req.user_context.extensions.append(extension)
+        if not hasattr(self.thread_local, "user_context_extensions"):
+            return
+        for _, extension in self.thread_local.user_context_extensions:
+            req.user_context.extensions.append(extension)
+
+    def _execute_plan_request_with_metadata(
+        self, operation_id: Optional[str] = None
+    ) -> "pb2.ExecutePlanRequest":
+        # As SparkConnectClient's: an ExecutePlanRequest of the session ID, the user agent and the
+        # tags of the client, the server-side session ID that it observed, its user, its result
+        # chunking options, and ``operation_id``, else a new one (``INVALID_OPERATION_UUID_ID`` of
+        # one that is not a UUID), of its user context extensions and then of the call stack of
+        # the user's code. The transport builds the requests that it sends of its own.
+        import pyspark.sql.connect.proto as pb2
+
+        req = pb2.ExecutePlanRequest(
+            session_id=self._session_id,
+            client_type=self._builder.userAgent,
+            tags=list(self.get_tags()),
+        )
+        if self._server_session_id is not None:
+            req.client_observed_server_side_session_id = self._server_session_id
+        if self._user_id:
+            req.user_context.user_id = self._user_id
+        # Add request option to allow result chunking.
+        allow_arrow_batch_chunking, preferred_arrow_chunk_size = self._session._result_chunking()
+        chunking = pb2.ResultChunkingOptions(allow_arrow_batch_chunking=allow_arrow_batch_chunking)
+        if preferred_arrow_chunk_size is not None:
+            chunking.preferred_arrow_chunk_size = preferred_arrow_chunk_size
+        req.request_options.append(
+            pb2.ExecutePlanRequest.RequestOption(result_chunking_options=chunking)
+        )
+        if operation_id is None:
+            operation_id = str(uuid.uuid4())
+        else:
+            try:
+                uuid.UUID(operation_id, version=4)
+            except ValueError as ve:
+                # Of the ValueError as its context, as PySpark's raises it.
+                raise PySparkValueError(  # noqa: B904
+                    errorClass="INVALID_OPERATION_UUID_ID",
+                    messageParameters={"arg_name": "operation_id", "origin": str(ve)},
+                )
+        req.operation_id = operation_id
+        self._update_request_with_user_context_extensions(req)
+
+        if call_stack_trace := self.__class__._build_call_stack_trace():
+            req.user_context.extensions.append(call_stack_trace)
+        return req
+
+    def _analyze_plan_request_with_metadata(self) -> "pb2.AnalyzePlanRequest":
+        # As SparkConnectClient's: an AnalyzePlanRequest of the session ID of the client, the
+        # server-side session ID that it observed, its user agent and its user, of its user context
+        # extensions and then of the call stack of the user's code.
+        import pyspark.sql.connect.proto as pb2
+
+        req = pb2.AnalyzePlanRequest()
+        req.session_id = self._session_id
+        if self._server_session_id is not None:
+            req.client_observed_server_side_session_id = self._server_session_id
+        req.client_type = self._builder.userAgent
+        if self._user_id:
+            req.user_context.user_id = self._user_id
+        self._update_request_with_user_context_extensions(req)
+        if call_stack_trace := self.__class__._build_call_stack_trace():
+            req.user_context.extensions.append(call_stack_trace)
+        return req
+
+    def _config_request_with_metadata(self) -> "pb2.ConfigRequest":
+        # As SparkConnectClient's: a ConfigRequest of the session ID of the client, the
+        # server-side session ID that it observed, its user agent and its user, of its user context
+        # extensions and then of the call stack of the user's code.
+        import pyspark.sql.connect.proto as pb2
+
+        req = pb2.ConfigRequest()
+        req.session_id = self._session_id
+        if self._server_session_id is not None:
+            req.client_observed_server_side_session_id = self._server_session_id
+        req.client_type = self._builder.userAgent
+        if self._user_id:
+            req.user_context.user_id = self._user_id
+        self._update_request_with_user_context_extensions(req)
+        if call_stack_trace := self.__class__._build_call_stack_trace():
+            req.user_context.extensions.append(call_stack_trace)
+        return req
 
     def register_udf(
         self,
@@ -2149,6 +2361,7 @@ class SparkConnectClient:
         their names."""
         import pyspark.sql.connect.proto as pb2
 
+        logger.debug("Fetching the resources")
         command = pb2.Command()
         command.get_resources_command.SetInParent()
         _, properties, _ = self.execute_command(command)
@@ -2160,6 +2373,7 @@ class SparkConnectClient:
         pyspark.sql.connect.resource.profile creates its profile with it."""
         import pyspark.sql.connect.proto as pb2
 
+        logger.debug("Creating the ResourceProfile")
         command = pb2.Command()
         command.create_resource_profile_command.profile.CopyFrom(profile)
         _, properties, _ = self.execute_command(command)
@@ -2175,6 +2389,11 @@ class SparkConnectClient:
         try:
             if len(cache_ids) > 0:
                 if self._ml_cache_rpc_thread == threading.get_ident():
+                    logger.warning(
+                        "Skipping re-entrant ML cache delete of %s object ref(s) while another "
+                        "ML-cache RPC is in flight on this thread (avoids a re-entrant gRPC hang).",
+                        len(cache_ids),
+                    )
                     return []
                 command = pb2.Command()
                 command.ml_command.delete.obj_refs.extend(
@@ -2201,6 +2420,10 @@ class SparkConnectClient:
             import pyspark.sql.connect.proto as pb2
 
             if self._ml_cache_rpc_thread == threading.get_ident():
+                logger.warning(
+                    "Skipping re-entrant ML cache cleanup while another ML-cache RPC is in flight "
+                    "on this thread (avoids a re-entrant gRPC hang)."
+                )
                 return
             command = pb2.Command()
             command.ml_command.clean_cache.SetInParent()
@@ -2236,6 +2459,240 @@ class SparkConnectClient:
         )
         _, properties, _ = self.execute_command(command)
         return properties["ml_command_result"].param.long
+
+
+class _ProtoText:
+    # What SparkConnectClient._proto_to_string reads of its client: its _truncate.
+    _truncate = SparkConnectClient._truncate
+
+
+def _proto_text(type_name: str, data: bytes, truncate: bool) -> str:
+    """The text of the message of the full name ``type_name`` of the bytes ``data``, a message of
+    Spark Connect that the Rust transport builds or reads, of any depth, as
+    ``SparkConnectClient._proto_to_string`` writes it in a log of the client: on one line,
+    truncated when ``truncate``, as PySpark's client logs its plans, its requests and its
+    responses."""
+    import pyspark.sql.connect.proto as pb2
+
+    message = _pyspark._proto_parse_deep(getattr(pb2, type_name.rsplit(".", 1)[-1]), data)
+    return SparkConnectClient._proto_to_string(_ProtoText(), message, truncate)  # type: ignore
+
+
+def _call_stack_of_call(
+    innermost: Optional[str] = None, cached_property: Optional[str] = None
+) -> list[tuple[str, str, int]]:
+    """The call stack of the user's code of the call of the client that runs, of the frames of
+    the caller of the method of the extension that calls this, as PySpark's
+    ``SparkConnectClient._retrieve_stack_frames`` reads it: from the outermost frame to the first
+    frame of the pyspark package, the function, the file and the line of each, the function of the
+    frame that it calls, of the frame after it. The methods of the extension have no frames: the
+    innermost frame of the user's code that calls one has the name ``innermost``, as ``__del__`` of
+    a finalizer, else the name of the method or the attribute that the source of its expression
+    names (``collect`` of ``df.collect()``), as PySpark's has the name of the function of PySpark
+    that it calls, or else its own, as PySpark's last frame. Of the attribute ``cached_property``,
+    a ``functools.cached_property`` of PySpark's, it calls the ``__get__`` of ``functools``, whose
+    frame calls the function of the attribute, as PySpark's."""
+    import traceback
+
+    caller = sys._getframe(1)
+    frames = traceback.extract_stack(caller)
+    stack = []
+    for i, frame in enumerate(frames):
+        filename, lineno, func, _ = frame
+        if _is_pyspark_source(filename):
+            break
+        if i + 1 < len(frames):
+            _, _, func, _ = frames[i + 1]
+        elif cached_property is not None and _cached_property_frame() is not None:
+            func = "__get__"
+        else:
+            func = innermost or _called_name(caller) or func
+        stack.append((func, filename, lineno))
+    else:
+        getter = _cached_property_frame() if cached_property is not None else None
+        if stack and getter is not None:
+            stack.append((cached_property, *getter))
+    return stack
+
+
+_CACHED_PROPERTY_FRAME: list[Optional[tuple[str, int]]] = []
+
+
+def _cached_property_frame() -> Optional[tuple[str, int]]:
+    """The file and the line of the frame of the ``__get__`` of ``functools.cached_property`` as it
+    calls the function of the attribute, of this Python, as PySpark's frames of a
+    ``cached_property`` have them; None of a ``__get__`` that has no frame of Python."""
+    if not _CACHED_PROPERTY_FRAME:
+
+        class _Probe:
+            @functools.cached_property
+            def frame(self) -> Optional[tuple[str, int]]:
+                getter = sys._getframe(1)
+                if getter.f_code.co_name != "__get__":
+                    return None
+                return getter.f_code.co_filename, getter.f_lineno
+
+        _CACHED_PROPERTY_FRAME.append(_Probe().frame)
+    return _CACHED_PROPERTY_FRAME[0]
+
+
+# The names of `_called_name`, by the identity of the code and the instruction of a frame, with the
+# code, of a size of at most `_CALLED_NAMES_SIZE`: a call of a site reads its source once. Of the
+# `id` of the code, which hashes at once, where the hash of a code hashes its constants, of a
+# module of many lines too; the code that the entry keeps is compared by identity, so that an id
+# that another code takes again is not of its entry.
+_CALLED_NAMES: dict[tuple[int, int], tuple[Any, Optional[str]]] = {}
+_CALLED_NAMES_SIZE = 256
+
+
+def _called_name(frame: Any) -> Optional[str]:
+    """The name of the method or the attribute that ``frame`` calls or reads at its instruction,
+    of the source of the expression of the instruction: ``collect`` of ``df.collect()`` and
+    ``schema`` of ``df.schema``; None of a source that names none, as an alias, or of no source."""
+    try:
+        code = frame.f_code
+        key = (id(code), frame.f_lasti)
+    except AttributeError:
+        return None
+    entry = _CALLED_NAMES.get(key)
+    if entry is not None and entry[0] is code:
+        return entry[1]
+    called = _called_name_of(frame)
+    if len(_CALLED_NAMES) >= _CALLED_NAMES_SIZE:
+        _CALLED_NAMES.clear()
+    _CALLED_NAMES[key] = (code, called)
+    return called
+
+
+def _called_name_of(frame: Any) -> Optional[str]:
+    """`_called_name` of ``frame``, of its source."""
+    import ast
+    import linecache
+
+    try:
+        index = frame.f_lasti // 2
+        positions = _positions_of(frame.f_code)
+        lineno, end_lineno, col, end_col = positions[index]
+    except (AttributeError, IndexError, ValueError):
+        return None
+    if None in (lineno, end_lineno, col, end_col):
+        return None
+    source = linecache.getlines(frame.f_code.co_filename, frame.f_globals)
+    lines = source[lineno - 1 : end_lineno]
+    if len(lines) != end_lineno - lineno + 1:
+        return None
+    # Of the UTF-8 offsets of the columns of the positions, within one line or over several.
+    encoded = [line.encode("utf-8") for line in lines]
+    before = encoded[0][:col]
+    encoded[-1] = encoded[-1][:end_col]
+    encoded[0] = encoded[0][col:]
+    try:
+        node = ast.parse("(" + b"".join(encoded).decode("utf-8") + ")", mode="eval").body
+    except (SyntaxError, UnicodeDecodeError, ValueError):
+        return None
+    if isinstance(node, ast.Call):
+        node = node.func
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    if not isinstance(node, ast.Name):
+        return None
+    # Of an attribute of another line than its object, the positions start at its name, after the
+    # dot, of this line or of one before it, past the lines of comments only. The tokens are of the
+    # source from a line that starts outside any string (see `_token_line`), so that a string of
+    # several lines is read as one, of no indentation, which a start inside brackets would misread.
+    first = _token_line(frame.f_code, positions, index, source, lineno)
+    text = "".join(line.lstrip(" \t\f") for line in source[first - 1 : lineno - 1])
+    last = _last_token(text + before.decode("utf-8", "replace").lstrip(" \t\f"))
+    return node.id if last == "." else None
+
+
+# The positions of the instructions of the codes of at least `_POSITIONS_CACHED_FROM` of them, as
+# their `co_positions()` gives them, of at most `_POSITIONS_SIZE` codes: the calls of a module of
+# many lines read its positions once. By the identity of the code, with the code, as
+# `_CALLED_NAMES`.
+_POSITIONS: dict[int, tuple[Any, list[Any]]] = {}
+_POSITIONS_SIZE = 4
+_POSITIONS_CACHED_FROM = 1024
+
+
+def _positions_of(code: Any) -> list[Any]:
+    """The positions of the instructions of ``code``, by their index, of `_POSITIONS`."""
+    entry = _POSITIONS.get(id(code))
+    if entry is not None and entry[0] is code:
+        return entry[1]
+    positions = list(code.co_positions())
+    if len(positions) >= _POSITIONS_CACHED_FROM:
+        if len(_POSITIONS) >= _POSITIONS_SIZE:
+            _POSITIONS.clear()
+        _POSITIONS[id(code)] = (code, positions)
+    return positions
+
+
+def _token_line(
+    code: Any, positions: list[Any], index: int, source: list[str], lineno: int
+) -> int:
+    """The line of ``source``, the source of ``code``, from which `_called_name` tokenizes the
+    source before a position of the line ``lineno``, of the instruction ``index`` of ``code``,
+    whose instructions have the positions ``positions``: the last line before it, of an
+    instruction before it, whose first token is where that instruction starts, which no string
+    holds, after whitespace only, so that the line starts outside any string; else the first line
+    of ``code``, the start of a function or a class, else the first line of the file, as of a
+    lambda or a comprehension."""
+    indents: dict[int, int] = {}
+    for line, _, col, _ in reversed(positions[:index]):
+        if line is None or col is None or not 0 < line < lineno or line > len(source):
+            continue
+        if line not in indents:
+            text = source[line - 1].encode("utf-8")
+            indents[line] = len(text) - len(text.lstrip(b" \t\f"))
+        if col == indents[line]:
+            return line
+    first = code.co_firstlineno
+    if code.co_name.startswith("<") or not 0 < first <= lineno:
+        return 1
+    return first
+
+
+def _last_token(source: str) -> Optional[str]:
+    """The last token of ``source``, Python source from the start of a statement, that is neither
+    a comment nor a line break, or None of a source of none, as one of blank lines or comments."""
+    import io
+    import tokenize
+
+    last = None
+    try:
+        for token in tokenize.generate_tokens(io.StringIO(source).readline):
+            if token.type not in (
+                tokenize.COMMENT,
+                tokenize.NL,
+                tokenize.NEWLINE,
+                tokenize.INDENT,
+                tokenize.DEDENT,
+                tokenize.ENDMARKER,
+            ):
+                last = token.string
+    except (tokenize.TokenError, SyntaxError):
+        # Of a source that a statement goes on after, as one of an open bracket: its tokens so far.
+        pass
+    return last
+
+
+# The type URL of the placeholder of the relation of a DataFrame of the transport, of the value of
+# its marker alone, 8 bytes, which stands for the relation of the DataFrame, in the encoding of a
+# message that holds it: `google.protobuf.Any.type_url` (1) and `value` (2).
+_MARKER_PLACEHOLDER = b"type.googleapis.com/spark.connect.rust.DataFramePlaceholder\x12\x08"
+
+
+def _plan_of_bytes(field: int, data: bytes) -> bytes:
+    """The bytes of a ``spark.connect.Plan`` of the message of the bytes ``data`` in its field
+    ``field``: its relation (``root``, 1) or its command (``command``, 2)."""
+    header = bytearray([field << 3 | 2])
+    size = len(data)
+    while size > 0x7F:
+        header.append(size & 0x7F | 0x80)
+        size >>= 7
+    header.append(size)
+    return bytes(header) + data
 
 
 def _proto_str(value: Any) -> str:
@@ -2490,7 +2947,7 @@ def _in_copy_context(method: Any) -> Any:
                 finally:
                     _COPY_CALL.reset(token)
 
-        return generator
+        return _named_as(generator, method)
 
     @functools.wraps(method)
     def call(self: Any, *args: Any, **kwargs: Any) -> Any:
@@ -2504,7 +2961,18 @@ def _in_copy_context(method: Any) -> Any:
         finally:
             _COPY_CALL.reset(token)
 
-    return call
+    return _named_as(call, method)
+
+
+def _named_as(wrapper: Any, method: Any) -> Any:
+    # `wrapper` of the code names of `method`, as the frames of its calls, which tracebacks and the
+    # call stack of the requests show, are of PySpark's method itself.
+    code = method.__code__
+    names = {"co_name": code.co_name}
+    if hasattr(code, "co_qualname"):
+        names["co_qualname"] = code.co_qualname
+    wrapper.__code__ = wrapper.__code__.replace(**names)
+    return wrapper
 
 
 for _name, _member in list(vars(SparkConnectClient).items()):
@@ -2872,11 +3340,25 @@ def _log_rpc_error(
     grpcio, an exception of its class name and its text, of no frames of PySpark's client."""
     if not logger.isEnabledFor(logging.ERROR):
         return
-    try:
-        error = _grpc_error(streaming, code, details, debug_error_string, trailing_metadata, text)
-    except Exception:
-        error = (_MultiThreadedRendezvous if streaming else _InactiveRpcError)(text)
+    error = _rpc_error(streaming, code, details, debug_error_string, trailing_metadata, text)
     logger.error("GRPC Error received", exc_info=error)
+
+
+def _rpc_error(
+    streaming: bool,
+    code: int,
+    details: str,
+    debug_error_string: Optional[str],
+    trailing_metadata: list[tuple[str, bytes]],
+    text: str,
+) -> BaseException:
+    """grpcio's ``RpcError`` of a failed call of the Rust transport (see ``_grpc_error``), or,
+    without grpcio, an exception of its class name and its text, of no frames of PySpark's client:
+    the exception that PySpark's ``_handle_rpc_error`` handles of the call."""
+    try:
+        return _grpc_error(streaming, code, details, debug_error_string, trailing_metadata, text)
+    except Exception:
+        return (_MultiThreadedRendezvous if streaming else _InactiveRpcError)(text)
 
 
 def _log_rpc_deadlines(deadlines: Optional["RpcDeadlines"] = None, **seconds: Any) -> None:

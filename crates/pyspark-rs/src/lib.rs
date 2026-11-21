@@ -18,6 +18,7 @@ use pyo3::prelude::*;
 mod connect_docs_generated;
 mod catalog;
 mod client;
+mod client_log;
 mod column;
 mod conf;
 mod connect_bridge;
@@ -148,6 +149,7 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     spark_connect_core::client::set_bundled_ssl_roots_file(grpcio_roots_file(_py));
     client::warn_of_spent_retries();
     client::log_grpc_errors();
+    client_log::listen();
     // The requests of the finalizers of a session read the state of its client when they are
     // sent, as PySpark's finalizers build their requests when they run.
     spark_connect::session::set_finalizer_request_hook(

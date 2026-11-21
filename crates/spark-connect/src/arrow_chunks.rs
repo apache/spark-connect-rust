@@ -16,6 +16,22 @@ pub(crate) struct ArrowChunkAssembler {
     pending: Option<PendingBatch>,
     /// The rows of the batches of the execution so far, at which the next batch starts.
     num_records: i64,
+    /// Whether a whole batch is logged, as PySpark's `_execute_and_fetch_as_iterator` logs it
+    /// (`Assembling arrow batch ...`), of an execution whose responses are logged.
+    logged: bool,
+}
+
+/// Log that a whole batch of `size` bytes is assembled, of the chunks that the last chunk of it
+/// counts, `num_chunks_in_batch` (0 when it does not), as PySpark's
+/// `_execute_and_fetch_as_iterator` logs it before it reads the batch: the error of the record,
+/// which fails the execution.
+fn log_assembled(size: usize, num_chunks_in_batch: Option<i64>) -> Result<()> {
+    spark_connect_core::client_log::debug_blocking(|| {
+        format!(
+            "Assembling arrow batch of size {size} from {} chunks.",
+            num_chunks_in_batch.unwrap_or(0)
+        )
+    })
 }
 
 struct PendingBatch {
@@ -27,6 +43,14 @@ struct PendingBatch {
 }
 
 impl ArrowChunkAssembler {
+    /// An assembler of the batches of an execution, which logs each whole batch when `logged`.
+    pub(crate) fn logging(logged: bool) -> Self {
+        ArrowChunkAssembler {
+            logged,
+            ..Default::default()
+        }
+    }
+
     /// Take the Arrow batch of `response` as the chunks of a batch: the batch of the response is
     /// replaced by the whole batch once its last chunk is in, and removed while chunks are still
     /// missing. Responses without an Arrow batch are left as they are, as are their other fields.
@@ -64,6 +88,9 @@ impl ArrowChunkAssembler {
                     )));
                 }
                 if num_chunks == 1 {
+                    if self.logged {
+                        log_assembled(batch.data.len(), batch.num_chunks_in_batch)?;
+                    }
                     self.count_rows(&batch)?;
                     response.response_type = Some(
                         proto::execute_plan_response::ResponseType::ArrowBatch(batch),
@@ -109,6 +136,9 @@ impl ArrowChunkAssembler {
         if pending.received < pending.num_chunks {
             self.pending = Some(pending);
             return Ok(());
+        }
+        if self.logged {
+            log_assembled(pending.data.len(), batch.num_chunks_in_batch)?;
         }
         let batch = proto::execute_plan_response::ArrowBatch {
             row_count: pending.row_count,
@@ -480,6 +510,54 @@ mod tests {
         assembler.push(&mut last).unwrap();
         assert_eq!(&batch_of(&last).unwrap().data[..], &data[..]);
         assembler.push(&mut whole(0, Some(5), ipc(&[0]))).unwrap();
+    }
+
+    #[test]
+    fn a_whole_batch_is_logged_as_pyspark_logs_it_of_an_execution_whose_responses_are_logged() {
+        // As PySpark's `_execute_and_fetch_as_iterator`, which logs a batch once its last chunk is
+        // in, of its size and of the number of chunks that the last chunk counts, 0 of none.
+        use spark_connect_core::client_log::{self, Level, Listener, Message};
+        struct Recorder(std::sync::Mutex<Vec<String>>, std::thread::ThreadId);
+        impl Listener for Recorder {
+            fn enabled_for(&self, level: Level) -> bool {
+                level >= Level::Debug && std::thread::current().id() == self.1
+            }
+            fn log(&self, _: Level, message: Message) -> spark_connect_core::retries::Delivery {
+                if let Message::Text(text) = message {
+                    self.0.lock().unwrap().push(text);
+                }
+                None
+            }
+        }
+        let recorder = std::sync::Arc::new(Recorder(
+            std::sync::Mutex::new(Vec::new()),
+            std::thread::current().id(),
+        ));
+        client_log::set_listener(Some(recorder.clone()));
+        let mut logged = ArrowChunkAssembler::logging(true);
+        logged.push(&mut chunk(0, 2, 7, b"ab")).unwrap();
+        logged.push(&mut chunk(1, 2, 7, b"cde")).unwrap();
+        let mut whole = proto::ExecutePlanResponse {
+            response_type: Some(ResponseType::ArrowBatch(ArrowBatch {
+                row_count: 0,
+                data: b"whole".to_vec().into(),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        logged.push(&mut whole).unwrap();
+        // Of an execution whose responses are not logged, nothing.
+        ArrowChunkAssembler::default()
+            .push(&mut chunk(0, 1, 0, b"x"))
+            .unwrap();
+        client_log::set_listener(None);
+        assert_eq!(
+            *recorder.0.lock().unwrap(),
+            [
+                "Assembling arrow batch of size 5 from 2 chunks.",
+                "Assembling arrow batch of size 5 from 0 chunks.",
+            ]
+        );
     }
 
     #[test]

@@ -314,6 +314,7 @@ jobs:
             tests/test_statistics_offline.py \
             tests/test_exit_cleanup_offline.py \
             tests/test_create_dataframe_configs_offline.py \
+            tests/test_connect_logs_offline.py \
             tests/test_type_stubs_offline.py
           PYTHONPATH=$(pwd) python -m coverage json --rcfile=.coveragerc -o coverage-python.json
 
