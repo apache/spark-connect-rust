@@ -1,0 +1,2127 @@
+{
+ "cases": {
+  "call_stack": [
+   [],
+   "[('execute', [('call_stack', '_connect_log_cases.py', 801), ('collect', '_connect_log_cases.py', 304)]), ('execute', [('call_stack', '_connect_log_cases.py', 801), ('toPandas', '_connect_log_cases.py', 307)]), ('execute', None), ('analyze', [('call_stack', '_connect_log_cases.py', 801), ('schema', '_connect_log_cases.py', 306)]), ('config', [('call_stack', '_connect_log_cases.py', 801), ('collect', '_connect_log_cases.py', 304)]), ('config', [('call_stack', '_connect_log_cases.py', 801), ('get', '_connect_log_cases.py', 305)]), ('config', [('call_stack', '_connect_log_cases.py', 801), ('toPandas', '_connect_log_cases.py', 307)]), ('config', None)]"
+  ],
+  "call_stack_of_calls": [
+   [],
+   "[('execute', [('call_stack_of_calls', '_connect_log_cases.py', 801), ('to_table', '_connect_log_cases.py', 342)]), ('execute', [('call_stack_of_calls', '_connect_log_cases.py', 801), ('collect', '_connect_log_cases.py', 343)]), ('execute', [('call_stack_of_calls', '_connect_log_cases.py', 801), ('collect', '_connect_log_cases.py', 346)]), ('analyze', [('call_stack_of_calls', '_connect_log_cases.py', 801), ('__get__', '_connect_log_cases.py', 341), ('isStreaming', 'functools.py', None)]), ('config', [('call_stack_of_calls', '_connect_log_cases.py', 801), ('collect', '_connect_log_cases.py', 343)]), ('config', [('call_stack_of_calls', '_connect_log_cases.py', 801), ('collect', '_connect_log_cases.py', 343)]), ('config', [('call_stack_of_calls', '_connect_log_cases.py', 801), ('collect', '_connect_log_cases.py', 346)])]"
+  ],
+  "cannot_parse": [
+   [
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Plan compression threshold: 10485760, algorithm: ZSTD"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Executing plan <Truncated message due to truncation error>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetch"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Request: session_id: \"<uuid>\" user_context { user_id: \"connect-logs\" } plan { root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } } } client_type: \"<agent>\" request_options { result_chunking_options { allow_arrow_batch_chunking: true } } operation_id: \"<uuid>\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "ERROR",
+     "GRPC Error received <exc_info: _MultiThreadedRendezvous>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received ErrorInfo: reason: \"org.apache.spark.SparkArithmeticException\"\ndomain: \"org.apache.spark\"\nmetadata {\n  key: \"sqlState\"\n  value: \"22012\"\n}\nmetadata {\n  key: \"messageParameters\"\n  value: \"{}\"\n}\nmetadata {\n  key: \"errorClass\"\n  value: \"CONNECT_INVALID_PLAN.CANNOT_PARSE\"\n}\nmetadata {\n  key: \"classes\"\n  value: \"[\\\"org.apache.spark.SparkArithmeticException\\\"]\"\n}\n"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "INFO",
+     "Disabling plan compression for the session due to CONNECT_INVALID_PLAN.CANNOT_PARSE error."
+    ]
+   ],
+   "'UnknownException'"
+  ],
+  "client_api": [
+   [
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Plan compression threshold: 10485760, algorithm: ZSTD"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Executing plan <Truncated message due to truncation error>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetch"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Request: session_id: \"<uuid>\" user_context { user_id: \"connect-logs\" } plan { root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } } } client_type: \"<agent>\" request_options { result_chunking_options { allow_arrow_batch_chunking: true } } operation_id: \"<uuid>\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" schema { struct { fields { name: \"id\" data_type { long { } } } } } operation_id: \"<uuid>\" response_id: \"r1\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received the schema."
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" arrow_batch { row_count: 3 data: \"\\377\\377\\377\\377x\\000\\000\\000\\020\\000\\000\\000\\000\\000\\n\\000\\014\\000\\006\\000\\005\\000\\010\\000\\n\\000\\000\\000\\000\\001\\004\\000\\014\\000\\000\\000\\010\\000\\010\\000\\000\\000\\004\\000\\010\\000\\000\\000\\004\\000\\000\\000\\001\\000\\000\\000\\024\\000\\000\\000\\020\\000\\024\\000\\010\\000\\006\\000\\007\\000\\014\\000\\000\\000\\020\\000\\020\\000\\000\\000\\000\\000\\001\\002\\020\\000\\000\\000\\034\\000\\000\\000\\004\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000id\\000\\000\\010\\000\\014\\000\\010\\000\\007\\000\\010\\000\\000\\000\\000\\000\\000\\001@\\000\\000\\000\\377\\377\\377\\377\\210\\000\\000\\000\\024\\000\\000\\000\\000\\000\\000\\000\\014\\000\\026\\000\\006\\000\\005\\000\\010\\000\\014\\000\\014\\000\\000\\000\\000\\003\\004\\000\\030\\000\\000\\000\\030\\000\\000\\000\\000\\000\\000\\000\\000\\000\\n\\000\\030\\000\\014\\000\\004\\000\\010\\000\\n\\000\\000\\000<\\000\\000\\000\\020\\000\\000\\000\\003\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\030\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\001\\000\\000\\000\\003\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\001\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000\\000\\000\\000\\000\\377\\377\\377\\377\\000\\000\\000\\000\" } operation_id: \"<uuid>\" response_id: \"r2\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received arrow batch rows=3 Number of chunks in batch=0 Chunk index=0 size=304"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Assembling arrow batch of size 304 from 0 chunks."
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" operation_id: \"<uuid>\" response_id: \"r3\" result_complete { }"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Executing plan <Truncated message due to truncation error>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetch"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Request: session_id: \"<uuid>\" user_context { user_id: \"connect-logs\" } plan { root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } } } client_type: \"<agent>\" request_options { result_chunking_options { allow_arrow_batch_chunking: true } } operation_id: \"<uuid>\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" schema { struct { fields { name: \"id\" data_type { long { } } } } } operation_id: \"<uuid>\" response_id: \"r1\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received the schema."
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" arrow_batch { row_count: 3 data: \"\\377\\377\\377\\377x\\000\\000\\000\\020\\000\\000\\000\\000\\000\\n\\000\\014\\000\\006\\000\\005\\000\\010\\000\\n\\000\\000\\000\\000\\001\\004\\000\\014\\000\\000\\000\\010\\000\\010\\000\\000\\000\\004\\000\\010\\000\\000\\000\\004\\000\\000\\000\\001\\000\\000\\000\\024\\000\\000\\000\\020\\000\\024\\000\\010\\000\\006\\000\\007\\000\\014\\000\\000\\000\\020\\000\\020\\000\\000\\000\\000\\000\\001\\002\\020\\000\\000\\000\\034\\000\\000\\000\\004\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000id\\000\\000\\010\\000\\014\\000\\010\\000\\007\\000\\010\\000\\000\\000\\000\\000\\000\\001@\\000\\000\\000\\377\\377\\377\\377\\210\\000\\000\\000\\024\\000\\000\\000\\000\\000\\000\\000\\014\\000\\026\\000\\006\\000\\005\\000\\010\\000\\014\\000\\014\\000\\000\\000\\000\\003\\004\\000\\030\\000\\000\\000\\030\\000\\000\\000\\000\\000\\000\\000\\000\\000\\n\\000\\030\\000\\014\\000\\004\\000\\010\\000\\n\\000\\000\\000<\\000\\000\\000\\020\\000\\000\\000\\003\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\030\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\001\\000\\000\\000\\003\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\001\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000\\000\\000\\000\\000\\377\\377\\377\\377\\000\\000\\000\\000\" } operation_id: \"<uuid>\" response_id: \"r2\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received arrow batch rows=3 Number of chunks in batch=0 Chunk index=0 size=304"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Assembling arrow batch of size 304 from 0 chunks."
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" operation_id: \"<uuid>\" response_id: \"r3\" result_complete { }"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Executing plan <Truncated message due to truncation error>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Request: session_id: \"<uuid>\" user_context { user_id: \"connect-logs\" } plan { root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } } } client_type: \"<agent>\" request_options { result_chunking_options { allow_arrow_batch_chunking: true } } operation_id: \"<uuid>\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" schema { struct { fields { name: \"id\" data_type { long { } } } } } operation_id: \"<uuid>\" response_id: \"r1\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received the schema."
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" arrow_batch { row_count: 3 data: \"\\377\\377\\377\\377x\\000\\000\\000\\020\\000\\000\\000\\000\\000\\n\\000\\014\\000\\006\\000\\005\\000\\010\\000\\n\\000\\000\\000\\000\\001\\004\\000\\014\\000\\000\\000\\010\\000\\010\\000\\000\\000\\004\\000\\010\\000\\000\\000\\004\\000\\000\\000\\001\\000\\000\\000\\024\\000\\000\\000\\020\\000\\024\\000\\010\\000\\006\\000\\007\\000\\014\\000\\000\\000\\020\\000\\020\\000\\000\\000\\000\\000\\001\\002\\020\\000\\000\\000\\034\\000\\000\\000\\004\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000id\\000\\000\\010\\000\\014\\000\\010\\000\\007\\000\\010\\000\\000\\000\\000\\000\\000\\001@\\000\\000\\000\\377\\377\\377\\377\\210\\000\\000\\000\\024\\000\\000\\000\\000\\000\\000\\000\\014\\000\\026\\000\\006\\000\\005\\000\\010\\000\\014\\000\\014\\000\\000\\000\\000\\003\\004\\000\\030\\000\\000\\000\\030\\000\\000\\000\\000\\000\\000\\000\\000\\000\\n\\000\\030\\000\\014\\000\\004\\000\\010\\000\\n\\000\\000\\000<\\000\\000\\000\\020\\000\\000\\000\\003\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\030\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\001\\000\\000\\000\\003\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\001\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000\\000\\000\\000\\000\\377\\377\\377\\377\\000\\000\\000\\000\" } operation_id: \"<uuid>\" response_id: \"r2\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received arrow batch rows=3 Number of chunks in batch=0 Chunk index=0 size=304"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Assembling arrow batch of size 304 from 0 chunks."
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" operation_id: \"<uuid>\" response_id: \"r3\" result_complete { }"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Schema for plan: <Truncated message due to truncation error>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Explain (mode=simple) for plan <Truncated message due to truncation error>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Execute command for command <Truncated message due to truncation error>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetch"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Request: session_id: \"<uuid>\" user_context { user_id: \"connect-logs\" } plan { command { sql_command { input { sql { query: \"select 1 as a\" } } } } } client_type: \"<agent>\" request_options { result_chunking_options { allow_arrow_batch_chunking: true } } operation_id: \"<uuid>\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" sql_command_result { relation { sql { query: \"select 1 as a\" } } } operation_id: \"<uuid>\" response_id: \"r1\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received the SQL command result."
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" operation_id: \"<uuid>\" response_id: \"r2\" result_complete { }"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Execute command as iterator for command <Truncated message due to truncation error>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Request: session_id: \"<uuid>\" user_context { user_id: \"connect-logs\" } plan { command { sql_command { input { sql { query: \"select 1 as a\" } } } } } client_type: \"<agent>\" request_options { result_chunking_options { allow_arrow_batch_chunking: true } } operation_id: \"<uuid>\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" sql_command_result { relation { sql { query: \"select 1 as a\" } } } operation_id: \"<uuid>\" response_id: \"r1\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received the SQL command result."
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" operation_id: \"<uuid>\" response_id: \"r2\" result_complete { }"
+    ]
+   ],
+   "['sql_command_result']"
+  ],
+  "closed_client": [
+   [
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Plan compression threshold: 10485760, algorithm: ZSTD"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Executing plan <Truncated message due to truncation error>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetch"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Request: session_id: \"<uuid>\" user_context { user_id: \"connect-logs\" } plan { root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } } } client_type: \"<agent>\" request_options { result_chunking_options { allow_arrow_batch_chunking: true } } operation_id: \"<uuid>\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" schema { struct { fields { name: \"id\" data_type { long { } } } } } operation_id: \"<uuid>\" response_id: \"r1\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received the schema."
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" arrow_batch { row_count: 3 data: \"\\377\\377\\377\\377x\\000\\000\\000\\020\\000\\000\\000\\000\\000\\n\\000\\014\\000\\006\\000\\005\\000\\010\\000\\n\\000\\000\\000\\000\\001\\004\\000\\014\\000\\000\\000\\010\\000\\010\\000\\000\\000\\004\\000\\010\\000\\000\\000\\004\\000\\000\\000\\001\\000\\000\\000\\024\\000\\000\\000\\020\\000\\024\\000\\010\\000\\006\\000\\007\\000\\014\\000\\000\\000\\020\\000\\020\\000\\000\\000\\000\\000\\001\\002\\020\\000\\000\\000\\034\\000\\000\\000\\004\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000id\\000\\000\\010\\000\\014\\000\\010\\000\\007\\000\\010\\000\\000\\000\\000\\000\\000\\001@\\000\\000\\000\\377\\377\\377\\377\\210\\000\\000\\000\\024\\000\\000\\000\\000\\000\\000\\000\\014\\000\\026\\000\\006\\000\\005\\000\\010\\000\\014\\000\\014\\000\\000\\000\\000\\003\\004\\000\\030\\000\\000\\000\\030\\000\\000\\000\\000\\000\\000\\000\\000\\000\\n\\000\\030\\000\\014\\000\\004\\000\\010\\000\\n\\000\\000\\000<\\000\\000\\000\\020\\000\\000\\000\\003\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\030\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\001\\000\\000\\000\\003\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\001\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000\\000\\000\\000\\000\\377\\377\\377\\377\\000\\000\\000\\000\" } operation_id: \"<uuid>\" response_id: \"r2\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received arrow batch rows=3 Number of chunks in batch=0 Chunk index=0 size=304"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Assembling arrow batch of size 304 from 0 chunks."
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" operation_id: \"<uuid>\" response_id: \"r3\" result_complete { }"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Executing plan <Truncated message due to truncation error>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetch"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Request: session_id: \"<uuid>\" user_context { user_id: \"connect-logs\" } plan { root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } } } client_type: \"<agent>\" request_options { result_chunking_options { allow_arrow_batch_chunking: true } } operation_id: \"<uuid>\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Schema for plan: <Truncated message due to truncation error>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Execute command for command <Truncated message due to truncation error>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetch"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Request: session_id: \"<uuid>\" user_context { user_id: \"connect-logs\" } plan { command { sql_command { input { common { plan_id: <id> } sql { query: \"select 1 as a\" } } } } } client_type: \"<agent>\" request_options { result_chunking_options { allow_arrow_batch_chunking: true } } operation_id: \"<uuid>\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Executing plan <Truncated message due to truncation error>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetch"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Request: session_id: \"<uuid>\" user_context { user_id: \"connect-logs\" } plan { root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } } } client_type: \"<agent>\" request_options { result_chunking_options { allow_arrow_batch_chunking: true } } operation_id: \"<uuid>\""
+    ]
+   ],
+   "([('collect', 'SparkConnectException', 'NO_ACTIVE_SESSION', True), ('schema', 'SparkConnectException', 'NO_ACTIVE_SESSION', False), ('sql', 'SparkConnectException', 'NO_ACTIVE_SESSION', True), ('to_table', 'SparkConnectException', 'NO_ACTIVE_SESSION', True)], True)"
+  ],
+  "closed_client_before_its_first_plan": [
+   [
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "<unformatted: Plan compression is disabled because the server does not support it. % (SparkConnectException) of TypeError>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Executing plan <Truncated message due to truncation error>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetch"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Request: session_id: \"<uuid>\" user_context { user_id: \"connect-logs\" } plan { root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } } } client_type: \"<agent>\" request_options { result_chunking_options { allow_arrow_batch_chunking: true } } operation_id: \"<uuid>\""
+    ]
+   ],
+   "('SparkConnectException', 'NO_ACTIVE_SESSION')"
+  ],
+  "collect": [
+   [
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Plan compression threshold: 10485760, algorithm: ZSTD"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Executing plan <Truncated message due to truncation error>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetch"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Request: session_id: \"<uuid>\" user_context { user_id: \"connect-logs\" } plan { root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } } } client_type: \"<agent>\" request_options { result_chunking_options { allow_arrow_batch_chunking: true } } operation_id: \"<uuid>\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" schema { struct { fields { name: \"id\" data_type { long { } } } } } operation_id: \"<uuid>\" response_id: \"r1\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received the schema."
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" arrow_batch { row_count: 3 data: \"\\377\\377\\377\\377x\\000\\000\\000\\020\\000\\000\\000\\000\\000\\n\\000\\014\\000\\006\\000\\005\\000\\010\\000\\n\\000\\000\\000\\000\\001\\004\\000\\014\\000\\000\\000\\010\\000\\010\\000\\000\\000\\004\\000\\010\\000\\000\\000\\004\\000\\000\\000\\001\\000\\000\\000\\024\\000\\000\\000\\020\\000\\024\\000\\010\\000\\006\\000\\007\\000\\014\\000\\000\\000\\020\\000\\020\\000\\000\\000\\000\\000\\001\\002\\020\\000\\000\\000\\034\\000\\000\\000\\004\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000id\\000\\000\\010\\000\\014\\000\\010\\000\\007\\000\\010\\000\\000\\000\\000\\000\\000\\001@\\000\\000\\000\\377\\377\\377\\377\\210\\000\\000\\000\\024\\000\\000\\000\\000\\000\\000\\000\\014\\000\\026\\000\\006\\000\\005\\000\\010\\000\\014\\000\\014\\000\\000\\000\\000\\003\\004\\000\\030\\000\\000\\000\\030\\000\\000\\000\\000\\000\\000\\000\\000\\000\\n\\000\\030\\000\\014\\000\\004\\000\\010\\000\\n\\000\\000\\000<\\000\\000\\000\\020\\000\\000\\000\\003\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\030\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\001\\000\\000\\000\\003\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\001\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000\\000\\000\\000\\000\\377\\377\\377\\377\\000\\000\\000\\000\" } operation_id: \"<uuid>\" response_id: \"r2\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received arrow batch rows=3 Number of chunks in batch=0 Chunk index=0 size=304"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Assembling arrow batch of size 304 from 0 chunks."
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" metrics { metrics { name: \"Range\" plan_id: <id> parent: 7 execution_metrics { key: \"numOutputRows\" value { name: \"number of output rows\" value: 3 metric_type: \"sum\" } } } } observed_metrics { name: \"obs\" values { long: 3 } keys: \"n\" plan_id: <id> } operation_id: \"<uuid>\" response_id: \"r3\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received metric batch."
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received observed metric batch."
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" operation_id: \"<uuid>\" response_id: \"r4\" result_complete { }"
+    ]
+   ],
+   "[Row(id=0), Row(id=1), Row(id=2)]"
+  ],
+  "collect_again": [
+   [
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Plan compression threshold: 10485760, algorithm: ZSTD"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Executing plan <Truncated message due to truncation error>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetch"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Request: session_id: \"<uuid>\" user_context { user_id: \"connect-logs\" } plan { root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } } } client_type: \"<agent>\" request_options { result_chunking_options { allow_arrow_batch_chunking: true } } operation_id: \"<uuid>\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" schema { struct { fields { name: \"id\" data_type { long { } } } } } operation_id: \"<uuid>\" response_id: \"r1\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received the schema."
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" arrow_batch { row_count: 3 data: \"\\377\\377\\377\\377x\\000\\000\\000\\020\\000\\000\\000\\000\\000\\n\\000\\014\\000\\006\\000\\005\\000\\010\\000\\n\\000\\000\\000\\000\\001\\004\\000\\014\\000\\000\\000\\010\\000\\010\\000\\000\\000\\004\\000\\010\\000\\000\\000\\004\\000\\000\\000\\001\\000\\000\\000\\024\\000\\000\\000\\020\\000\\024\\000\\010\\000\\006\\000\\007\\000\\014\\000\\000\\000\\020\\000\\020\\000\\000\\000\\000\\000\\001\\002\\020\\000\\000\\000\\034\\000\\000\\000\\004\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000id\\000\\000\\010\\000\\014\\000\\010\\000\\007\\000\\010\\000\\000\\000\\000\\000\\000\\001@\\000\\000\\000\\377\\377\\377\\377\\210\\000\\000\\000\\024\\000\\000\\000\\000\\000\\000\\000\\014\\000\\026\\000\\006\\000\\005\\000\\010\\000\\014\\000\\014\\000\\000\\000\\000\\003\\004\\000\\030\\000\\000\\000\\030\\000\\000\\000\\000\\000\\000\\000\\000\\000\\n\\000\\030\\000\\014\\000\\004\\000\\010\\000\\n\\000\\000\\000<\\000\\000\\000\\020\\000\\000\\000\\003\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\030\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\001\\000\\000\\000\\003\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\001\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000\\000\\000\\000\\000\\377\\377\\377\\377\\000\\000\\000\\000\" } operation_id: \"<uuid>\" response_id: \"r2\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received arrow batch rows=3 Number of chunks in batch=0 Chunk index=0 size=304"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Assembling arrow batch of size 304 from 0 chunks."
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" operation_id: \"<uuid>\" response_id: \"r3\" result_complete { }"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Executing plan <Truncated message due to truncation error>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetch"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Request: session_id: \"<uuid>\" user_context { user_id: \"connect-logs\" } plan { root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } } } client_type: \"<agent>\" request_options { result_chunking_options { allow_arrow_batch_chunking: true } } operation_id: \"<uuid>\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" schema { struct { fields { name: \"id\" data_type { long { } } } } } operation_id: \"<uuid>\" response_id: \"r1\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received the schema."
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" arrow_batch { row_count: 3 data: \"\\377\\377\\377\\377x\\000\\000\\000\\020\\000\\000\\000\\000\\000\\n\\000\\014\\000\\006\\000\\005\\000\\010\\000\\n\\000\\000\\000\\000\\001\\004\\000\\014\\000\\000\\000\\010\\000\\010\\000\\000\\000\\004\\000\\010\\000\\000\\000\\004\\000\\000\\000\\001\\000\\000\\000\\024\\000\\000\\000\\020\\000\\024\\000\\010\\000\\006\\000\\007\\000\\014\\000\\000\\000\\020\\000\\020\\000\\000\\000\\000\\000\\001\\002\\020\\000\\000\\000\\034\\000\\000\\000\\004\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000id\\000\\000\\010\\000\\014\\000\\010\\000\\007\\000\\010\\000\\000\\000\\000\\000\\000\\001@\\000\\000\\000\\377\\377\\377\\377\\210\\000\\000\\000\\024\\000\\000\\000\\000\\000\\000\\000\\014\\000\\026\\000\\006\\000\\005\\000\\010\\000\\014\\000\\014\\000\\000\\000\\000\\003\\004\\000\\030\\000\\000\\000\\030\\000\\000\\000\\000\\000\\000\\000\\000\\000\\n\\000\\030\\000\\014\\000\\004\\000\\010\\000\\n\\000\\000\\000<\\000\\000\\000\\020\\000\\000\\000\\003\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\030\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\001\\000\\000\\000\\003\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\001\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000\\000\\000\\000\\000\\377\\377\\377\\377\\000\\000\\000\\000\" } operation_id: \"<uuid>\" response_id: \"r2\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received arrow batch rows=3 Number of chunks in batch=0 Chunk index=0 size=304"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Assembling arrow batch of size 304 from 0 chunks."
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" operation_id: \"<uuid>\" response_id: \"r3\" result_complete { }"
+    ]
+   ],
+   "('again', [Row(id=0), Row(id=1), Row(id=2)])"
+  ],
+  "collect_of_a_failed_lookup": [
+   [
+    [
+     "pyspark.sql.connect.logging",
+     "ERROR",
+     "GRPC Error received <exc_info: _InactiveRpcError>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "<unformatted: Plan compression is disabled because the server does not support it. % (SparkConnectGrpcException) of TypeError>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Executing plan <Truncated message due to truncation error>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetch"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Request: session_id: \"<uuid>\" user_context { user_id: \"connect-logs\" } plan { root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } } } client_type: \"<agent>\" request_options { result_chunking_options { allow_arrow_batch_chunking: true } } operation_id: \"<uuid>\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" schema { struct { fields { name: \"id\" data_type { long { } } } } } operation_id: \"<uuid>\" response_id: \"r1\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received the schema."
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" arrow_batch { row_count: 3 data: \"\\377\\377\\377\\377x\\000\\000\\000\\020\\000\\000\\000\\000\\000\\n\\000\\014\\000\\006\\000\\005\\000\\010\\000\\n\\000\\000\\000\\000\\001\\004\\000\\014\\000\\000\\000\\010\\000\\010\\000\\000\\000\\004\\000\\010\\000\\000\\000\\004\\000\\000\\000\\001\\000\\000\\000\\024\\000\\000\\000\\020\\000\\024\\000\\010\\000\\006\\000\\007\\000\\014\\000\\000\\000\\020\\000\\020\\000\\000\\000\\000\\000\\001\\002\\020\\000\\000\\000\\034\\000\\000\\000\\004\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000id\\000\\000\\010\\000\\014\\000\\010\\000\\007\\000\\010\\000\\000\\000\\000\\000\\000\\001@\\000\\000\\000\\377\\377\\377\\377\\210\\000\\000\\000\\024\\000\\000\\000\\000\\000\\000\\000\\014\\000\\026\\000\\006\\000\\005\\000\\010\\000\\014\\000\\014\\000\\000\\000\\000\\003\\004\\000\\030\\000\\000\\000\\030\\000\\000\\000\\000\\000\\000\\000\\000\\000\\n\\000\\030\\000\\014\\000\\004\\000\\010\\000\\n\\000\\000\\000<\\000\\000\\000\\020\\000\\000\\000\\003\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\030\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\001\\000\\000\\000\\003\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\001\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000\\000\\000\\000\\000\\377\\377\\377\\377\\000\\000\\000\\000\" } operation_id: \"<uuid>\" response_id: \"r2\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received arrow batch rows=3 Number of chunks in batch=0 Chunk index=0 size=304"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Assembling arrow batch of size 304 from 0 chunks."
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" operation_id: \"<uuid>\" response_id: \"r3\" result_complete { }"
+    ]
+   ],
+   "[Row(id=0), Row(id=1), Row(id=2)]"
+  ],
+  "collect_of_a_lookup_that_a_policy_fails": [
+   [
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "<unformatted: Plan compression is disabled because the server does not support it. % (KeyError) of TypeError>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Executing plan <Truncated message due to truncation error>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetch"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Request: session_id: \"<uuid>\" user_context { user_id: \"connect-logs\" } plan { root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } } } client_type: \"<agent>\" request_options { result_chunking_options { allow_arrow_batch_chunking: true } } operation_id: \"<uuid>\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" schema { struct { fields { name: \"id\" data_type { long { } } } } } operation_id: \"<uuid>\" response_id: \"r1\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received the schema."
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" arrow_batch { row_count: 3 data: \"\\377\\377\\377\\377x\\000\\000\\000\\020\\000\\000\\000\\000\\000\\n\\000\\014\\000\\006\\000\\005\\000\\010\\000\\n\\000\\000\\000\\000\\001\\004\\000\\014\\000\\000\\000\\010\\000\\010\\000\\000\\000\\004\\000\\010\\000\\000\\000\\004\\000\\000\\000\\001\\000\\000\\000\\024\\000\\000\\000\\020\\000\\024\\000\\010\\000\\006\\000\\007\\000\\014\\000\\000\\000\\020\\000\\020\\000\\000\\000\\000\\000\\001\\002\\020\\000\\000\\000\\034\\000\\000\\000\\004\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000id\\000\\000\\010\\000\\014\\000\\010\\000\\007\\000\\010\\000\\000\\000\\000\\000\\000\\001@\\000\\000\\000\\377\\377\\377\\377\\210\\000\\000\\000\\024\\000\\000\\000\\000\\000\\000\\000\\014\\000\\026\\000\\006\\000\\005\\000\\010\\000\\014\\000\\014\\000\\000\\000\\000\\003\\004\\000\\030\\000\\000\\000\\030\\000\\000\\000\\000\\000\\000\\000\\000\\000\\n\\000\\030\\000\\014\\000\\004\\000\\010\\000\\n\\000\\000\\000<\\000\\000\\000\\020\\000\\000\\000\\003\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\030\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\001\\000\\000\\000\\003\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\001\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000\\000\\000\\000\\000\\377\\377\\377\\377\\000\\000\\000\\000\" } operation_id: \"<uuid>\" response_id: \"r2\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received arrow batch rows=3 Number of chunks in batch=0 Chunk index=0 size=304"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Assembling arrow batch of size 304 from 0 chunks."
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" operation_id: \"<uuid>\" response_id: \"r3\" result_complete { }"
+    ]
+   ],
+   "[Row(id=0), Row(id=1), Row(id=2)]"
+  ],
+  "collect_of_chunks": [
+   [
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Plan compression threshold: 10485760, algorithm: ZSTD"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Executing plan <Truncated message due to truncation error>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetch"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Request: session_id: \"<uuid>\" user_context { user_id: \"connect-logs\" } plan { root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } } } client_type: \"<agent>\" request_options { result_chunking_options { allow_arrow_batch_chunking: true } } operation_id: \"<uuid>\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" schema { struct { fields { name: \"id\" data_type { long { } } } } } operation_id: \"<uuid>\" response_id: \"r1\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received the schema."
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" arrow_batch { row_count: 3 data: \"\\377\\377\\377\\377x\\000\\000\\000\\020\\000\\000\\000\\000\\000\\n\\000\\014\\000\\006\\000\\005\\000\\010\\000\\n\\000\\000\\000\\000\\001\\004\\000\\014\\000\\000\\000\\010\\000\\010\\000\\000\\000\\004\\000\\010\\000\\000\\000\\004\\000\\000\\000\\001\\000\\000\\000\\024\\000\\000\\000\\020\\000\\024\\000\\010\\000\\006\\000\\007\\000\\014\\000\\000\\000\\020\\000\\020\\000\\000\\000\\000\\000\\001\\002\\020\\000\\000\\000\\034\\000\\000\\000\\004\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000id\\000\\000\\010\\000\\014\\000\\010\\000\\007\\000\\010\\000\\000\\000\\000\\000\\000\\001@\\000\\000\\000\\377\\377\\377\\377\\210\\000\\000\\000\\024\\000\\000\\000\\000\\000\\000\\000\\014\\000\\026\\000\\006\\000\\005\\000\" start_offset: 0 chunk_index: 0 num_chunks_in_batch: 2 } operation_id: \"<uuid>\" response_id: \"r2\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received arrow batch rows=3 Number of chunks in batch=2 Chunk index=0 size=152"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" arrow_batch { row_count: 3 data: \"\\010\\000\\014\\000\\014\\000\\000\\000\\000\\003\\004\\000\\030\\000\\000\\000\\030\\000\\000\\000\\000\\000\\000\\000\\000\\000\\n\\000\\030\\000\\014\\000\\004\\000\\010\\000\\n\\000\\000\\000<\\000\\000\\000\\020\\000\\000\\000\\003\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\030\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\001\\000\\000\\000\\003\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\001\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000\\000\\000\\000\\000\\377\\377\\377\\377\\000\\000\\000\\000\" start_offset: 0 chunk_index: 1 num_chunks_in_batch: 2 } operation_id: \"<uuid>\" response_id: \"r3\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received arrow batch rows=3 Number of chunks in batch=2 Chunk index=1 size=152"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Assembling arrow batch of size 304 from 2 chunks."
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" operation_id: \"<uuid>\" response_id: \"r4\" result_complete { }"
+    ]
+   ],
+   "[Row(id=0), Row(id=1), Row(id=2)]"
+  ],
+  "compressed": [
+   [
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Execute command for command <Truncated message due to truncation error>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Plan compression threshold: 40, algorithm: ZSTD"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Plan compression: original_size=176, compressed_size=38, saving_ratio=0.78, duration_s=<t>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetch"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Request: session_id: \"<uuid>\" user_context { user_id: \"connect-logs\" } plan { compressed_operation { data: \"(\\265/\\375 \\260\\355\\000\\000\\260*\\255\\0012\\252\\001R\\247\\001\\n\\244\\001select 1 +\\001\\000.S\\256\\t\" op_type: OP_TYPE_COMMAND compression_codec: COMPRESSION_CODEC_ZSTD } } client_type: \"<agent>\" request_options { result_chunking_options { allow_arrow_batch_chunking: true } } operation_id: \"<uuid>\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" sql_command_result { relation { sql { query: \"select 1 as a\" } } } operation_id: \"<uuid>\" response_id: \"r1\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received the SQL command result."
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" operation_id: \"<uuid>\" response_id: \"r2\" result_complete { }"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Execute command for command <Truncated message due to truncation error>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Plan compression: original_size=47, compressed_size=56, saving_ratio=-0.19, duration_s=<t>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Plan compression not effective. Using original plan."
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetch"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Request: session_id: \"<uuid>\" user_context { user_id: \"connect-logs\" } plan { command { sql_command { input { sql { query: \"select \\'abcdefghijklmnopqrstuvwxyz0123\\'\" } } } } } client_type: \"<agent>\" request_options { result_chunking_options { allow_arrow_batch_chunking: true } } operation_id: \"<uuid>\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" sql_command_result { relation { sql { query: \"select 1 as a\" } } } operation_id: \"<uuid>\" response_id: \"r1\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received the SQL command result."
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" operation_id: \"<uuid>\" response_id: \"r2\" result_complete { }"
+    ]
+   ],
+   "'compressed'"
+  ],
+  "explain": [
+   [
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Plan compression threshold: 10485760, algorithm: ZSTD"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Explain (mode=formatted) for plan <Truncated message due to truncation error>"
+    ]
+   ],
+   "'explained'"
+  ],
+  "explain_not_allowed": [
+   [
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Plan compression threshold: 10485760, algorithm: ZSTD"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Explain (mode=FORMATTED) for plan <Truncated message due to truncation error>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Explain (mode=bogus) for plan <Truncated message due to truncation error>"
+    ]
+   ],
+   "['PySparkValueError', 'PySparkValueError']"
+  ],
+  "handler_interrupts": [
+   [
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Plan compression threshold: 10485760, algorithm: ZSTD"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Executing plan <Truncated message due to truncation error>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetch"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Request: session_id: \"<uuid>\" user_context { user_id: \"connect-logs\" } plan { root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } } } client_type: \"<agent>\" request_options { result_chunking_options { allow_arrow_batch_chunking: true } } operation_id: \"<uuid>\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" schema { struct { fields { name: \"id\" data_type { long { } } } } } operation_id: \"<uuid>\" response_id: \"r1\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received the schema."
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" arrow_batch { row_count: 3 data: \"\\377\\377\\377\\377x\\000\\000\\000\\020\\000\\000\\000\\000\\000\\n\\000\\014\\000\\006\\000\\005\\000\\010\\000\\n\\000\\000\\000\\000\\001\\004\\000\\014\\000\\000\\000\\010\\000\\010\\000\\000\\000\\004\\000\\010\\000\\000\\000\\004\\000\\000\\000\\001\\000\\000\\000\\024\\000\\000\\000\\020\\000\\024\\000\\010\\000\\006\\000\\007\\000\\014\\000\\000\\000\\020\\000\\020\\000\\000\\000\\000\\000\\001\\002\\020\\000\\000\\000\\034\\000\\000\\000\\004\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000id\\000\\000\\010\\000\\014\\000\\010\\000\\007\\000\\010\\000\\000\\000\\000\\000\\000\\001@\\000\\000\\000\\377\\377\\377\\377\\210\\000\\000\\000\\024\\000\\000\\000\\000\\000\\000\\000\\014\\000\\026\\000\\006\\000\\005\\000\\010\\000\\014\\000\\014\\000\\000\\000\\000\\003\\004\\000\\030\\000\\000\\000\\030\\000\\000\\000\\000\\000\\000\\000\\000\\000\\n\\000\\030\\000\\014\\000\\004\\000\\010\\000\\n\\000\\000\\000<\\000\\000\\000\\020\\000\\000\\000\\003\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\030\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\001\\000\\000\\000\\003\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\001\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000\\000\\000\\000\\000\\377\\377\\377\\377\\000\\000\\000\\000\" } operation_id: \"<uuid>\" response_id: \"r2\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received arrow batch rows=3 Number of chunks in batch=0 Chunk index=0 size=304"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Interrupt request received for operation=<uuid>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Executing plan <Truncated message due to truncation error>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Request: session_id: \"<uuid>\" user_context { user_id: \"connect-logs\" } plan { root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } } } client_type: \"<agent>\" request_options { result_chunking_options { allow_arrow_batch_chunking: true } } operation_id: \"<uuid>\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" schema { struct { fields { name: \"id\" data_type { long { } } } } } operation_id: \"<uuid>\" response_id: \"r1\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received the schema."
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" arrow_batch { row_count: 3 data: \"\\377\\377\\377\\377x\\000\\000\\000\\020\\000\\000\\000\\000\\000\\n\\000\\014\\000\\006\\000\\005\\000\\010\\000\\n\\000\\000\\000\\000\\001\\004\\000\\014\\000\\000\\000\\010\\000\\010\\000\\000\\000\\004\\000\\010\\000\\000\\000\\004\\000\\000\\000\\001\\000\\000\\000\\024\\000\\000\\000\\020\\000\\024\\000\\010\\000\\006\\000\\007\\000\\014\\000\\000\\000\\020\\000\\020\\000\\000\\000\\000\\000\\001\\002\\020\\000\\000\\000\\034\\000\\000\\000\\004\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000id\\000\\000\\010\\000\\014\\000\\010\\000\\007\\000\\010\\000\\000\\000\\000\\000\\000\\001@\\000\\000\\000\\377\\377\\377\\377\\210\\000\\000\\000\\024\\000\\000\\000\\000\\000\\000\\000\\014\\000\\026\\000\\006\\000\\005\\000\\010\\000\\014\\000\\014\\000\\000\\000\\000\\003\\004\\000\\030\\000\\000\\000\\030\\000\\000\\000\\000\\000\\000\\000\\000\\000\\n\\000\\030\\000\\014\\000\\004\\000\\010\\000\\n\\000\\000\\000<\\000\\000\\000\\020\\000\\000\\000\\003\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\030\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\001\\000\\000\\000\\003\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\001\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000\\000\\000\\000\\000\\377\\377\\377\\377\\000\\000\\000\\000\" } operation_id: \"<uuid>\" response_id: \"r2\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received arrow batch rows=3 Number of chunks in batch=0 Chunk index=0 size=304"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Interrupt request received for operation=<uuid>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Executing plan <Truncated message due to truncation error>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetch"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Request: session_id: \"<uuid>\" user_context { user_id: \"connect-logs\" } plan { root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } } } client_type: \"<agent>\" request_options { result_chunking_options { allow_arrow_batch_chunking: true } } operation_id: \"<uuid>\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "ERROR",
+     "GRPC Error received <exc_info: _MultiThreadedRendezvous>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Executing plan <Truncated message due to truncation error>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetch"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Request: session_id: \"<uuid>\" user_context { user_id: \"connect-logs\" } plan { root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } } } client_type: \"<agent>\" request_options { result_chunking_options { allow_arrow_batch_chunking: true } } operation_id: \"<uuid>\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "ERROR",
+     "GRPC Error received <exc_info: _MultiThreadedRendezvous>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received ErrorInfo: reason: \"org.apache.spark.SparkArithmeticException\"\ndomain: \"org.apache.spark\"\nmetadata {\n  key: \"sqlState\"\n  value: \"22012\"\n}\nmetadata {\n  key: \"messageParameters\"\n  value: \"{}\"\n}\nmetadata {\n  key: \"errorClass\"\n  value: \"DIVIDE_BY_ZERO\"\n}\nmetadata {\n  key: \"classes\"\n  value: \"[\\\"org.apache.spark.SparkArithmeticException\\\"]\"\n}\n"
+    ]
+   ],
+   "[('Received arrow batch', 'KeyboardInterrupt', 'raised at Received arrow batch', None, 1), ('Received arrow batch', 'KeyboardInterrupt', 'raised at Received arrow batch', None, 1), ('GRPC Error received', 'KeyboardInterrupt', 'raised at GRPC Error received', '_MultiThreadedRendezvous', 0), ('Received ErrorInfo', 'KeyboardInterrupt', 'raised at Received ErrorInfo', '_MultiThreadedRendezvous', 0)]"
+  ],
+  "handler_raises": [
+   [
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Plan compression threshold: 10485760, algorithm: ZSTD"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "<unformatted: Plan compression is disabled because the server does not support it. % (ValueError) of TypeError>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Executing plan <Truncated message due to truncation error>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetch"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Request: session_id: \"<uuid>\" user_context { user_id: \"connect-logs\" } plan { root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } } } client_type: \"<agent>\" request_options { result_chunking_options { allow_arrow_batch_chunking: true } } operation_id: \"<uuid>\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" schema { struct { fields { name: \"id\" data_type { long { } } } } } operation_id: \"<uuid>\" response_id: \"r1\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received the schema."
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" arrow_batch { row_count: 3 data: \"\\377\\377\\377\\377x\\000\\000\\000\\020\\000\\000\\000\\000\\000\\n\\000\\014\\000\\006\\000\\005\\000\\010\\000\\n\\000\\000\\000\\000\\001\\004\\000\\014\\000\\000\\000\\010\\000\\010\\000\\000\\000\\004\\000\\010\\000\\000\\000\\004\\000\\000\\000\\001\\000\\000\\000\\024\\000\\000\\000\\020\\000\\024\\000\\010\\000\\006\\000\\007\\000\\014\\000\\000\\000\\020\\000\\020\\000\\000\\000\\000\\000\\001\\002\\020\\000\\000\\000\\034\\000\\000\\000\\004\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000id\\000\\000\\010\\000\\014\\000\\010\\000\\007\\000\\010\\000\\000\\000\\000\\000\\000\\001@\\000\\000\\000\\377\\377\\377\\377\\210\\000\\000\\000\\024\\000\\000\\000\\000\\000\\000\\000\\014\\000\\026\\000\\006\\000\\005\\000\\010\\000\\014\\000\\014\\000\\000\\000\\000\\003\\004\\000\\030\\000\\000\\000\\030\\000\\000\\000\\000\\000\\000\\000\\000\\000\\n\\000\\030\\000\\014\\000\\004\\000\\010\\000\\n\\000\\000\\000<\\000\\000\\000\\020\\000\\000\\000\\003\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\030\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\001\\000\\000\\000\\003\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\001\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000\\000\\000\\000\\000\\377\\377\\377\\377\\000\\000\\000\\000\" } operation_id: \"<uuid>\" response_id: \"r2\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received arrow batch rows=3 Number of chunks in batch=0 Chunk index=0 size=304"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Assembling arrow batch of size 304 from 0 chunks."
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" operation_id: \"<uuid>\" response_id: \"r3\" result_complete { }"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Executing plan <Truncated message due to truncation error>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetch"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Executing plan <Truncated message due to truncation error>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetch"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Request: session_id: \"<uuid>\" user_context { user_id: \"connect-logs\" } plan { root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } } } client_type: \"<agent>\" request_options { result_chunking_options { allow_arrow_batch_chunking: true } } operation_id: \"<uuid>\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Executing plan <Truncated message due to truncation error>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetch"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Request: session_id: \"<uuid>\" user_context { user_id: \"connect-logs\" } plan { root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } } } client_type: \"<agent>\" request_options { result_chunking_options { allow_arrow_batch_chunking: true } } operation_id: \"<uuid>\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" schema { struct { fields { name: \"id\" data_type { long { } } } } } operation_id: \"<uuid>\" response_id: \"r1\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received the schema."
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Executing plan <Truncated message due to truncation error>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetch"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Request: session_id: \"<uuid>\" user_context { user_id: \"connect-logs\" } plan { root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } } } client_type: \"<agent>\" request_options { result_chunking_options { allow_arrow_batch_chunking: true } } operation_id: \"<uuid>\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" schema { struct { fields { name: \"id\" data_type { long { } } } } } operation_id: \"<uuid>\" response_id: \"r1\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received the schema."
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" arrow_batch { row_count: 3 data: \"\\377\\377\\377\\377x\\000\\000\\000\\020\\000\\000\\000\\000\\000\\n\\000\\014\\000\\006\\000\\005\\000\\010\\000\\n\\000\\000\\000\\000\\001\\004\\000\\014\\000\\000\\000\\010\\000\\010\\000\\000\\000\\004\\000\\010\\000\\000\\000\\004\\000\\000\\000\\001\\000\\000\\000\\024\\000\\000\\000\\020\\000\\024\\000\\010\\000\\006\\000\\007\\000\\014\\000\\000\\000\\020\\000\\020\\000\\000\\000\\000\\000\\001\\002\\020\\000\\000\\000\\034\\000\\000\\000\\004\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000id\\000\\000\\010\\000\\014\\000\\010\\000\\007\\000\\010\\000\\000\\000\\000\\000\\000\\001@\\000\\000\\000\\377\\377\\377\\377\\210\\000\\000\\000\\024\\000\\000\\000\\000\\000\\000\\000\\014\\000\\026\\000\\006\\000\\005\\000\\010\\000\\014\\000\\014\\000\\000\\000\\000\\003\\004\\000\\030\\000\\000\\000\\030\\000\\000\\000\\000\\000\\000\\000\\000\\000\\n\\000\\030\\000\\014\\000\\004\\000\\010\\000\\n\\000\\000\\000<\\000\\000\\000\\020\\000\\000\\000\\003\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\030\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\001\\000\\000\\000\\003\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\001\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000\\000\\000\\000\\000\\377\\377\\377\\377\\000\\000\\000\\000\" } operation_id: \"<uuid>\" response_id: \"r2\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received arrow batch rows=3 Number of chunks in batch=0 Chunk index=0 size=304"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Schema for plan: <Truncated message due to truncation error>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Executing plan <Truncated message due to truncation error>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetch"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Request: session_id: \"<uuid>\" user_context { user_id: \"connect-logs\" } plan { root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } } } client_type: \"<agent>\" request_options { result_chunking_options { allow_arrow_batch_chunking: true } } operation_id: \"<uuid>\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" schema { struct { fields { name: \"id\" data_type { long { } } } } } operation_id: \"<uuid>\" response_id: \"r1\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received the schema."
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" arrow_batch { row_count: 3 data: \"\\377\\377\\377\\377x\\000\\000\\000\\020\\000\\000\\000\\000\\000\\n\\000\\014\\000\\006\\000\\005\\000\\010\\000\\n\\000\\000\\000\\000\\001\\004\\000\\014\\000\\000\\000\\010\\000\\010\\000\\000\\000\\004\\000\\010\\000\\000\\000\\004\\000\\000\\000\\001\\000\\000\\000\\024\\000\\000\\000\\020\\000\\024\\000\\010\\000\\006\\000\\007\\000\\014\\000\\000\\000\\020\\000\\020\\000\\000\\000\\000\\000\\001\\002\\020\\000\\000\\000\\034\\000\\000\\000\\004\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000id\\000\\000\\010\\000\\014\\000\\010\\000\\007\\000\\010\\000\\000\\000\\000\\000\\000\\001@\\000\\000\\000\\377\\377\\377\\377\\210\\000\\000\\000\\024\\000\\000\\000\\000\\000\\000\\000\\014\\000\\026\\000\\006\\000\\005\\000\\010\\000\\014\\000\\014\\000\\000\\000\\000\\003\\004\\000\\030\\000\\000\\000\\030\\000\\000\\000\\000\\000\\000\\000\\000\\000\\n\\000\\030\\000\\014\\000\\004\\000\\010\\000\\n\\000\\000\\000<\\000\\000\\000\\020\\000\\000\\000\\003\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\030\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\001\\000\\000\\000\\003\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\001\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000\\000\\000\\000\\000\\377\\377\\377\\377\\000\\000\\000\\000\" } operation_id: \"<uuid>\" response_id: \"r2\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received arrow batch rows=3 Number of chunks in batch=0 Chunk index=0 size=304"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Interrupt request received for operation=<uuid>"
+    ]
+   ],
+   "[('Plan compression threshold', 'returned'), ('ExecuteAndFetch', 'ValueError', 'raised at ExecuteAndFetch'), ('ExecuteAndFetchAsIterator. Request', 'ValueError', 'raised at ExecuteAndFetchAsIterator. Request'), ('Received the schema.', 'ValueError', 'raised at Received the schema.'), ('Received arrow batch', 'ValueError', 'raised at Received arrow batch'), ('Schema for plan', 'ValueError', 'raised at Schema for plan'), ('Received arrow batch', 'KeyboardInterrupt', 'raised at Received arrow batch')]"
+  ],
+  "hook": [
+   [
+    [
+     "pyspark.sql.connect.logging",
+     "INFO",
+     "Spark Connect RPC deadlines: RpcDeadlines(reattachable_execute_plan=600, reattach_execute=600, analyze_plan=3600, add_artifacts=3600, config=600, interrupt=600, release_session=600, artifact_status=600, clone_session=600, get_status=600, fetch_error_details=600)"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Plan compression threshold: 200, algorithm: ZSTD"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Plan compression: original_size=<n>, compressed_size=<n>, saving_ratio=<r>, duration_s=<t>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Plan compression not effective. Using original plan."
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Executing plan <Truncated message due to truncation error>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetch"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Request: session_id: \"<uuid>\" user_context { user_id: \"connect-logs\" } plan { root { common { plan_id: <id> } project { input { common { plan_id: <id> } range { start: 0 end: 1 step: 1 } } expressions { alias { expr { literal { binary: \"\\347\\356\\347a^\\363_0\\344\\233H.\\025\\312\\347P\\007 \\036\\022a{\\017\\355\\247\\341dw\\226\\377\\002+\\352\\216\\320*\\202\\241u\\223\\017#7\\3157\\224\\305\\\"\\010\\000mk\\032\\360\\300\\313\\326%e\\212\\254,\\237\\252\\007\\321<D~3\\005\\036\\356\\371Z`\\345aC\\326\\304;\\312\\327l\\000\\212\\233\\nk_\\3113\\025Jm\\342\\204\\004\\250\\227\\305%&.j|\\007\\274\\276\\350A\\367E\\305]N\\237t\\177aQd\\306\\367(\\327\\03057\\023\\202z\\310\\203\\327\\373\\226Y#@t\\365%\\217lh\\010#\\211\\322\\344\\177\\036\\027Z\\220\\274C/\\271F\\346\\251G\\021\\t\\363\\267\\237\\021\\n&\\366\\\"\\237\\243E%&\\347\\274\\026B\\256\\264+\\362\\'\\325\\017\\377\\007\\303\\302\\006$).;\\203\\325\\251\\306\\352\\341\\354*\\017\\236,\\366\\013u9\\376\\370\\202\\005\\274\\232IgV\\257\\342\\377{\\247\\317\\200e\\334fm\\304p\\242kED\\376\\263\\024 \\215V9\\346\\361\\214m\\323\\303\\374\\241\\347\\244&\\020\\216\\025\\217\\265\\236\\tE\\317\\350a\\014\\210yH\\030;\\3447\\274\\'ef\\363\\203[\\005\\361\\022[s\\213\\261Q\\311r,\\322\\306B\\346\\350d\\003\\300\\257\\355\\247h2?m|\\307,\\236\\244\\206\\010\\262*\\023\\341\\257\\327\\214\\371\\016o \\333\\021X\\253G\\360L\\341\\374,q\\340\\224T\\203\\237\\303j\\233H\\213\\376f\\322:\\002\\301\\016\\026\\315>\\373/U!\\352\\323\\316\\211~\\362\\374A\\255\\336\\363\\2427b\\326\\017\\205B\\013\\022cOt\\006\\221\\244\\265}\\3775\\377>\\200e\\337\\013\\300\\323QhonEw\\261\\\\\\241\\241coc1DzC-\\204\\3061\\336\\327@f\\316\\t1f\\267\\270;\\257`$\\3666\\014\\023\\366Ka^:hXP\\2200\\037D\\354\\'1\\247\\310\\357\\332\\265\\334k\\277\\006\\024f\\\\\\320\\350\\270\\275\\317cT0\\007\\245+\\317a\\256\\204\\217;Q\\317D\\250\\275\\335\\\\\\317i^$\\256\\232\\3603\\005\\266\\031v\\213\\231\\254n\\317]\\'\\307\\376m=\\312\\013:7y\\203\\343\\315\\031d\\300\\0052\\204\\200\\215\\256\\3243\\343\\'\\027\\305Q\\305\\361V\\375\\035\\333\\375\\327\\221\\314\\237\\273\\222\\367\\212\\221\\227\\r\\007}\\025P\\321\\307\\033\\241\\313\\031\\243%r\\333\\364\\200|\\0272\\357I}:\\031\\325\\351<h\\032\\266O?\\272\\342G\\325\\351\\206\\326\\272F\\224Az\\366:\\236\\267\\214\\213a\\216za\\177d\\024\\037\\004\\212\\204\\331\\r\\0234q\\216%,Rx\\277\\367\\365\\265k\\255\\257\\375D&=\\345m\\343\\331\\204\\307M\\274N\\246\\224^\\332\\2751\\354\\245(*\\335\\370\\355\\231\\004&\\236m)\\233\\375\\247\\220Ip\\267\\247\\273<\\245\\341\\216\\340\\234\\352\\242q\\314\\177+\\271\\273\\014\\272\\312\\306c\\274\\307OZZ-\\350\\220\\013q\\035Q\\227\\013\\330 \\234+\\253)\\2145\\240+\\rI1\\330}p\\372\\255\\353\\311\\263\\254\\252E\\374\\371%\\027\\322\\262\\001\\301-\\355\\014\\271\\0058\\327\\327J}S\\300U\\244h\\307\\331\\225\\214\\036\\361\\235:\\233O[\\037\\352\\010\\366\\022\\2407e^\\267ox\\361r\\342^\\217\\316X\\237\\365\\205\\370\\316\\257/\\367q\\314\\031oD\\305\\214\\035y\\005\\361\\276\\346~\\327P\\324P\\244J\\204C\\210\\033M[\\000hLA*\\264\\2121\\365\\357*\\233\\t`\\325b.\\341j\\023\\323\\375P\\237\\241\\237\\317&\\234\\357\\\"\\270&G6\\311\\354>\\343\\006\\301\\363y\\226:\\352\\005iM\\224\\300\\230\\254\\310,\\203`f\\3008\\250\\236\\214\\360\\251\\344\\303/4H0C[\\\\b\\315\\022\\355.3t\\020P?\\336\\320%\\256\\332GiK\\305\\367\\251\\323\\007\\315\\242}\\t\\205\\251`\\257\\235\\3416\\301h\\252\\2264Q\\201\\230w\\264Hed\\re*E}\\364\\325\\252\\250.\\270\\210\\355?\\347Ez \\207V\\253J>\\001\\223\\272{\\271T_\\'\\350\\020\\316\\\\F\\235\\303\\010Qf\\322\\357\\020I\\305<\\317X\\254C\\206|\\252\\033\\023J\\316\\3764\\360\\260\\322\\320\\220\\370\\355\\321\\336<:\\251\\335\\327\\014\\244\\033\\227\\335\\300\\244\\234#}?\\344|\\313\\032\\3635z\\234\\312x#\\274\\327Tq\\327>$2B?\\350\\000\\227|\\231\\014\\246X \\341\\346\\313H\\266v\\027\\234\\017\\350\\240\\235\\246\\377I\\361ig\\227\\036d\\241\\265\\361\\010Xgxb\\0316\\234\\240\\214\\327E\\253\\343\\324(Vr\\235=d\\211\\\\x\\227\\213\\276;u\\232\\\\s\\215C.\\354\\'\\341%\\027\\003\\221\\200\\330,T\\221a}[\\216\\016_M\\021\\354\\304\\001\\377\\036\\\\ \\270\\244\\367\\020\\225YT9\\337x\\341\\203x\\204\\372q\\377\\205\\022g\\032\\345\\\\\\246M\\t\\376\\336\\342\\206\\017%:[yJ\\033\\237\\331\\025\\240\\207\\377-W\\301\\202\\177Q\\376\\350\\037\\241\\322\\357\\272n\\025A\\372DJ\\351\\024\\001{\\321H.\\311\\230\\361\\331\\'\\021u\\227\\201<{\\326\\354,t\\272\\236\\254o\\024R\\316\\035\\257Z\\354\\311m\\303\\301\\031n\\326\\261~^S\\365h\\314m\\357\\235\\361\\344\\372\\\\\\371h\\304\\326%\\030\\215\\271\\214\\t]\\206\\311o\\2114\\270\\035N\\270F{=\\n\\244\\304\\346*\\303\\246\\203\\034\\232\\311z\\372\\024`MA\\020j\\237\\322\\331\\365E\\205\\240\\347\\301Kh\\217\\346\\317E\\305\\266s4\\225\\275\\260nG\\024\\014\\367\\005\\230\\\"n\\264>\\277x\\204.\\332=\\310\\374\\036\\372\\304\\250\\221\\376\\217qQ\\316g\\363U\\263z/\\257\\330M\\364\\203\\235\\013\\310=\\272 \\317\\213\\033\\301\\375\\231\\360\\246\\201%\\014\\022\\261\\245\\277\\230\\206_\\360\\304\\256\\271\\017n&\\030\\322\\324 \\215\\\"\\355\\346\\303\\305\\023E\\213\\236\\375\\270\\362\\nLb\\212t\\204px\\000\\311\\001z\\374(\\252\\207\\2615\\t\\240j\\312PbRQ\\252\\373\\226\\275\\324\\222\\273\\377y\\177\\271\\246[@ #4\\2369\\347\\366\\024S\\323\\366\\033\\260\\201\\313\\310\\201\\200\\274\\247]\\252hB\\327@\\211R@f\\300\\225v^\\007\\361D\\211\\212\\326\\201\\313\\305G\\030P<\\025c\\222\\266=\\317\\250\\r\\367W\\277\\\"\\236\\340\\221r\\310\\320H\\307n\\220K\\342Y6\\200\\371\\335=M\\245\\t\\212I\\214\\314\\214\\244t)\\366f\\273\\204\\032M \\003\\236(\\002]\\254\\367Gg\\321\\367\\020\\324\\263\\312\\035n\\201\\215`\\224\\177\\342\\030Z\\rV<&\\212\\267\\014\\236 \\356\\005k \\272\\005\\207}\\375\\314\\2353\\366\\315\\321\\200\\014\\004Ht\\245\\306\\275\\215\\272\\346\\265\\237\\216\\\"\\2440\\207\\253m\\\\l\\030B\\233iZ\\2616OI\\276\\263]\\334\\013\\004\\314\\032\\3160\\244h\\nY\\244\\\"7\\244\\334\\362p\\377\\321[\\213#\\307\\244]\\266\\005K\\301\\034l\\260\\341\\331:>\\350\\337\\357\\326\\304u\\300\\025\\020\\347\\344\\221\\027\\033\\246M\\357\\250\\203\\240`\\360\\315\\032@\\3738w_H:5\\200\\205!^\\023\\257\\200\\262\\350j\\007\\332d\\372\\217z%6\\341\\373{$\\376\\034!M\\273[3\\252\\022\\261p\\223<\\325]\\306\\017\\356\\372$-i\\241d\\334\\301\\007\\255\\241\\216jk\\\\AW\\356\\025B\\216;\\204\\260\\267\\235d\\004#i\\270\\236\\321fJ$\\210\\331\\277\\321\\216\\351D?0\\261\\325x\\374<\\221?\\222(\\350s\\364\\306e\\323p\\345 \\273\\326\\252\\220\\341\\211\\225\\006}\\007\\322\\277C\\200\\306\\327\\216\\256452\\350k-\\272\\010\\277\\017\\260\\013O\\360%\\271W\\355\\241\\365\\037q\\n\\312\\335u8\\035\\\"\\354\\315ok\\376\\275I\\3121*\\001U\\201\\362=\\335\\357O\\010\\275\\273\\0147\\263\\32380\\232?\\\"yB-\\235\\226\\264}~\\323\\356\\033o\\347W5\\353F5OIX\\320<\\323\\005uN8\\300P\\226\\016\\3178\\374\\231\\027\\307\\325\\231(m\\2059\\326\\250\\372hF1\\311\\231\\210\\204p\\274+\\333\\364\\304\\267\\334\\252\\346;\\031\\237\\037S\\303\\245\\314r2\\276\\020\\240\\270\\367u\\371\\004\\277\\3205\\003\\266~\\273\\274\\232k\\034\\241^\\376<\\260\\033/m\\201\\212\\331\\277\\315-\\2221+\\313s\\200\\250\\020\\242LO\\222\\220\\035\\373\\030\" } } name: \"b\" } common { origin { python_origin { fragment: \"alias\" call_site: \"_connect_log_cases.py:369\" } } } } } } } client_type: \"<agent>\" request_options { result_chunking_options { allow_arrow_batch_chunking: true } } operation_id: \"<uuid>\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "hook"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" schema { struct { fields { name: \"id\" data_type { long { } } } } } operation_id: \"<uuid>\" response_id: \"r1\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received the schema."
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" arrow_batch { row_count: 3 data: \"\\377\\377\\377\\377x\\000\\000\\000\\020\\000\\000\\000\\000\\000\\n\\000\\014\\000\\006\\000\\005\\000\\010\\000\\n\\000\\000\\000\\000\\001\\004\\000\\014\\000\\000\\000\\010\\000\\010\\000\\000\\000\\004\\000\\010\\000\\000\\000\\004\\000\\000\\000\\001\\000\\000\\000\\024\\000\\000\\000\\020\\000\\024\\000\\010\\000\\006\\000\\007\\000\\014\\000\\000\\000\\020\\000\\020\\000\\000\\000\\000\\000\\001\\002\\020\\000\\000\\000\\034\\000\\000\\000\\004\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000id\\000\\000\\010\\000\\014\\000\\010\\000\\007\\000\\010\\000\\000\\000\\000\\000\\000\\001@\\000\\000\\000\\377\\377\\377\\377\\210\\000\\000\\000\\024\\000\\000\\000\\000\\000\\000\\000\\014\\000\\026\\000\\006\\000\\005\\000\\010\\000\\014\\000\\014\\000\\000\\000\\000\\003\\004\\000\\030\\000\\000\\000\\030\\000\\000\\000\\000\\000\\000\\000\\000\\000\\n\\000\\030\\000\\014\\000\\004\\000\\010\\000\\n\\000\\000\\000<\\000\\000\\000\\020\\000\\000\\000\\003\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\030\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\001\\000\\000\\000\\003\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\001\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000\\000\\000\\000\\000\\377\\377\\377\\377\\000\\000\\000\\000\" } operation_id: \"<uuid>\" response_id: \"r2\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received arrow batch rows=3 Number of chunks in batch=0 Chunk index=0 size=304"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Assembling arrow batch of size 304 from 0 chunks."
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" operation_id: \"<uuid>\" response_id: \"r3\" result_complete { }"
+    ]
+   ],
+   "'hooked'"
+  ],
+  "incompressible": [
+   [
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Plan compression threshold: 200, algorithm: ZSTD"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Plan compression: original_size=<n>, compressed_size=<n>, saving_ratio=<r>, duration_s=<t>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Plan compression not effective. Using original plan."
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Executing plan <Truncated message due to truncation error>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetch"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Request: session_id: \"<uuid>\" user_context { user_id: \"connect-logs\" } plan { root { common { plan_id: <id> } project { input { common { plan_id: <id> } range { start: 0 end: 1 step: 1 } } expressions { alias { expr { literal { binary: \"\\347\\356\\347a^\\363_0\\344\\233H.\\025\\312\\347P\\007 \\036\\022a{\\017\\355\\247\\341dw\\226\\377\\002+\\352\\216\\320*\\202\\241u\\223\\017#7\\3157\\224\\305\\\"\\010\\000mk\\032\\360\\300\\313\\326%e\\212\\254,\\237\\252\\007\\321<D~3\\005\\036\\356\\371Z`\\345aC\\326\\304;\\312\\327l\\000\\212\\233\\nk_\\3113\\025Jm\\342\\204\\004\\250\\227\\305%&.j|\\007\\274\\276\\350A\\367E\\305]N\\237t\\177aQd\\306\\367(\\327\\03057\\023\\202z\\310\\203\\327\\373\\226Y#@t\\365%\\217lh\\010#\\211\\322\\344\\177\\036\\027Z\\220\\274C/\\271F\\346\\251G\\021\\t\\363\\267\\237\\021\\n&\\366\\\"\\237\\243E%&\\347\\274\\026B\\256\\264+\\362\\'\\325\\017\\377\\007\\303\\302\\006$).;\\203\\325\\251\\306\\352\\341\\354*\\017\\236,\\366\\013u9\\376\\370\\202\\005\\274\\232IgV\\257\\342\\377{\\247\\317\\200e\\334fm\\304p\\242kED\\376\\263\\024 \\215V9\\346\\361\\214m\\323\\303\\374\\241\\347\\244&\\020\\216\\025\\217\\265\\236\\tE\\317\\350a\\014\\210yH\\030;\\3447\\274\\'ef\\363\\203[\\005\\361\\022[s\\213\\261Q\\311r,\\322\\306B\\346\\350d\\003\\300\\257\\355\\247h2?m|\\307,\\236\\244\\206\\010\\262*\\023\\341\\257\\327\\214\\371\\016o \\333\\021X\\253G\\360L\\341\\374,q\\340\\224T\\203\\237\\303j\\233H\\213\\376f\\322:\\002\\301\\016\\026\\315>\\373/U!\\352\\323\\316\\211~\\362\\374A\\255\\336\\363\\2427b\\326\\017\\205B\\013\\022cOt\\006\\221\\244\\265}\\3775\\377>\\200e\\337\\013\\300\\323QhonEw\\261\\\\\\241\\241coc1DzC-\\204\\3061\\336\\327@f\\316\\t1f\\267\\270;\\257`$\\3666\\014\\023\\366Ka^:hXP\\2200\\037D\\354\\'1\\247\\310\\357\\332\\265\\334k\\277\\006\\024f\\\\\\320\\350\\270\\275\\317cT0\\007\\245+\\317a\\256\\204\\217;Q\\317D\\250\\275\\335\\\\\\317i^$\\256\\232\\3603\\005\\266\\031v\\213\\231\\254n\\317]\\'\\307\\376m=\\312\\013:7y\\203\\343\\315\\031d\\300\\0052\\204\\200\\215\\256\\3243\\343\\'\\027\\305Q\\305\\361V\\375\\035\\333\\375\\327\\221\\314\\237\\273\\222\\367\\212\\221\\227\\r\\007}\\025P\\321\\307\\033\\241\\313\\031\\243%r\\333\\364\\200|\\0272\\357I}:\\031\\325\\351<h\\032\\266O?\\272\\342G\\325\\351\\206\\326\\272F\\224Az\\366:\\236\\267\\214\\213a\\216za\\177d\\024\\037\\004\\212\\204\\331\\r\\0234q\\216%,Rx\\277\\367\\365\\265k\\255\\257\\375D&=\\345m\\343\\331\\204\\307M\\274N\\246\\224^\\332\\2751\\354\\245(*\\335\\370\\355\\231\\004&\\236m)\\233\\375\\247\\220Ip\\267\\247\\273<\\245\\341\\216\\340\\234\\352\\242q\\314\\177+\\271\\273\\014\\272\\312\\306c\\274\\307OZZ-\\350\\220\\013q\\035Q\\227\\013\\330 \\234+\\253)\\2145\\240+\\rI1\\330}p\\372\\255\\353\\311\\263\\254\\252E\\374\\371%\\027\\322\\262\\001\\301-\\355\\014\\271\\0058\\327\\327J}S\\300U\\244h\\307\\331\\225\\214\\036\\361\\235:\\233O[\\037\\352\\010\\366\\022\\2407e^\\267ox\\361r\\342^\\217\\316X\\237\\365\\205\\370\\316\\257/\\367q\\314\\031oD\\305\\214\\035y\\005\\361\\276\\346~\\327P\\324P\\244J\\204C\\210\\033M[\\000hLA*\\264\\2121\\365\\357*\\233\\t`\\325b.\\341j\\023\\323\\375P\\237\\241\\237\\317&\\234\\357\\\"\\270&G6\\311\\354>\\343\\006\\301\\363y\\226:\\352\\005iM\\224\\300\\230\\254\\310,\\203`f\\3008\\250\\236\\214\\360\\251\\344\\303/4H0C[\\\\b\\315\\022\\355.3t\\020P?\\336\\320%\\256\\332GiK\\305\\367\\251\\323\\007\\315\\242}\\t\\205\\251`\\257\\235\\3416\\301h\\252\\2264Q\\201\\230w\\264Hed\\re*E}\\364\\325\\252\\250.\\270\\210\\355?\\347Ez \\207V\\253J>\\001\\223\\272{\\271T_\\'\\350\\020\\316\\\\F\\235\\303\\010Qf\\322\\357\\020I\\305<\\317X\\254C\\206|\\252\\033\\023J\\316\\3764\\360\\260\\322\\320\\220\\370\\355\\321\\336<:\\251\\335\\327\\014\\244\\033\\227\\335\\300\\244\\234#}?\\344|\\313\\032\\3635z\\234\\312x#\\274\\327Tq\\327>$2B?\\350\\000\\227|\\231\\014\\246X \\341\\346\\313H\\266v\\027\\234\\017\\350\\240\\235\\246\\377I\\361ig\\227\\036d\\241\\265\\361\\010Xgxb\\0316\\234\\240\\214\\327E\\253\\343\\324(Vr\\235=d\\211\\\\x\\227\\213\\276;u\\232\\\\s\\215C.\\354\\'\\341%\\027\\003\\221\\200\\330,T\\221a}[\\216\\016_M\\021\\354\\304\\001\\377\\036\\\\ \\270\\244\\367\\020\\225YT9\\337x\\341\\203x\\204\\372q\\377\\205\\022g\\032\\345\\\\\\246M\\t\\376\\336\\342\\206\\017%:[yJ\\033\\237\\331\\025\\240\\207\\377-W\\301\\202\\177Q\\376\\350\\037\\241\\322\\357\\272n\\025A\\372DJ\\351\\024\\001{\\321H.\\311\\230\\361\\331\\'\\021u\\227\\201<{\\326\\354,t\\272\\236\\254o\\024R\\316\\035\\257Z\\354\\311m\\303\\301\\031n\\326\\261~^S\\365h\\314m\\357\\235\\361\\344\\372\\\\\\371h\\304\\326%\\030\\215\\271\\214\\t]\\206\\311o\\2114\\270\\035N\\270F{=\\n\\244\\304\\346*\\303\\246\\203\\034\\232\\311z\\372\\024`MA\\020j\\237\\322\\331\\365E\\205\\240\\347\\301Kh\\217\\346\\317E\\305\\266s4\\225\\275\\260nG\\024\\014\\367\\005\\230\\\"n\\264>\\277x\\204.\\332=\\310\\374\\036\\372\\304\\250\\221\\376\\217qQ\\316g\\363U\\263z/\\257\\330M\\364\\203\\235\\013\\310=\\272 \\317\\213\\033\\301\\375\\231\\360\\246\\201%\\014\\022\\261\\245\\277\\230\\206_\\360\\304\\256\\271\\017n&\\030\\322\\324 \\215\\\"\\355\\346\\303\\305\\023E\\213\\236\\375\\270\\362\\nLb\\212t\\204px\\000\\311\\001z\\374(\\252\\207\\2615\\t\\240j\\312PbRQ\\252\\373\\226\\275\\324\\222\\273\\377y\\177\\271\\246[@ #4\\2369\\347\\366\\024S\\323\\366\\033\\260\\201\\313\\310\\201\\200\\274\\247]\\252hB\\327@\\211R@f\\300\\225v^\\007\\361D\\211\\212\\326\\201\\313\\305G\\030P<\\025c\\222\\266=\\317\\250\\r\\367W\\277\\\"\\236\\340\\221r\\310\\320H\\307n\\220K\\342Y6\\200\\371\\335=M\\245\\t\\212I\\214\\314\\214\\244t)\\366f\\273\\204\\032M \\003\\236(\\002]\\254\\367Gg\\321\\367\\020\\324\\263\\312\\035n\\201\\215`\\224\\177\\342\\030Z\\rV<&\\212\\267\\014\\236 \\356\\005k \\272\\005\\207}\\375\\314\\2353\\366\\315\\321\\200\\014\\004Ht\\245\\306\\275\\215\\272\\346\\265\\237\\216\\\"\\2440\\207\\253m\\\\l\\030B\\233iZ\\2616OI\\276\\263]\\334\\013\\004\\314\\032\\3160\\244h\\nY\\244\\\"7\\244\\334\\362p\\377\\321[\\213#\\307\\244]\\266\\005K\\301\\034l\\260\\341\\331:>\\350\\337\\357\\326\\304u\\300\\025\\020\\347\\344\\221\\027\\033\\246M\\357\\250\\203\\240`\\360\\315\\032@\\3738w_H:5\\200\\205!^\\023\\257\\200\\262\\350j\\007\\332d\\372\\217z%6\\341\\373{$\\376\\034!M\\273[3\\252\\022\\261p\\223<\\325]\\306\\017\\356\\372$-i\\241d\\334\\301\\007\\255\\241\\216jk\\\\AW\\356\\025B\\216;\\204\\260\\267\\235d\\004#i\\270\\236\\321fJ$\\210\\331\\277\\321\\216\\351D?0\\261\\325x\\374<\\221?\\222(\\350s\\364\\306e\\323p\\345 \\273\\326\\252\\220\\341\\211\\225\\006}\\007\\322\\277C\\200\\306\\327\\216\\256452\\350k-\\272\\010\\277\\017\\260\\013O\\360%\\271W\\355\\241\\365\\037q\\n\\312\\335u8\\035\\\"\\354\\315ok\\376\\275I\\3121*\\001U\\201\\362=\\335\\357O\\010\\275\\273\\0147\\263\\32380\\232?\\\"yB-\\235\\226\\264}~\\323\\356\\033o\\347W5\\353F5OIX\\320<\\323\\005uN8\\300P\\226\\016\\3178\\374\\231\\027\\307\\325\\231(m\\2059\\326\\250\\372hF1\\311\\231\\210\\204p\\274+\\333\\364\\304\\267\\334\\252\\346;\\031\\237\\037S\\303\\245\\314r2\\276\\020\\240\\270\\367u\\371\\004\\277\\3205\\003\\266~\\273\\274\\232k\\034\\241^\\376<\\260\\033/m\\201\\212\\331\\277\\315-\\2221+\\313s\\200\\250\\020\\242LO\\222\\220\\035\\373\\030\" } } name: \"b\" } common { origin { python_origin { fragment: \"alias\" call_site: \"_connect_log_cases.py:369\" } } } } } } } client_type: \"<agent>\" request_options { result_chunking_options { allow_arrow_batch_chunking: true } } operation_id: \"<uuid>\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" schema { struct { fields { name: \"id\" data_type { long { } } } } } operation_id: \"<uuid>\" response_id: \"r1\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received the schema."
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" arrow_batch { row_count: 3 data: \"\\377\\377\\377\\377x\\000\\000\\000\\020\\000\\000\\000\\000\\000\\n\\000\\014\\000\\006\\000\\005\\000\\010\\000\\n\\000\\000\\000\\000\\001\\004\\000\\014\\000\\000\\000\\010\\000\\010\\000\\000\\000\\004\\000\\010\\000\\000\\000\\004\\000\\000\\000\\001\\000\\000\\000\\024\\000\\000\\000\\020\\000\\024\\000\\010\\000\\006\\000\\007\\000\\014\\000\\000\\000\\020\\000\\020\\000\\000\\000\\000\\000\\001\\002\\020\\000\\000\\000\\034\\000\\000\\000\\004\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000id\\000\\000\\010\\000\\014\\000\\010\\000\\007\\000\\010\\000\\000\\000\\000\\000\\000\\001@\\000\\000\\000\\377\\377\\377\\377\\210\\000\\000\\000\\024\\000\\000\\000\\000\\000\\000\\000\\014\\000\\026\\000\\006\\000\\005\\000\\010\\000\\014\\000\\014\\000\\000\\000\\000\\003\\004\\000\\030\\000\\000\\000\\030\\000\\000\\000\\000\\000\\000\\000\\000\\000\\n\\000\\030\\000\\014\\000\\004\\000\\010\\000\\n\\000\\000\\000<\\000\\000\\000\\020\\000\\000\\000\\003\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\030\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\001\\000\\000\\000\\003\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\001\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000\\000\\000\\000\\000\\377\\377\\377\\377\\000\\000\\000\\000\" } operation_id: \"<uuid>\" response_id: \"r2\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received arrow batch rows=3 Number of chunks in batch=0 Chunk index=0 size=304"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Assembling arrow batch of size 304 from 0 chunks."
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" operation_id: \"<uuid>\" response_id: \"r3\" result_complete { }"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Plan compression: original_size=<n>, compressed_size=<n>, saving_ratio=<r>, duration_s=<t>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Plan compression not effective. Using original plan."
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Executing plan <Truncated message due to truncation error>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetch"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Request: session_id: \"<uuid>\" user_context { user_id: \"connect-logs\" } plan { root { common { plan_id: <id> } project { input { common { plan_id: <id> } range { start: 0 end: 1 step: 1 } } expressions { alias { expr { literal { binary: \"\\347\\356\\347a^\\363_0\\344\\233H.\\025\\312\\347P\\007 \\036\\022a{\\017\\355\\247\\341dw\\226\\377\\002+\\352\\216\\320*\\202\\241u\\223\\017#7\\3157\\224\\305\\\"\\010\\000mk\\032\\360\\300\\313\\326%e\\212\\254,\\237\\252\\007\\321<D~3\\005\\036\\356\\371Z`\\345aC\\326\\304;\\312\\327l\\000\\212\\233\\nk_\\3113\\025Jm\\342\\204\\004\\250\\227\\305%&.j|\\007\\274\\276\\350A\\367E\\305]N\\237t\\177aQd\\306\\367(\\327\\03057\\023\\202z\\310\\203\\327\\373\\226Y#@t\\365%\\217lh\\010#\\211\\322\\344\\177\\036\\027Z\\220\\274C/\\271F\\346\\251G\\021\\t\\363\\267\\237\\021\\n&\\366\\\"\\237\\243E%&\\347\\274\\026B\\256\\264+\\362\\'\\325\\017\\377\\007\\303\\302\\006$).;\\203\\325\\251\\306\\352\\341\\354*\\017\\236,\\366\\013u9\\376\\370\\202\\005\\274\\232IgV\\257\\342\\377{\\247\\317\\200e\\334fm\\304p\\242kED\\376\\263\\024 \\215V9\\346\\361\\214m\\323\\303\\374\\241\\347\\244&\\020\\216\\025\\217\\265\\236\\tE\\317\\350a\\014\\210yH\\030;\\3447\\274\\'ef\\363\\203[\\005\\361\\022[s\\213\\261Q\\311r,\\322\\306B\\346\\350d\\003\\300\\257\\355\\247h2?m|\\307,\\236\\244\\206\\010\\262*\\023\\341\\257\\327\\214\\371\\016o \\333\\021X\\253G\\360L\\341\\374,q\\340\\224T\\203\\237\\303j\\233H\\213\\376f\\322:\\002\\301\\016\\026\\315>\\373/U!\\352\\323\\316\\211~\\362\\374A\\255\\336\\363\\2427b\\326\\017\\205B\\013\\022cOt\\006\\221\\244\\265}\\3775\\377>\\200e\\337\\013\\300\\323QhonEw\\261\\\\\\241\\241coc1DzC-\\204\\3061\\336\\327@f\\316\\t1f\\267\\270;\\257`$\\3666\\014\\023\\366Ka^:hXP\\2200\\037D\\354\\'1\\247\\310\\357\\332\\265\\334k\\277\\006\\024f\\\\\\320\\350\\270\\275\\317cT0\\007\\245+\\317a\\256\\204\\217;Q\\317D\\250\\275\\335\\\\\\317i^$\\256\\232\\3603\\005\\266\\031v\\213\\231\\254n\\317]\\'\\307\\376m=\\312\\013:7y\\203\\343\\315\\031d\\300\\0052\\204\\200\\215\\256\\3243\\343\\'\\027\\305Q\\305\\361V\\375\\035\\333\\375\\327\\221\\314\\237\\273\\222\\367\\212\\221\\227\\r\\007}\\025P\\321\\307\\033\\241\\313\\031\\243%r\\333\\364\\200|\\0272\\357I}:\\031\\325\\351<h\\032\\266O?\\272\\342G\\325\\351\\206\\326\\272F\\224Az\\366:\\236\\267\\214\\213a\\216za\\177d\\024\\037\\004\\212\\204\\331\\r\\0234q\\216%,Rx\\277\\367\\365\\265k\\255\\257\\375D&=\\345m\\343\\331\\204\\307M\\274N\\246\\224^\\332\\2751\\354\\245(*\\335\\370\\355\\231\\004&\\236m)\\233\\375\\247\\220Ip\\267\\247\\273<\\245\\341\\216\\340\\234\\352\\242q\\314\\177+\\271\\273\\014\\272\\312\\306c\\274\\307OZZ-\\350\\220\\013q\\035Q\\227\\013\\330 \\234+\\253)\\2145\\240+\\rI1\\330}p\\372\\255\\353\\311\\263\\254\\252E\\374\\371%\\027\\322\\262\\001\\301-\\355\\014\\271\\0058\\327\\327J}S\\300U\\244h\\307\\331\\225\\214\\036\\361\\235:\\233O[\\037\\352\\010\\366\\022\\2407e^\\267ox\\361r\\342^\\217\\316X\\237\\365\\205\\370\\316\\257/\\367q\\314\\031oD\\305\\214\\035y\\005\\361\\276\\346~\\327P\\324P\\244J\\204C\\210\\033M[\\000hLA*\\264\\2121\\365\\357*\\233\\t`\\325b.\\341j\\023\\323\\375P\\237\\241\\237\\317&\\234\\357\\\"\\270&G6\\311\\354>\\343\\006\\301\\363y\\226:\\352\\005iM\\224\\300\\230\\254\\310,\\203`f\\3008\\250\\236\\214\\360\\251\\344\\303/4H0C[\\\\b\\315\\022\\355.3t\\020P?\\336\\320%\\256\\332GiK\\305\\367\\251\\323\\007\\315\\242}\\t\\205\\251`\\257\\235\\3416\\301h\\252\\2264Q\\201\\230w\\264Hed\\re*E}\\364\\325\\252\\250.\\270\\210\\355?\\347Ez \\207V\\253J>\\001\\223\\272{\\271T_\\'\\350\\020\\316\\\\F\\235\\303\\010Qf\\322\\357\\020I\\305<\\317X\\254C\\206|\\252\\033\\023J\\316\\3764\\360\\260\\322\\320\\220\\370\\355\\321\\336<:\\251\\335\\327\\014\\244\\033\\227\\335\\300\\244\\234#}?\\344|\\313\\032\\3635z\\234\\312x#\\274\\327Tq\\327>$2B?\\350\\000\\227|\\231\\014\\246X \\341\\346\\313H\\266v\\027\\234\\017\\350\\240\\235\\246\\377I\\361ig\\227\\036d\\241\\265\\361\\010Xgxb\\0316\\234\\240\\214\\327E\\253\\343\\324(Vr\\235=d\\211\\\\x\\227\\213\\276;u\\232\\\\s\\215C.\\354\\'\\341%\\027\\003\\221\\200\\330,T\\221a}[\\216\\016_M\\021\\354\\304\\001\\377\\036\\\\ \\270\\244\\367\\020\\225YT9\\337x\\341\\203x\\204\\372q\\377\\205\\022g\\032\\345\\\\\\246M\\t\\376\\336\\342\\206\\017%:[yJ\\033\\237\\331\\025\\240\\207\\377-W\\301\\202\\177Q\\376\\350\\037\\241\\322\\357\\272n\\025A\\372DJ\\351\\024\\001{\\321H.\\311\\230\\361\\331\\'\\021u\\227\\201<{\\326\\354,t\\272\\236\\254o\\024R\\316\\035\\257Z\\354\\311m\\303\\301\\031n\\326\\261~^S\\365h\\314m\\357\\235\\361\\344\\372\\\\\\371h\\304\\326%\\030\\215\\271\\214\\t]\\206\\311o\\2114\\270\\035N\\270F{=\\n\\244\\304\\346*\\303\\246\\203\\034\\232\\311z\\372\\024`MA\\020j\\237\\322\\331\\365E\\205\\240\\347\\301Kh\\217\\346\\317E\\305\\266s4\\225\\275\\260nG\\024\\014\\367\\005\\230\\\"n\\264>\\277x\\204.\\332=\\310\\374\\036\\372\\304\\250\\221\\376\\217qQ\\316g\\363U\\263z/\\257\\330M\\364\\203\\235\\013\\310=\\272 \\317\\213\\033\\301\\375\\231\\360\\246\\201%\\014\\022\\261\\245\\277\\230\\206_\\360\\304\\256\\271\\017n&\\030\\322\\324 \\215\\\"\\355\\346\\303\\305\\023E\\213\\236\\375\\270\\362\\nLb\\212t\\204px\\000\\311\\001z\\374(\\252\\207\\2615\\t\\240j\\312PbRQ\\252\\373\\226\\275\\324\\222\\273\\377y\\177\\271\\246[@ #4\\2369\\347\\366\\024S\\323\\366\\033\\260\\201\\313\\310\\201\\200\\274\\247]\\252hB\\327@\\211R@f\\300\\225v^\\007\\361D\\211\\212\\326\\201\\313\\305G\\030P<\\025c\\222\\266=\\317\\250\\r\\367W\\277\\\"\\236\\340\\221r\\310\\320H\\307n\\220K\\342Y6\\200\\371\\335=M\\245\\t\\212I\\214\\314\\214\\244t)\\366f\\273\\204\\032M \\003\\236(\\002]\\254\\367Gg\\321\\367\\020\\324\\263\\312\\035n\\201\\215`\\224\\177\\342\\030Z\\rV<&\\212\\267\\014\\236 \\356\\005k \\272\\005\\207}\\375\\314\\2353\\366\\315\\321\\200\\014\\004Ht\\245\\306\\275\\215\\272\\346\\265\\237\\216\\\"\\2440\\207\\253m\\\\l\\030B\\233iZ\\2616OI\\276\\263]\\334\\013\\004\\314\\032\\3160\\244h\\nY\\244\\\"7\\244\\334\\362p\\377\\321[\\213#\\307\\244]\\266\\005K\\301\\034l\\260\\341\\331:>\\350\\337\\357\\326\\304u\\300\\025\\020\\347\\344\\221\\027\\033\\246M\\357\\250\\203\\240`\\360\\315\\032@\\3738w_H:5\\200\\205!^\\023\\257\\200\\262\\350j\\007\\332d\\372\\217z%6\\341\\373{$\\376\\034!M\\273[3\\252\\022\\261p\\223<\\325]\\306\\017\\356\\372$-i\\241d\\334\\301\\007\\255\\241\\216jk\\\\AW\\356\\025B\\216;\\204\\260\\267\\235d\\004#i\\270\\236\\321fJ$\\210\\331\\277\\321\\216\\351D?0\\261\\325x\\374<\\221?\\222(\\350s\\364\\306e\\323p\\345 \\273\\326\\252\\220\\341\\211\\225\\006}\\007\\322\\277C\\200\\306\\327\\216\\256452\\350k-\\272\\010\\277\\017\\260\\013O\\360%\\271W\\355\\241\\365\\037q\\n\\312\\335u8\\035\\\"\\354\\315ok\\376\\275I\\3121*\\001U\\201\\362=\\335\\357O\\010\\275\\273\\0147\\263\\32380\\232?\\\"yB-\\235\\226\\264}~\\323\\356\\033o\\347W5\\353F5OIX\\320<\\323\\005uN8\\300P\\226\\016\\3178\\374\\231\\027\\307\\325\\231(m\\2059\\326\\250\\372hF1\\311\\231\\210\\204p\\274+\\333\\364\\304\\267\\334\\252\\346;\\031\\237\\037S\\303\\245\\314r2\\276\\020\\240\\270\\367u\\371\\004\\277\\3205\\003\\266~\\273\\274\\232k\\034\\241^\\376<\\260\\033/m\\201\\212\\331\\277\\315-\\2221+\\313s\\200\\250\\020\\242LO\\222\\220\\035\\373\\030\" } } name: \"b\" } common { origin { python_origin { fragment: \"alias\" call_site: \"_connect_log_cases.py:369\" } } } } } } } client_type: \"<agent>\" request_options { result_chunking_options { allow_arrow_batch_chunking: true } } operation_id: \"<uuid>\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" schema { struct { fields { name: \"id\" data_type { long { } } } } } operation_id: \"<uuid>\" response_id: \"r1\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received the schema."
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" arrow_batch { row_count: 3 data: \"\\377\\377\\377\\377x\\000\\000\\000\\020\\000\\000\\000\\000\\000\\n\\000\\014\\000\\006\\000\\005\\000\\010\\000\\n\\000\\000\\000\\000\\001\\004\\000\\014\\000\\000\\000\\010\\000\\010\\000\\000\\000\\004\\000\\010\\000\\000\\000\\004\\000\\000\\000\\001\\000\\000\\000\\024\\000\\000\\000\\020\\000\\024\\000\\010\\000\\006\\000\\007\\000\\014\\000\\000\\000\\020\\000\\020\\000\\000\\000\\000\\000\\001\\002\\020\\000\\000\\000\\034\\000\\000\\000\\004\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000id\\000\\000\\010\\000\\014\\000\\010\\000\\007\\000\\010\\000\\000\\000\\000\\000\\000\\001@\\000\\000\\000\\377\\377\\377\\377\\210\\000\\000\\000\\024\\000\\000\\000\\000\\000\\000\\000\\014\\000\\026\\000\\006\\000\\005\\000\\010\\000\\014\\000\\014\\000\\000\\000\\000\\003\\004\\000\\030\\000\\000\\000\\030\\000\\000\\000\\000\\000\\000\\000\\000\\000\\n\\000\\030\\000\\014\\000\\004\\000\\010\\000\\n\\000\\000\\000<\\000\\000\\000\\020\\000\\000\\000\\003\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\030\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\001\\000\\000\\000\\003\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\001\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000\\000\\000\\000\\000\\377\\377\\377\\377\\000\\000\\000\\000\" } operation_id: \"<uuid>\" response_id: \"r2\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received arrow batch rows=3 Number of chunks in batch=0 Chunk index=0 size=304"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Assembling arrow batch of size 304 from 0 chunks."
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" operation_id: \"<uuid>\" response_id: \"r3\" result_complete { }"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Plan compression: original_size=<n>, compressed_size=<n>, saving_ratio=<r>, duration_s=<t>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Plan compression not effective. Using original plan."
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Executing plan <Truncated message due to truncation error>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Request: session_id: \"<uuid>\" user_context { user_id: \"connect-logs\" } plan { root { common { plan_id: <id> } project { input { common { plan_id: <id> } range { start: 0 end: 1 step: 1 } } expressions { alias { expr { literal { binary: \"\\347\\356\\347a^\\363_0\\344\\233H.\\025\\312\\347P\\007 \\036\\022a{\\017\\355\\247\\341dw\\226\\377\\002+\\352\\216\\320*\\202\\241u\\223\\017#7\\3157\\224\\305\\\"\\010\\000mk\\032\\360\\300\\313\\326%e\\212\\254,\\237\\252\\007\\321<D~3\\005\\036\\356\\371Z`\\345aC\\326\\304;\\312\\327l\\000\\212\\233\\nk_\\3113\\025Jm\\342\\204\\004\\250\\227\\305%&.j|\\007\\274\\276\\350A\\367E\\305]N\\237t\\177aQd\\306\\367(\\327\\03057\\023\\202z\\310\\203\\327\\373\\226Y#@t\\365%\\217lh\\010#\\211\\322\\344\\177\\036\\027Z\\220\\274C/\\271F\\346\\251G\\021\\t\\363\\267\\237\\021\\n&\\366\\\"\\237\\243E%&\\347\\274\\026B\\256\\264+\\362\\'\\325\\017\\377\\007\\303\\302\\006$).;\\203\\325\\251\\306\\352\\341\\354*\\017\\236,\\366\\013u9\\376\\370\\202\\005\\274\\232IgV\\257\\342\\377{\\247\\317\\200e\\334fm\\304p\\242kED\\376\\263\\024 \\215V9\\346\\361\\214m\\323\\303\\374\\241\\347\\244&\\020\\216\\025\\217\\265\\236\\tE\\317\\350a\\014\\210yH\\030;\\3447\\274\\'ef\\363\\203[\\005\\361\\022[s\\213\\261Q\\311r,\\322\\306B\\346\\350d\\003\\300\\257\\355\\247h2?m|\\307,\\236\\244\\206\\010\\262*\\023\\341\\257\\327\\214\\371\\016o \\333\\021X\\253G\\360L\\341\\374,q\\340\\224T\\203\\237\\303j\\233H\\213\\376f\\322:\\002\\301\\016\\026\\315>\\373/U!\\352\\323\\316\\211~\\362\\374A\\255\\336\\363\\2427b\\326\\017\\205B\\013\\022cOt\\006\\221\\244\\265}\\3775\\377>\\200e\\337\\013\\300\\323QhonEw\\261\\\\\\241\\241coc1DzC-\\204\\3061\\336\\327@f\\316\\t1f\\267\\270;\\257`$\\3666\\014\\023\\366Ka^:hXP\\2200\\037D\\354\\'1\\247\\310\\357\\332\\265\\334k\\277\\006\\024f\\\\\\320\\350\\270\\275\\317cT0\\007\\245+\\317a\\256\\204\\217;Q\\317D\\250\\275\\335\\\\\\317i^$\\256\\232\\3603\\005\\266\\031v\\213\\231\\254n\\317]\\'\\307\\376m=\\312\\013:7y\\203\\343\\315\\031d\\300\\0052\\204\\200\\215\\256\\3243\\343\\'\\027\\305Q\\305\\361V\\375\\035\\333\\375\\327\\221\\314\\237\\273\\222\\367\\212\\221\\227\\r\\007}\\025P\\321\\307\\033\\241\\313\\031\\243%r\\333\\364\\200|\\0272\\357I}:\\031\\325\\351<h\\032\\266O?\\272\\342G\\325\\351\\206\\326\\272F\\224Az\\366:\\236\\267\\214\\213a\\216za\\177d\\024\\037\\004\\212\\204\\331\\r\\0234q\\216%,Rx\\277\\367\\365\\265k\\255\\257\\375D&=\\345m\\343\\331\\204\\307M\\274N\\246\\224^\\332\\2751\\354\\245(*\\335\\370\\355\\231\\004&\\236m)\\233\\375\\247\\220Ip\\267\\247\\273<\\245\\341\\216\\340\\234\\352\\242q\\314\\177+\\271\\273\\014\\272\\312\\306c\\274\\307OZZ-\\350\\220\\013q\\035Q\\227\\013\\330 \\234+\\253)\\2145\\240+\\rI1\\330}p\\372\\255\\353\\311\\263\\254\\252E\\374\\371%\\027\\322\\262\\001\\301-\\355\\014\\271\\0058\\327\\327J}S\\300U\\244h\\307\\331\\225\\214\\036\\361\\235:\\233O[\\037\\352\\010\\366\\022\\2407e^\\267ox\\361r\\342^\\217\\316X\\237\\365\\205\\370\\316\\257/\\367q\\314\\031oD\\305\\214\\035y\\005\\361\\276\\346~\\327P\\324P\\244J\\204C\\210\\033M[\\000hLA*\\264\\2121\\365\\357*\\233\\t`\\325b.\\341j\\023\\323\\375P\\237\\241\\237\\317&\\234\\357\\\"\\270&G6\\311\\354>\\343\\006\\301\\363y\\226:\\352\\005iM\\224\\300\\230\\254\\310,\\203`f\\3008\\250\\236\\214\\360\\251\\344\\303/4H0C[\\\\b\\315\\022\\355.3t\\020P?\\336\\320%\\256\\332GiK\\305\\367\\251\\323\\007\\315\\242}\\t\\205\\251`\\257\\235\\3416\\301h\\252\\2264Q\\201\\230w\\264Hed\\re*E}\\364\\325\\252\\250.\\270\\210\\355?\\347Ez \\207V\\253J>\\001\\223\\272{\\271T_\\'\\350\\020\\316\\\\F\\235\\303\\010Qf\\322\\357\\020I\\305<\\317X\\254C\\206|\\252\\033\\023J\\316\\3764\\360\\260\\322\\320\\220\\370\\355\\321\\336<:\\251\\335\\327\\014\\244\\033\\227\\335\\300\\244\\234#}?\\344|\\313\\032\\3635z\\234\\312x#\\274\\327Tq\\327>$2B?\\350\\000\\227|\\231\\014\\246X \\341\\346\\313H\\266v\\027\\234\\017\\350\\240\\235\\246\\377I\\361ig\\227\\036d\\241\\265\\361\\010Xgxb\\0316\\234\\240\\214\\327E\\253\\343\\324(Vr\\235=d\\211\\\\x\\227\\213\\276;u\\232\\\\s\\215C.\\354\\'\\341%\\027\\003\\221\\200\\330,T\\221a}[\\216\\016_M\\021\\354\\304\\001\\377\\036\\\\ \\270\\244\\367\\020\\225YT9\\337x\\341\\203x\\204\\372q\\377\\205\\022g\\032\\345\\\\\\246M\\t\\376\\336\\342\\206\\017%:[yJ\\033\\237\\331\\025\\240\\207\\377-W\\301\\202\\177Q\\376\\350\\037\\241\\322\\357\\272n\\025A\\372DJ\\351\\024\\001{\\321H.\\311\\230\\361\\331\\'\\021u\\227\\201<{\\326\\354,t\\272\\236\\254o\\024R\\316\\035\\257Z\\354\\311m\\303\\301\\031n\\326\\261~^S\\365h\\314m\\357\\235\\361\\344\\372\\\\\\371h\\304\\326%\\030\\215\\271\\214\\t]\\206\\311o\\2114\\270\\035N\\270F{=\\n\\244\\304\\346*\\303\\246\\203\\034\\232\\311z\\372\\024`MA\\020j\\237\\322\\331\\365E\\205\\240\\347\\301Kh\\217\\346\\317E\\305\\266s4\\225\\275\\260nG\\024\\014\\367\\005\\230\\\"n\\264>\\277x\\204.\\332=\\310\\374\\036\\372\\304\\250\\221\\376\\217qQ\\316g\\363U\\263z/\\257\\330M\\364\\203\\235\\013\\310=\\272 \\317\\213\\033\\301\\375\\231\\360\\246\\201%\\014\\022\\261\\245\\277\\230\\206_\\360\\304\\256\\271\\017n&\\030\\322\\324 \\215\\\"\\355\\346\\303\\305\\023E\\213\\236\\375\\270\\362\\nLb\\212t\\204px\\000\\311\\001z\\374(\\252\\207\\2615\\t\\240j\\312PbRQ\\252\\373\\226\\275\\324\\222\\273\\377y\\177\\271\\246[@ #4\\2369\\347\\366\\024S\\323\\366\\033\\260\\201\\313\\310\\201\\200\\274\\247]\\252hB\\327@\\211R@f\\300\\225v^\\007\\361D\\211\\212\\326\\201\\313\\305G\\030P<\\025c\\222\\266=\\317\\250\\r\\367W\\277\\\"\\236\\340\\221r\\310\\320H\\307n\\220K\\342Y6\\200\\371\\335=M\\245\\t\\212I\\214\\314\\214\\244t)\\366f\\273\\204\\032M \\003\\236(\\002]\\254\\367Gg\\321\\367\\020\\324\\263\\312\\035n\\201\\215`\\224\\177\\342\\030Z\\rV<&\\212\\267\\014\\236 \\356\\005k \\272\\005\\207}\\375\\314\\2353\\366\\315\\321\\200\\014\\004Ht\\245\\306\\275\\215\\272\\346\\265\\237\\216\\\"\\2440\\207\\253m\\\\l\\030B\\233iZ\\2616OI\\276\\263]\\334\\013\\004\\314\\032\\3160\\244h\\nY\\244\\\"7\\244\\334\\362p\\377\\321[\\213#\\307\\244]\\266\\005K\\301\\034l\\260\\341\\331:>\\350\\337\\357\\326\\304u\\300\\025\\020\\347\\344\\221\\027\\033\\246M\\357\\250\\203\\240`\\360\\315\\032@\\3738w_H:5\\200\\205!^\\023\\257\\200\\262\\350j\\007\\332d\\372\\217z%6\\341\\373{$\\376\\034!M\\273[3\\252\\022\\261p\\223<\\325]\\306\\017\\356\\372$-i\\241d\\334\\301\\007\\255\\241\\216jk\\\\AW\\356\\025B\\216;\\204\\260\\267\\235d\\004#i\\270\\236\\321fJ$\\210\\331\\277\\321\\216\\351D?0\\261\\325x\\374<\\221?\\222(\\350s\\364\\306e\\323p\\345 \\273\\326\\252\\220\\341\\211\\225\\006}\\007\\322\\277C\\200\\306\\327\\216\\256452\\350k-\\272\\010\\277\\017\\260\\013O\\360%\\271W\\355\\241\\365\\037q\\n\\312\\335u8\\035\\\"\\354\\315ok\\376\\275I\\3121*\\001U\\201\\362=\\335\\357O\\010\\275\\273\\0147\\263\\32380\\232?\\\"yB-\\235\\226\\264}~\\323\\356\\033o\\347W5\\353F5OIX\\320<\\323\\005uN8\\300P\\226\\016\\3178\\374\\231\\027\\307\\325\\231(m\\2059\\326\\250\\372hF1\\311\\231\\210\\204p\\274+\\333\\364\\304\\267\\334\\252\\346;\\031\\237\\037S\\303\\245\\314r2\\276\\020\\240\\270\\367u\\371\\004\\277\\3205\\003\\266~\\273\\274\\232k\\034\\241^\\376<\\260\\033/m\\201\\212\\331\\277\\315-\\2221+\\313s\\200\\250\\020\\242LO\\222\\220\\035\\373\\030\" } } name: \"b\" } common { origin { python_origin { fragment: \"alias\" call_site: \"_connect_log_cases.py:369\" } } } } } } } client_type: \"<agent>\" request_options { result_chunking_options { allow_arrow_batch_chunking: true } } operation_id: \"<uuid>\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" schema { struct { fields { name: \"id\" data_type { long { } } } } } operation_id: \"<uuid>\" response_id: \"r1\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received the schema."
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" arrow_batch { row_count: 3 data: \"\\377\\377\\377\\377x\\000\\000\\000\\020\\000\\000\\000\\000\\000\\n\\000\\014\\000\\006\\000\\005\\000\\010\\000\\n\\000\\000\\000\\000\\001\\004\\000\\014\\000\\000\\000\\010\\000\\010\\000\\000\\000\\004\\000\\010\\000\\000\\000\\004\\000\\000\\000\\001\\000\\000\\000\\024\\000\\000\\000\\020\\000\\024\\000\\010\\000\\006\\000\\007\\000\\014\\000\\000\\000\\020\\000\\020\\000\\000\\000\\000\\000\\001\\002\\020\\000\\000\\000\\034\\000\\000\\000\\004\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000id\\000\\000\\010\\000\\014\\000\\010\\000\\007\\000\\010\\000\\000\\000\\000\\000\\000\\001@\\000\\000\\000\\377\\377\\377\\377\\210\\000\\000\\000\\024\\000\\000\\000\\000\\000\\000\\000\\014\\000\\026\\000\\006\\000\\005\\000\\010\\000\\014\\000\\014\\000\\000\\000\\000\\003\\004\\000\\030\\000\\000\\000\\030\\000\\000\\000\\000\\000\\000\\000\\000\\000\\n\\000\\030\\000\\014\\000\\004\\000\\010\\000\\n\\000\\000\\000<\\000\\000\\000\\020\\000\\000\\000\\003\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\030\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\001\\000\\000\\000\\003\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\001\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000\\000\\000\\000\\000\\377\\377\\377\\377\\000\\000\\000\\000\" } operation_id: \"<uuid>\" response_id: \"r2\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received arrow batch rows=3 Number of chunks in batch=0 Chunk index=0 size=304"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Assembling arrow batch of size 304 from 0 chunks."
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" operation_id: \"<uuid>\" response_id: \"r3\" result_complete { }"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Plan compression: original_size=<n>, compressed_size=<n>, saving_ratio=<r>, duration_s=<t>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Plan compression not effective. Using original plan."
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Executing plan <Truncated message due to truncation error>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetch"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Request: session_id: \"<uuid>\" user_context { user_id: \"connect-logs\" } plan { root { common { plan_id: <id> } project { input { common { plan_id: <id> } range { start: 0 end: 1 step: 1 } } expressions { alias { expr { literal { binary: \"\\347\\356\\347a^\\363_0\\344\\233H.\\025\\312\\347P\\007 \\036\\022a{\\017\\355\\247\\341dw\\226\\377\\002+\\352\\216\\320*\\202\\241u\\223\\017#7\\3157\\224\\305\\\"\\010\\000mk\\032\\360\\300\\313\\326%e\\212\\254,\\237\\252\\007\\321<D~3\\005\\036\\356\\371Z`\\345aC\\326\\304;\\312\\327l\\000\\212\\233\\nk_\\3113\\025Jm\\342\\204\\004\\250\\227\\305%&.j|\\007\\274\\276\\350A\\367E\\305]N\\237t\\177aQd\\306\\367(\\327\\03057\\023\\202z\\310\\203\\327\\373\\226Y#@t\\365%\\217lh\\010#\\211\\322\\344\\177\\036\\027Z\\220\\274C/\\271F\\346\\251G\\021\\t\\363\\267\\237\\021\\n&\\366\\\"\\237\\243E%&\\347\\274\\026B\\256\\264+\\362\\'\\325\\017\\377\\007\\303\\302\\006$).;\\203\\325\\251\\306\\352\\341\\354*\\017\\236,\\366\\013u9\\376\\370\\202\\005\\274\\232IgV\\257\\342\\377{\\247\\317\\200e\\334fm\\304p\\242kED\\376\\263\\024 \\215V9\\346\\361\\214m\\323\\303\\374\\241\\347\\244&\\020\\216\\025\\217\\265\\236\\tE\\317\\350a\\014\\210yH\\030;\\3447\\274\\'ef\\363\\203[\\005\\361\\022[s\\213\\261Q\\311r,\\322\\306B\\346\\350d\\003\\300\\257\\355\\247h2?m|\\307,\\236\\244\\206\\010\\262*\\023\\341\\257\\327\\214\\371\\016o \\333\\021X\\253G\\360L\\341\\374,q\\340\\224T\\203\\237\\303j\\233H\\213\\376f\\322:\\002\\301\\016\\026\\315>\\373/U!\\352\\323\\316\\211~\\362\\374A\\255\\336\\363\\2427b\\326\\017\\205B\\013\\022cOt\\006\\221\\244\\265}\\3775\\377>\\200e\\337\\013\\300\\323QhonEw\\261\\\\\\241\\241coc1DzC-\\204\\3061\\336\\327@f\\316\\t1f\\267\\270;\\257`$\\3666\\014\\023\\366Ka^:hXP\\2200\\037D\\354\\'1\\247\\310\\357\\332\\265\\334k\\277\\006\\024f\\\\\\320\\350\\270\\275\\317cT0\\007\\245+\\317a\\256\\204\\217;Q\\317D\\250\\275\\335\\\\\\317i^$\\256\\232\\3603\\005\\266\\031v\\213\\231\\254n\\317]\\'\\307\\376m=\\312\\013:7y\\203\\343\\315\\031d\\300\\0052\\204\\200\\215\\256\\3243\\343\\'\\027\\305Q\\305\\361V\\375\\035\\333\\375\\327\\221\\314\\237\\273\\222\\367\\212\\221\\227\\r\\007}\\025P\\321\\307\\033\\241\\313\\031\\243%r\\333\\364\\200|\\0272\\357I}:\\031\\325\\351<h\\032\\266O?\\272\\342G\\325\\351\\206\\326\\272F\\224Az\\366:\\236\\267\\214\\213a\\216za\\177d\\024\\037\\004\\212\\204\\331\\r\\0234q\\216%,Rx\\277\\367\\365\\265k\\255\\257\\375D&=\\345m\\343\\331\\204\\307M\\274N\\246\\224^\\332\\2751\\354\\245(*\\335\\370\\355\\231\\004&\\236m)\\233\\375\\247\\220Ip\\267\\247\\273<\\245\\341\\216\\340\\234\\352\\242q\\314\\177+\\271\\273\\014\\272\\312\\306c\\274\\307OZZ-\\350\\220\\013q\\035Q\\227\\013\\330 \\234+\\253)\\2145\\240+\\rI1\\330}p\\372\\255\\353\\311\\263\\254\\252E\\374\\371%\\027\\322\\262\\001\\301-\\355\\014\\271\\0058\\327\\327J}S\\300U\\244h\\307\\331\\225\\214\\036\\361\\235:\\233O[\\037\\352\\010\\366\\022\\2407e^\\267ox\\361r\\342^\\217\\316X\\237\\365\\205\\370\\316\\257/\\367q\\314\\031oD\\305\\214\\035y\\005\\361\\276\\346~\\327P\\324P\\244J\\204C\\210\\033M[\\000hLA*\\264\\2121\\365\\357*\\233\\t`\\325b.\\341j\\023\\323\\375P\\237\\241\\237\\317&\\234\\357\\\"\\270&G6\\311\\354>\\343\\006\\301\\363y\\226:\\352\\005iM\\224\\300\\230\\254\\310,\\203`f\\3008\\250\\236\\214\\360\\251\\344\\303/4H0C[\\\\b\\315\\022\\355.3t\\020P?\\336\\320%\\256\\332GiK\\305\\367\\251\\323\\007\\315\\242}\\t\\205\\251`\\257\\235\\3416\\301h\\252\\2264Q\\201\\230w\\264Hed\\re*E}\\364\\325\\252\\250.\\270\\210\\355?\\347Ez \\207V\\253J>\\001\\223\\272{\\271T_\\'\\350\\020\\316\\\\F\\235\\303\\010Qf\\322\\357\\020I\\305<\\317X\\254C\\206|\\252\\033\\023J\\316\\3764\\360\\260\\322\\320\\220\\370\\355\\321\\336<:\\251\\335\\327\\014\\244\\033\\227\\335\\300\\244\\234#}?\\344|\\313\\032\\3635z\\234\\312x#\\274\\327Tq\\327>$2B?\\350\\000\\227|\\231\\014\\246X \\341\\346\\313H\\266v\\027\\234\\017\\350\\240\\235\\246\\377I\\361ig\\227\\036d\\241\\265\\361\\010Xgxb\\0316\\234\\240\\214\\327E\\253\\343\\324(Vr\\235=d\\211\\\\x\\227\\213\\276;u\\232\\\\s\\215C.\\354\\'\\341%\\027\\003\\221\\200\\330,T\\221a}[\\216\\016_M\\021\\354\\304\\001\\377\\036\\\\ \\270\\244\\367\\020\\225YT9\\337x\\341\\203x\\204\\372q\\377\\205\\022g\\032\\345\\\\\\246M\\t\\376\\336\\342\\206\\017%:[yJ\\033\\237\\331\\025\\240\\207\\377-W\\301\\202\\177Q\\376\\350\\037\\241\\322\\357\\272n\\025A\\372DJ\\351\\024\\001{\\321H.\\311\\230\\361\\331\\'\\021u\\227\\201<{\\326\\354,t\\272\\236\\254o\\024R\\316\\035\\257Z\\354\\311m\\303\\301\\031n\\326\\261~^S\\365h\\314m\\357\\235\\361\\344\\372\\\\\\371h\\304\\326%\\030\\215\\271\\214\\t]\\206\\311o\\2114\\270\\035N\\270F{=\\n\\244\\304\\346*\\303\\246\\203\\034\\232\\311z\\372\\024`MA\\020j\\237\\322\\331\\365E\\205\\240\\347\\301Kh\\217\\346\\317E\\305\\266s4\\225\\275\\260nG\\024\\014\\367\\005\\230\\\"n\\264>\\277x\\204.\\332=\\310\\374\\036\\372\\304\\250\\221\\376\\217qQ\\316g\\363U\\263z/\\257\\330M\\364\\203\\235\\013\\310=\\272 \\317\\213\\033\\301\\375\\231\\360\\246\\201%\\014\\022\\261\\245\\277\\230\\206_\\360\\304\\256\\271\\017n&\\030\\322\\324 \\215\\\"\\355\\346\\303\\305\\023E\\213\\236\\375\\270\\362\\nLb\\212t\\204px\\000\\311\\001z\\374(\\252\\207\\2615\\t\\240j\\312PbRQ\\252\\373\\226\\275\\324\\222\\273\\377y\\177\\271\\246[@ #4\\2369\\347\\366\\024S\\323\\366\\033\\260\\201\\313\\310\\201\\200\\274\\247]\\252hB\\327@\\211R@f\\300\\225v^\\007\\361D\\211\\212\\326\\201\\313\\305G\\030P<\\025c\\222\\266=\\317\\250\\r\\367W\\277\\\"\\236\\340\\221r\\310\\320H\\307n\\220K\\342Y6\\200\\371\\335=M\\245\\t\\212I\\214\\314\\214\\244t)\\366f\\273\\204\\032M \\003\\236(\\002]\\254\\367Gg\\321\\367\\020\\324\\263\\312\\035n\\201\\215`\\224\\177\\342\\030Z\\rV<&\\212\\267\\014\\236 \\356\\005k \\272\\005\\207}\\375\\314\\2353\\366\\315\\321\\200\\014\\004Ht\\245\\306\\275\\215\\272\\346\\265\\237\\216\\\"\\2440\\207\\253m\\\\l\\030B\\233iZ\\2616OI\\276\\263]\\334\\013\\004\\314\\032\\3160\\244h\\nY\\244\\\"7\\244\\334\\362p\\377\\321[\\213#\\307\\244]\\266\\005K\\301\\034l\\260\\341\\331:>\\350\\337\\357\\326\\304u\\300\\025\\020\\347\\344\\221\\027\\033\\246M\\357\\250\\203\\240`\\360\\315\\032@\\3738w_H:5\\200\\205!^\\023\\257\\200\\262\\350j\\007\\332d\\372\\217z%6\\341\\373{$\\376\\034!M\\273[3\\252\\022\\261p\\223<\\325]\\306\\017\\356\\372$-i\\241d\\334\\301\\007\\255\\241\\216jk\\\\AW\\356\\025B\\216;\\204\\260\\267\\235d\\004#i\\270\\236\\321fJ$\\210\\331\\277\\321\\216\\351D?0\\261\\325x\\374<\\221?\\222(\\350s\\364\\306e\\323p\\345 \\273\\326\\252\\220\\341\\211\\225\\006}\\007\\322\\277C\\200\\306\\327\\216\\256452\\350k-\\272\\010\\277\\017\\260\\013O\\360%\\271W\\355\\241\\365\\037q\\n\\312\\335u8\\035\\\"\\354\\315ok\\376\\275I\\3121*\\001U\\201\\362=\\335\\357O\\010\\275\\273\\0147\\263\\32380\\232?\\\"yB-\\235\\226\\264}~\\323\\356\\033o\\347W5\\353F5OIX\\320<\\323\\005uN8\\300P\\226\\016\\3178\\374\\231\\027\\307\\325\\231(m\\2059\\326\\250\\372hF1\\311\\231\\210\\204p\\274+\\333\\364\\304\\267\\334\\252\\346;\\031\\237\\037S\\303\\245\\314r2\\276\\020\\240\\270\\367u\\371\\004\\277\\3205\\003\\266~\\273\\274\\232k\\034\\241^\\376<\\260\\033/m\\201\\212\\331\\277\\315-\\2221+\\313s\\200\\250\\020\\242LO\\222\\220\\035\\373\\030\" } } name: \"b\" } common { origin { python_origin { fragment: \"alias\" call_site: \"_connect_log_cases.py:369\" } } } } } } } client_type: \"<agent>\" request_options { result_chunking_options { allow_arrow_batch_chunking: true } } operation_id: \"<uuid>\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" schema { struct { fields { name: \"id\" data_type { long { } } } } } operation_id: \"<uuid>\" response_id: \"r1\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received the schema."
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" arrow_batch { row_count: 3 data: \"\\377\\377\\377\\377x\\000\\000\\000\\020\\000\\000\\000\\000\\000\\n\\000\\014\\000\\006\\000\\005\\000\\010\\000\\n\\000\\000\\000\\000\\001\\004\\000\\014\\000\\000\\000\\010\\000\\010\\000\\000\\000\\004\\000\\010\\000\\000\\000\\004\\000\\000\\000\\001\\000\\000\\000\\024\\000\\000\\000\\020\\000\\024\\000\\010\\000\\006\\000\\007\\000\\014\\000\\000\\000\\020\\000\\020\\000\\000\\000\\000\\000\\001\\002\\020\\000\\000\\000\\034\\000\\000\\000\\004\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000id\\000\\000\\010\\000\\014\\000\\010\\000\\007\\000\\010\\000\\000\\000\\000\\000\\000\\001@\\000\\000\\000\\377\\377\\377\\377\\210\\000\\000\\000\\024\\000\\000\\000\\000\\000\\000\\000\\014\\000\\026\\000\\006\\000\\005\\000\\010\\000\\014\\000\\014\\000\\000\\000\\000\\003\\004\\000\\030\\000\\000\\000\\030\\000\\000\\000\\000\\000\\000\\000\\000\\000\\n\\000\\030\\000\\014\\000\\004\\000\\010\\000\\n\\000\\000\\000<\\000\\000\\000\\020\\000\\000\\000\\003\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\030\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\001\\000\\000\\000\\003\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\001\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000\\000\\000\\000\\000\\377\\377\\377\\377\\000\\000\\000\\000\" } operation_id: \"<uuid>\" response_id: \"r2\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received arrow batch rows=3 Number of chunks in batch=0 Chunk index=0 size=304"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Assembling arrow batch of size 304 from 0 chunks."
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" operation_id: \"<uuid>\" response_id: \"r3\" result_complete { }"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Executing plan <Truncated message due to truncation error>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetch"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Request: session_id: \"<uuid>\" user_context { user_id: \"connect-logs\" } plan { root { common { plan_id: <id> } project { input { common { plan_id: <id> } range { start: 0 end: 1 step: 1 } } expressions { alias { expr { literal { binary: \"\\347\\356\\347a^\\363_0\\344\\233H.\\025\\312\\347P\\007 \\036\\022a{\\017\\355\\247\\341dw\\226\\377\\002+\\352\\216\\320*\\202\\241u\\223\\017#7\\3157\\224\\305\\\"\\010\\000mk\\032\\360\\300\\313\\326%e\\212\\254,\\237\\252\\007\\321<D~3\\005\\036\\356\\371Z`\\345aC\\326\\304;\\312\\327l\\000\\212\\233\\nk_\\3113\\025Jm\\342\\204\\004\\250\\227\\305%&.j|\\007\\274\\276\\350A\\367E\\305]N\\237t\\177aQd\\306\\367(\\327\\03057\\023\\202z\\310\\203\\327\\373\\226Y#@t\\365%\\217lh\\010#\\211\\322\\344\\177\\036\\027Z\\220\\274C/\\271F\\346\\251G\\021\\t\\363\\267\\237\\021\\n&\\366\\\"\\237\\243E%&\\347\\274\\026B\\256\\264+\\362\\'\\325\\017\\377\\007\\303\\302\\006$).;\\203\\325\\251\\306\\352\\341\\354*\\017\\236,\\366\\013u9\\376\\370\\202\\005\\274\\232IgV\\257\\342\\377{\\247\\317\\200e\\334fm\\304p\\242kED\\376\\263\\024 \\215V9\\346\\361\\214m\\323\\303\\374\\241\\347\\244&\\020\\216\\025\\217\\265\\236\\tE\\317\\350a\\014\\210yH\\030;\\3447\\274\\'ef\\363\\203[\\005\\361\\022[s\\213\\261Q\\311r,\\322\\306B\\346\\350d\\003\\300\\257\\355\\247h2?m|\\307,\\236\\244\\206\\010\\262*\\023\\341\\257\\327\\214\\371\\016o \\333\\021X\\253G\\360L\\341\\374,q\\340\\224T\\203\\237\\303j\\233H\\213\\376f\\322:\\002\\301\\016\\026\\315>\\373/U!\\352\\323\\316\\211~\\362\\374A\\255\\336\\363\\2427b\\326\\017\\205B\\013\\022cOt\\006\\221\\244\\265}\\3775\\377>\\200e\\337\\013\\300\\323QhonEw\\261\\\\\\241\\241coc1DzC-\\204\\3061\\336\\327@f\\316\\t1f\\267\\270;\\257`$\\3666\\014\\023\\366Ka^:hXP\\2200\\037D\\354\\'1\\247\\310\\357\\332\\265\\334k\\277\\006\\024f\\\\\\320\\350\\270\\275\\317cT0\\007\\245+\\317a\\256\\204\\217;Q\\317D\\250\\275\\335\\\\\\317i^$\\256\\232\\3603\\005\\266\\031v\\213\\231\\254n\\317]\\'\\307\\376m=\\312\\013:7y\\203\\343\\315\\031d\\300\\0052\\204\\200\\215\\256\\3243\\343\\'\\027\\305Q\\305\\361V\\375\\035\\333\\375\\327\\221\\314\\237\\273\\222\\367\\212\\221\\227\\r\\007}\\025P\\321\\307\\033\\241\\313\\031\\243%r\\333\\364\\200|\\0272\\357I}:\\031\\325\\351<h\\032\\266O?\\272\\342G\\325\\351\\206\\326\\272F\\224Az\\366:\\236\\267\\214\\213a\\216za\\177d\\024\\037\\004\\212\\204\\331\\r\\0234q\\216%,Rx\\277\\367\\365\\265k\\255\\257\\375D&=\\345m\\343\\331\\204\\307M\\274N\\246\\224^\\332\\2751\\354\\245(*\\335\\370\\355\\231\\004&\\236m)\\233\\375\\247\\220Ip\\267\\247\\273<\\245\\341\\216\\340\\234\\352\\242q\\314\\177+\\271\\273\\014\\272\\312\\306c\\274\\307OZZ-\\350\\220\\013q\\035Q\\227\\013\\330 \\234+\\253)\\2145\\240+\\rI1\\330}p\\372\\255\\353\\311\\263\\254\\252E\\374\\371%\\027\\322\\262\\001\\301-\\355\\014\\271\\0058\\327\\327J}S\\300U\\244h\\307\\331\\225\\214\\036\\361\\235:\\233O[\\037\\352\\010\\366\\022\\2407e^\\267ox\\361r\\342^\\217\\316X\\237\\365\\205\\370\\316\\257/\\367q\\314\\031oD\\305\\214\\035y\\005\\361\\276\\346~\\327P\\324P\\244J\\204C\\210\\033M[\\000hLA*\\264\\2121\\365\\357*\\233\\t`\\325b.\\341j\\023\\323\\375P\\237\\241\\237\\317&\\234\\357\\\"\\270&G6\\311\\354>\\343\\006\\301\\363y\\226:\\352\\005iM\\224\\300\\230\\254\\310,\\203`f\\3008\\250\\236\\214\\360\\251\\344\\303/4H0C[\\\\b\\315\\022\\355.3t\\020P?\\336\\320%\\256\\332GiK\\305\\367\\251\\323\\007\\315\\242}\\t\\205\\251`\\257\\235\\3416\\301h\\252\\2264Q\\201\\230w\\264Hed\\re*E}\\364\\325\\252\\250.\\270\\210\\355?\\347Ez \\207V\\253J>\\001\\223\\272{\\271T_\\'\\350\\020\\316\\\\F\\235\\303\\010Qf\\322\\357\\020I\\305<\\317X\\254C\\206|\\252\\033\\023J\\316\\3764\\360\\260\\322\\320\\220\\370\\355\\321\\336<:\\251\\335\\327\\014\\244\\033\\227\\335\\300\\244\\234#}?\\344|\\313\\032\\3635z\\234\\312x#\\274\\327Tq\\327>$2B?\\350\\000\\227|\\231\\014\\246X \\341\\346\\313H\\266v\\027\\234\\017\\350\\240\\235\\246\\377I\\361ig\\227\\036d\\241\\265\\361\\010Xgxb\\0316\\234\\240\\214\\327E\\253\\343\\324(Vr\\235=d\\211\\\\x\\227\\213\\276;u\\232\\\\s\\215C.\\354\\'\\341%\\027\\003\\221\\200\\330,T\\221a}[\\216\\016_M\\021\\354\\304\\001\\377\\036\\\\ \\270\\244\\367\\020\\225YT9\\337x\\341\\203x\\204\\372q\\377\\205\\022g\\032\\345\\\\\\246M\\t\\376\\336\\342\\206\\017%:[yJ\\033\\237\\331\\025\\240\\207\\377-W\\301\\202\\177Q\\376\\350\\037\\241\\322\\357\\272n\\025A\\372DJ\\351\\024\\001{\\321H.\\311\\230\\361\\331\\'\\021u\\227\\201<{\\326\\354,t\\272\\236\\254o\\024R\\316\\035\\257Z\\354\\311m\\303\\301\\031n\\326\\261~^S\\365h\\314m\\357\\235\\361\\344\\372\\\\\\371h\\304\\326%\\030\\215\\271\\214\\t]\\206\\311o\\2114\\270\\035N\\270F{=\\n\\244\\304\\346*\\303\\246\\203\\034\\232\\311z\\372\\024`MA\\020j\\237\\322\\331\\365E\\205\\240\\347\\301Kh\\217\\346\\317E\\305\\266s4\\225\\275\\260nG\\024\\014\\367\\005\\230\\\"n\\264>\\277x\\204.\\332=\\310\\374\\036\\372\\304\\250\\221\\376\\217qQ\\316g\\363U\\263z/\\257\\330M\\364\\203\\235\\013\\310=\\272 \\317\\213\\033\\301\\375\\231\\360\\246\\201%\\014\\022\\261\\245\\277\\230\\206_\\360\\304\\256\\271\\017n&\\030\\322\\324 \\215\\\"\\355\\346\\303\\305\\023E\\213\\236\\375\\270\\362\\nLb\\212t\\204px\\000\\311\\001z\\374(\\252\\207\\2615\\t\\240j\\312PbRQ\\252\\373\\226\\275\\324\\222\\273\\377y\\177\\271\\246[@ #4\\2369\\347\\366\\024S\\323\\366\\033\\260\\201\\313\\310\\201\\200\\274\\247]\\252hB\\327@\\211R@f\\300\\225v^\\007\\361D\\211\\212\\326\\201\\313\\305G\\030P<\\025c\\222\\266=\\317\\250\\r\\367W\\277\\\"\\236\\340\\221r\\310\\320H\\307n\\220K\\342Y6\\200\\371\\335=M\\245\\t\\212I\\214\\314\\214\\244t)\\366f\\273\\204\\032M \\003\\236(\\002]\\254\\367Gg\\321\\367\\020\\324\\263\\312\\035n\\201\\215`\\224\\177\\342\\030Z\\rV<&\\212\\267\\014\\236 \\356\\005k \\272\\005\\207}\\375\\314\\2353\\366\\315\\321\\200\\014\\004Ht\\245\\306\\275\\215\\272\\346\\265\\237\\216\\\"\\2440\\207\\253m\\\\l\\030B\\233iZ\\2616OI\\276\\263]\\334\\013\\004\\314\\032\\3160\\244h\\nY\\244\\\"7\\244\\334\\362p\\377\\321[\\213#\\307\\244]\\266\\005K\\301\\034l\\260\\341\\331:>\\350\\337\\357\\326\\304u\\300\\025\\020\\347\\344\\221\\027\\033\\246M\\357\\250\\203\\240`\\360\\315\\032@\\3738w_H:5\\200\\205!^\\023\\257\\200\\262\\350j\\007\\332d\\372\\217z%6\\341\\373{$\\376\\034!M\\273[3\\252\\022\\261p\\223<\\325]\\306\\017\\356\\372$-i\\241d\\334\\301\\007\\255\\241\\216jk\\\\AW\\356\\025B\\216;\\204\\260\\267\\235d\\004#i\\270\\236\\321fJ$\\210\\331\\277\\321\\216\\351D?0\\261\\325x\\374<\\221?\\222(\\350s\\364\\306e\\323p\\345 \\273\\326\\252\\220\\341\\211\\225\\006}\\007\\322\\277C\\200\\306\\327\\216\\256452\\350k-\\272\\010\\277\\017\\260\\013O\\360%\\271W\\355\\241\\365\\037q\\n\\312\\335u8\\035\\\"\\354\\315ok\\376\\275I\\3121*\\001U\\201\\362=\\335\\357O\\010\\275\\273\\0147\\263\\32380\\232?\\\"yB-\\235\\226\\264}~\\323\\356\\033o\\347W5\\353F5OIX\\320<\\323\\005uN8\\300P\\226\\016\\3178\\374\\231\\027\\307\\325\\231(m\\2059\\326\\250\\372hF1\\311\\231\\210\\204p\\274+\\333\\364\\304\\267\\334\\252\\346;\\031\\237\\037S\\303\\245\\314r2\\276\\020\\240\\270\\367u\\371\\004\\277\\3205\\003\\266~\\273\\274\\232k\\034\\241^\\376<\\260\\033/m\\201\\212\\331\\277\\315-\\2221+\\313s\\200\\250\\020\\242LO\\222\\220\\035\\373\\030\" } } name: \"b\" } common { origin { python_origin { fragment: \"alias\" call_site: \"_connect_log_cases.py:369\" } } } } } } } client_type: \"<agent>\" request_options { result_chunking_options { allow_arrow_batch_chunking: true } } operation_id: \"<uuid>\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" schema { struct { fields { name: \"id\" data_type { long { } } } } } operation_id: \"<uuid>\" response_id: \"r1\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received the schema."
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" arrow_batch { row_count: 3 data: \"\\377\\377\\377\\377x\\000\\000\\000\\020\\000\\000\\000\\000\\000\\n\\000\\014\\000\\006\\000\\005\\000\\010\\000\\n\\000\\000\\000\\000\\001\\004\\000\\014\\000\\000\\000\\010\\000\\010\\000\\000\\000\\004\\000\\010\\000\\000\\000\\004\\000\\000\\000\\001\\000\\000\\000\\024\\000\\000\\000\\020\\000\\024\\000\\010\\000\\006\\000\\007\\000\\014\\000\\000\\000\\020\\000\\020\\000\\000\\000\\000\\000\\001\\002\\020\\000\\000\\000\\034\\000\\000\\000\\004\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000id\\000\\000\\010\\000\\014\\000\\010\\000\\007\\000\\010\\000\\000\\000\\000\\000\\000\\001@\\000\\000\\000\\377\\377\\377\\377\\210\\000\\000\\000\\024\\000\\000\\000\\000\\000\\000\\000\\014\\000\\026\\000\\006\\000\\005\\000\\010\\000\\014\\000\\014\\000\\000\\000\\000\\003\\004\\000\\030\\000\\000\\000\\030\\000\\000\\000\\000\\000\\000\\000\\000\\000\\n\\000\\030\\000\\014\\000\\004\\000\\010\\000\\n\\000\\000\\000<\\000\\000\\000\\020\\000\\000\\000\\003\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\030\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\001\\000\\000\\000\\003\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\001\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000\\000\\000\\000\\000\\377\\377\\377\\377\\000\\000\\000\\000\" } operation_id: \"<uuid>\" response_id: \"r2\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received arrow batch rows=3 Number of chunks in batch=0 Chunk index=0 size=304"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Assembling arrow batch of size 304 from 0 chunks."
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" operation_id: \"<uuid>\" response_id: \"r3\" result_complete { }"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Executing plan <Truncated message due to truncation error>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Request: session_id: \"<uuid>\" user_context { user_id: \"connect-logs\" } plan { root { common { plan_id: <id> } project { input { common { plan_id: <id> } range { start: 0 end: 1 step: 1 } } expressions { alias { expr { literal { binary: \"\\347\\356\\347a^\\363_0\\344\\233H.\\025\\312\\347P\\007 \\036\\022a{\\017\\355\\247\\341dw\\226\\377\\002+\\352\\216\\320*\\202\\241u\\223\\017#7\\3157\\224\\305\\\"\\010\\000mk\\032\\360\\300\\313\\326%e\\212\\254,\\237\\252\\007\\321<D~3\\005\\036\\356\\371Z`\\345aC\\326\\304;\\312\\327l\\000\\212\\233\\nk_\\3113\\025Jm\\342\\204\\004\\250\\227\\305%&.j|\\007\\274\\276\\350A\\367E\\305]N\\237t\\177aQd\\306\\367(\\327\\03057\\023\\202z\\310\\203\\327\\373\\226Y#@t\\365%\\217lh\\010#\\211\\322\\344\\177\\036\\027Z\\220\\274C/\\271F\\346\\251G\\021\\t\\363\\267\\237\\021\\n&\\366\\\"\\237\\243E%&\\347\\274\\026B\\256\\264+\\362\\'\\325\\017\\377\\007\\303\\302\\006$).;\\203\\325\\251\\306\\352\\341\\354*\\017\\236,\\366\\013u9\\376\\370\\202\\005\\274\\232IgV\\257\\342\\377{\\247\\317\\200e\\334fm\\304p\\242kED\\376\\263\\024 \\215V9\\346\\361\\214m\\323\\303\\374\\241\\347\\244&\\020\\216\\025\\217\\265\\236\\tE\\317\\350a\\014\\210yH\\030;\\3447\\274\\'ef\\363\\203[\\005\\361\\022[s\\213\\261Q\\311r,\\322\\306B\\346\\350d\\003\\300\\257\\355\\247h2?m|\\307,\\236\\244\\206\\010\\262*\\023\\341\\257\\327\\214\\371\\016o \\333\\021X\\253G\\360L\\341\\374,q\\340\\224T\\203\\237\\303j\\233H\\213\\376f\\322:\\002\\301\\016\\026\\315>\\373/U!\\352\\323\\316\\211~\\362\\374A\\255\\336\\363\\2427b\\326\\017\\205B\\013\\022cOt\\006\\221\\244\\265}\\3775\\377>\\200e\\337\\013\\300\\323QhonEw\\261\\\\\\241\\241coc1DzC-\\204\\3061\\336\\327@f\\316\\t1f\\267\\270;\\257`$\\3666\\014\\023\\366Ka^:hXP\\2200\\037D\\354\\'1\\247\\310\\357\\332\\265\\334k\\277\\006\\024f\\\\\\320\\350\\270\\275\\317cT0\\007\\245+\\317a\\256\\204\\217;Q\\317D\\250\\275\\335\\\\\\317i^$\\256\\232\\3603\\005\\266\\031v\\213\\231\\254n\\317]\\'\\307\\376m=\\312\\013:7y\\203\\343\\315\\031d\\300\\0052\\204\\200\\215\\256\\3243\\343\\'\\027\\305Q\\305\\361V\\375\\035\\333\\375\\327\\221\\314\\237\\273\\222\\367\\212\\221\\227\\r\\007}\\025P\\321\\307\\033\\241\\313\\031\\243%r\\333\\364\\200|\\0272\\357I}:\\031\\325\\351<h\\032\\266O?\\272\\342G\\325\\351\\206\\326\\272F\\224Az\\366:\\236\\267\\214\\213a\\216za\\177d\\024\\037\\004\\212\\204\\331\\r\\0234q\\216%,Rx\\277\\367\\365\\265k\\255\\257\\375D&=\\345m\\343\\331\\204\\307M\\274N\\246\\224^\\332\\2751\\354\\245(*\\335\\370\\355\\231\\004&\\236m)\\233\\375\\247\\220Ip\\267\\247\\273<\\245\\341\\216\\340\\234\\352\\242q\\314\\177+\\271\\273\\014\\272\\312\\306c\\274\\307OZZ-\\350\\220\\013q\\035Q\\227\\013\\330 \\234+\\253)\\2145\\240+\\rI1\\330}p\\372\\255\\353\\311\\263\\254\\252E\\374\\371%\\027\\322\\262\\001\\301-\\355\\014\\271\\0058\\327\\327J}S\\300U\\244h\\307\\331\\225\\214\\036\\361\\235:\\233O[\\037\\352\\010\\366\\022\\2407e^\\267ox\\361r\\342^\\217\\316X\\237\\365\\205\\370\\316\\257/\\367q\\314\\031oD\\305\\214\\035y\\005\\361\\276\\346~\\327P\\324P\\244J\\204C\\210\\033M[\\000hLA*\\264\\2121\\365\\357*\\233\\t`\\325b.\\341j\\023\\323\\375P\\237\\241\\237\\317&\\234\\357\\\"\\270&G6\\311\\354>\\343\\006\\301\\363y\\226:\\352\\005iM\\224\\300\\230\\254\\310,\\203`f\\3008\\250\\236\\214\\360\\251\\344\\303/4H0C[\\\\b\\315\\022\\355.3t\\020P?\\336\\320%\\256\\332GiK\\305\\367\\251\\323\\007\\315\\242}\\t\\205\\251`\\257\\235\\3416\\301h\\252\\2264Q\\201\\230w\\264Hed\\re*E}\\364\\325\\252\\250.\\270\\210\\355?\\347Ez \\207V\\253J>\\001\\223\\272{\\271T_\\'\\350\\020\\316\\\\F\\235\\303\\010Qf\\322\\357\\020I\\305<\\317X\\254C\\206|\\252\\033\\023J\\316\\3764\\360\\260\\322\\320\\220\\370\\355\\321\\336<:\\251\\335\\327\\014\\244\\033\\227\\335\\300\\244\\234#}?\\344|\\313\\032\\3635z\\234\\312x#\\274\\327Tq\\327>$2B?\\350\\000\\227|\\231\\014\\246X \\341\\346\\313H\\266v\\027\\234\\017\\350\\240\\235\\246\\377I\\361ig\\227\\036d\\241\\265\\361\\010Xgxb\\0316\\234\\240\\214\\327E\\253\\343\\324(Vr\\235=d\\211\\\\x\\227\\213\\276;u\\232\\\\s\\215C.\\354\\'\\341%\\027\\003\\221\\200\\330,T\\221a}[\\216\\016_M\\021\\354\\304\\001\\377\\036\\\\ \\270\\244\\367\\020\\225YT9\\337x\\341\\203x\\204\\372q\\377\\205\\022g\\032\\345\\\\\\246M\\t\\376\\336\\342\\206\\017%:[yJ\\033\\237\\331\\025\\240\\207\\377-W\\301\\202\\177Q\\376\\350\\037\\241\\322\\357\\272n\\025A\\372DJ\\351\\024\\001{\\321H.\\311\\230\\361\\331\\'\\021u\\227\\201<{\\326\\354,t\\272\\236\\254o\\024R\\316\\035\\257Z\\354\\311m\\303\\301\\031n\\326\\261~^S\\365h\\314m\\357\\235\\361\\344\\372\\\\\\371h\\304\\326%\\030\\215\\271\\214\\t]\\206\\311o\\2114\\270\\035N\\270F{=\\n\\244\\304\\346*\\303\\246\\203\\034\\232\\311z\\372\\024`MA\\020j\\237\\322\\331\\365E\\205\\240\\347\\301Kh\\217\\346\\317E\\305\\266s4\\225\\275\\260nG\\024\\014\\367\\005\\230\\\"n\\264>\\277x\\204.\\332=\\310\\374\\036\\372\\304\\250\\221\\376\\217qQ\\316g\\363U\\263z/\\257\\330M\\364\\203\\235\\013\\310=\\272 \\317\\213\\033\\301\\375\\231\\360\\246\\201%\\014\\022\\261\\245\\277\\230\\206_\\360\\304\\256\\271\\017n&\\030\\322\\324 \\215\\\"\\355\\346\\303\\305\\023E\\213\\236\\375\\270\\362\\nLb\\212t\\204px\\000\\311\\001z\\374(\\252\\207\\2615\\t\\240j\\312PbRQ\\252\\373\\226\\275\\324\\222\\273\\377y\\177\\271\\246[@ #4\\2369\\347\\366\\024S\\323\\366\\033\\260\\201\\313\\310\\201\\200\\274\\247]\\252hB\\327@\\211R@f\\300\\225v^\\007\\361D\\211\\212\\326\\201\\313\\305G\\030P<\\025c\\222\\266=\\317\\250\\r\\367W\\277\\\"\\236\\340\\221r\\310\\320H\\307n\\220K\\342Y6\\200\\371\\335=M\\245\\t\\212I\\214\\314\\214\\244t)\\366f\\273\\204\\032M \\003\\236(\\002]\\254\\367Gg\\321\\367\\020\\324\\263\\312\\035n\\201\\215`\\224\\177\\342\\030Z\\rV<&\\212\\267\\014\\236 \\356\\005k \\272\\005\\207}\\375\\314\\2353\\366\\315\\321\\200\\014\\004Ht\\245\\306\\275\\215\\272\\346\\265\\237\\216\\\"\\2440\\207\\253m\\\\l\\030B\\233iZ\\2616OI\\276\\263]\\334\\013\\004\\314\\032\\3160\\244h\\nY\\244\\\"7\\244\\334\\362p\\377\\321[\\213#\\307\\244]\\266\\005K\\301\\034l\\260\\341\\331:>\\350\\337\\357\\326\\304u\\300\\025\\020\\347\\344\\221\\027\\033\\246M\\357\\250\\203\\240`\\360\\315\\032@\\3738w_H:5\\200\\205!^\\023\\257\\200\\262\\350j\\007\\332d\\372\\217z%6\\341\\373{$\\376\\034!M\\273[3\\252\\022\\261p\\223<\\325]\\306\\017\\356\\372$-i\\241d\\334\\301\\007\\255\\241\\216jk\\\\AW\\356\\025B\\216;\\204\\260\\267\\235d\\004#i\\270\\236\\321fJ$\\210\\331\\277\\321\\216\\351D?0\\261\\325x\\374<\\221?\\222(\\350s\\364\\306e\\323p\\345 \\273\\326\\252\\220\\341\\211\\225\\006}\\007\\322\\277C\\200\\306\\327\\216\\256452\\350k-\\272\\010\\277\\017\\260\\013O\\360%\\271W\\355\\241\\365\\037q\\n\\312\\335u8\\035\\\"\\354\\315ok\\376\\275I\\3121*\\001U\\201\\362=\\335\\357O\\010\\275\\273\\0147\\263\\32380\\232?\\\"yB-\\235\\226\\264}~\\323\\356\\033o\\347W5\\353F5OIX\\320<\\323\\005uN8\\300P\\226\\016\\3178\\374\\231\\027\\307\\325\\231(m\\2059\\326\\250\\372hF1\\311\\231\\210\\204p\\274+\\333\\364\\304\\267\\334\\252\\346;\\031\\237\\037S\\303\\245\\314r2\\276\\020\\240\\270\\367u\\371\\004\\277\\3205\\003\\266~\\273\\274\\232k\\034\\241^\\376<\\260\\033/m\\201\\212\\331\\277\\315-\\2221+\\313s\\200\\250\\020\\242LO\\222\\220\\035\\373\\030\" } } name: \"b\" } common { origin { python_origin { fragment: \"alias\" call_site: \"_connect_log_cases.py:369\" } } } } } } } client_type: \"<agent>\" request_options { result_chunking_options { allow_arrow_batch_chunking: true } } operation_id: \"<uuid>\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" schema { struct { fields { name: \"id\" data_type { long { } } } } } operation_id: \"<uuid>\" response_id: \"r1\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received the schema."
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" arrow_batch { row_count: 3 data: \"\\377\\377\\377\\377x\\000\\000\\000\\020\\000\\000\\000\\000\\000\\n\\000\\014\\000\\006\\000\\005\\000\\010\\000\\n\\000\\000\\000\\000\\001\\004\\000\\014\\000\\000\\000\\010\\000\\010\\000\\000\\000\\004\\000\\010\\000\\000\\000\\004\\000\\000\\000\\001\\000\\000\\000\\024\\000\\000\\000\\020\\000\\024\\000\\010\\000\\006\\000\\007\\000\\014\\000\\000\\000\\020\\000\\020\\000\\000\\000\\000\\000\\001\\002\\020\\000\\000\\000\\034\\000\\000\\000\\004\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000id\\000\\000\\010\\000\\014\\000\\010\\000\\007\\000\\010\\000\\000\\000\\000\\000\\000\\001@\\000\\000\\000\\377\\377\\377\\377\\210\\000\\000\\000\\024\\000\\000\\000\\000\\000\\000\\000\\014\\000\\026\\000\\006\\000\\005\\000\\010\\000\\014\\000\\014\\000\\000\\000\\000\\003\\004\\000\\030\\000\\000\\000\\030\\000\\000\\000\\000\\000\\000\\000\\000\\000\\n\\000\\030\\000\\014\\000\\004\\000\\010\\000\\n\\000\\000\\000<\\000\\000\\000\\020\\000\\000\\000\\003\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\030\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\001\\000\\000\\000\\003\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\001\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000\\000\\000\\000\\000\\377\\377\\377\\377\\000\\000\\000\\000\" } operation_id: \"<uuid>\" response_id: \"r2\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received arrow batch rows=3 Number of chunks in batch=0 Chunk index=0 size=304"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Assembling arrow batch of size 304 from 0 chunks."
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" operation_id: \"<uuid>\" response_id: \"r3\" result_complete { }"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Schema for plan: <Truncated message due to truncation error>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Explain (mode=simple) for plan <Truncated message due to truncation error>"
+    ]
+   ],
+   "'root'"
+  ],
+  "info_level": [
+   [],
+   "[Row(id=0), Row(id=1), Row(id=2)]"
+  ],
+  "info_level_of_an_error": [
+   [
+    [
+     "pyspark.sql.connect.logging",
+     "ERROR",
+     "GRPC Error received <exc_info: _MultiThreadedRendezvous>"
+    ]
+   ],
+   "'UnknownException'"
+  ],
+  "interrupted_at_a_failed_lookup": [
+   [
+    [
+     "pyspark.sql.connect.logging",
+     "ERROR",
+     "GRPC Error received <exc_info: _InactiveRpcError>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "<unformatted: Plan compression is disabled because the server does not support it. % (SparkConnectGrpcException) of TypeError>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Executing plan <Truncated message due to truncation error>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetch"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Request: session_id: \"<uuid>\" user_context { user_id: \"connect-logs\" } plan { root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } } } client_type: \"<agent>\" request_options { result_chunking_options { allow_arrow_batch_chunking: true } } operation_id: \"<uuid>\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" schema { struct { fields { name: \"id\" data_type { long { } } } } } operation_id: \"<uuid>\" response_id: \"r1\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received the schema."
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" arrow_batch { row_count: 3 data: \"\\377\\377\\377\\377x\\000\\000\\000\\020\\000\\000\\000\\000\\000\\n\\000\\014\\000\\006\\000\\005\\000\\010\\000\\n\\000\\000\\000\\000\\001\\004\\000\\014\\000\\000\\000\\010\\000\\010\\000\\000\\000\\004\\000\\010\\000\\000\\000\\004\\000\\000\\000\\001\\000\\000\\000\\024\\000\\000\\000\\020\\000\\024\\000\\010\\000\\006\\000\\007\\000\\014\\000\\000\\000\\020\\000\\020\\000\\000\\000\\000\\000\\001\\002\\020\\000\\000\\000\\034\\000\\000\\000\\004\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000id\\000\\000\\010\\000\\014\\000\\010\\000\\007\\000\\010\\000\\000\\000\\000\\000\\000\\001@\\000\\000\\000\\377\\377\\377\\377\\210\\000\\000\\000\\024\\000\\000\\000\\000\\000\\000\\000\\014\\000\\026\\000\\006\\000\\005\\000\\010\\000\\014\\000\\014\\000\\000\\000\\000\\003\\004\\000\\030\\000\\000\\000\\030\\000\\000\\000\\000\\000\\000\\000\\000\\000\\n\\000\\030\\000\\014\\000\\004\\000\\010\\000\\n\\000\\000\\000<\\000\\000\\000\\020\\000\\000\\000\\003\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\030\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\001\\000\\000\\000\\003\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\001\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000\\000\\000\\000\\000\\377\\377\\377\\377\\000\\000\\000\\000\" } operation_id: \"<uuid>\" response_id: \"r2\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received arrow batch rows=3 Number of chunks in batch=0 Chunk index=0 size=304"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Assembling arrow batch of size 304 from 0 chunks."
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" operation_id: \"<uuid>\" response_id: \"r3\" result_complete { }"
+    ]
+   ],
+   "(('KeyboardInterrupt', 'raised at Plan compression is disabled', 'SparkConnectGrpcException', (0, 0)), [Row(id=0), Row(id=1), Row(id=2)])"
+  ],
+  "keyboard_interrupt": [
+   [
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Plan compression threshold: 10485760, algorithm: ZSTD"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Executing plan <Truncated message due to truncation error>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetch"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Request: session_id: \"<uuid>\" user_context { user_id: \"connect-logs\" } plan { root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } } } client_type: \"<agent>\" request_options { result_chunking_options { allow_arrow_batch_chunking: true } } operation_id: \"<uuid>\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" schema { struct { fields { name: \"id\" data_type { long { } } } } } operation_id: \"<uuid>\" response_id: \"r1\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received the schema."
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" arrow_batch { row_count: 3 data: \"\\377\\377\\377\\377x\\000\\000\\000\\020\\000\\000\\000\\000\\000\\n\\000\\014\\000\\006\\000\\005\\000\\010\\000\\n\\000\\000\\000\\000\\001\\004\\000\\014\\000\\000\\000\\010\\000\\010\\000\\000\\000\\004\\000\\010\\000\\000\\000\\004\\000\\000\\000\\001\\000\\000\\000\\024\\000\\000\\000\\020\\000\\024\\000\\010\\000\\006\\000\\007\\000\\014\\000\\000\\000\\020\\000\\020\\000\\000\\000\\000\\000\\001\\002\\020\\000\\000\\000\\034\\000\\000\\000\\004\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000id\\000\\000\\010\\000\\014\\000\\010\\000\\007\\000\\010\\000\\000\\000\\000\\000\\000\\001@\\000\\000\\000\\377\\377\\377\\377\\210\\000\\000\\000\\024\\000\\000\\000\\000\\000\\000\\000\\014\\000\\026\\000\\006\\000\\005\\000\\010\\000\\014\\000\\014\\000\\000\\000\\000\\003\\004\\000\\030\\000\\000\\000\\030\\000\\000\\000\\000\\000\\000\\000\\000\\000\\n\\000\\030\\000\\014\\000\\004\\000\\010\\000\\n\\000\\000\\000<\\000\\000\\000\\020\\000\\000\\000\\003\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\030\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\001\\000\\000\\000\\003\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\001\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000\\000\\000\\000\\000\\377\\377\\377\\377\\000\\000\\000\\000\" } operation_id: \"<uuid>\" response_id: \"r2\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received arrow batch rows=3 Number of chunks in batch=0 Chunk index=0 size=304"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Assembling arrow batch of size 304 from 0 chunks."
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Interrupt request received for operation=<uuid>"
+    ]
+   ],
+   "'KeyboardInterrupt'"
+  ],
+  "raised_at_a_failed_lookup": [
+   [
+    [
+     "pyspark.sql.connect.logging",
+     "ERROR",
+     "GRPC Error received <exc_info: _InactiveRpcError>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "<unformatted: Plan compression is disabled because the server does not support it. % (SparkConnectGrpcException) of TypeError>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Executing plan <Truncated message due to truncation error>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetch"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Request: session_id: \"<uuid>\" user_context { user_id: \"connect-logs\" } plan { root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } } } client_type: \"<agent>\" request_options { result_chunking_options { allow_arrow_batch_chunking: true } } operation_id: \"<uuid>\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" schema { struct { fields { name: \"id\" data_type { long { } } } } } operation_id: \"<uuid>\" response_id: \"r1\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received the schema."
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" arrow_batch { row_count: 3 data: \"\\377\\377\\377\\377x\\000\\000\\000\\020\\000\\000\\000\\000\\000\\n\\000\\014\\000\\006\\000\\005\\000\\010\\000\\n\\000\\000\\000\\000\\001\\004\\000\\014\\000\\000\\000\\010\\000\\010\\000\\000\\000\\004\\000\\010\\000\\000\\000\\004\\000\\000\\000\\001\\000\\000\\000\\024\\000\\000\\000\\020\\000\\024\\000\\010\\000\\006\\000\\007\\000\\014\\000\\000\\000\\020\\000\\020\\000\\000\\000\\000\\000\\001\\002\\020\\000\\000\\000\\034\\000\\000\\000\\004\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000id\\000\\000\\010\\000\\014\\000\\010\\000\\007\\000\\010\\000\\000\\000\\000\\000\\000\\001@\\000\\000\\000\\377\\377\\377\\377\\210\\000\\000\\000\\024\\000\\000\\000\\000\\000\\000\\000\\014\\000\\026\\000\\006\\000\\005\\000\\010\\000\\014\\000\\014\\000\\000\\000\\000\\003\\004\\000\\030\\000\\000\\000\\030\\000\\000\\000\\000\\000\\000\\000\\000\\000\\n\\000\\030\\000\\014\\000\\004\\000\\010\\000\\n\\000\\000\\000<\\000\\000\\000\\020\\000\\000\\000\\003\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\030\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\001\\000\\000\\000\\003\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\001\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000\\000\\000\\000\\000\\377\\377\\377\\377\\000\\000\\000\\000\" } operation_id: \"<uuid>\" response_id: \"r2\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received arrow batch rows=3 Number of chunks in batch=0 Chunk index=0 size=304"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Assembling arrow batch of size 304 from 0 chunks."
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" operation_id: \"<uuid>\" response_id: \"r3\" result_complete { }"
+    ]
+   ],
+   "(('ValueError', 'raised at Plan compression is disabled', 'SparkConnectGrpcException', (0, 0)), [Row(id=0), Row(id=1), Row(id=2)])"
+  ],
+  "registration": [
+   [
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Execute"
+    ]
+   ],
+   "'registered'"
+  ],
+  "resources": [
+   [
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Fetching the resources"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Execute command for command <Truncated message due to truncation error>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Plan compression threshold: 10485760, algorithm: ZSTD"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetch"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Request: session_id: \"<uuid>\" user_context { user_id: \"connect-logs\" } plan { command { get_resources_command { } } } client_type: \"<agent>\" request_options { result_chunking_options { allow_arrow_batch_chunking: true } } operation_id: \"<uuid>\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" get_resources_command_result { } operation_id: \"<uuid>\" response_id: \"r1\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" operation_id: \"<uuid>\" response_id: \"r2\" result_complete { }"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Creating the ResourceProfile"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Execute command for command <Truncated message due to truncation error>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetch"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Request: session_id: \"<uuid>\" user_context { user_id: \"connect-logs\" } plan { command { create_resource_profile_command { profile { } } } } client_type: \"<agent>\" request_options { result_chunking_options { allow_arrow_batch_chunking: true } } operation_id: \"<uuid>\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" operation_id: \"<uuid>\" response_id: \"r1\" create_resource_profile_command_result { profile_id: 3 }"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" operation_id: \"<uuid>\" response_id: \"r2\" result_complete { }"
+    ]
+   ],
+   "({}, 3)"
+  ],
+  "schema": [
+   [
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Plan compression threshold: 10485760, algorithm: ZSTD"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Schema for plan: <Truncated message due to truncation error>"
+    ]
+   ],
+   "StructType([StructField('id', LongType(), True)])"
+  ],
+  "server_error": [
+   [
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Plan compression threshold: 10485760, algorithm: ZSTD"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Executing plan <Truncated message due to truncation error>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetch"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Request: session_id: \"<uuid>\" user_context { user_id: \"connect-logs\" } plan { root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } } } client_type: \"<agent>\" request_options { result_chunking_options { allow_arrow_batch_chunking: true } } operation_id: \"<uuid>\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "ERROR",
+     "GRPC Error received <exc_info: _MultiThreadedRendezvous>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received ErrorInfo: reason: \"org.apache.spark.SparkArithmeticException\"\ndomain: \"org.apache.spark\"\nmetadata {\n  key: \"sqlState\"\n  value: \"22012\"\n}\nmetadata {\n  key: \"messageParameters\"\n  value: \"{}\"\n}\nmetadata {\n  key: \"errorClass\"\n  value: \"DIVIDE_BY_ZERO\"\n}\nmetadata {\n  key: \"classes\"\n  value: \"[\\\"org.apache.spark.SparkArithmeticException\\\"]\"\n}\n"
+    ]
+   ],
+   "'UnknownException'"
+  ],
+  "sql": [
+   [
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Execute command for command <Truncated message due to truncation error>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Plan compression threshold: 10485760, algorithm: ZSTD"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetch"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Request: session_id: \"<uuid>\" user_context { user_id: \"connect-logs\" } plan { command { sql_command { input { common { plan_id: <id> } sql { query: \"select 1 as a\" } } } } } client_type: \"<agent>\" request_options { result_chunking_options { allow_arrow_batch_chunking: true } } operation_id: \"<uuid>\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" sql_command_result { relation { sql { query: \"select 1 as a\" } } } operation_id: \"<uuid>\" response_id: \"r1\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received the SQL command result."
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" operation_id: \"<uuid>\" response_id: \"r2\" result_complete { }"
+    ]
+   ],
+   "'DataFrame'"
+  ],
+  "to_arrow": [
+   [
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Plan compression threshold: 10485760, algorithm: ZSTD"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Schema for plan: <Truncated message due to truncation error>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Executing plan <Truncated message due to truncation error>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetch"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Request: session_id: \"<uuid>\" user_context { user_id: \"connect-logs\" } plan { root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } } } client_type: \"<agent>\" request_options { result_chunking_options { allow_arrow_batch_chunking: true } } operation_id: \"<uuid>\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" schema { struct { fields { name: \"id\" data_type { long { } } } } } operation_id: \"<uuid>\" response_id: \"r1\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received the schema."
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" arrow_batch { row_count: 3 data: \"\\377\\377\\377\\377x\\000\\000\\000\\020\\000\\000\\000\\000\\000\\n\\000\\014\\000\\006\\000\\005\\000\\010\\000\\n\\000\\000\\000\\000\\001\\004\\000\\014\\000\\000\\000\\010\\000\\010\\000\\000\\000\\004\\000\\010\\000\\000\\000\\004\\000\\000\\000\\001\\000\\000\\000\\024\\000\\000\\000\\020\\000\\024\\000\\010\\000\\006\\000\\007\\000\\014\\000\\000\\000\\020\\000\\020\\000\\000\\000\\000\\000\\001\\002\\020\\000\\000\\000\\034\\000\\000\\000\\004\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000id\\000\\000\\010\\000\\014\\000\\010\\000\\007\\000\\010\\000\\000\\000\\000\\000\\000\\001@\\000\\000\\000\\377\\377\\377\\377\\210\\000\\000\\000\\024\\000\\000\\000\\000\\000\\000\\000\\014\\000\\026\\000\\006\\000\\005\\000\\010\\000\\014\\000\\014\\000\\000\\000\\000\\003\\004\\000\\030\\000\\000\\000\\030\\000\\000\\000\\000\\000\\000\\000\\000\\000\\n\\000\\030\\000\\014\\000\\004\\000\\010\\000\\n\\000\\000\\000<\\000\\000\\000\\020\\000\\000\\000\\003\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\030\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\001\\000\\000\\000\\003\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\001\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000\\000\\000\\000\\000\\377\\377\\377\\377\\000\\000\\000\\000\" } operation_id: \"<uuid>\" response_id: \"r2\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received arrow batch rows=3 Number of chunks in batch=0 Chunk index=0 size=304"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Assembling arrow batch of size 304 from 0 chunks."
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" operation_id: \"<uuid>\" response_id: \"r3\" result_complete { }"
+    ]
+   ],
+   "3"
+  ],
+  "to_local_iterator": [
+   [
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Plan compression threshold: 10485760, algorithm: ZSTD"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Executing plan <Truncated message due to truncation error>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Request: session_id: \"<uuid>\" user_context { user_id: \"connect-logs\" } plan { root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } } } client_type: \"<agent>\" request_options { result_chunking_options { allow_arrow_batch_chunking: true } } operation_id: \"<uuid>\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" schema { struct { fields { name: \"id\" data_type { long { } } } } } operation_id: \"<uuid>\" response_id: \"r1\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received the schema."
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" arrow_batch { row_count: 3 data: \"\\377\\377\\377\\377x\\000\\000\\000\\020\\000\\000\\000\\000\\000\\n\\000\\014\\000\\006\\000\\005\\000\\010\\000\\n\\000\\000\\000\\000\\001\\004\\000\\014\\000\\000\\000\\010\\000\\010\\000\\000\\000\\004\\000\\010\\000\\000\\000\\004\\000\\000\\000\\001\\000\\000\\000\\024\\000\\000\\000\\020\\000\\024\\000\\010\\000\\006\\000\\007\\000\\014\\000\\000\\000\\020\\000\\020\\000\\000\\000\\000\\000\\001\\002\\020\\000\\000\\000\\034\\000\\000\\000\\004\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000id\\000\\000\\010\\000\\014\\000\\010\\000\\007\\000\\010\\000\\000\\000\\000\\000\\000\\001@\\000\\000\\000\\377\\377\\377\\377\\210\\000\\000\\000\\024\\000\\000\\000\\000\\000\\000\\000\\014\\000\\026\\000\\006\\000\\005\\000\\010\\000\\014\\000\\014\\000\\000\\000\\000\\003\\004\\000\\030\\000\\000\\000\\030\\000\\000\\000\\000\\000\\000\\000\\000\\000\\n\\000\\030\\000\\014\\000\\004\\000\\010\\000\\n\\000\\000\\000<\\000\\000\\000\\020\\000\\000\\000\\003\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\030\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\001\\000\\000\\000\\003\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\001\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000\\000\\000\\000\\000\\377\\377\\377\\377\\000\\000\\000\\000\" } operation_id: \"<uuid>\" response_id: \"r2\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received arrow batch rows=3 Number of chunks in batch=0 Chunk index=0 size=304"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Assembling arrow batch of size 304 from 0 chunks."
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" operation_id: \"<uuid>\" response_id: \"r3\" result_complete { }"
+    ]
+   ],
+   "[Row(id=0), Row(id=1), Row(id=2)]"
+  ],
+  "to_pandas": [
+   [
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Plan compression threshold: 10485760, algorithm: ZSTD"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Executing plan <Truncated message due to truncation error>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetch"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Request: session_id: \"<uuid>\" user_context { user_id: \"connect-logs\" } plan { root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } } } client_type: \"<agent>\" request_options { result_chunking_options { allow_arrow_batch_chunking: true } } operation_id: \"<uuid>\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" schema { struct { fields { name: \"id\" data_type { long { } } } } } operation_id: \"<uuid>\" response_id: \"r1\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received the schema."
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" arrow_batch { row_count: 3 data: \"\\377\\377\\377\\377x\\000\\000\\000\\020\\000\\000\\000\\000\\000\\n\\000\\014\\000\\006\\000\\005\\000\\010\\000\\n\\000\\000\\000\\000\\001\\004\\000\\014\\000\\000\\000\\010\\000\\010\\000\\000\\000\\004\\000\\010\\000\\000\\000\\004\\000\\000\\000\\001\\000\\000\\000\\024\\000\\000\\000\\020\\000\\024\\000\\010\\000\\006\\000\\007\\000\\014\\000\\000\\000\\020\\000\\020\\000\\000\\000\\000\\000\\001\\002\\020\\000\\000\\000\\034\\000\\000\\000\\004\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000id\\000\\000\\010\\000\\014\\000\\010\\000\\007\\000\\010\\000\\000\\000\\000\\000\\000\\001@\\000\\000\\000\\377\\377\\377\\377\\210\\000\\000\\000\\024\\000\\000\\000\\000\\000\\000\\000\\014\\000\\026\\000\\006\\000\\005\\000\\010\\000\\014\\000\\014\\000\\000\\000\\000\\003\\004\\000\\030\\000\\000\\000\\030\\000\\000\\000\\000\\000\\000\\000\\000\\000\\n\\000\\030\\000\\014\\000\\004\\000\\010\\000\\n\\000\\000\\000<\\000\\000\\000\\020\\000\\000\\000\\003\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\030\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\001\\000\\000\\000\\003\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\001\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000\\000\\000\\000\\000\\377\\377\\377\\377\\000\\000\\000\\000\" } operation_id: \"<uuid>\" response_id: \"r2\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received arrow batch rows=3 Number of chunks in batch=0 Chunk index=0 size=304"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Assembling arrow batch of size 304 from 0 chunks."
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" operation_id: \"<uuid>\" response_id: \"r3\" result_complete { }"
+    ]
+   ],
+   "(3, 1)"
+  ],
+  "write": [
+   [
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Execute command for command <Truncated message due to truncation error>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Plan compression threshold: 10485760, algorithm: ZSTD"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetch"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Request: session_id: \"<uuid>\" user_context { user_id: \"connect-logs\" } plan { command { write_operation { input { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } } source: \"parquet\" path: \"/tmp/connect-logs-case\" mode: SAVE_MODE_OVERWRITE } } } client_type: \"<agent>\" request_options { result_chunking_options { allow_arrow_batch_chunking: true } } operation_id: \"<uuid>\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" operation_id: \"<uuid>\" response_id: \"r1\" result_complete { }"
+    ]
+   ],
+   "'written'"
+  ]
+ },
+ "pyspark": "4.3.0"
+}

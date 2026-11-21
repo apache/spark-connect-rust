@@ -327,6 +327,47 @@ pub(crate) fn is_base_exception_only(err: &SparkError) -> bool {
             .is_some_and(|value| value == "true")
 }
 
+/// The parameter of the error of the core of an exception of a callback that a log raised as the
+/// client handles the failure of a call (see [`raised_in_handling`]).
+const RAISED_IN_HANDLING: &str = "raised_in_handling";
+
+/// `err`, the error of a log that the client writes as it handles the failure of a call, marked as
+/// such when it is the error of an exception of a callback: as PySpark's log is in an `except`
+/// clause of the failure, which the `except KeyboardInterrupt` of its execution does not catch
+/// (see [`is_callback_keyboard_interrupt`]).
+pub(crate) fn raised_in_handling(mut err: SparkError) -> SparkError {
+    if callback_id(&err).is_some() {
+        err.params
+            .insert(RAISED_IN_HANDLING.to_string(), "true".to_string());
+    }
+    err
+}
+
+/// Whether `err` is the error of an exception of a callback that is a `KeyboardInterrupt`, which
+/// the `except KeyboardInterrupt` of PySpark's execution catches: not of a log that the client
+/// writes as it handles the failure of a call (see [`raised_in_handling`]), whose exception goes
+/// out of PySpark's `except Exception` as it is.
+pub(crate) fn is_callback_keyboard_interrupt(py: Python<'_>, err: &SparkError) -> bool {
+    if !is_base_exception_only(err)
+        || err
+            .params
+            .get(RAISED_IN_HANDLING)
+            .is_some_and(|value| value == "true")
+    {
+        return false;
+    }
+    let Some(id) = callback_id(err) else {
+        return false;
+    };
+    CALLBACK_EXCEPTIONS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&id)
+        .is_some_and(|exception| {
+            exception.is_instance_of::<pyo3::exceptions::PyKeyboardInterrupt>(py)
+        })
+}
+
 /// The ID of the exception of the Python callback that `err` is the error of, if it is one, which
 /// tells two such errors apart.
 pub(crate) fn callback_error_id(err: &SparkError) -> Option<u64> {
@@ -373,6 +414,24 @@ pub(crate) fn callback_exception(err: &SparkError) -> Option<PyErr> {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .remove(&id)
+}
+
+/// The exception that `err` stands for, as [`spark_error_to_py_exception`] makes it, but of the
+/// exception of a Python callback as it is kept, for the caller that raises or releases it: the
+/// argument of a log of the error that a caller catches, as PySpark's `logger.debug(text, e)` of the
+/// exception that it caught.
+pub(crate) fn exception_of(py: Python<'_>, err: &SparkError) -> PyErr {
+    if let Some(id) = callback_id(err) {
+        if let Some(exception) = CALLBACK_EXCEPTIONS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&id)
+            .map(|exception| exception.clone_ref(py))
+        {
+            return exception;
+        }
+    }
+    spark_error_to_py_exception(err.clone())
 }
 
 /// The error class of the error of the core of an exception that a plan keeps, which each

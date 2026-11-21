@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use spark_connect_core::client::InflightHandle;
+use spark_connect_core::client_log::{AnalysisLog, ExecutionLog};
 use spark_connect_core::error::{Result, SparkError, SparkErrorKind};
 use spark_connect_core::runtime::{block_on, get_runtime};
 use spark_connect_proto as proto;
@@ -140,15 +141,40 @@ impl PreparedExecution {
         Option<DataType>,
         ExecutionInfo,
     )> {
-        self.dataframe
-            .record_batches_of(self.request, check, KeptBy::Caller)
+        self.dataframe.record_batches_of(
+            self.request,
+            check,
+            KeptBy::Caller,
+            ExecutionLog::Fetch,
+            Sent::AsIs,
+        )
+    }
+
+    /// Log the plan of the execution as PySpark's `to_pandas` logs it as it starts, before it
+    /// reads the settings of its conversion (`Executing plan ...`): the execution of
+    /// [`PreparedExecution::collect_record_batches_and_info`] logs the rest. The error of the
+    /// record fails the conversion there.
+    pub fn log_plan_of_conversion(&self) -> Result<()> {
+        spark_connect_core::client_log::log_blocking(
+            spark_connect_core::client_log::Level::Debug,
+            || spark_connect_core::client_log::executing_plan(self.request.plan.as_ref()),
+        )
     }
 
     /// Send the execution and stream its rows, as [`DataFrame::to_local_iterator`] does.
     pub fn into_local_iterator(self, prefetch_partitions: bool) -> Result<LocalRowIterator> {
         self.dataframe
-            .local_iterator_of(self.request, prefetch_partitions)
+            .local_iterator_of(self.request, prefetch_partitions, Sent::AsIs)
     }
+}
+
+/// How the plan of the request of an execution of a DataFrame is sent: compressed, as the plan
+/// that PySpark's `to_proto` builds, or as it is, once [`DataFrame::prepare_execution`] tried its
+/// compression.
+#[derive(Clone, Copy)]
+enum Sent {
+    Compressed,
+    AsIs,
 }
 
 /// Who keeps the information of an execution as that of the last execution of its DataFrame: the
@@ -1182,7 +1208,7 @@ impl DataFrame {
     ) -> Result<(Vec<Row>, Option<DataType>)> {
         let request = self.build_execute_request()?;
         let observations = self.plan.observations();
-        let mut stream = self.session.execute_plan(request)?;
+        let mut stream = self.session.execute_plan(request, ExecutionLog::ToTable)?;
 
         let mut rows = vec![];
         let mut schema = None;
@@ -1240,18 +1266,26 @@ impl DataFrame {
     ///   fetched on demand only once the previous batch is exhausted.
     pub fn to_local_iterator(&self, prefetch_partitions: bool) -> Result<LocalRowIterator> {
         let request = self.build_execute_request()?;
-        self.local_iterator_of(request, prefetch_partitions)
+        self.local_iterator_of(request, prefetch_partitions, Sent::Compressed)
     }
 
     /// The rows of the execution of `request`, a request of this DataFrame, as
-    /// [`DataFrame::to_local_iterator`] streams them.
+    /// [`DataFrame::to_local_iterator`] streams them, of its plan sent as `sent` says.
     fn local_iterator_of(
         &self,
         request: proto::ExecutePlanRequest,
         prefetch_partitions: bool,
+        sent: Sent,
     ) -> Result<LocalRowIterator> {
         let observations = self.plan.observations();
-        let stream = self.session.execute_plan(request)?;
+        let stream = match sent {
+            Sent::Compressed => self
+                .session
+                .execute_plan(request, ExecutionLog::ToTableAsIterator)?,
+            Sent::AsIs => self
+                .session
+                .execute_plan_as_is(request, ExecutionLog::ToTableAsIterator)?,
+        };
         Ok(LocalRowIterator::new(
             self.session.clone(),
             stream,
@@ -1267,10 +1301,15 @@ impl DataFrame {
     /// here, as PySpark's client reads them when it builds its first plan (see
     /// `SparkConnectClient::read_plan_compression`). A method of the result sends it. Not a
     /// stable API.
+    ///
+    /// The plan of the request is compressed then, as PySpark's `to_proto` compresses it, with
+    /// what it logs of the compression (see `SparkConnectClient::prepare_plan`).
     #[doc(hidden)]
     pub fn prepare_execution(&self) -> Result<PreparedExecution> {
-        let request = self.build_execute_request()?;
-        block_on(self.session.client().read_plan_compression())?;
+        let mut request = self.build_execute_request()?;
+        if let Some(plan) = request.plan.as_mut() {
+            block_on(self.session.client().prepare_plan(plan))?;
+        }
         Ok(PreparedExecution {
             dataframe: self.clone(),
             request,
@@ -1316,25 +1355,37 @@ impl DataFrame {
         check: impl Fn(&DataType) -> Result<()>,
     ) -> Result<(Vec<arrow::record_batch::RecordBatch>, Option<DataType>)> {
         let request = self.build_execute_request()?;
-        self.record_batches_of(request, check, KeptBy::DataFrame)
-            .map(|(batches, schema, _)| (batches, schema))
+        self.record_batches_of(
+            request,
+            check,
+            KeptBy::DataFrame,
+            ExecutionLog::ToTable,
+            Sent::Compressed,
+        )
+        .map(|(batches, schema, _)| (batches, schema))
     }
 
     /// The Arrow batches of the execution of `request`, a request of this DataFrame, as
-    /// [`DataFrame::collect_record_batches_with_schema_checked`] collects them, and the
-    /// information of the execution, which the session records and `kept_by` keeps.
+    /// [`DataFrame::collect_record_batches_with_schema_checked`] collects them, of its plan sent
+    /// as `sent` says, and the information of the execution, which the session records and
+    /// `kept_by` keeps.
     fn record_batches_of(
         &self,
         request: proto::ExecutePlanRequest,
         check: impl Fn(&DataType) -> Result<()>,
         kept_by: KeptBy,
+        log: ExecutionLog,
+        sent: Sent,
     ) -> Result<(
         Vec<arrow::record_batch::RecordBatch>,
         Option<DataType>,
         ExecutionInfo,
     )> {
         let observations = self.plan.observations();
-        let mut stream = self.session.execute_plan(request)?;
+        let mut stream = match sent {
+            Sent::Compressed => self.session.execute_plan(request, log)?,
+            Sent::AsIs => self.session.execute_plan_as_is(request, log)?,
+        };
 
         let mut batches = vec![];
         let mut schema = None;
@@ -1975,7 +2026,11 @@ impl DataFrame {
             return Ok(schema.as_ref().clone());
         }
         let request = self.build_analyze_request()?;
-        let response = block_on(self.session.client().analyze_plan(request))?;
+        let response = block_on(
+            self.session
+                .client()
+                .analyze_plan_logged(request, AnalysisLog::Schema),
+        )?;
 
         if let Some(proto::analyze_plan_response::Result::Schema(schema)) = response.result {
             let schema = DataType::from_proto(
@@ -2338,44 +2393,61 @@ impl DataFrame {
     /// of a mode, which PySpark Connect's client checks: one of "simple", "extended",
     /// "codegen", "cost" and "formatted", else a `VALUE_NOT_ALLOWED` error, which it raises
     /// once it has built the plan, so that the error of a plan that it fails to build comes
-    /// first.
+    /// first, and once its `explain_string` logged the plan, of the mode as it is given it
+    /// (`Explain (mode=...) for plan ...`), after the lookup of the plan compression of the first
+    /// plan of its `to_proto`.
     pub fn explain_string(&self, mode: &str) -> Result<String> {
         use proto::analyze_plan_request::explain::ExplainMode;
         let relation = self.relation()?;
-        let explain_mode = match mode {
-            "simple" => ExplainMode::Simple,
-            "extended" => ExplainMode::Extended,
-            "codegen" => ExplainMode::Codegen,
-            "cost" => ExplainMode::Cost,
-            "formatted" => ExplainMode::Formatted,
-            _ => {
-                return Err(SparkError::value(
-                    "VALUE_NOT_ALLOWED",
-                    &[
-                        ("arg_name", "explain_mode"),
-                        (
-                            "allowed_values",
-                            "['simple', 'extended', 'codegen', 'cost', 'formatted']",
-                        ),
-                    ],
-                ))
-            }
-        };
-        let plan = proto::Plan {
+        let mut plan = proto::Plan {
             op_type: Some(proto::plan::OpType::Root(relation)),
         };
-        let request = proto::AnalyzePlanRequest {
-            session_id: self.session.client().session_id().to_string(),
-            user_context: Some(proto::UserContext::default()),
-            analyze: Some(proto::analyze_plan_request::Analyze::Explain(
-                proto::analyze_plan_request::Explain {
-                    plan: Some(plan),
-                    explain_mode: explain_mode as i32,
-                },
-            )),
-            ..Default::default()
-        };
-        let response = block_on(self.session.client().analyze_plan(request))?;
+        let client = self.session.client();
+        let session_id = client.session_id().to_string();
+        // As PySpark's `to_proto`, which compresses the plan, and `explain_string`, which logs it,
+        // before its `_analyze` checks the mode, and sends the plan as it is. One wait, so that a
+        // signal that ends the lookup of the plan compression of the first plan ends the rest.
+        let response = block_on(async {
+            client.prepare_plan(&mut plan).await?;
+            spark_connect_core::client_log::logged(
+                spark_connect_core::client_log::Level::Debug,
+                || spark_connect_core::client_log::explain_plan(mode, &plan),
+            )
+            .await?;
+            let explain_mode = match mode {
+                "simple" => ExplainMode::Simple,
+                "extended" => ExplainMode::Extended,
+                "codegen" => ExplainMode::Codegen,
+                "cost" => ExplainMode::Cost,
+                "formatted" => ExplainMode::Formatted,
+                _ => {
+                    return Err(SparkError::value(
+                        "VALUE_NOT_ALLOWED",
+                        &[
+                            ("arg_name", "explain_mode"),
+                            (
+                                "allowed_values",
+                                "['simple', 'extended', 'codegen', 'cost', 'formatted']",
+                            ),
+                        ],
+                    ))
+                }
+            };
+            let request = proto::AnalyzePlanRequest {
+                session_id,
+                user_context: Some(proto::UserContext::default()),
+                analyze: Some(proto::analyze_plan_request::Analyze::Explain(
+                    proto::analyze_plan_request::Explain {
+                        plan: Some(plan),
+                        explain_mode: explain_mode as i32,
+                    },
+                )),
+                ..Default::default()
+            };
+            client
+                .analyze_plan_as_is(request, AnalysisLog::Silent)
+                .await
+        })?;
         match response.result {
             Some(proto::analyze_plan_response::Result::Explain(e)) => Ok(e.explain_string),
             _ => Err(SparkError::connect_msg(
@@ -3699,8 +3771,13 @@ fn execute_command_reporting(
     request.plan = Some(plan);
 
     let mut stream = match execution {
-        CommandExecution::Reported => session.execute_plan(request)?,
-        CommandExecution::Unreported => session.execute_plan_unreported(request)?,
+        CommandExecution::Reported => {
+            session.execute_plan(request, ExecutionLog::ExecuteCommand)?
+        }
+        // Of a command that PySpark does not send, which it does not log either.
+        CommandExecution::Unreported => {
+            session.execute_plan_unreported(request, ExecutionLog::Silent)?
+        }
         CommandExecution::Registration => session.execute_registration(request)?,
     };
     // Drain the response stream so the command runs to completion server-side,
@@ -3738,11 +3815,14 @@ impl PlanExecution {
     /// [`crate::plan::BuiltOutside`]), whose observed metrics set `observations`, and whose
     /// progress reaches the progress handlers of the session when `reported`, as PySpark's
     /// `Progress` of the execution reports it.
+    ///
+    /// Its logs are those of the method of PySpark's client that is given the plan, as `log` says.
     pub(crate) fn start(
         session: &SparkSession,
         plan: crate::plan::BuiltOutside<proto::Plan>,
         observations: Vec<(String, crate::observation::Observation)>,
         reported: bool,
+        log: ExecutionLog,
     ) -> Result<PlanExecution> {
         let (mut plan, urls) = plan.into_parts();
         crate::plan::resolve_plan(&mut plan, urls)?;
@@ -3756,10 +3836,18 @@ impl PlanExecution {
             plan: Some(plan),
             ..Default::default()
         };
-        let stream = if reported {
-            session.execute_plan(request)?
-        } else {
-            session.execute_plan_unreported(request)?
+        // As PySpark's `execute_command` and `execute_command_as_iterator`, which set the command
+        // that they are given in the plan of their request, compressed; the other methods of its
+        // client send the plan that they are given as it is, which `to_proto` compressed.
+        let compressed = matches!(
+            log,
+            ExecutionLog::ExecuteCommand | ExecutionLog::ExecuteCommandAsIterator
+        );
+        let stream = match (reported, compressed) {
+            (true, true) => session.execute_plan(request, log)?,
+            (true, false) => session.execute_plan_as_is(request, log)?,
+            (false, true) => session.execute_plan_unreported(request, log)?,
+            (false, false) => session.execute_plan_unreported_as_is(request, log)?,
         };
         Ok(PlanExecution {
             session: session.clone(),

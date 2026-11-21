@@ -510,11 +510,14 @@ impl Retrying {
         }
         let server_delay_ms = retry_delay_ms(status);
         let Some(wait_ms) = self.state.next_attempt(server_delay_ms) else {
-            // As PySpark's `Retrying._wait` logs it before it warns of the spent retries.
-            log(|listener| {
+            // As PySpark's `Retrying._wait` logs it before it warns of the spent retries: the
+            // error of the log fails the call in place of the failure, without the warning.
+            if let Err(error) = log(|listener| {
                 let error = crate::error::grpcio_error_text(status, self.call);
-                listener.given_up(&error);
-            });
+                listener.given_up(&error)
+            }) {
+                return Backoff::Failed(Box::new(error));
+            }
             return Backoff::Exceeded;
         };
         if self.state.policy().recognize_server_retry_delay {
@@ -525,16 +528,19 @@ impl Retrying {
                 return Backoff::Failed(Box::new(mismatch));
             }
         }
-        // As PySpark's `RetryPolicyState.next_attempt` and `Retrying._wait` log them.
-        log(|listener| {
+        // As PySpark's `RetryPolicyState.next_attempt` and `Retrying._wait` log them, before the
+        // wait: the error of a log fails the call in place of the retry.
+        if let Err(error) = log(|listener| {
             if let Some(delay_ms) =
                 server_delay_ms.filter(|_| self.state.policy().recognize_server_retry_delay)
             {
-                listener.server_retry_delay(delay_ms);
+                listener.server_retry_delay(delay_ms)?;
             }
             let error = crate::error::grpcio_error_text(status, self.call);
-            listener.retrying(&error, wait_ms, "DefaultPolicy");
-        });
+            listener.retrying(&error, wait_ms, "DefaultPolicy")
+        }) {
+            return Backoff::Failed(Box::new(error));
+        }
         self.wait(std::time::Duration::from_millis(wait_ms)).await
     }
 
@@ -554,8 +560,10 @@ impl Retrying {
 
     /// Whether a failure that the reference retries as a `RetryException` is retried, at once:
     /// until such retries have run for the policy's elapsed-time bound, measured from the first
-    /// of them, which this call is when there was none.
-    pub(crate) fn retry_at_once(&mut self) -> bool {
+    /// of them, which this call is when there was none. The error is that of the log of the retry
+    /// or of its end, which fails the call in place of either (see
+    /// [`RetriesListener::retrying_at_once`]).
+    pub(crate) fn retry_at_once(&mut self) -> crate::error::Result<bool> {
         let since = *self
             .retry_exception_since
             .get_or_insert_with(std::time::Instant::now);
@@ -567,12 +575,12 @@ impl Retrying {
         // As PySpark's `Retrying._wait` logs the `RetryException` that it retries, or gives up.
         log(|listener| {
             if retried {
-                listener.retrying_at_once(RETRY_EXCEPTION);
+                listener.retrying_at_once(RETRY_EXCEPTION)
             } else {
-                listener.given_up(RETRY_EXCEPTION);
+                listener.given_up(RETRY_EXCEPTION)
             }
-        });
-        retried
+        })?;
+        Ok(retried)
     }
 }
 
@@ -688,41 +696,86 @@ pub trait RetriesListener: Send + Sync {
     /// The attempt of a call that failed with the error of the text `error`, as grpcio's
     /// error gives it, is made again after `wait_ms` milliseconds under the policy of the name
     /// `policy`, as PySpark's `Retrying._wait` logs it (`Got error: ... Will retry after ...`).
-    /// On the thread that polls the call.
-    fn retrying(&self, _error: &str, _wait_ms: u64, _policy: &str) {}
+    /// On the thread that polls the call. An error, of a handler or a filter of the log that
+    /// raised, fails the call in place of the retry, as the exception of PySpark's log goes out of
+    /// its `_wait` (see [`Delivery`]).
+    fn retrying(&self, _error: &str, _wait_ms: u64, _policy: &str) -> crate::error::Result<()> {
+        Ok(())
+    }
 
     /// A failure that PySpark raises as a `RetryException` of the `repr` `error` is retried at
-    /// once, as `Retrying._wait` logs it (`Got error: RetryException(). Retrying.`).
-    fn retrying_at_once(&self, _error: &str) {}
+    /// once, as `Retrying._wait` logs it (`Got error: RetryException(). Retrying.`). An error
+    /// fails the call, as of [`RetriesListener::retrying`].
+    fn retrying_at_once(&self, _error: &str) -> crate::error::Result<()> {
+        Ok(())
+    }
 
     /// The retries of the failure of the text `error` are given up, as `Retrying._wait` logs it
-    /// before it warns (`Given up on retrying. error: ...`).
-    fn given_up(&self, _error: &str) {}
+    /// before it warns (`Given up on retrying. error: ...`). An error fails the call in place of
+    /// the failure, without the warning, as of [`RetriesListener::retrying`].
+    fn given_up(&self, _error: &str) -> crate::error::Result<()> {
+        Ok(())
+    }
 
     /// The server asked for a delay of `delay_ms` before the retry, which the policy recognizes,
-    /// as `RetryPolicyState.next_attempt` logs it.
-    fn server_retry_delay(&self, _delay_ms: u64) {}
+    /// as `RetryPolicyState.next_attempt` logs it. An error fails the call, as of
+    /// [`RetriesListener::retrying`].
+    fn server_retry_delay(&self, _delay_ms: u64) -> crate::error::Result<()> {
+        Ok(())
+    }
 
     /// A failed RPC of grpcio's error `error` is converted into the error of its call, as
     /// PySpark's `_handle_rpc_error` logs it first (`GRPC Error received`, of the exception): the
-    /// delivery of the log, which the call awaits (see [`Delivery`]).
+    /// delivery of the log, which the call awaits (see [`Delivery`]), whose error is the error of
+    /// the call in place of the failure, as the exception of PySpark's log goes out of its
+    /// `_handle_rpc_error`.
     fn rpc_error(&self, _error: &crate::error::GrpcioError) -> Delivery {
         None
     }
 
     /// The error of the server of a failed RPC has the `ErrorInfo` of the text `text`, as
     /// `_handle_rpc_error` logs it (`Received ErrorInfo: ...`): the delivery of the log, which
-    /// the call awaits (see [`Delivery`]).
+    /// the call awaits, of an error as of [`RetriesListener::rpc_error`].
     fn error_info(&self, _text: &str) -> Delivery {
         None
     }
+
+    /// `error`, the error of a log that the client writes as it handles `handled`, the failure of
+    /// a call (see [`Handled`]), as the error of the call: of the failure as its context, as the
+    /// exception of PySpark's log is raised in the `except` clause that handles it, which the
+    /// `except KeyboardInterrupt` of PySpark's execution does not catch, so that a
+    /// `KeyboardInterrupt` of it interrupts nothing.
+    fn raised_in_handling(
+        &self,
+        error: crate::error::SparkError,
+        _handled: Handled<'_>,
+    ) -> crate::error::SparkError {
+        error
+    }
+}
+
+/// The failure of a call that the client handles as it writes a log whose error is that of the call
+/// (see [`RetriesListener::raised_in_handling`]). Not a stable API.
+#[derive(Debug, Clone, Copy)]
+pub enum Handled<'a> {
+    /// A failed RPC, of grpcio's error of it, as PySpark's `_handle_rpc_error` converts it (see
+    /// [`RetriesListener::rpc_error`]), in the `except` clause of the call that handles grpcio's
+    /// `RpcError`.
+    Rpc(&'a crate::error::GrpcioError),
+    /// An error that the client caught, as the `except Exception as e` of PySpark's lookup of the
+    /// plan compression catches the error of the lookup, whose log is in it.
+    Error(&'a crate::error::SparkError),
 }
 
 /// What a listener does of an event elsewhere, such as the log of an error on another thread, of
 /// a call that runs on a thread that does not run it at once: the call awaits it before it goes
 /// on, so that the log precedes what the call does next, as PySpark's client logs on the thread
-/// of the call before it raises. None when it is done. Not a stable API.
-pub type Delivery = Option<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>>;
+/// of the call before it raises. Its error, of a handler or a filter of the log that raised, fails
+/// the call there, as the exception of PySpark's log goes out of the call. None when it is done:
+/// a log made at once, on the thread of the call, whose error is a delivery that is ready with it.
+/// Not a stable API.
+pub type Delivery =
+    Option<std::pin::Pin<Box<dyn std::future::Future<Output = crate::error::Result<()>> + Send>>>;
 
 /// The failure of a request that the transport sent in the background.
 #[derive(Debug)]
@@ -765,10 +818,38 @@ pub(crate) fn retries_exceeded(exceeded: RetriesExceeded) -> crate::error::Resul
     }
 }
 
-/// Tell the listener of the process, if one is set, of what `tell` tells it.
-pub(crate) fn log(tell: impl FnOnce(&dyn RetriesListener)) {
-    if let Some(listener) = listener() {
-        tell(listener.as_ref());
+/// Tell the listener of the process, if one is set, of what `tell` tells it: the error of a log
+/// of it, which fails the call.
+pub(crate) fn log(
+    tell: impl FnOnce(&dyn RetriesListener) -> crate::error::Result<()>,
+) -> crate::error::Result<()> {
+    match listener() {
+        Some(listener) => tell(listener.as_ref()),
+        None => Ok(()),
+    }
+}
+
+/// The delivery of the log that `tell` makes with the listener of the process, if one is set,
+/// awaited: its error, which fails the call.
+pub(crate) async fn log_delivered(
+    tell: impl FnOnce(&dyn RetriesListener) -> Delivery,
+) -> crate::error::Result<()> {
+    let delivery = listener().and_then(|listener| tell(listener.as_ref()));
+    match delivery {
+        Some(delivery) => delivery.await,
+        None => Ok(()),
+    }
+}
+
+/// `error`, of a log that the client writes as it handles `handled`, as the error of the call (see
+/// [`RetriesListener::raised_in_handling`]).
+pub(crate) fn raised_in_handling(
+    error: crate::error::SparkError,
+    handled: Handled<'_>,
+) -> crate::error::SparkError {
+    match listener() {
+        Some(listener) => listener.raised_in_handling(error, handled),
+        None => error,
     }
 }
 
@@ -1967,21 +2048,21 @@ mod tests {
         };
         // No bound: always, though the policy has no retries.
         let mut retrying = Retrying::new(&bounded(None));
-        assert!((0..100).all(|_| retrying.retry_at_once()));
+        assert!((0..100).all(|_| retrying.retry_at_once().unwrap()));
         // A bound of 0 has passed at the first of them.
-        assert!(!Retrying::new(&bounded(Some(0))).retry_at_once());
+        assert!(!Retrying::new(&bounded(Some(0))).retry_at_once().unwrap());
         // The clock starts at the first of them, not when the call started.
         let mut retrying = Retrying::new(&bounded(Some(50)));
         std::thread::sleep(std::time::Duration::from_millis(60));
-        assert!(retrying.retry_at_once());
+        assert!(retrying.retry_at_once().unwrap());
         std::thread::sleep(std::time::Duration::from_millis(60));
-        assert!(!retrying.retry_at_once());
+        assert!(!retrying.retry_at_once().unwrap());
         // They do not spend the retries of the policy, nor the policy's theirs.
         let mut retrying = Retrying::new(&RetryPolicy {
             max_retry_exception_elapsed_time_ms: Some(0),
             ..quick_policy(1)
         });
-        assert!(!retrying.retry_at_once());
+        assert!(!retrying.retry_at_once().unwrap());
         let down = tonic::Status::unavailable("down");
         assert_eq!(retrying.backoff(&down).await, Backoff::Retry);
     }

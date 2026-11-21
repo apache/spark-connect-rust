@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex, Weak};
 
 use spark_connect_core::channel::ChannelBuilder;
 use spark_connect_core::client::{ExecutePlanHook, SparkConnectClient};
+use spark_connect_core::client_log::ExecutionLog;
 use spark_connect_core::error::{Result, SparkError};
 use spark_connect_core::runtime::{block_on, calling_thread_id, check_callback_depth};
 use spark_connect_core::thread_entries::forget_when_thread_ends;
@@ -619,11 +620,26 @@ impl SparkSession {
     /// Execute `request` on the server, with the progress of the execution for the progress
     /// handlers. Its operation ID is that of the request, or a new one, which the client
     /// assigns before it sends the request, as PySpark's `Progress` of the request has it.
+    /// The logs of the execution are those of the method of PySpark's client that it stands for,
+    /// as `log` says (see [`ExecutionLog`]).
     pub(crate) fn execute_plan(
         &self,
         request: proto::ExecutePlanRequest,
+        log: ExecutionLog,
     ) -> Result<ExecutionStream> {
-        self.execute_plan_with_handlers(request, self.progress_handlers(), true)
+        self.execute_plan_with_handlers(request, self.progress_handlers(), true, log)
+    }
+
+    /// As [`execute_plan`](Self::execute_plan), for a request whose plan is sent as it is,
+    /// neither compressed nor of the lookup of the plan compression of the session: a plan whose
+    /// compression was tried as PySpark's `to_proto` tries it (see
+    /// `SparkConnectClient::prepare_plan`), or a plan that PySpark's client sends as it is given it.
+    pub(crate) fn execute_plan_as_is(
+        &self,
+        request: proto::ExecutePlanRequest,
+        log: ExecutionLog,
+    ) -> Result<ExecutionStream> {
+        self.execute_plan_with_handlers(request, self.progress_handlers(), false, log)
     }
 
     /// As [`execute_plan`](Self::execute_plan), but the progress of the execution, and its done
@@ -632,28 +648,45 @@ impl SparkSession {
     pub(crate) fn execute_plan_unreported(
         &self,
         request: proto::ExecutePlanRequest,
+        log: ExecutionLog,
     ) -> Result<ExecutionStream> {
-        self.execute_plan_with_handlers(request, ProgressHandlers::default(), true)
+        self.execute_plan_with_handlers(request, ProgressHandlers::default(), true, log)
+    }
+
+    /// As [`execute_plan_unreported`](Self::execute_plan_unreported), of a plan sent as it is (see
+    /// [`execute_plan_as_is`](Self::execute_plan_as_is)).
+    pub(crate) fn execute_plan_unreported_as_is(
+        &self,
+        request: proto::ExecutePlanRequest,
+        log: ExecutionLog,
+    ) -> Result<ExecutionStream> {
+        self.execute_plan_with_handlers(request, ProgressHandlers::default(), false, log)
     }
 
     /// As [`execute_plan_unreported`](Self::execute_plan_unreported), for a registration of
     /// PySpark's `_execute`, of a function, a table function, a data source or a Java function,
     /// whose command PySpark sets in the plan of its request as it is: neither compressed nor of
-    /// the lookup of the plan compression of the session.
+    /// the lookup of the plan compression of the session, and of the logs of `_execute`.
     pub(crate) fn execute_registration(
         &self,
         request: proto::ExecutePlanRequest,
     ) -> Result<ExecutionStream> {
-        self.execute_plan_with_handlers(request, ProgressHandlers::default(), false)
+        self.execute_plan_with_handlers(
+            request,
+            ProgressHandlers::default(),
+            false,
+            ExecutionLog::Execute,
+        )
     }
 
-    /// The execution of `request`, whose progress reaches `handlers`, and whose plan is
-    /// compressed when `compressed`.
+    /// The execution of `request`, whose progress reaches `handlers`, whose plan is compressed
+    /// when `compressed`, and of the logs of `log`.
     fn execute_plan_with_handlers(
         &self,
         mut request: proto::ExecutePlanRequest,
         handlers: ProgressHandlers,
         compressed: bool,
+        log: ExecutionLog,
     ) -> Result<ExecutionStream> {
         let operation_id = request
             .operation_id
@@ -661,15 +694,19 @@ impl SparkSession {
             .clone();
         // Before the request: an execution that fails to start ends, as done, too.
         check_callback_depth()?;
+        // As PySpark's client, which builds the request, and logs it, before the `Progress` of
+        // the execution starts: an error then, as of a record, ends no progress. One wait, so that
+        // a signal that ends the lookup of the plan compression of the first plan ends the rest.
+        let client = self.client();
+        let started = block_on(async {
+            match client.build_execution(request, compressed, log).await {
+                Ok(built) => Ok(client.execute_built(built).await),
+                Err(error) => Err(error),
+            }
+        })?;
         let mut progress = ProgressTracker::with_handlers(handlers, Some(operation_id));
         // An execution that fails to start ends too: the error of the done call is its error, as
         // the `Progress` of PySpark wraps its request.
-        let client = self.client();
-        let started = if compressed {
-            block_on(client.execute_plan_reattachable(request))
-        } else {
-            block_on(client.execute_plan_reattachable_uncompressed(request))
-        };
         let stream = match started {
             Ok(stream) => stream,
             Err(error) => return Err(progress.finish_after(error)),
@@ -1403,7 +1440,9 @@ impl SparkSession {
     /// that it observes set `observations`, by their names, as PySpark's client sets the
     /// Observations that it is given, and its progress reaches the progress handlers when
     /// `reported`, as PySpark reports the progress of all its executions but those of
-    /// `execute_command_as_iterator`. Not a stable API.
+    /// `execute_command_as_iterator`. A plan of a relation is sent as it is, as `to_table` sends
+    /// the plan that it is given, and one of a command compressed, as `execute_command` sets its
+    /// command in its plan. Not a stable API.
     #[doc(hidden)]
     pub fn execute_plan_proto(
         &self,
@@ -1411,15 +1450,37 @@ impl SparkSession {
         observations: Vec<(String, crate::observation::Observation)>,
         reported: bool,
     ) -> Result<crate::dataframe::PlanExecution> {
-        crate::dataframe::PlanExecution::start(self, plan.into(), observations, reported)
+        let plan = plan.into();
+        let log = match plan.message().op_type.as_ref() {
+            Some(proto::plan::OpType::Root(_)) => ExecutionLog::ToTable,
+            _ => ExecutionLog::ExecuteCommand,
+        };
+        crate::dataframe::PlanExecution::start(self, plan, observations, reported, log)
+    }
+
+    /// As [`SparkSession::execute_plan_proto`], of the logs of the method of PySpark's client that
+    /// is given the plan, as `log` says, and of its compression: a plan of `to_table`,
+    /// `to_table_as_iterator` and `to_pandas` is sent as it is, and the command of
+    /// `execute_command` and `execute_command_as_iterator` compressed. Not a stable API.
+    #[doc(hidden)]
+    pub fn execute_plan_proto_logged(
+        &self,
+        plan: impl Into<crate::plan::BuiltOutside<proto::Plan>>,
+        observations: Vec<(String, crate::observation::Observation)>,
+        reported: bool,
+        log: ExecutionLog,
+    ) -> Result<crate::dataframe::PlanExecution> {
+        crate::dataframe::PlanExecution::start(self, plan.into(), observations, reported, log)
     }
 
     /// The response of the server to `request`, an analysis built outside the core, such as the
     /// analyses of PySpark's `SparkConnectClient.schema`, `explain_string`, `same_semantics` and
     /// `semantic_hash`: of this session, with the placeholders of its plans replaced, of the search
     /// that the encoding of the request allows, if the core is given it (see
-    /// [`crate::plan::BuiltOutside`]), retried and checked as the analyses of the core are. Not a
-    /// stable API.
+    /// [`crate::plan::BuiltOutside`]), retried and checked as the analyses of the core are. Its
+    /// plans are sent as they are, neither compressed nor of the lookup of the plan compression of
+    /// the session, as PySpark's `_analyze` sends the plans that it is given, which `to_proto`
+    /// compressed. Not a stable API.
     #[doc(hidden)]
     pub fn analyze_plan_proto(
         &self,
@@ -1430,7 +1491,42 @@ impl SparkSession {
         if let Some(analyze) = request.analyze.as_mut() {
             crate::plan::resolve_analysis(analyze, urls)?;
         }
-        block_on(self.client.analyze_plan(request))
+        block_on(
+            self.client
+                .analyze_plan_as_is(request, spark_connect_core::client_log::AnalysisLog::Silent),
+        )
+    }
+
+    /// `plan`, a plan built outside the core (see [`crate::plan::BuiltOutside`]), with its
+    /// placeholders replaced, as the session sends it. Not a stable API.
+    #[doc(hidden)]
+    pub fn resolved_plan_proto(
+        &self,
+        plan: impl Into<crate::plan::BuiltOutside<proto::Plan>>,
+    ) -> Result<proto::Plan> {
+        let (mut plan, urls) = plan.into().into_parts();
+        crate::plan::resolve_plan(&mut plan, urls)?;
+        Ok(plan)
+    }
+
+    /// `plan`, a plan built outside the core of a relation or a command (see
+    /// [`crate::plan::BuiltOutside`]), compressed as the session compresses its plans, after the
+    /// lookup of the plan compression of its first plan, as PySpark's `_try_compress_and_set_plan`
+    /// compresses the plan of `to_proto`, with what it logs then (see
+    /// `SparkConnectClient::prepare_plan`): of its placeholders replaced, and None when it is not
+    /// compressed, as a plan of a relation or a command of no more bytes than the threshold, or of
+    /// a compression that is not effective, which PySpark's sends as it is. Not a stable API.
+    #[doc(hidden)]
+    pub fn compressed_plan_proto(
+        &self,
+        plan: impl Into<crate::plan::BuiltOutside<proto::Plan>>,
+    ) -> Result<Option<proto::Plan>> {
+        let mut plan = self.resolved_plan_proto(plan)?;
+        block_on(self.client.prepare_plan(&mut plan))?;
+        Ok(match plan.op_type {
+            Some(proto::plan::OpType::CompressedOperation(_)) => Some(plan),
+            _ => None,
+        })
     }
 
     /// The response of the server to `request`, a configuration request built outside the core,
@@ -1471,6 +1567,24 @@ impl SparkSession {
         self.client.refresh_user_agent();
     }
 
+    /// The result chunking options of the executions of the client of this session, as PySpark's
+    /// client sends them with each `ExecutePlanRequest` (see
+    /// `SparkConnectClient::result_chunking`). Not a stable API.
+    #[doc(hidden)]
+    pub fn result_chunking(&self) -> spark_connect_core::client::ResultChunking {
+        self.client.result_chunking()
+    }
+
+    /// The plan compression of the client of this session once its settings are read, and None
+    /// before (see `SparkConnectClient::known_plan_compression`): of a plan of no more bytes than
+    /// the threshold, or of none, [`SparkSession::compressed_plan_proto`] gives None, the plan as
+    /// it is, but of a placeholder of a DataFrame that holds no relation, which may stand for more.
+    /// Not a stable API.
+    #[doc(hidden)]
+    pub fn known_plan_compression(&self) -> Option<Option<usize>> {
+        self.client.known_plan_compression()
+    }
+
     /// The per-RPC deadlines of the calls of this session (see
     /// [`spark_connect_core::client::RpcDeadlines`]).
     pub fn rpc_deadlines(&self) -> spark_connect_core::client::RpcDeadlines {
@@ -1506,6 +1620,14 @@ impl SparkSession {
     /// `SPARK_CONNECT_AUTHENTICATE_TOKEN`.
     pub fn token_parameter(&self) -> Option<&str> {
         self.client.token_parameter()
+    }
+
+    /// Make the requests of the executions, the analyses and the configurations of the calling
+    /// thread carry `call_stack`, the call stack of the user's code of its call, or none (see
+    /// `SparkConnectClient::set_thread_call_stack`). Not a stable API.
+    #[doc(hidden)]
+    pub fn set_thread_call_stack(&self, call_stack: Option<prost_types::Any>) {
+        self.client.set_thread_call_stack(call_stack);
     }
 
     /// Delete the ML cached objects `refs` on the server, as PySpark's `RemoteModelRef` does

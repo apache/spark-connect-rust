@@ -321,6 +321,46 @@ not a stable API. The reads of the configs of the server's stack trace, as the e
 of a call is converted, are retried under the retry policy of the client, as PySpark's `config()`
 retries them, where each was read once.
 
+The module `client_log` of the core (not a stable API) has what PySpark's client logs of its calls:
+the listener of the process (`client_log::set_listener`, a `client_log::Listener`, which the Python
+binding sets) is asked whether a level is logged and given each record of one, a
+`client_log::Message` of a text, or of an encoded message of protobuf with the text before it, which
+the binding writes of PySpark's `_proto_to_string`, of a `retries::Delivery` whose error, as of a
+handler of the logger that raised, fails the call at the record (`client_log::log` is
+`#[must_use]`: a record is written as its delivery is awaited), and which writes the records of a
+thread that `client_log::write_records_on_this_thread` marks on that thread, as those of the
+listener bus of streaming queries. `SparkConnectClient::execute_plan_reattachable` logs as
+PySpark's `to_table` a plan of a relation, and as its `execute_command` a command;
+`SparkConnectClient::execute_plan_reattachable_logged` logs as the method of a
+`client_log::ExecutionLog`, of the plan compressed, and
+`SparkConnectClient::execute_plan_reattachable_as_is` of the plan as it is, as the plan that
+`SparkConnectClient::prepare_plan` prepared, of one try of its compression, as PySpark's `to_proto`
+tries it; `SparkConnectClient::build_execution` and `SparkConnectClient::execute_built` make the
+two parts of such an execution, before PySpark's `Progress` of it starts and in it (a
+`client::BuiltExecution`); `SparkConnectClient::analyze_plan_logged` logs as the method of a
+`client_log::AnalysisLog`, of the plans compressed, and `SparkConnectClient::analyze_plan_as_is` of
+the plans as they are; `client_log::explain_plan` is the record of PySpark's `explain_string`, of
+the mode as it is given; and `SparkSession::set_thread_call_stack` and
+`SparkConnectClient::set_thread_call_stack` give the requests of a thread the call stack of the
+user's code of their call. `SparkSession::execute_plan_proto_logged`,
+`SparkSession::resolved_plan_proto`, `SparkSession::compressed_plan_proto`,
+`SparkSession::known_plan_compression` (of `SparkConnectClient::known_plan_compression`, the
+threshold of the plan compression once its settings are read) and `SparkSession::result_chunking`
+serve the plans and the requests of the Python client. The methods of a `RetriesListener` of what
+PySpark's client logs of its retries (`retrying`, `retrying_at_once`, `given_up`,
+`server_retry_delay`) return the error of the record, which fails the call, and
+`RetriesListener::raised_in_handling` is given the error of a record that the client writes as it
+handles the failure of a call, of that failure (a `retries::Handled`: the failed RPC of a
+conversion, or the error of the failed lookup of the plan compression), and gives the error of the
+call. All of these are hidden. Without a listener, nothing is logged. A closed client, as of a
+stopped session, writes the records of a call before it fails it with NO_ACTIVE_SESSION, where it
+failed it first, and the first plan of a closed client looks the plan compression up, which fails
+of the closed client and disables the compression, as PySpark's. A plan
+is compressed in a frame of zstd of the size of its content, as python-zstandard's `compress`,
+where it was a frame of no size, so the server's `PLAN_SIZE_LARGER_THAN_MAX` of a plan over its
+limit reports the size that the frame declares, as of PySpark's plans, and the threshold of the
+compression is read as Python's `int()` reads it (`+1_000`).
+
 `SparkConnectClient::read_plan_compression` reads the plan compression settings of the server
 before a plan is sent, as PySpark's client reads them when it builds its first plan: before the
 request of a relation (`to_proto`), which then observes the server-side session ID of the response
@@ -3096,7 +3136,9 @@ read of the stack-trace settings of an error, catch the exception of a handler t
 failed one, and the call goes on and waits again.
 
 At interpreter exit, a session that is not stopped has its ML cache cleaned by one
-`clean_cache` request, as PySpark's client does. Its errors are ignored, but when the server
+`clean_cache` request of the `_cleanup_ml_cache` of its client, as PySpark's `_on_exit` cleans it,
+so a program that replaces that method, as PySpark's tests do for a client of no server, replaces
+the cleanup. Its errors are ignored, but when the server
 is gone the exit waits on that request's retries, as PySpark's does, so the exit can take as
 long as those retries. A signal ends that wait, as it ends PySpark's, whose cleanup catches
 `Exception` only: the `KeyboardInterrupt` of Ctrl-C is raised out of the exit hook, which
@@ -3827,12 +3869,49 @@ logger of Spark Connect (`pyspark.sql.connect.logging`), which is disabled unles
 `SPARK_CONNECT_LOG_LEVEL` is set, as PySpark's: `session.stop(): Session could not be released.
 Error: $<error>`.
 
-With `SPARK_CONNECT_LOG_LEVEL`, the client logs to the logger of Spark Connect what PySpark's client
-logs of its RPCs, of the same levels and messages: the deadlines of a new client (`Spark Connect RPC
-deadlines: ...`), each retry and the end of the retries of a call (`Given up on retrying. error:
-...`), and each gRPC failure that it converts (`GRPC Error received`, of grpcio's `RpcError`, and
-`Received ErrorInfo: ...` of an error of the server). The debug logs of its plans and of their
-responses are not (see `dev/parity/known-differences.md`).
+With `SPARK_CONNECT_LOG_LEVEL`, or a level of the logger of `pyspark.sql.connect.logging`, the
+client logs to the logger of Spark Connect what PySpark's client logs, of the same levels, messages
+and order, through the logger's methods, as PySpark's: the deadlines of a new client (`Spark Connect
+RPC deadlines: ...`); the settings of the plan compression that the first plan of a session reads
+(`Plan compression threshold: ...`, or the error of a failed read as the argument of a text of no
+placeholder for it, as PySpark's) and the compression of a plan (`Plan compression: original_size=
+...`, of the frame of python-zstandard's `compress`, and `Plan compression not effective. Using
+original plan.`); the plan of each execution and analysis, as the method of PySpark's client that it
+stands for logs it (`Executing plan ...`, `Execute command for command ...`, `Execute command as
+iterator for command ...`, `Schema for plan: ...`, `Explain (mode=...) for plan ...`, `Execute` and
+`ExecuteAndFetch`), of the text of `SparkConnectClient._proto_to_string` of the drop-in's protobuf
+runtime; the request of each execution and each response as the execution reads it
+(`ExecuteAndFetchAsIterator. Request: ...` and `Response received: ...`, `Received the schema.`,
+`Received the SQL command result.`, `Received metric batch.`, `Received observed metric batch.`,
+`Received arrow batch ...` and `Assembling arrow batch ...`); the deadline of a stream that the
+execution reattaches (`Deadline exceeded on stream for operation ...`) and the interrupt of an
+execution by a `KeyboardInterrupt` (`Interrupt request received for operation=...`), after which
+nothing more of the execution is logged of its responses, as PySpark's reads nothing more of them
+(PySpark's release of the execution, which it sends as it interrupts it, may fail on the server,
+which it logs, `ReleaseExecute failed with exception: ...`, where the drop-in releases it once the
+server ended it); each retry and the end of the retries of a call (`Given up on retrying. error:
+...`); each gRPC failure that it converts (`GRPC Error received`, of grpcio's `RpcError`,
+`Received ErrorInfo: ...` of an error of the server, and `Disabling plan compression for the
+session due to CONNECT_INVALID_PLAN.CANNOT_PARSE error.`); and of `SparkSession.client`, its
+resources and resource profiles (`Fetching the resources`, `Creating the ResourceProfile`) and a
+delete or a cleanup of the ML cache that it skips while one is in flight on its thread (`Skipping
+re-entrant ML cache ...`). The exception of a handler or a filter of the logger at a record fails
+the call there, as PySpark's: before the request of an execution when the record precedes it, and
+of a `KeyboardInterrupt` at a response, of `toLocalIterator` too, with the interrupt of the
+execution, as PySpark's `except KeyboardInterrupt`, but at a record of the conversion of the failure
+of the execution (`GRPC Error received`, `Received ErrorInfo: ...`), which PySpark's `except
+Exception` writes, of no interrupt; the exception of a record that the client writes as it handles
+a failure, of the conversion of a failure or of the failed lookup of the plan compression, has the
+failure as its context, as PySpark's. A call of a closed client, as of a stopped session, writes
+the records that come before the request, and then raises NO_ACTIVE_SESSION, as PySpark's client,
+which reads its `_stub`, of that error, only to send. The level of the logger is read once per
+call, as the call starts: a record of a level that the logger does not write is not made, and
+nothing is formatted for it, so a level that a progress handler enables during a call applies from
+the next call on, while one that it disables applies at once, as the logger's methods filter the
+records. With
+`SPARK_CONNECT_DEBUG_CLIENT_CALL_STACK`, the requests of the executions, the analyses and the
+configurations carry the call stack of the user's code, as PySpark's (see
+`dev/parity/known-differences.md` for both).
 
 For TLS roots, including `GRPC_DEFAULT_SSL_ROOTS_FILE_PATH`, see
 [TLS Root Certificates](configuration.md#tls-root-certificates).

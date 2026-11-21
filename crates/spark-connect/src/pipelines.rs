@@ -241,7 +241,10 @@ impl PipelineRunStream {
                 .expect("pipeline run stream already exhausted its request");
             // As PySpark's `execute_command_as_iterator`, which runs a pipeline without a
             // `Progress`: the progress of the run does not reach the progress handlers.
-            self.stream = Some(self.session.execute_plan_unreported(request)?);
+            self.stream = Some(self.session.execute_plan_unreported(
+                request,
+                spark_connect_core::client_log::ExecutionLog::ExecuteCommandAsIterator,
+            )?);
         }
         self.stream.as_mut().unwrap().next_message()
     }
