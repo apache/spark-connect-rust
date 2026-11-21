@@ -1818,6 +1818,356 @@ pub(crate) fn raw_schema_json(schema: Option<&Bound<'_, PyAny>>) -> PyResult<Opt
     json_dumps(py, &json).map(Some)
 }
 
+/// The `json()` that PySpark's `createDataFrame` of no rows sends of `schema`, a struct whose
+/// fields hold an element that is not a `StructField`, at any level (a list that a str was appended
+/// to in place, `s.fields.append("x")`), which the core's struct type does not take (see
+/// `ForeignFields`): as PySpark's `json()` of the object writes it, of the `jsonValue` of each
+/// element of the fields of each struct in their order, an element's own, so of the
+/// `AttributeError` of one that has none, such as `'str' object has no attribute 'jsonValue'`. The
+/// `json` or `jsonValue` of a Python subclass is its own. None of another schema.
+pub(crate) fn foreign_schema_json(schema: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
+    let py = schema.py();
+    let mut foreign = ForeignFields::default();
+    if !schema.is_instance_of::<PyStructType>() || !foreign.holds(schema)? {
+        return Ok(None);
+    }
+    if overrides(schema, "json", &py.get_type::<PyStructType>())? {
+        return Ok(Some(
+            schema.call_method0(pyo3::intern!(py, "json"))?.extract()?,
+        ));
+    }
+    json_dumps(py, &foreign.json_value(py, schema)?).map(Some)
+}
+
+/// Which type objects hold an element that is not a `StructField` in the `fields` of one of their
+/// structs, at any level: of the fields' types, the elements of the fields themselves (a struct, an
+/// array or a map in `fields` is such an element, and may hold more), the element of an array, and
+/// the key and the value of a map. Of each object, the children that it keeps, which the lowering
+/// into the core's types reads, and those that its attributes give, which PySpark's methods read
+/// (see `ForeignFields::json_value`), of a Python subclass of an attribute of its own, such as a
+/// property that makes a new type at each read. A child that an object does not keep as an object
+/// is of the core's types, which hold fields only. Each object is looked at once, and held with its
+/// answer, so that no object takes the address of one that was freed and gets its answer.
+#[derive(Default)]
+struct ForeignFields(std::collections::HashMap<usize, (Py<PyAny>, bool)>);
+
+impl ForeignFields {
+    /// Whether the type object `obj` holds such an element.
+    fn holds(&mut self, obj: &Bound<'_, PyAny>) -> PyResult<bool> {
+        let key = obj.as_ptr() as usize;
+        if let Some((_, holds)) = self.0.get(&key) {
+            return Ok(*holds);
+        }
+        // Of a type of many levels, on a stack with room for a level.
+        let holds = crate::pbmsg::grow(|| self.holds_level(obj))?;
+        self.0.insert(key, (obj.clone().unbind(), holds));
+        Ok(holds)
+    }
+
+    /// [`ForeignFields::holds`] of one level.
+    fn holds_level(&mut self, obj: &Bound<'_, PyAny>) -> PyResult<bool> {
+        let py = obj.py();
+        if let Ok(st) = obj.cast::<PyStructType>() {
+            let kept = st.borrow().fields.clone_ref(py);
+            if self.holds_element(kept.bind(py).try_iter()?)? {
+                return Ok(true);
+            }
+            let native = py.get_type::<PyStructType>();
+            if overrides(obj, "fields", &native)? || overrides(obj, "__iter__", &native)? {
+                return self.holds_element(struct_elements(obj)?);
+            }
+            Ok(false)
+        } else if let Ok(field) = obj.cast::<PyStructField>() {
+            let kept = field.borrow().data_type_object.kept(py);
+            self.holds_child(obj, kept, "dataType", &py.get_type::<PyStructField>())
+        } else if let Ok(array) = obj.cast::<PyArrayType>() {
+            let kept = array.borrow().element_object.kept(py);
+            self.holds_child(obj, kept, "elementType", &py.get_type::<PyArrayType>())
+        } else if let Ok(map) = obj.cast::<PyMapType>() {
+            let (key, value) = {
+                let map = map.borrow();
+                (map.key_object.kept(py), map.value_object.kept(py))
+            };
+            let native = py.get_type::<PyMapType>();
+            Ok(self.holds_child(obj, key, "keyType", &native)?
+                || self.holds_child(obj, value, "valueType", &native)?)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Whether one of `elements`, the elements of the fields of a struct, is not a `StructField`,
+    /// or is one whose type holds such an element.
+    fn holds_element(&mut self, elements: Bound<'_, pyo3::types::PyIterator>) -> PyResult<bool> {
+        for element in elements {
+            let element = element?;
+            if !element.is_instance_of::<PyStructField>() || self.holds(&element)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Whether the child `name` of the type object `obj` holds such an element: `kept`, the child
+    /// that `obj` keeps, or, of a class of an attribute `name` of its own (that `native` does not
+    /// give), the child that it gives.
+    fn holds_child(
+        &mut self,
+        obj: &Bound<'_, PyAny>,
+        kept: Option<Py<PyAny>>,
+        name: &str,
+        native: &Bound<'_, pyo3::types::PyType>,
+    ) -> PyResult<bool> {
+        if let Some(kept) = kept {
+            if self.holds(kept.bind(obj.py()))? {
+                return Ok(true);
+            }
+        }
+        if overrides(obj, name, native)? {
+            return self.holds(&obj.getattr(name)?);
+        }
+        Ok(false)
+    }
+
+    /// The `jsonValue` of the type object `obj`, as PySpark's `jsonValue` makes it, of the
+    /// attributes that it reads in their order: of a struct, the `jsonValue` of each element of
+    /// its fields in their order (`for f in self`), the element's own for one that is not a type;
+    /// of a field, PySpark's `StructField.jsonValue`, of its `dataType` and `name`, of the
+    /// collations of the strings of its arrays and maps, which go to its metadata, then of its
+    /// `metadata`, `name`, `dataType` (written without the collations) and `nullable`; and of an
+    /// array and a map, of their `typeName`, their types and their flags. A Python subclass of its
+    /// own `jsonValue`, and a type of another kind, are of their `jsonValue`.
+    fn json_value<'py>(
+        &mut self,
+        py: Python<'py>,
+        obj: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        // Of a type of many levels, whose JSON values recurse over its levels as they are made, on
+        // a stack with room for a level.
+        crate::pbmsg::grow(|| self.json_value_level(py, obj))
+    }
+
+    /// [`ForeignFields::json_value`] of one level.
+    fn json_value_level<'py>(
+        &mut self,
+        py: Python<'py>,
+        obj: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let json_value = pyo3::intern!(py, "jsonValue");
+        let own = |native: Bound<'_, pyo3::types::PyType>| overrides(obj, "jsonValue", &native);
+        let json = pyo3::types::PyDict::new(py);
+        if obj.is_instance_of::<PyStructType>() {
+            if own(py.get_type::<PyStructType>())? {
+                return obj.call_method0(json_value);
+            }
+            json.set_item("type", type_name_of(obj)?)?;
+            let fields = PyList::empty(py);
+            for element in struct_elements(obj)? {
+                fields.append(self.json_value(py, &element?)?)?;
+            }
+            json.set_item("fields", fields)?;
+        } else if obj.is_instance_of::<PyStructField>() {
+            if own(py.get_type::<PyStructField>())? {
+                return obj.call_method0(json_value);
+            }
+            // As PySpark's `StructField.jsonValue`: `getCollationMetadata` reads the type and the
+            // name, of the collations of the strings of the arrays and maps of the type, which go
+            // to the metadata, and the type is written without them (`_dataTypeJsonValue`).
+            let data_type = obj.getattr(pyo3::intern!(py, "dataType"))?;
+            let name = obj.getattr(pyo3::intern!(py, "name"))?;
+            let collations = pyo3::types::PyDict::new(py);
+            visit_collations(py, &data_type, &name, &collations)?;
+            let metadata = obj.getattr(pyo3::intern!(py, "metadata"))?;
+            let metadata = if collations.is_empty() {
+                metadata
+            } else {
+                let merged = pyo3::types::PyDict::new(py);
+                merged.call_method1("update", (&metadata,))?;
+                merged.set_item("__COLLATIONS", &collations)?;
+                merged.into_any()
+            };
+            json.set_item("name", obj.getattr(pyo3::intern!(py, "name"))?)?;
+            let data_type = obj.getattr(pyo3::intern!(py, "dataType"))?;
+            let type_json = if collations.is_empty() {
+                self.json_value(py, &data_type)?
+            } else {
+                self.json_value_without_collations(py, &data_type)?
+            };
+            json.set_item("type", type_json)?;
+            json.set_item("nullable", obj.getattr(pyo3::intern!(py, "nullable"))?)?;
+            json.set_item("metadata", metadata)?;
+        } else if obj.is_instance_of::<PyArrayType>() {
+            if own(py.get_type::<PyArrayType>())? {
+                return obj.call_method0(json_value);
+            }
+            json.set_item("type", type_name_of(obj)?)?;
+            let element = obj.getattr(pyo3::intern!(py, "elementType"))?;
+            json.set_item("elementType", self.json_value(py, &element)?)?;
+            json.set_item(
+                "containsNull",
+                obj.getattr(pyo3::intern!(py, "containsNull"))?,
+            )?;
+        } else if obj.is_instance_of::<PyMapType>() {
+            if own(py.get_type::<PyMapType>())? {
+                return obj.call_method0(json_value);
+            }
+            json.set_item("type", type_name_of(obj)?)?;
+            let key = obj.getattr(pyo3::intern!(py, "keyType"))?;
+            json.set_item("keyType", self.json_value(py, &key)?)?;
+            let value = obj.getattr(pyo3::intern!(py, "valueType"))?;
+            json.set_item("valueType", self.json_value(py, &value)?)?;
+            json.set_item(
+                "valueContainsNull",
+                obj.getattr(pyo3::intern!(py, "valueContainsNull"))?,
+            )?;
+        } else {
+            return obj.call_method0(json_value);
+        }
+        Ok(json.into_any())
+    }
+
+    /// The JSON value of PySpark's `removeCollations(data_type).jsonValue()` of a field whose
+    /// strings are collated (`StructField._dataTypeJsonValue`): of new arrays and maps of the
+    /// types and the flags of `data_type`, read in their order, of a string, a varchar and a char
+    /// of no collation, and of any other type, a struct too, its own JSON value.
+    fn json_value_without_collations<'py>(
+        &mut self,
+        py: Python<'py>,
+        data_type: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        crate::pbmsg::grow(|| {
+            let json = pyo3::types::PyDict::new(py);
+            if data_type.is_instance_of::<PyArrayType>() {
+                let element = data_type.getattr(pyo3::intern!(py, "elementType"))?;
+                json.set_item("type", "array")?;
+                json.set_item(
+                    "elementType",
+                    self.json_value_without_collations(py, &element)?,
+                )?;
+                json.set_item(
+                    "containsNull",
+                    data_type.getattr(pyo3::intern!(py, "containsNull"))?,
+                )?;
+                return Ok(json.into_any());
+            }
+            if data_type.is_instance_of::<PyMapType>() {
+                let key = data_type.getattr(pyo3::intern!(py, "keyType"))?;
+                let key = self.json_value_without_collations(py, &key)?;
+                let value = data_type.getattr(pyo3::intern!(py, "valueType"))?;
+                let value = self.json_value_without_collations(py, &value)?;
+                json.set_item("type", "map")?;
+                json.set_item("keyType", key)?;
+                json.set_item("valueType", value)?;
+                json.set_item(
+                    "valueContainsNull",
+                    data_type.getattr(pyo3::intern!(py, "valueContainsNull"))?,
+                )?;
+                return Ok(json.into_any());
+            }
+            let plain = if data_type.is_instance_of::<PyStringType>() {
+                Some(py.get_type::<PyStringType>().call0()?)
+            } else if data_type.is_instance_of::<PyVarcharType>() {
+                let length = data_type.getattr(pyo3::intern!(py, "length"))?;
+                Some(py.get_type::<PyVarcharType>().call1((length,))?)
+            } else if data_type.is_instance_of::<PyCharType>() {
+                let length = data_type.getattr(pyo3::intern!(py, "length"))?;
+                Some(py.get_type::<PyCharType>().call1((length,))?)
+            } else {
+                None
+            };
+            match plain {
+                Some(plain) => plain.call_method0(pyo3::intern!(py, "jsonValue")),
+                None => self.json_value(py, data_type),
+            }
+        })
+    }
+}
+
+/// The elements of the fields of the struct `obj`, as PySpark's `for f in self` iterates them:
+/// `iter(self.fields)`, or the `__iter__` of a Python subclass of its own.
+fn struct_elements<'py>(obj: &Bound<'py, PyAny>) -> PyResult<Bound<'py, pyo3::types::PyIterator>> {
+    let py = obj.py();
+    if overrides(obj, "__iter__", &py.get_type::<PyStructType>())? {
+        return obj.try_iter();
+    }
+    obj.getattr(pyo3::intern!(py, "fields"))?.try_iter()
+}
+
+/// PySpark's `StructField.getCollationMetadata` of the type `data_type` of a field at `path`, its
+/// name: the `provider.collation` of each collated string of its arrays and maps, of itself too,
+/// by its path (`s.element`, `s.key`, `s.value`), into `out`, but not of the structs in it, whose
+/// fields write their own (`visitRecursively`).
+fn visit_collations(
+    py: Python<'_>,
+    data_type: &Bound<'_, PyAny>,
+    path: &Bound<'_, PyAny>,
+    out: &Bound<'_, pyo3::types::PyDict>,
+) -> PyResult<()> {
+    crate::pbmsg::grow(|| {
+        if data_type.is_instance_of::<PyArrayType>() {
+            let element = data_type.getattr(pyo3::intern!(py, "elementType"))?;
+            process_collations(py, &element, &path.add(".element")?, out)
+        } else if data_type.is_instance_of::<PyMapType>() {
+            let key = data_type.getattr(pyo3::intern!(py, "keyType"))?;
+            process_collations(py, &key, &path.add(".key")?, out)?;
+            let value = data_type.getattr(pyo3::intern!(py, "valueType"))?;
+            process_collations(py, &value, &path.add(".value")?, out)
+        } else if is_collated_string(py, data_type)? {
+            out.set_item(path, collation_value(py, data_type)?)
+        } else {
+            Ok(())
+        }
+    })
+}
+
+/// PySpark's `processDataType` of `getCollationMetadata`: a collated string at `path`, or the
+/// levels of another type.
+fn process_collations(
+    py: Python<'_>,
+    data_type: &Bound<'_, PyAny>,
+    path: &Bound<'_, PyAny>,
+    out: &Bound<'_, pyo3::types::PyDict>,
+) -> PyResult<()> {
+    if is_collated_string(py, data_type)? {
+        return out.set_item(path, collation_value(py, data_type)?);
+    }
+    visit_collations(py, data_type, path, out)
+}
+
+/// PySpark's `StructField._isCollatedString`: a `StringType` of a collation other than UTF-8
+/// binary.
+fn is_collated_string(py: Python<'_>, data_type: &Bound<'_, PyAny>) -> PyResult<bool> {
+    Ok(data_type.is_instance_of::<PyStringType>()
+        && !data_type
+            .call_method0(pyo3::intern!(py, "isUTF8BinaryCollation"))?
+            .is_truthy()?)
+}
+
+/// PySpark's `StructField.schemaCollationValue`: `{provider}.{collation}` of the string type.
+fn collation_value<'py>(
+    py: Python<'py>,
+    data_type: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let collation = data_type.getattr(pyo3::intern!(py, "collation"))?;
+    let provider = py
+        .get_type::<PyStringType>()
+        .call_method1(pyo3::intern!(py, "collationProvider"), (&collation,))?;
+    Ok(
+        pyo3::types::PyString::new(py, &format!("{}.{}", provider.str()?, collation.str()?))
+            .into_any(),
+    )
+}
+
+/// Whether the class of `obj` overrides the attribute `name` of the native class `native`, as a
+/// Python subclass of its own method does.
+fn overrides(
+    obj: &Bound<'_, PyAny>,
+    name: &str,
+    native: &Bound<'_, pyo3::types::PyType>,
+) -> PyResult<bool> {
+    Ok(!obj.get_type().getattr(name)?.is(&native.getattr(name)?))
+}
+
 /// The `jsonValue` of the field `field`, with its nullable flags as given, and whether one of
 /// them is other than a bool.
 fn field_json_value<'py>(

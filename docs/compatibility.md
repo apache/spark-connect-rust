@@ -2930,8 +2930,27 @@ values by position with the fields as they are: a row of another number of value
 raises `AXIS_LENGTH_MISMATCH`, a dict is read by them, and a field past them has no value
 (`IndexError`); below the top level, a value past the fields and fewer names than fields raise
 `IndexError` too. A pandas DataFrame is named with `toDF(*schema.fieldNames())`, of which the server
-raises for another number of names than columns. An element that is not a `StructField` is not
-taken (see `dev/parity/known-differences.md`).
+raises for another number of names than columns.
+
+`createDataFrame` under a struct whose fields hold an element that is not a `StructField`, as
+`s.fields.append("x")` gives, at any level (in a struct inside it changed in place, also of a
+struct, an array or a map that is itself an element of `fields`), is PySpark's, of any data, but of
+a pandas DataFrame of another width than the fields, which raises `AXIS_LENGTH_MISMATCH` as of any
+struct (see `dev/parity/known-differences.md`). It converts the data as PySpark's conversion does,
+of its errors: of local rows or a pyarrow Table, it reads the fields, of the `AttributeError` of the
+first attribute that an element lacks, and takes local rows apart by the cached names first, of
+`AXIS_LENGTH_MISMATCH`; of a pandas DataFrame of rows, it deduplicates the names of the fields first
+(`_deduplicate_field_names`), of the `IndexError` of an element past the cached `names`; and of an
+array of rows, it reads no field and checks the width of the array. It then writes the `json()` of
+the schema object as PySpark's does, of no rows too, of the `jsonValue` of each element of the
+fields of its structs in their order, so it raises the `AttributeError` of an element of none, and
+of an element that has one sends the converted data of that JSON, with the names of the struct of a
+pandas DataFrame (`toDF`). A field of such a struct writes the collations of the strings of its
+arrays and maps into its metadata (`__COLLATIONS`), and its type without them, as PySpark's
+`StructField.jsonValue`, which reads the attributes of the types in its order, so a type of a
+Python subclass of a property of its own, such as a `dataType` that makes a new struct at each read,
+is written of what each read gives. Its other uses lower the struct, which raises (see
+`dev/parity/known-differences.md`).
 
 The parameters of a type are its attributes, as PySpark's: `t.scale = 3` makes a
 `DecimalType(10, 2)` a `DecimalType(10, 3)`, as its repr, JSON, `==` and hash show, also in the

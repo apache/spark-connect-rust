@@ -124,16 +124,15 @@ difference is intentional or tracked for a fix.
   PySpark's `StructType` methods read the attributes of each element of `fields` as they go, so of a
   list that a str or another object was appended to in place, each use raises the `AttributeError`
   of the first attribute that it reads (`simpleString`, `jsonValue`, `name`, `dataType`,
-  `needConversion`), or uses an object that has them, and its pickles and copies keep the element;
-  `createDataFrame` of local rows takes them apart by the cached names first, so a row of another
-  number of values raises `AXIS_LENGTH_MISMATCH` before that. This client lowers the list into the
-  core's struct type at each use that needs the type (its JSON, simple string and tree string, a
-  lookup by name, `add`, its pickles and copies, the plans of `to`, `cast`, `from_json` and a
-  reader's schema, and `createDataFrame` of no rows), and raises `TypeError: StructType fields must
-  be StructField objects` there, and an assignment of `fields` of such an element raises it at once;
-  `createDataFrame` of local rows or of a pyarrow Table reads the fields as PySpark's conversion
-  does, and raises its `AttributeError`. Of a list of `StructField`s changed in place, the cached
-  `names` and their uses are PySpark's (see `docs/compatibility.md`).
+  `needConversion`), or uses an object that has them, and its pickles and copies keep the element.
+  This client lowers the list into the core's struct type at each use that needs the type (its JSON,
+  simple string and tree string, a lookup by name, `add`, its pickles and copies, and the plans of
+  `to`, `cast`, `from_json` and a reader's schema), and raises `TypeError: StructType fields must be
+  StructField objects` there, and an assignment of `fields` of such an element, and a `StructField`,
+  an `ArrayType` or a `MapType` made of a struct of one, raise it at once. `createDataFrame` under
+  such a struct is PySpark's, of any data but a pandas DataFrame of another width than the fields
+  (see the first entry of this section), and so are the cached `names` of a list of `StructField`s
+  changed in place and their uses (see `docs/compatibility.md`).
 - **A schema that PySpark does not convert is requested once** (intentional; the errors are the
   same). PySpark's `_schema` keeps the schema that it requested only once its conversion of it
   succeeded, so of a schema that it does not convert, such as of a user-defined type whose
