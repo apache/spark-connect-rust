@@ -117,6 +117,11 @@ struct SignalWatch {
     /// place of the KeyboardInterrupt, as the error of `interrupt_failure`, and with which no
     /// interrupt is sent.
     interrupt_unbuilt: Mutex<Option<PyErr>>,
+    /// The failure of the call whose conversion ran when the first signal came (see
+    /// `spark_connect_core::client::converting_failure`), whose grpcio's error the exception of
+    /// the signal has as its context, of the operation ID of its execution, and which interrupts
+    /// nothing.
+    converting: Mutex<Option<spark_connect_core::client::Conversion>>,
 }
 
 impl SignalWatch {
@@ -174,6 +179,16 @@ impl SignalWatch {
                     None => return Watch::Continue,
                     Some((signal, keyboard_interrupt)) => {
                         *error = Some(signal);
+                        // As PySpark's `_handle_error`, which converts the failure of a call in
+                        // its `except Exception` clause: a signal while the failure is converted,
+                        // as during the request of the details of an error of the server or the
+                        // read of the configs of its stack trace, ends the wait at once, of no
+                        // interrupt, and has the failure as its context.
+                        if let Some(conversion) = spark_connect_core::client::converting_failure() {
+                            *self.converting.lock().unwrap_or_else(|e| e.into_inner()) =
+                                Some(conversion);
+                            return Watch::Abort;
+                        }
                         // As PySpark's execution, whose `except KeyboardInterrupt` interrupts the
                         // operation on the server: the exception of another handler ends the
                         // wait at once, as it goes out of the execution as it is.
@@ -182,6 +197,15 @@ impl SignalWatch {
                         }
                     }
                 }
+            } else if self
+                .converting
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_some()
+            {
+                // The signal came while the failure of the call was converted: the wait goes on
+                // to its end, and interrupts nothing.
+                return Watch::Abort;
             } else if self.interrupted.load(Ordering::SeqCst) {
                 // A failed interrupt ends the wait at once, as PySpark raises the error of the
                 // interrupt without waiting for the server to end the execution.
@@ -209,6 +233,20 @@ impl SignalWatch {
                         .interrupt_unbuilt
                         .lock()
                         .unwrap_or_else(|e| e.into_inner()) = Some(unbuilt);
+                    return Watch::Abort;
+                }
+                // As PySpark's `except KeyboardInterrupt`, which logs the interrupt before it
+                // interrupts the operation: the exception of the record replaces the
+                // KeyboardInterrupt, which becomes its context, and nothing is interrupted.
+                if let Err(raised) = crate::client_log::interrupted(&operation_id) {
+                    Python::attach(|py| {
+                        let raised = crate::errors::spark_error_to_py_exception(raised);
+                        let mut error = self.error.lock().unwrap_or_else(|e| e.into_inner());
+                        *error = Some(match error.take() {
+                            Some(signal) => crate::errors::with_context(py, raised, signal),
+                            None => raised,
+                        });
+                    });
                     return Watch::Abort;
                 }
                 self.interrupted.store(true, Ordering::SeqCst);
@@ -603,6 +641,25 @@ pub(crate) fn before_finalizer_request(session: &SparkSession) -> bool {
     Python::try_attach(|py| {
         match refresh_request_context(py, session, RequestContext::Finalizer) {
             Ok(refreshed) => {
+                // The levels of its logs, and the call stack of its request, of the finalizer
+                // as it runs, as PySpark's builds its request then, of its `__del__`; of none that
+                // cannot be read. Of a finalizer that runs during a call of the thread, the call
+                // stack of that call, as PySpark's ends at the first frame of the pyspark package.
+                let started = match enclosing_call_stack(false) {
+                    Some(call_stack) => {
+                        crate::client_log::start_nested_call(py, session, call_stack);
+                        Ok(())
+                    }
+                    None => crate::client_log::start_call(
+                        py,
+                        session,
+                        crate::client_log::Called::Finalizer,
+                    )
+                    .map(drop),
+                };
+                if started.is_err() {
+                    session.set_thread_call_stack(None);
+                }
                 // An error of the reset of its state is not the request's.
                 let _ = after_call(
                     py,
@@ -654,6 +711,31 @@ struct CallOfThread {
     copy_token: Option<Py<PyAny>>,
     raised: Option<PyErr>,
     failure_errors: Vec<SparkError>,
+    /// The call stack of the user's code that the requests of the call carry, once it started,
+    /// which the calls that run during it carry too.
+    call_stack: Option<prost_types::Any>,
+}
+
+/// The call stack of the call during which a call or a finalizer that starts on this thread runs,
+/// if one runs: of the call before the last of the calls of the thread, of a call that `entered`
+/// already, else of the last. A call stack of none is of a call whose requests carry none.
+fn enclosing_call_stack(entered: bool) -> Option<Option<prost_types::Any>> {
+    CALLS.with(|calls| {
+        let calls = calls.try_borrow().ok()?;
+        let at = calls.len().checked_sub(if entered { 2 } else { 1 })?;
+        Some(calls[at].call_stack.clone())
+    })
+}
+
+/// Keep `call_stack` as the call stack of the last call of the thread.
+fn keep_call_stack(call_stack: Option<prost_types::Any>) {
+    CALLS.with(|calls| {
+        if let Ok(mut calls) = calls.try_borrow_mut() {
+            if let Some(call) = calls.last_mut() {
+                call.call_stack = call_stack;
+            }
+        }
+    });
 }
 
 /// A call of [`run_interruptible`] on this thread, as long as it lives. A call that runs during
@@ -678,6 +760,7 @@ impl<'a> Call<'a> {
             copy_token: None,
             raised: None,
             failure_errors: Vec::new(),
+            call_stack: None,
         };
         let nested = CALLS.with(|calls| {
             let mut calls = calls.borrow_mut();
@@ -1215,6 +1298,13 @@ pub(crate) fn interrupt_for_handler(
     operation_id: &str,
     error: PyErr,
 ) -> PyErr {
+    // As PySpark's `except KeyboardInterrupt`, which logs the interrupt before it interrupts the
+    // operation: the exception of the record replaces the KeyboardInterrupt, which becomes its
+    // context, and nothing is interrupted.
+    if let Err(raised) = crate::client_log::interrupt_requested(operation_id) {
+        let raised = crate::errors::spark_error_to_py_exception(raised);
+        return crate::errors::with_context(py, raised, error);
+    }
     let refresher = session.user_context_refresher();
     let refresh = refresher
         .as_ref()
@@ -1270,6 +1360,22 @@ fn run_interruptible<T: Send, E: Send + Into<Box<SparkError>>>(
         Ok(refreshed) => refreshed,
         Err(error) => return Err(call.end_unrefreshed(py, error)),
     };
+    // The levels of the logs of the call, and the call stack of its requests, as PySpark's
+    // requests read them as they are built. A call that runs during another call of the thread, as
+    // one of a progress handler or of a hook, carries the call stack of that call, as PySpark's
+    // ends at the first frame of the pyspark package, of the call that runs it.
+    let called = crate::client_log::take_called();
+    let started = match enclosing_call_stack(true) {
+        Some(call_stack) => {
+            crate::client_log::start_nested_call(py, session, call_stack.clone());
+            Ok(call_stack)
+        }
+        None => crate::client_log::start_call(py, session, called),
+    };
+    match started {
+        Ok(call_stack) => keep_call_stack(call_stack),
+        Err(error) => return Err(call.end_unrefreshed(py, error)),
+    }
     call.of_copy(py, refreshed.copy_token.as_ref());
     // As PySpark's requests, which read `SPARK_CONNECT_USER_AGENT` of `os.environ` as each is
     // built: of the environment as the call starts, read under the GIL, as Python changes it.
@@ -1339,12 +1445,13 @@ fn wait_interruptible<T: Send, E: Send + Into<Box<SparkError>>>(
         error: Mutex::new(None),
         interrupt_failure: Arc::new(Mutex::new(None)),
         interrupt_unbuilt: Mutex::new(None),
+        converting: Mutex::new(None),
     });
     let poll: Arc<WaitWatch> = {
         let watch = Arc::clone(&watch);
         Arc::new(move || watch.poll())
     };
-    let output = py.detach(|| with_wait_watch(poll, f));
+    let output = crate::client_log::of_its_own_logs(|| py.detach(|| with_wait_watch(poll, f)));
     // Of a handler of a signal, or a KeyboardInterrupt that Python code of the client raised in
     // the call after the last check of the wait, as PySpark raises it out of the call there.
     let signal = watch
@@ -1363,7 +1470,46 @@ fn wait_interruptible<T: Send, E: Send + Into<Box<SparkError>>>(
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .take();
+    // As PySpark's: the exception of a signal while the failure of the call was converted, in
+    // the `except Exception` clause of the call, has grpcio's error of the failure as its context,
+    // and the operation ID of the execution of the failure, which the `except BaseException` of
+    // its `_handle_error` sets on any exception that goes out of the conversion.
+    let converting = watch
+        .converting
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take();
+    let signal = match (signal, converting) {
+        (Some(signal), Some(conversion)) => {
+            let signal = match crate::client::rpc_error_of(py, &conversion.failure) {
+                Some(context) => crate::errors::with_context(py, signal, context),
+                None => signal,
+            };
+            crate::errors::stamp_operation_id(
+                signal.value(py).as_any(),
+                conversion.operation_id.as_deref(),
+            );
+            Some(signal)
+        }
+        (signal, _) => signal,
+    };
     let output: Result<T, Box<SparkError>> = output.map_err(Into::into);
+    // As the `except KeyboardInterrupt` of PySpark's execution, of a KeyboardInterrupt that Python
+    // code of the client raised in it, out of the iterator of its responses, as a handler of the
+    // logs of a response or a retry policy raises the exception of a signal: its record, and then
+    // the interrupt of the operation, of the attributes of the client of the call then. A signal
+    // that the wait took is raised as such.
+    if signal.is_none() && interrupt_unbuilt.is_none() {
+        if let Err(err) = &output {
+            if let Some(operation_id) = err.operation_id.clone() {
+                if crate::errors::is_callback_keyboard_interrupt(py, err) {
+                    if let Some(interrupt) = crate::errors::callback_exception(err) {
+                        return Err(interrupt_for_handler(py, session, &operation_id, interrupt));
+                    }
+                }
+            }
+        }
+    }
     // As PySpark's: the error of the build of the request of the interrupt replaces the
     // KeyboardInterrupt, which becomes its context, as `interrupt_operation` raises out of the
     // `except` clause, and no interrupt is sent.

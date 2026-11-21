@@ -1182,6 +1182,11 @@ impl<M> BuiltOutside<M> {
     pub(crate) fn into_parts(self) -> (M, Option<usize>) {
         (self.message, self.urls)
     }
+
+    /// The message, as it was given.
+    pub(crate) fn message(&self) -> &M {
+        &self.message
+    }
 }
 
 /// How far a resolution of a message built outside the core looks for its placeholders.

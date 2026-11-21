@@ -1234,24 +1234,15 @@ impl PyExitHook {
         if session.is_stopped() {
             return Ok(());
         }
-        let mut command = spark_connect_proto::Command::default();
-        let clean_cache = spark_connect_proto::ml_command::CleanCache {};
-        command.command_type = Some(spark_connect_proto::command::CommandType::MlCommand(
-            spark_connect_proto::MlCommand {
-                command: Some(spark_connect_proto::ml_command::Command::CleanCache(
-                    clean_cache,
-                )),
-            },
-        ));
-        raise_only_base_exceptions(
-            py,
-            crate::interrupt::interruptible_outcome(py, &session, || {
-                session
-                    .execute_command_proto(command)
-                    .map(drop)
-                    .map_err(Box::new)
-            }),
-        )?;
+        // As PySpark's `_on_exit`, which cleans the ML cache with the `_cleanup_ml_cache` of its
+        // client, which a program may replace, as PySpark's tests replace it: of the client of the
+        // session, whose `except Exception` drops the errors of the request, and out of which a
+        // `BaseException` only goes, as the KeyboardInterrupt of Ctrl-C, out of the hook.
+        let object = session_object(py, &session)?;
+        py.import("pyspark.sql.connect.client.core")?
+            .getattr("_client_of")?
+            .call1((object,))?
+            .call_method0("_cleanup_ml_cache")?;
         if self.release_session_on_exit {
             // As PySpark's `release_session`, whose request carries no user context extensions.
             raise_only_base_exceptions(
@@ -4220,13 +4211,51 @@ impl PySparkSession {
 
     /// The bytes of the response of the server to `request`, the bytes of an `AnalyzePlanRequest`
     /// that `client` builds, as PySpark's `SparkConnectClient._analyze` sends it: of its
-    /// `schema`, `explain_string`, `same_semantics` and `semantic_hash`.
+    /// `schema`, `explain_string`, `same_semantics` and `semantic_hash`, of the plans as they are.
     fn _analyze_plan<'py>(
         &self,
         py: Python<'py>,
         request: &[u8],
     ) -> PyResult<Bound<'py, pyo3::types::PyBytes>> {
         crate::client::analyze_plan(py, &self.session, request)
+    }
+
+    /// Log `prefix` and `plan`, the bytes of a `Plan` that `client` is given, at the debug level,
+    /// as PySpark's `to_pandas`, `schema` and `explain_string` log the plan that they are given:
+    /// for a caller that checked that the logger writes it (see `crate::client::log_plan`).
+    fn _log_plan(&self, py: Python<'_>, prefix: String, plan: &[u8]) -> PyResult<()> {
+        crate::client::log_plan(py, &self.session, prefix, plan)
+    }
+
+    /// The bytes of `plan`, the bytes of a `Plan` of a relation or a command that `client` sets in
+    /// a plan, compressed as the session compresses its plans, as PySpark's
+    /// `_try_compress_and_set_plan` compresses the plan of `to_proto`; None when it is not
+    /// compressed.
+    fn _compressed_plan<'py>(
+        &self,
+        py: Python<'py>,
+        plan: &[u8],
+    ) -> PyResult<Option<Bound<'py, pyo3::types::PyBytes>>> {
+        crate::client::compressed_plan(py, &self.session, plan)
+    }
+
+    /// The threshold of the plan compression of the session once its settings are read, of its
+    /// first plan: the size of the encoding of a relation or a command over which
+    /// `_compressed_plan` compresses it, -1 when the compression is disabled, and None before.
+    fn _plan_compression_threshold(&self) -> Option<i64> {
+        self.session
+            .known_plan_compression()
+            .map(|threshold| threshold.map_or(-1, |t| i64::try_from(t).unwrap_or(i64::MAX)))
+    }
+
+    /// The result chunking options of the executions of the session, as PySpark's
+    /// `_allow_arrow_batch_chunking` and `_preferred_arrow_chunk_size` of its client.
+    fn _result_chunking(&self) -> (bool, Option<i64>) {
+        let chunking = self.session.result_chunking();
+        (
+            chunking.allow_arrow_batch_chunking,
+            chunking.preferred_arrow_chunk_size,
+        )
     }
 
     /// The bytes of the response of the server to `request`, the bytes of a `ConfigRequest` that
@@ -4244,14 +4273,18 @@ impl PySparkSession {
     /// and `execute_command_as_iterator`: its responses, whose observed metrics set the
     /// Observations of `observations`, the pairs of a name and an Observation, and whose progress
     /// reaches the progress handlers when `reported`.
+    /// The execution logs what the method of PySpark's client of the name `log` logs of it (see
+    /// `crate::client::execute_plan`).
+    #[pyo3(signature = (plan, observations, reported, log=None))]
     fn _execute_plan(
         &self,
         py: Python<'_>,
         plan: &[u8],
         observations: Vec<(String, Bound<'_, PyAny>)>,
         reported: bool,
+        log: Option<&str>,
     ) -> PyResult<crate::client::PyExecutePlanResponses> {
-        crate::client::execute_plan(py, &self.session, plan, observations, reported)
+        crate::client::execute_plan(py, &self.session, plan, observations, reported, log)
     }
 
     /// Cache `blobs`, bytes or bytearrays, as artifacts of the session, as PySpark's
@@ -4633,8 +4666,11 @@ impl PySparkSession {
     #[getter]
     #[doc = connect_doc!(SparkSession.version)]
     fn version(&self, py: Python<'_>) -> PyResult<String> {
-        interruptible(py, &self.session, || {
-            self.session.version().map_err(Box::new)
+        // A `functools.cached_property` of PySpark's.
+        crate::client_log::of_cached_property("version", || {
+            interruptible(py, &self.session, || {
+                self.session.version().map_err(Box::new)
+            })
         })
     }
 

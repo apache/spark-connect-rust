@@ -833,10 +833,12 @@ impl UnaryService<ConfigRequest> for Config {
 }
 
 #[tokio::test]
-async fn reattach_of_a_stream_whose_client_was_closed_raises_no_active_session() {
-    // As the reference: an execution that is still read when its session is stopped, and that
-    // needs a reattach, raises NO_ACTIVE_SESSION from the stub of the closed client, instead of
-    // reattaching. The stream ends with that error, and the server gets no reattach.
+async fn reattach_of_a_stream_whose_channel_was_closed_raises_the_error_of_a_closed_channel() {
+    // As the reference's iterator, which reattaches through the stub that it was made with: an
+    // execution that is still read when its session is stopped, which closes the channel, and that
+    // needs a reattach, raises grpc's `ValueError` of a closed channel, instead of reattaching. The
+    // stream ends with that error, and the server gets no reattach, nor its release, which the
+    // closed channel refuses too.
     let fixture = Fixture::start(
         vec![streamed(vec![response("r1", false)])],
         vec![streamed(vec![response("r2", true)])],
@@ -849,25 +851,89 @@ async fn reattach_of_a_stream_whose_client_was_closed_raises_no_active_session()
     let first = bounded(stream.message()).await.unwrap().unwrap();
     assert_eq!(first.response_id, "r1");
 
-    // The stream ends after r1, so the next read reattaches, which the closed client refuses.
+    // The stream ends after r1, so the next read reattaches, which the closed channel refuses.
     fixture.client.close();
     let error = bounded(stream.message()).await.unwrap_err();
     assert_eq!(
-        error.get_condition().as_deref(),
-        Some("NO_ACTIVE_SESSION"),
+        error.kind,
+        spark_connect_core::error::SparkErrorKind::BuiltinValueError,
         "{error:?}"
     );
+    assert_eq!(error.message(), "Cannot invoke RPC: Channel closed!");
     assert!(bounded(stream.message()).await.unwrap().is_none());
 
+    tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(fixture.state.reattaches.lock().unwrap().is_empty());
     assert_eq!(*fixture.state.executes.lock().unwrap(), 1);
+    assert!(fixture.state.releases.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
-async fn retry_of_an_execution_whose_client_was_closed_raises_no_active_session() {
-    // As the reference: each attempt of a call goes through the stub of the client, which
-    // raises NO_ACTIVE_SESSION once the client is closed. An execution that waits to retry when
-    // its session is stopped raises that error at its next attempt, and sends nothing more.
+async fn a_stream_read_after_its_channel_was_closed_fails_as_grpcio_cancels_it() {
+    // As grpcio's `close` of the channel, which cancels its calls whose status is not delivered:
+    // an execution left open across the close of its client, of responses that it did not read,
+    // fails at its next read, of the CANCELLED of the cancel, of none of those responses, and its
+    // release is refused of the closed channel.
+    let fixture = Fixture::start(
+        vec![streamed(vec![response("r1", false), response("r2", true)])],
+        vec![],
+        quick_retries(),
+    )
+    .await;
+    let mut stream = bounded(fixture.client.execute_plan_reattachable(execute_request()))
+        .await
+        .unwrap();
+    let first = bounded(stream.message()).await.unwrap().unwrap();
+    assert_eq!(first.response_id, "r1");
+    // The rest of the stream arrives before the close.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let released = fixture.state.releases.lock().unwrap().len();
+    fixture.client.close();
+    let error = bounded(stream.message()).await.unwrap_err();
+    assert_eq!(
+        error.grpc_code,
+        Some(tonic::Code::Cancelled as i32),
+        "{error:?}"
+    );
+    assert!(
+        error.message().contains("Stream removed (Channel closed!)"),
+        "{error:?}"
+    );
+    assert!(bounded(stream.message()).await.unwrap().is_none());
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(fixture.state.releases.lock().unwrap().len(), released);
+    assert!(fixture.state.reattaches.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn reattach_of_a_stream_whose_client_was_closed_of_an_open_channel_is_sent() {
+    // As the reference's iterator, which reattaches through the stub that it was made with rather
+    // than the `_stub` of the client: a client closed of its session alone, as of a session change,
+    // whose channel stays open, still reattaches the execution that it reads.
+    let fixture = Fixture::start(
+        vec![streamed(vec![response("r1", false)])],
+        vec![streamed(vec![response("r2", true)])],
+        quick_retries(),
+    )
+    .await;
+    let mut stream = bounded(fixture.client.execute_plan_reattachable(execute_request()))
+        .await
+        .unwrap();
+    let first = bounded(stream.message()).await.unwrap().unwrap();
+    assert_eq!(first.response_id, "r1");
+    fixture.client.set_closed(true);
+    let second = bounded(stream.message()).await.unwrap().unwrap();
+    assert_eq!(second.response_id, "r2");
+    assert_eq!(fixture.state.reattaches.lock().unwrap().len(), 1);
+    fixture.client.set_closed(false);
+}
+
+#[tokio::test]
+async fn retry_of_an_execution_whose_channel_was_closed_raises_the_error_of_a_closed_channel() {
+    // As the reference's iterator, whose attempts go through the stub that it was made with, which
+    // grpc refuses once the channel is closed. An execution that waits to retry when its session is
+    // stopped, which closes the channel, raises grpc's `ValueError` of a closed channel at its next
+    // attempt, and sends nothing more.
     let fixture = Fixture::start(
         (0..1000)
             .map(|_| Step::Fail(Status::unavailable("server unavailable")))
@@ -900,10 +966,11 @@ async fn retry_of_an_execution_whose_client_was_closed_raises_no_active_session(
     fixture.client.close();
     let error = bounded(call).await.unwrap().unwrap_err();
     assert_eq!(
-        error.get_condition().as_deref(),
-        Some("NO_ACTIVE_SESSION"),
+        error.kind,
+        spark_connect_core::error::SparkErrorKind::BuiltinValueError,
         "{error:?}"
     );
+    assert_eq!(error.message(), "Cannot invoke RPC: Channel closed!");
     let sent = *fixture.state.executes.lock().unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(*fixture.state.executes.lock().unwrap(), sent);

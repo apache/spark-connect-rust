@@ -1402,6 +1402,9 @@ fn run_listener_event_loop(
     bus: Weak<ListenerBus>,
     generation: u64,
 ) {
+    // The records of the responses that the thread reads are written on it, which runs the
+    // listeners, as PySpark's `_query_event_handler` thread logs the responses that it reads.
+    spark_connect_core::client_log::write_records_on_this_thread();
     // Declared first so it runs last, after the dispatch guard, also when a callback unwinds.
     let _finish = FinishGeneration {
         bus: bus.clone(),
@@ -2188,7 +2191,10 @@ impl StreamingQueryManager {
             ..Default::default()
         };
 
-        let response_stream = self.session.execute_plan_unreported(request)?;
+        let response_stream = self.session.execute_plan_unreported(
+            request,
+            spark_connect_core::client_log::ExecutionLog::ExecuteCommandAsIterator,
+        )?;
 
         Ok(ListenerEventStream {
             stream: response_stream,

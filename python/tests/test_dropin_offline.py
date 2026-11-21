@@ -4520,6 +4520,254 @@ def test_plan_logging_string_of_a_protobuf_message_as_pyspark_connect():
     assert client._proto_to_string(deep).count("project {") == 400
 
 
+def test_the_call_stack_of_the_requests_is_pysparks_of_the_frames_of_the_users_code(monkeypatch):
+    # As PySpark's `_retrieve_stack_frames` and `_build_call_stack_trace`, of
+    # SPARK_CONNECT_DEBUG_CLIENT_CALL_STACK: the frames from the outermost to the first of the
+    # pyspark package, each of the function of the frame after it. The requests of the transport
+    # carry the call stack of the frames of the caller of the method of the extension, whose
+    # innermost frame has the name that the source of its call names, else its own.
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.sql.connect.client import SparkConnectClient, core
+
+    def frames():
+        return core._call_stack_of_call()
+
+    this = os.path.abspath(__file__)
+    monkeypatch.delenv("SPARK_CONNECT_DEBUG_CLIENT_CALL_STACK", raising=False)
+    assert SparkConnectClient._build_call_stack_trace() is None
+    retrieved = SparkConnectClient._retrieve_stack_frames()
+    # The frame of this test, of the function of PySpark's frame after it.
+    assert (retrieved[-1].function, retrieved[-1].file) == ("_retrieve_stack_frames", this)
+    for value in ("TRUE", "1"):
+        monkeypatch.setenv("SPARK_CONNECT_DEBUG_CLIENT_CALL_STACK", value)
+        built = SparkConnectClient._build_call_stack_trace()
+        error = pb2.FetchErrorDetailsResponse.Error()
+        assert built.Unpack(error)
+        assert error.stack_trace[-1].method_name == "_build_call_stack_trace"
+        assert error.stack_trace[-1].file_name == this
+        assert error.stack_trace[-1].declaring_class == ""
+    monkeypatch.setenv("SPARK_CONNECT_DEBUG_CLIENT_CALL_STACK", "yes")
+    assert SparkConnectClient._build_call_stack_trace() is None
+
+    # Of the caller of the extension: the name of the attribute of the call of the innermost frame
+    # of its source, of one line or of several.
+    stack = frames()
+    assert stack[-1][:2] == ("_call_stack_of_call", this) and stack[-2][0] == "frames"
+    stack = (
+        core
+        ._call_stack_of_call()
+    )
+    assert stack[-1][:2] == ("_call_stack_of_call", this)
+    stack = (core.
+             _call_stack_of_call())
+    assert stack[-1][:2] == ("_call_stack_of_call", this)
+    # Of a source that names none, as an alias, or of no source: the frame's own function.
+    call = core._call_stack_of_call
+    assert call()[-1][0] == (
+        "test_the_call_stack_of_the_requests_is_pysparks_of_the_frames_of_the_users_code"
+    )
+    namespace = {"core": core}
+    exec(compile("stack = core._call_stack_of_call()", "<no source>", "exec"), namespace)
+    assert namespace["stack"][-1] == ("<module>", "<no source>", 1)
+    assert core._called_name(object()) is None
+    # Past a line of a comment that ends with a period, which is no dot of an attribute, and a
+    # number that does.
+    # Read the stack.
+    stack = call()
+    assert stack[-1][0] == (
+        "test_the_call_stack_of_the_requests_is_pysparks_of_the_frames_of_the_users_code"
+    )
+    number = 1.
+    stack = call()
+    assert stack[-1][0] != "call" and number == 1.0
+    # Past the last line of a string of several lines that ends with a period, which is of the
+    # string, and no dot of an attribute.
+    text = """Read
+    the stack."""
+    stack = call()
+    assert stack[-1][0] == (
+        "test_the_call_stack_of_the_requests_is_pysparks_of_the_frames_of_the_users_code"
+    )
+    assert text
+    # Of the code of a module, from the line of the statement before the call, which starts
+    # outside any string: past a string of several lines that ends with a period, and of an
+    # attribute of another line than its object.
+    import linecache
+
+    module = (
+        'x = """Read\nthe stack."""\nstack = call()\nother = (core.\n  _call_stack_of_call())\n'
+    )
+    linecache.cache["<called module>"] = (
+        len(module), None, module.splitlines(True), "<called module>"
+    )
+    try:
+        namespace = {"call": call, "core": core}
+        exec(compile(module, "<called module>", "exec"), namespace)
+    finally:
+        linecache.cache.pop("<called module>", None)
+    assert namespace["stack"][-1] == ("<module>", "<called module>", 3)
+    assert namespace["other"][-1] == ("_call_stack_of_call", "<called module>", 5)
+    # The innermost frame of a finalizer is of its `__del__`, as PySpark's.
+    assert core._call_stack_of_call(innermost="__del__")[-1][:2] == ("__del__", this)
+    # An attribute that is a `functools.cached_property` of PySpark's calls `__get__` of
+    # `functools`, whose frame calls the function of the attribute, as a cached_property of this
+    # Python does.
+    import functools
+
+    class Probe:
+        @functools.cached_property
+        def frame(self):
+            return traceback.extract_stack()[-2]
+
+    import traceback
+
+    getter = Probe().frame
+    stack = core._call_stack_of_call(cached_property="isStreaming")
+    assert stack[-2][:2] == ("__get__", this)
+    assert stack[-1] == ("isStreaming", getter.filename, getter.lineno)
+
+
+def test_the_requests_that_the_client_builds_are_pysparks(mock_connect, monkeypatch):
+    # As PySpark's `_execute_plan_request_with_metadata`, `_analyze_plan_request_with_metadata`
+    # and `_config_request_with_metadata`: of the session ID, the user agent, the user and the
+    # server-side session ID of the client, the tags of the thread and the result chunking of an
+    # execution, of an operation ID of a UUID, and of the user context extensions and the call
+    # stack of the user's code last.
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.errors import PySparkValueError
+
+    spark, _ = mock_connect
+    client = spark.client
+    extension = pb2.FetchErrorDetailsResponse.Error()
+    extension.stack_trace.add().method_name = "mine"
+    from pyspark.sql.connect.proto._rust import Any as AnyMessage
+
+    packed = AnyMessage()
+    packed.Pack(extension)
+    client.add_threadlocal_user_context_extension(packed)
+    spark.addTag("tagged")
+    try:
+        monkeypatch.setenv("SPARK_CONNECT_DEBUG_CLIENT_CALL_STACK", "1")
+        execute = client._execute_plan_request_with_metadata()
+        analyze = client._analyze_plan_request_with_metadata()
+        config = client._config_request_with_metadata()
+        monkeypatch.delenv("SPARK_CONNECT_DEBUG_CLIENT_CALL_STACK")
+        assert list(client._config_request_with_metadata().user_context.extensions) == [packed]
+        for request in (execute, analyze, config):
+            assert request.session_id == client._session_id
+            assert request.client_type == client._builder.userAgent
+            extensions = request.user_context.extensions
+            assert len(extensions) == 2 and extensions[0] == packed
+            stack = pb2.FetchErrorDetailsResponse.Error()
+            assert extensions[1].Unpack(stack)
+            assert stack.stack_trace[-1].file_name == os.path.abspath(__file__)
+        assert list(execute.tags) == ["tagged"]
+        import uuid
+
+        uuid.UUID(execute.operation_id, version=4)
+        [option] = execute.request_options
+        assert option.result_chunking_options.allow_arrow_batch_chunking
+        assert not option.result_chunking_options.HasField("preferred_arrow_chunk_size")
+        operation_id = str(uuid.uuid4())
+        assert client._execute_plan_request_with_metadata(operation_id).operation_id == operation_id
+        with pytest.raises(PySparkValueError) as raised:
+            client._execute_plan_request_with_metadata("not a uuid")
+        assert raised.value.getCondition() == "INVALID_OPERATION_UUID_ID"
+    finally:
+        spark.clearTags()
+        client.clear_user_context_extensions()
+
+
+def test_the_wrappers_of_the_client_have_the_code_names_of_its_methods():
+    # As PySpark's methods, whose frames, of tracebacks and of the call stack of the requests, are
+    # of their own names: the wrappers that run them in the context of a copy of a client too.
+    from pyspark.sql.connect.client import SparkConnectClient
+
+    for name in ("to_table", "to_table_as_iterator", "execute_command", "config"):
+        code = getattr(SparkConnectClient, name).__code__
+        assert code.co_name == name
+        if hasattr(code, "co_qualname"):
+            assert code.co_qualname == f"SparkConnectClient.{name}"
+
+
+def test_the_exit_of_a_client_cleans_its_ml_cache_of_its_cleanup_as_pyspark():
+    # As PySpark's `_on_exit`, which cleans the ML cache of the client with its
+    # `_cleanup_ml_cache`, which a program may replace, as PySpark's tests replace it for a client
+    # of no server: the exit sends nothing then, and does not wait on retries.
+    import subprocess
+    import sys
+
+    code = """
+import time
+from pyspark.sql.connect.client import SparkConnectClient
+SparkConnectClient._cleanup_ml_cache = lambda _: print("cleaned")
+client = SparkConnectClient("sc://127.0.0.1:1", use_reattachable_execute=False)
+print("made")
+"""
+    started = time.monotonic()
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, timeout=60
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.split() == ["made", "cleaned"]
+    assert time.monotonic() - started < 30
+
+
+def test_a_record_of_a_retry_whose_handler_raises_fails_the_call_as_pyspark(mock_connect):
+    # As PySpark's `Retrying._wait`, out of which the exception of a handler of its log of a retry
+    # goes: the call fails with it, of no more retries.
+    import logging
+
+    from pyspark.sql.connect.client.retries import DefaultPolicy
+    from pyspark.sql.connect.logging import logger
+
+    spark, service = mock_connect
+    service.execute_failure = ("UNAVAILABLE", "down")
+
+    class Raising(logging.Handler):
+        def emit(self, record):
+            if str(record.msg).startswith("Got error"):
+                raise ValueError("the handler raised")
+
+    with _connect_log():
+        logger.addHandler(Raising())
+        spark.client.set_retry_policies(
+            [DefaultPolicy(max_retries=30, initial_backoff=1000, max_backoff=1000, jitter=0)]
+        )
+        started = time.monotonic()
+        with pytest.raises(ValueError, match="the handler raised"):
+            spark.range(1).collect()
+        assert time.monotonic() - started < 15
+    assert len(service.execute_requests) == 1
+
+
+def test_a_reentrant_ml_cache_rpc_is_skipped_and_logged_as_pyspark():
+    # As PySpark's `_delete_ml_cache` and `_cleanup_ml_cache`, which skip a delete or a cleanup
+    # of the ML cache of a thread that runs one, and log it as a warning.
+    import logging
+    import threading
+
+    from pyspark.sql.connect.client import SparkConnectClient
+
+    client = SparkConnectClient._of_session(_FakeSessionOfClient())
+    client._ml_cache_rpc_thread = threading.get_ident()
+    with _connect_log("DEBUG") as records:
+        assert client._delete_ml_cache(["a", "b"]) == []
+        assert client._cleanup_ml_cache() is None
+    assert [(r.levelno, r.getMessage()) for r in records] == [
+        (
+            logging.WARNING,
+            "Skipping re-entrant ML cache delete of 2 object ref(s) while another ML-cache RPC "
+            "is in flight on this thread (avoids a re-entrant gRPC hang).",
+        ),
+        (
+            logging.WARNING,
+            "Skipping re-entrant ML cache cleanup while another ML-cache RPC is in flight on "
+            "this thread (avoids a re-entrant gRPC hang).",
+        ),
+    ]
+
+
 def test_subqueries_are_sent_with_the_plans_they_refer_to_as_pyspark(mock_connect):
     # As PySpark's DataFrame.scalar(), DataFrame.exists() and Column.isin(df): Columns of
     # SubqueryExpressions of the plan of the DataFrame, sent in a WithRelations of the plans
@@ -6357,9 +6605,12 @@ def test_a_too_long_user_agent_raises_at_each_request_as_pyspark(mock_connect, m
     assert not any(session_id in request for _, request in service.recorded_order)
 
 
-def test_the_plan_of_a_dataframe_that_a_hook_puts_in_is_compressed_as_pyspark(mock_connect):
-    # As PySpark's hook, which would put in the plan of `to_proto`, which compresses it: the plan
-    # of a DataFrame that an on_execute_plan hook puts in is sent compressed over the threshold.
+@pytest.mark.parametrize("put", ["relation", "to_proto"])
+def test_the_request_of_a_hook_is_sent_as_it_is_as_pyspark(mock_connect, put):
+    # As PySpark's executions, which send the request that the hooks return as it is: the relation
+    # of a DataFrame that an on_execute_plan hook sets as the root of the plan is sent as it is,
+    # over the threshold too, and the plan of its `to_proto`, which compresses it, compressed. The
+    # plan of the execution, which the hook replaces, is compressed once, before the hook.
     pytest.importorskip("google.protobuf")
     from pyspark.sql.connect.session import SparkSession
 
@@ -6369,7 +6620,10 @@ def test_the_plan_of_a_dataframe_that_a_hook_puts_in_is_compressed_as_pyspark(mo
 
     class PlanHook(SparkSession.Hook):
         def on_execute_plan(self, request):
-            request.plan.root.CopyFrom(frames[0]._plan.plan(None))
+            if put == "relation":
+                request.plan.root.CopyFrom(frames[0]._plan.plan(None))
+            else:
+                request.plan.CopyFrom(frames[0]._plan.to_proto(frames[0].sparkSession.client))
             return request
 
     builder = SparkSession.builder.remote(service.remote)
@@ -6381,7 +6635,10 @@ def test_the_plan_of_a_dataframe_that_a_hook_puts_in_is_compressed_as_pyspark(mo
     finally:
         spark.stop()
     plan = _sent_plan(service.execute_requests)
-    assert 1 not in plan and 3 in plan
+    if put == "relation":
+        assert 1 in plan and 3 not in plan
+    else:
+        assert 1 not in plan and 3 in plan
 
 
 def test_broadcast_type_check():
@@ -27664,7 +27921,7 @@ def test_client_reads_responses_within_upbs_limit_and_raises_pysparks_error_past
         session_id = "s"
         response = within.SerializeToString()
 
-        def _analyze_plan(self, data):
+        def _analyze_plan(self, data, log=None):
             return Session.response
 
         def _config(self, data):
@@ -28435,6 +28692,13 @@ def _connect_log(level="DEBUG"):
 
     class Recorder(logging.Handler):
         def emit(self, record):
+            # Of the records that format: the record of a failed lookup of the plan compression
+            # settings, as of the mock server, which has none, is of a text of no placeholder for
+            # its argument, as PySpark's, which test_connect_logs_offline.py compares.
+            try:
+                record.getMessage()
+            except TypeError:
+                return
             records.append(record)
 
     handler = Recorder()
@@ -30040,7 +30304,9 @@ def test_a_signal_that_a_log_of_the_client_takes_interrupts_the_call_as_pyspark(
 
     class Interrupting(logging.Handler):
         def emit(self, record):
-            if record.getMessage().startswith("Got error"):
+            # Of the text of the record, as a record of an argument and no placeholder, as that of
+            # a lookup of the plan compression that fails, does not format.
+            if str(record.msg).startswith("Got error"):
                 raise KeyboardInterrupt
 
     with _connect_log():
@@ -30303,7 +30569,7 @@ def test_a_signal_whose_handler_raises_in_a_log_runs_its_handler_once(mock_conne
 
     class Slow(logging.Handler):
         def emit(self, record):
-            if "Will retry" in record.getMessage():
+            if "Will retry" in str(record.msg):
                 time.sleep(1.0)
 
     previous = signal.signal(signal.SIGINT, handler)
@@ -41121,6 +41387,43 @@ def test_plan_compression_is_read_once_per_session(mock_connect):
     frame.collect()
     frame.collect()
     assert service.plan_compression_lookups == 1
+
+
+def test_to_proto_reads_nothing_of_the_client_once_the_compression_is_known_as_pyspark(
+    mock_connect,
+):
+    # As PySpark's `_try_compress_and_set_plan`, which looks the settings of the plan compression
+    # up for the first plan, of the request of the lookup, and then reads nothing of its client: a
+    # plan under the threshold, set as it is, and one over it, compressed, are built of a client
+    # whose user and session ID no request takes, and look nothing up. The session gives the
+    # threshold once it is known, -1 of a compression that is disabled, and None before.
+    from pyspark.sql import SparkSession
+
+    _, service = mock_connect
+    for confs, threshold, large_type in [
+        (_plan_confs("1024"), 1024, "compressed_operation"),
+        (_plan_confs(None), -1, "root"),
+    ]:
+        service.confs = confs
+        session = SparkSession.builder.remote(service.remote).create()
+        try:
+            client = session.client
+            assert client._session._plan_compression_threshold() is None
+            session.range(1)._plan.to_proto(client)
+            assert client._session._plan_compression_threshold() == threshold
+            lookups = service.plan_compression_lookups
+            user_id, session_id = client._user_id, client._session_id
+            client._user_id, client._session_id = 123, 5
+            try:
+                small = session.range(3)._plan.to_proto(client)
+                large = _long_literal_frame(session)._plan.to_proto(client)
+            finally:
+                client._user_id, client._session_id = user_id, session_id
+            assert small.WhichOneof("op_type") == "root"
+            assert large.WhichOneof("op_type") == large_type
+            assert service.plan_compression_lookups == lookups
+        finally:
+            session.stop()
 
 
 def test_plan_compression_is_disabled_for_a_session_whose_server_gives_no_threshold(mock_connect):
