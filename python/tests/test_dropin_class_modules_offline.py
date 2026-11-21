@@ -1309,7 +1309,6 @@ def test_the_connect_objects_have_the_docstrings_that_pyspark_connect_copies(
 MODULES_OF_PYSPARK_ONLY = {
     "pyspark.sql.connect.client.artifact",
     "pyspark.sql.connect.client.reattach",
-    "pyspark.sql.connect.local_server",
     "pyspark.sql.connect.streaming.worker.foreach_batch_worker",
     "pyspark.sql.connect.streaming.worker.listener_worker",
     "pyspark.sql.streaming.python_streaming_source_runner",

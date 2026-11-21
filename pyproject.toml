@@ -193,6 +193,7 @@ extend-exclude = [
     "python/pyspark/sql/connect/client/__init__.py",
     "python/pyspark/sql/connect/_typing.py",
     "python/pyspark/sql/connect/conversion.py",
+    "python/pyspark/sql/connect/local_server.py",
     "python/pyspark/sql/geo_utils.py",
     "python/pyspark/sql/sql_formatter.py",
     "python/pyspark/sql/session.py",

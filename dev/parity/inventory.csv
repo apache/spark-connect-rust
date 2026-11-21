@@ -72,97 +72,97 @@ sql/connect/client/artifact.py,method,ArtifactManager,is_cached_artifact,"(self,
 sql/connect/client/artifact.py,method,ArtifactManager,get_cached_artifacts,"(self, hashes)",446,done,spark-connect-core/src/artifact.rs
 sql/connect/client/artifact.py,method,ArtifactManager,cache_artifact,"(self, blob)",472,done,spark-connect-core/src/artifact.rs
 sql/connect/client/artifact.py,method,ArtifactManager,cache_artifacts,"(self, blobs)",488,done,spark-connect-core/src/artifact.rs
-sql/connect/client/core.py,class,,RpcDeadlines,,136,done,pyspark/sql/connect/client (over the Rust transport of the session)
-sql/connect/client/core.py,method,RpcDeadlines,__post_init__,(self),162,done,pyspark/sql/connect/client (over the Rust transport of the session)
-sql/connect/client/core.py,method,RpcDeadlines,disabled,(cls),174,done,pyspark/sql/connect/client (over the Rust transport of the session)
-sql/connect/client/core.py,class,,ChannelBuilder,,207,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
-sql/connect/client/core.py,method,ChannelBuilder,__init__,"(self, channelOptions, params)",242,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
-sql/connect/client/core.py,method,ChannelBuilder,get,"(self, key)",255,done,spark-connect-core/channel.rs
-sql/connect/client/core.py,method,ChannelBuilder,getDefault,"(self, key, default)",267,done,spark-connect-core/channel.rs
-sql/connect/client/core.py,method,ChannelBuilder,set,"(self, key, value)",270,done,spark-connect-core/channel.rs
-sql/connect/client/core.py,method,ChannelBuilder,setChannelOption,"(self, key, value)",273,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
-sql/connect/client/core.py,method,ChannelBuilder,add_interceptor,"(self, interceptor)",281,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
-sql/connect/client/core.py,method,ChannelBuilder,toChannel,(self),284,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
-sql/connect/client/core.py,method,ChannelBuilder,host,(self),295,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
-sql/connect/client/core.py,method,ChannelBuilder,userId,(self),321,done,spark-connect-core/channel.rs
-sql/connect/client/core.py,method,ChannelBuilder,token,(self),330,done,spark-connect-core/channel.rs
-sql/connect/client/core.py,method,ChannelBuilder,keepalive_enabled,(self),336,done,spark-connect-core/channel.rs
-sql/connect/client/core.py,method,ChannelBuilder,keepalive_time_ms,(self),352,done,spark-connect-core/channel.rs
-sql/connect/client/core.py,method,ChannelBuilder,keepalive_timeout_ms,(self),362,done,spark-connect-core/channel.rs
-sql/connect/client/core.py,method,ChannelBuilder,keepalive_without_calls,(self),372,done,spark-connect-core/channel.rs
-sql/connect/client/core.py,method,ChannelBuilder,metadata,(self),403,done,spark-connect-core/channel.rs
-sql/connect/client/core.py,method,ChannelBuilder,session_id,(self),430,done,spark-connect-core/channel.rs
-sql/connect/client/core.py,method,ChannelBuilder,userAgent,(self),449,done,spark-connect-core/channel.rs
-sql/connect/client/core.py,class,,DefaultChannelBuilder,,479,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
-sql/connect/client/core.py,method,DefaultChannelBuilder,default_port,(),502,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
-sql/connect/client/core.py,method,DefaultChannelBuilder,__init__,"(self, url, channelOptions)",527,done,spark-connect-core/channel.rs
-sql/connect/client/core.py,method,DefaultChannelBuilder,secure,(self),596,done,spark-connect-core/channel.rs
-sql/connect/client/core.py,method,DefaultChannelBuilder,use_ssl,(self),600,done,spark-connect-core/channel.rs
-sql/connect/client/core.py,method,DefaultChannelBuilder,host,(self),604,done,spark-connect-core/channel.rs
-sql/connect/client/core.py,method,DefaultChannelBuilder,endpoint,(self),611,done,spark-connect-core/channel.rs
-sql/connect/client/core.py,method,DefaultChannelBuilder,toChannel,(self),614,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
-sql/connect/client/core.py,class,,PlanObservedMetrics,,646,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
-sql/connect/client/core.py,method,PlanObservedMetrics,__init__,"(self, name, metrics, keys)",647,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
-sql/connect/client/core.py,method,PlanObservedMetrics,__repr__,(self),652,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
-sql/connect/client/core.py,method,PlanObservedMetrics,name,(self),656,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
-sql/connect/client/core.py,method,PlanObservedMetrics,metrics,(self),660,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
-sql/connect/client/core.py,method,PlanObservedMetrics,pairs,(self),664,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
-sql/connect/client/core.py,method,PlanObservedMetrics,keys,(self),671,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
-sql/connect/client/core.py,method,PlanObservedMetrics,to_dict,(self),674,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
-sql/connect/client/core.py,class,,AnalyzeResult,,689,done,pyspark/sql/connect/client (over the Rust transport of the session)
-sql/connect/client/core.py,method,AnalyzeResult,__init__,"(self, schema, explain_string, tree_string, is_local, is_streaming, input_files, spark_version, parsed, is_same_semantics, semantic_hash, storage_level, ddl_string)",690,done,pyspark/sql/connect/client (over the Rust transport of the session)
-sql/connect/client/core.py,method,AnalyzeResult,fromProto,"(cls, pb)",719,done,pyspark/sql/connect/client (over the Rust transport of the session)
-sql/connect/client/core.py,class,,ConfigResult,,780,done,pyspark/sql/connect/client (over the Rust transport of the session)
-sql/connect/client/core.py,method,ConfigResult,__init__,"(self, pairs, warnings)",781,done,pyspark/sql/connect/client (over the Rust transport of the session)
-sql/connect/client/core.py,method,ConfigResult,fromProto,"(cls, pb)",786,done,pyspark/sql/connect/client (over the Rust transport of the session)
-sql/connect/client/core.py,class,,SparkConnectClient,,798,done,pyspark/sql/connect/client (over the Rust transport of the session)
-sql/connect/client/core.py,method,SparkConnectClient,__init__,"(self, connection, user_id, channel_options, retry_policy, use_reattachable_execute, session_hooks, allow_arrow_batch_chunking, preferred_arrow_chunk_size, rpc_deadlines, max_retry_exception_elapsed_time)",811,done,pyspark/sql/connect/client (over the Rust transport of the session)
-sql/connect/client/core.py,method,SparkConnectClient,register_progress_handler,"(self, handler)",976,done,pyspark/sql/connect/client (over the Rust transport of the session)
-sql/connect/client/core.py,method,SparkConnectClient,clear_progress_handlers,(self),990,done,pyspark/sql/connect/client (over the Rust transport of the session)
-sql/connect/client/core.py,method,SparkConnectClient,remove_progress_handler,"(self, handler)",993,done,pyspark/sql/connect/client (over the Rust transport of the session)
-sql/connect/client/core.py,method,SparkConnectClient,disable_reattachable_execute,(self),1011,done,pyspark/sql/connect/client (over the Rust transport of the session)
-sql/connect/client/core.py,method,SparkConnectClient,enable_reattachable_execute,(self),1015,done,pyspark/sql/connect/client (over the Rust transport of the session)
-sql/connect/client/core.py,method,SparkConnectClient,set_retry_policies,"(self, policies)",1019,done,pyspark/sql/connect/client (over the Rust transport of the session)
-sql/connect/client/core.py,method,SparkConnectClient,get_retry_policies,(self),1027,done,pyspark/sql/connect/client (over the Rust transport of the session)
-sql/connect/client/core.py,method,SparkConnectClient,register_udf,"(self, function, return_type, name, eval_type, deterministic)",1077,done,pyspark/sql/connect/client (over the Rust transport of the session)
-sql/connect/client/core.py,method,SparkConnectClient,register_udtf,"(self, function, return_type, name, eval_type, deterministic)",1116,done,pyspark/sql/connect/client (over the Rust transport of the session)
-sql/connect/client/core.py,method,SparkConnectClient,register_data_source,"(self, dataSource)",1150,done,pyspark/sql/connect/client (over the Rust transport of the session)
-sql/connect/client/core.py,method,SparkConnectClient,register_java,"(self, name, javaClassName, return_type, aggregate)",1167,done,pyspark/sql/connect/client (over the Rust transport of the session)
-sql/connect/client/core.py,method,SparkConnectClient,to_table_as_iterator,"(self, plan, observations)",1208,done,pyspark/sql/connect/client (over the Rust transport of the session)
-sql/connect/client/core.py,method,SparkConnectClient,to_table,"(self, plan, observations)",1227,done,pyspark/sql/connect/client (over the Rust transport of the session)
-sql/connect/client/core.py,method,SparkConnectClient,to_pandas,"(self, plan, observations, **kwargs)",1246,done,pyspark/sql/connect/client (over the Rust transport of the session)
-sql/connect/client/core.py,method,SparkConnectClient,schema,"(self, plan)",1375,done,pyspark/sql/connect/client (over the Rust transport of the session)
-sql/connect/client/core.py,method,SparkConnectClient,explain_string,"(self, plan, explain_mode)",1389,done,pyspark/sql/connect/client (over the Rust transport of the session)
-sql/connect/client/core.py,method,SparkConnectClient,execute_command,"(self, command, observations)",1405,done,pyspark/sql/connect/client (over the Rust transport of the session)
-sql/connect/client/core.py,method,SparkConnectClient,execute_command_as_iterator,"(self, command, observations)",1427,done,pyspark/sql/connect/client (over the Rust transport of the session)
-sql/connect/client/core.py,method,SparkConnectClient,same_semantics,"(self, plan, other)",1452,done,pyspark/sql/connect/client (over the Rust transport of the session)
-sql/connect/client/core.py,method,SparkConnectClient,semantic_hash,"(self, plan)",1460,done,pyspark/sql/connect/client (over the Rust transport of the session)
-sql/connect/client/core.py,method,SparkConnectClient,close,(self),1468,done,pyspark/sql/connect/client (over the Rust transport of the session)
-sql/connect/client/core.py,method,SparkConnectClient,is_closed,(self),1478,done,pyspark/sql/connect/client (over the Rust transport of the session)
-sql/connect/client/core.py,method,SparkConnectClient,host,(self),1485,done,pyspark/sql/connect/client (over the Rust transport of the session)
-sql/connect/client/core.py,method,SparkConnectClient,token,(self),1492,done,pyspark/sql/connect/client (over the Rust transport of the session)
-sql/connect/client/core.py,method,SparkConnectClient,get_configs,"(self, *keys)",2016,done,pyspark/sql/connect/client (over the Rust transport of the session)
-sql/connect/client/core.py,method,SparkConnectClient,get_config_dict,"(self, *keys)",2021,done,pyspark/sql/connect/client (over the Rust transport of the session)
-sql/connect/client/core.py,method,SparkConnectClient,get_config_with_defaults,"(self, *pairs)",2025,done,pyspark/sql/connect/client (over the Rust transport of the session)
-sql/connect/client/core.py,method,SparkConnectClient,config,"(self, operation)",2036,done,pyspark/sql/connect/client (over the Rust transport of the session)
-sql/connect/client/core.py,method,SparkConnectClient,interrupt_all,(self),2098,done,pyspark/sql/connect/client (over the Rust transport of the session)
-sql/connect/client/core.py,method,SparkConnectClient,interrupt_tag,"(self, tag)",2114,done,pyspark/sql/connect/client (over the Rust transport of the session)
-sql/connect/client/core.py,method,SparkConnectClient,interrupt_operation,"(self, op_id)",2130,done,pyspark/sql/connect/client (over the Rust transport of the session)
-sql/connect/client/core.py,method,SparkConnectClient,release_session,(self),2146,done,pyspark/sql/connect/client (over the Rust transport of the session)
-sql/connect/client/core.py,method,SparkConnectClient,add_tag,"(self, tag)",2222,done,pyspark/sql/connect/client (over the Rust transport of the session)
-sql/connect/client/core.py,method,SparkConnectClient,remove_tag,"(self, tag)",2228,done,pyspark/sql/connect/client (over the Rust transport of the session)
-sql/connect/client/core.py,method,SparkConnectClient,get_tags,(self),2234,done,pyspark/sql/connect/client (over the Rust transport of the session)
-sql/connect/client/core.py,method,SparkConnectClient,clear_tags,(self),2239,done,pyspark/sql/connect/client (over the Rust transport of the session)
-sql/connect/client/core.py,method,SparkConnectClient,add_threadlocal_user_context_extension,"(self, extension)",2266,done,pyspark/sql/connect/client (over the Rust transport of the session)
-sql/connect/client/core.py,method,SparkConnectClient,add_global_user_context_extension,"(self, extension)",2273,done,pyspark/sql/connect/client (over the Rust transport of the session)
-sql/connect/client/core.py,method,SparkConnectClient,remove_user_context_extension,"(self, extension_id)",2279,done,pyspark/sql/connect/client (over the Rust transport of the session)
-sql/connect/client/core.py,method,SparkConnectClient,clear_user_context_extensions,(self),2292,done,pyspark/sql/connect/client (over the Rust transport of the session)
-sql/connect/client/core.py,method,SparkConnectClient,add_artifacts,"(self, *paths, pyfile, archive, file)",2437,done,pyspark/sql/connect/client (over the Rust transport of the session)
-sql/connect/client/core.py,method,SparkConnectClient,copy_from_local_to_fs,"(self, local_path, dest_path)",2448,done,pyspark/sql/connect/client (over the Rust transport of the session)
-sql/connect/client/core.py,method,SparkConnectClient,cache_artifact,"(self, blob)",2453,done,pyspark/sql/connect/client (over the Rust transport of the session)
-sql/connect/client/core.py,method,SparkConnectClient,cache_artifacts,"(self, blobs)",2459,done,pyspark/sql/connect/client (over the Rust transport of the session)
-sql/connect/client/core.py,method,SparkConnectClient,clone,"(self, new_session_id)",2718,done,pyspark/sql/connect/client (over the Rust transport of the session)
-sql/connect/client/core.py,method,SparkConnectClient,newSession,(self),2788,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,class,,RpcDeadlines,,137,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,RpcDeadlines,__post_init__,(self),163,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,RpcDeadlines,disabled,(cls),175,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,class,,ChannelBuilder,,208,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
+sql/connect/client/core.py,method,ChannelBuilder,__init__,"(self, channelOptions, params)",243,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
+sql/connect/client/core.py,method,ChannelBuilder,get,"(self, key)",256,done,spark-connect-core/channel.rs
+sql/connect/client/core.py,method,ChannelBuilder,getDefault,"(self, key, default)",268,done,spark-connect-core/channel.rs
+sql/connect/client/core.py,method,ChannelBuilder,set,"(self, key, value)",271,done,spark-connect-core/channel.rs
+sql/connect/client/core.py,method,ChannelBuilder,setChannelOption,"(self, key, value)",274,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
+sql/connect/client/core.py,method,ChannelBuilder,add_interceptor,"(self, interceptor)",282,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
+sql/connect/client/core.py,method,ChannelBuilder,toChannel,(self),285,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
+sql/connect/client/core.py,method,ChannelBuilder,host,(self),296,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
+sql/connect/client/core.py,method,ChannelBuilder,userId,(self),322,done,spark-connect-core/channel.rs
+sql/connect/client/core.py,method,ChannelBuilder,token,(self),331,done,spark-connect-core/channel.rs
+sql/connect/client/core.py,method,ChannelBuilder,keepalive_enabled,(self),337,done,spark-connect-core/channel.rs
+sql/connect/client/core.py,method,ChannelBuilder,keepalive_time_ms,(self),353,done,spark-connect-core/channel.rs
+sql/connect/client/core.py,method,ChannelBuilder,keepalive_timeout_ms,(self),363,done,spark-connect-core/channel.rs
+sql/connect/client/core.py,method,ChannelBuilder,keepalive_without_calls,(self),373,done,spark-connect-core/channel.rs
+sql/connect/client/core.py,method,ChannelBuilder,metadata,(self),404,done,spark-connect-core/channel.rs
+sql/connect/client/core.py,method,ChannelBuilder,session_id,(self),431,done,spark-connect-core/channel.rs
+sql/connect/client/core.py,method,ChannelBuilder,userAgent,(self),450,done,spark-connect-core/channel.rs
+sql/connect/client/core.py,class,,DefaultChannelBuilder,,480,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
+sql/connect/client/core.py,method,DefaultChannelBuilder,default_port,(),503,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
+sql/connect/client/core.py,method,DefaultChannelBuilder,__init__,"(self, url, channelOptions)",528,done,spark-connect-core/channel.rs
+sql/connect/client/core.py,method,DefaultChannelBuilder,secure,(self),597,done,spark-connect-core/channel.rs
+sql/connect/client/core.py,method,DefaultChannelBuilder,use_ssl,(self),601,done,spark-connect-core/channel.rs
+sql/connect/client/core.py,method,DefaultChannelBuilder,host,(self),605,done,spark-connect-core/channel.rs
+sql/connect/client/core.py,method,DefaultChannelBuilder,endpoint,(self),612,done,spark-connect-core/channel.rs
+sql/connect/client/core.py,method,DefaultChannelBuilder,toChannel,(self),615,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
+sql/connect/client/core.py,class,,PlanObservedMetrics,,647,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
+sql/connect/client/core.py,method,PlanObservedMetrics,__init__,"(self, name, metrics, keys)",648,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
+sql/connect/client/core.py,method,PlanObservedMetrics,__repr__,(self),653,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
+sql/connect/client/core.py,method,PlanObservedMetrics,name,(self),657,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
+sql/connect/client/core.py,method,PlanObservedMetrics,metrics,(self),661,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
+sql/connect/client/core.py,method,PlanObservedMetrics,pairs,(self),665,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
+sql/connect/client/core.py,method,PlanObservedMetrics,keys,(self),672,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
+sql/connect/client/core.py,method,PlanObservedMetrics,to_dict,(self),675,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
+sql/connect/client/core.py,class,,AnalyzeResult,,690,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,AnalyzeResult,__init__,"(self, schema, explain_string, tree_string, is_local, is_streaming, input_files, spark_version, parsed, is_same_semantics, semantic_hash, storage_level, ddl_string)",691,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,AnalyzeResult,fromProto,"(cls, pb)",720,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,class,,ConfigResult,,781,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,ConfigResult,__init__,"(self, pairs, warnings)",782,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,ConfigResult,fromProto,"(cls, pb)",787,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,class,,SparkConnectClient,,799,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,__init__,"(self, connection, user_id, channel_options, retry_policy, use_reattachable_execute, session_hooks, allow_arrow_batch_chunking, preferred_arrow_chunk_size, rpc_deadlines, max_retry_exception_elapsed_time)",812,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,register_progress_handler,"(self, handler)",977,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,clear_progress_handlers,(self),991,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,remove_progress_handler,"(self, handler)",994,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,disable_reattachable_execute,(self),1012,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,enable_reattachable_execute,(self),1016,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,set_retry_policies,"(self, policies)",1020,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,get_retry_policies,(self),1028,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,register_udf,"(self, function, return_type, name, eval_type, deterministic)",1078,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,register_udtf,"(self, function, return_type, name, eval_type, deterministic)",1117,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,register_data_source,"(self, dataSource)",1151,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,register_java,"(self, name, javaClassName, return_type, aggregate)",1168,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,to_table_as_iterator,"(self, plan, observations)",1209,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,to_table,"(self, plan, observations)",1228,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,to_pandas,"(self, plan, observations, **kwargs)",1247,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,schema,"(self, plan)",1376,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,explain_string,"(self, plan, explain_mode)",1390,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,execute_command,"(self, command, observations)",1406,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,execute_command_as_iterator,"(self, command, observations)",1428,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,same_semantics,"(self, plan, other)",1453,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,semantic_hash,"(self, plan)",1461,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,close,(self),1469,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,is_closed,(self),1479,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,host,(self),1486,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,token,(self),1493,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,get_configs,"(self, *keys)",2033,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,get_config_dict,"(self, *keys)",2038,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,get_config_with_defaults,"(self, *pairs)",2042,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,config,"(self, operation)",2053,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,interrupt_all,(self),2115,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,interrupt_tag,"(self, tag)",2131,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,interrupt_operation,"(self, op_id)",2147,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,release_session,(self),2163,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,add_tag,"(self, tag)",2239,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,remove_tag,"(self, tag)",2245,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,get_tags,(self),2253,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,clear_tags,(self),2258,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,add_threadlocal_user_context_extension,"(self, extension)",2285,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,add_global_user_context_extension,"(self, extension)",2292,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,remove_user_context_extension,"(self, extension_id)",2298,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,clear_user_context_extensions,(self),2311,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,add_artifacts,"(self, *paths, pyfile, archive, file)",2461,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,copy_from_local_to_fs,"(self, local_path, dest_path)",2472,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,cache_artifact,"(self, blob)",2477,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,cache_artifacts,"(self, blobs)",2483,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,clone,"(self, new_session_id)",2742,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,newSession,(self),2812,done,pyspark/sql/connect/client (over the Rust transport of the session)
 sql/connect/client/reattach.py,class,,ExecutePlanResponseReattachableIterator,,37,done,reattach.rs full impl
 sql/connect/client/reattach.py,method,ExecutePlanResponseReattachableIterator,__new__,"(cls, *args, **kwargs)",64,done,reattach.rs full impl
 sql/connect/client/reattach.py,method,ExecutePlanResponseReattachableIterator,__init__,"(self, request, stub, retrying, metadata, reattachable_execute_plan_timeout, reattach_execute_timeout)",69,done,reattach.rs full impl
@@ -676,484 +676,488 @@ sql/connect/functions/builtin.py,function,,avg,(col),1057,verified,functions.rs 
 sql/connect/functions/builtin.py,function,,collect_list,(col),1064,verified,functions.rs golden-verified
 sql/connect/functions/builtin.py,function,,array_agg,(col),1071,verified,functions.rs golden-verified
 sql/connect/functions/builtin.py,function,,collect_set,(col),1078,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,listagg,"(col, delimiter)",1085,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,listagg_distinct,"(col, delimiter)",1095,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,string_agg,"(col, delimiter)",1113,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,string_agg_distinct,"(col, delimiter)",1125,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,corr,"(col1, col2)",1143,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,count,(col),1150,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,countDistinct,"(col, *cols)",1159,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,count_distinct,"(col, *cols)",1166,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,covar_pop,"(col1, col2)",1178,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,covar_samp,"(col1, col2)",1185,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,first,"(col, ignorenulls)",1192,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,grouping,(col),1199,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,grouping_id,(*cols),1206,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,count_min_sketch,"(col, eps, confidence, seed)",1213,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,kurtosis,(col),1226,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,last,"(col, ignorenulls)",1233,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,max,(col),1240,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,max_by,"(col, ord, k)",1247,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,mean,(col),1256,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,median,(col),1263,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,min,(col),1270,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,min_by,"(col, ord, k)",1277,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,mode,"(col, deterministic)",1286,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,percentile,"(col, percentage, frequency)",1293,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,percentile_approx,"(col, percentage, accuracy)",1315,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,approx_percentile,"(col, percentage, accuracy)",1327,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,product,(col),1339,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,skewness,(col),1346,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,stddev,(col),1353,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,std,(col),1360,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,stddev_samp,(col),1367,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,stddev_pop,(col),1374,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,sum,(col),1381,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,sumDistinct,(col),1388,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,sum_distinct,(col),1396,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,var_pop,(col),1407,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,regr_avgx,"(y, x)",1414,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,regr_avgy,"(y, x)",1421,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,regr_count,"(y, x)",1428,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,regr_intercept,"(y, x)",1435,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,regr_r2,"(y, x)",1442,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,regr_slope,"(y, x)",1449,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,regr_sxx,"(y, x)",1456,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,regr_sxy,"(y, x)",1463,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,regr_syy,"(y, x)",1470,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,var_samp,(col),1477,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,variance,(col),1484,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,every,(col),1491,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,bool_and,(col),1498,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,some,(col),1505,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,bool_or,(col),1512,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,bit_and,(col),1519,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,bit_or,(col),1526,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,bit_xor,(col),1533,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,counter_diff,"(value, startTime)",1543,done,
-sql/connect/functions/builtin.py,function,,cume_dist,(),1552,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,dense_rank,(),1559,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,lag,"(col, offset, default)",1566,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,lead,"(col, offset, default)",1576,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,nth_value,"(col, offset, ignoreNulls)",1586,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,any_value,"(col, ignoreNulls)",1596,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,first_value,"(col, ignoreNulls)",1608,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,last_value,"(col, ignoreNulls)",1620,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,count_if,(col),1632,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,histogram_numeric,"(col, nBins)",1639,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,ntile,(n),1646,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,percent_rank,(),1653,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,rank,(),1660,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,row_number,(),1667,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,aggregate,"(col, initialValue, merge, finish)",1674,verified,functions.rs HOF (12 golden)
-sql/connect/functions/builtin.py,function,,reduce,"(col, initialValue, merge, finish)",1690,verified,functions.rs HOF (12 golden)
-sql/connect/functions/builtin.py,function,,array,(*cols),1706,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,array_append,"(col, value)",1717,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,array_contains,"(col, value)",1724,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,array_distinct,(col),1731,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,array_except,"(col1, col2)",1738,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,array_insert,"(arr, pos, value)",1745,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,array_intersect,"(col1, col2)",1754,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,array_compact,(col),1761,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,array_join,"(col, delimiter, null_replacement)",1768,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,array_max,(col),1780,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,array_min,(col),1787,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,array_size,(col),1794,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,cardinality,(col),1801,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,array_position,"(col, value)",1808,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,array_prepend,"(col, value)",1815,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,array_remove,"(col, element)",1822,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,array_repeat,"(col, count)",1829,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,array_sort,"(col, comparator)",1838,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,array_union,"(col1, col2)",1850,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,arrays_overlap,"(a1, a2)",1857,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,arrays_zip,(*cols),1864,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,concat,(*cols),1871,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,create_map,(*cols),1878,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,element_at,"(col, extraction)",1889,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,try_element_at,"(col, extraction)",1896,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,exists,"(col, f)",1903,verified,functions.rs HOF (12 golden)
-sql/connect/functions/builtin.py,function,,explode,(col),1910,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,explode_outer,(col),1917,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,filter,"(col, f)",1924,verified,functions.rs HOF (12 golden)
-sql/connect/functions/builtin.py,function,,flatten,(col),1934,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,forall,"(col, f)",1941,verified,functions.rs HOF (12 golden)
-sql/connect/functions/builtin.py,function,,from_csv,"(col, schema, options)",1948,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,from_json,"(col, schema, options)",1976,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,from_xml,"(col, schema, options)",2004,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,get,"(col, index)",2032,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,get_json_object,"(col, path)",2042,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,json_array_length,(col),2049,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,json_object_keys,(col),2056,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,inline,(col),2063,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,inline_outer,(col),2070,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,json_tuple,"(col, *fields)",2077,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,map_concat,(*cols),2089,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,map_contains_key,"(col, value)",2100,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,map_entries,(col),2107,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,map_filter,"(col, f)",2114,verified,functions.rs HOF (12 golden)
-sql/connect/functions/builtin.py,function,,map_from_arrays,"(col1, col2)",2121,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,map_from_entries,(col),2128,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,map_keys,(col),2135,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,map_values,(col),2142,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,map_zip_with,"(col1, col2, f)",2149,verified,functions.rs HOF (12 golden)
-sql/connect/functions/builtin.py,function,,str_to_map,"(text, pairDelim, keyValueDelim)",2160,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,try_parse_json,(col),2174,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,to_variant_object,(col),2181,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,parse_json,(col),2188,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,is_variant_null,(v),2195,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,is_valid_variant,(v),2202,done,
-sql/connect/functions/builtin.py,function,,variant_delete,"(v, *paths)",2209,done,
-sql/connect/functions/builtin.py,function,,variant_insert,"(v, path, value)",2222,done,
-sql/connect/functions/builtin.py,function,,try_variant_insert,"(v, path, value)",2230,done,
-sql/connect/functions/builtin.py,function,,variant_set,"(v, path, value, create_if_missing)",2240,done,
-sql/connect/functions/builtin.py,function,,try_variant_set,"(v, path, value, create_if_missing)",2255,done,
-sql/connect/functions/builtin.py,function,,variant_array_append,"(v, path, value)",2270,done,
-sql/connect/functions/builtin.py,function,,try_variant_array_append,"(v, path, value)",2280,done,
-sql/connect/functions/builtin.py,function,,variant_get,"(v, path, targetType)",2290,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,try_variant_get,"(v, path, targetType)",2301,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,schema_of_variant,(v),2312,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,schema_of_variant_agg,(v),2319,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,posexplode,(col),2326,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,posexplode_outer,(col),2333,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,reverse,(col),2340,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,sequence,"(start, stop, step)",2347,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,schema_of_csv,"(csv, options)",2359,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,schema_of_json,"(json, options)",2380,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,schema_of_xml,"(xml, options)",2401,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,shuffle,"(col, seed)",2422,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,size,(col),2430,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,slice,"(x, start, length)",2437,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,sort_array,"(col, asc)",2476,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,struct,(*cols),2483,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,named_struct,(*cols),2494,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,to_csv,"(col, options)",2501,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,to_json,"(col, options)",2511,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,to_xml,"(col, options)",2521,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,transform,"(col, f)",2531,verified,functions.rs HOF (12 golden)
-sql/connect/functions/builtin.py,function,,transform_keys,"(col, f)",2541,verified,functions.rs HOF (12 golden)
-sql/connect/functions/builtin.py,function,,transform_values,"(col, f)",2548,verified,functions.rs HOF (12 golden)
-sql/connect/functions/builtin.py,function,,zip_with,"(left, right, f)",2555,verified,functions.rs HOF (12 golden)
-sql/connect/functions/builtin.py,function,,upper,(col),2569,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,lower,(col),2576,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,ascii,(col),2583,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,base64,(col),2590,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,unbase64,(col),2597,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,ltrim,"(col, trim)",2604,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,rtrim,"(col, trim)",2614,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,trim,"(col, trim)",2624,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,concat_ws,"(sep, *cols)",2634,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,decode,"(col, charset)",2641,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,encode,"(col, charset)",2648,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,is_valid_utf8,(str),2655,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,make_valid_utf8,(str),2662,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,validate_utf8,(str),2669,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,try_validate_utf8,(str),2676,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,format_number,"(col, d)",2683,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,format_string,"(format, *cols)",2690,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,instr,"(str, substr, start, occurrence)",2697,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,overlay,"(src, replace, pos, len)",2717,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,sentences,"(string, language, country)",2755,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,substring,"(str, pos, len)",2769,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,substring_index,"(str, delim, count)",2782,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,levenshtein,"(left, right, threshold)",2789,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,jaro_winkler_similarity,"(left, right)",2801,done,
-sql/connect/functions/builtin.py,function,,locate,"(substr, str, pos)",2808,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,lpad,"(col, len, pad)",2815,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,rpad,"(col, len, pad)",2826,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,repeat,"(col, n)",2837,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,split,"(str, pattern, limit)",2846,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,rlike,"(str, regexp)",2859,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,regexp,"(str, regexp)",2866,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,regexp_like,"(str, regexp)",2873,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,randstr,"(length, seed)",2880,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,regexp_count,"(str, regexp)",2892,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,regexp_extract,"(str, pattern, idx)",2899,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,regexp_extract_all,"(str, regexp, idx)",2906,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,regexp_replace,"(string, pattern, replacement, position)",2918,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,regexp_substr,"(str, regexp)",2944,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,regexp_instr,"(str, regexp, idx)",2951,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,initcap,(col),2963,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,soundex,(col),2970,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,length,(col),2977,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,octet_length,(col),2984,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,bit_length,(col),2991,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,translate,"(srcCol, matching, replace)",2998,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,to_binary,"(col, format)",3005,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,to_char,"(col, format)",3015,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,to_varchar,"(col, format)",3022,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,to_number,"(col, format)",3029,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,replace,"(src, search, replace)",3036,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,split_part,"(src, delimiter, partNum)",3048,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,substr,"(str, pos, len)",3055,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,parse_url,"(url, partToExtract, key)",3067,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,try_parse_url,"(url, partToExtract, key)",3079,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,printf,"(format, *cols)",3091,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,url_decode,(str),3098,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,try_url_decode,(str),3105,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,url_encode,(str),3112,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,position,"(substr, str, start)",3119,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,endswith,"(str, suffix)",3131,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,startswith,"(str, prefix)",3138,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,char,(col),3145,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,try_to_binary,"(col, format)",3152,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,try_to_number,"(col, format)",3162,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,btrim,"(str, trim)",3169,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,char_length,(str),3179,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,character_length,(str),3186,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,chr,(n),3193,done,
-sql/connect/functions/builtin.py,function,,contains,"(left, right)",3200,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,elt,(*inputs),3207,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,find_in_set,"(str, str_array)",3214,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,like,"(str, pattern, escapeChar)",3221,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,ilike,"(str, pattern, escapeChar)",3233,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,lcase,(str),3245,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,ucase,(str),3252,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,left,"(str, len)",3259,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,right,"(str, len)",3266,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,mask,"(col, upperChar, lowerChar, digitChar, otherChar)",3273,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,collate,"(col, collation)",3293,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,collation,(col),3300,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,quote,(col),3307,done,
-sql/connect/functions/builtin.py,function,,curdate,(),3317,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,current_date,(),3324,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,current_time,(),3332,done,
-sql/connect/functions/builtin.py,function,,current_time,(precision),3336,done,
-sql/connect/functions/builtin.py,function,,current_time,(precision),3339,done,
-sql/connect/functions/builtin.py,function,,current_timestamp,(),3349,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,now,(),3356,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,current_timezone,(),3363,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,localtimestamp,(),3370,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,date_format,"(date, format)",3377,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,year,(col),3384,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,quarter,(col),3391,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,month,(col),3398,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,dayofweek,(col),3405,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,dayofmonth,(col),3412,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,day,(col),3419,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,dayofyear,(col),3426,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,hour,(col),3433,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,minute,(col),3440,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,second,(col),3447,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,weekofyear,(col),3454,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,weekday,(col),3461,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,monthname,(col),3468,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,dayname,(col),3475,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,extract,"(field, source)",3482,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,date_part,"(field, source)",3489,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,datepart,"(field, source)",3496,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,make_date,"(year, month, day)",3503,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,date_add,"(start, days)",3510,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,dateadd,"(start, days)",3519,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,date_sub,"(start, days)",3528,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,datediff,"(end, start)",3537,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,date_diff,"(end, start)",3544,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,date_from_unix_date,(days),3551,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,add_months,"(start, months)",3558,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,months_between,"(date1, date2, roundOff)",3567,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,to_date,"(col, format)",3574,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,try_to_date,"(col, format)",3584,done,
-sql/connect/functions/builtin.py,function,,unix_date,(col),3594,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,unix_micros,(col),3601,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,unix_millis,(col),3608,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,unix_nanos,(col),3615,done,
-sql/connect/functions/builtin.py,function,,unix_seconds,(col),3622,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,to_time,(str),3630,done,
-sql/connect/functions/builtin.py,function,,to_time,"(str, format)",3634,done,
-sql/connect/functions/builtin.py,function,,to_time,"(str, format)",3637,done,
-sql/connect/functions/builtin.py,function,,to_timestamp,(col),3648,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,to_timestamp,"(col, format)",3652,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,to_timestamp,"(col, format)",3655,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,try_to_time,(str),3666,done,
-sql/connect/functions/builtin.py,function,,try_to_time,"(str, format)",3670,done,
-sql/connect/functions/builtin.py,function,,try_to_time,"(str, format)",3673,done,
-sql/connect/functions/builtin.py,function,,try_to_timestamp,"(col, format)",3683,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,xpath,"(xml, path)",3693,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,xpath_boolean,"(xml, path)",3700,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,xpath_double,"(xml, path)",3707,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,xpath_number,"(xml, path)",3714,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,xpath_float,"(xml, path)",3721,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,xpath_int,"(xml, path)",3728,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,xpath_long,"(xml, path)",3735,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,xpath_short,"(xml, path)",3742,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,xpath_string,"(xml, path)",3749,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,trunc,"(date, format)",3756,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,date_trunc,"(format, timestamp)",3763,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,next_day,"(date, dayOfWeek)",3770,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,last_day,(date),3777,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,from_unixtime,"(timestamp, format)",3784,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,unix_timestamp,"(timestamp, format)",3792,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,unix_timestamp,(),3796,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,unix_timestamp,"(timestamp, format)",3799,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,from_utc_timestamp,"(timestamp, tz)",3810,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,to_utc_timestamp,"(timestamp, tz)",3817,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,timestamp_seconds,(col),3824,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,time_diff,"(unit, start, end)",3831,done,
-sql/connect/functions/builtin.py,function,,time_trunc,"(unit, time)",3838,done,
-sql/connect/functions/builtin.py,function,,timestamp_millis,(col),3845,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,timestamp_micros,(col),3852,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,timestamp_nanos,(col),3859,done,
-sql/connect/functions/builtin.py,function,,timestamp_diff,"(unit, start, end)",3866,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,timestamp_add,"(unit, quantity, ts)",3873,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,time_bucket,"(bucket_size, ts, origin)",3880,done,
-sql/connect/functions/builtin.py,function,,window,"(timeColumn, windowDuration, slideDuration, startTime)",3893,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,window_time,(windowColumn),3946,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,session_window,"(timeColumn, gapDuration)",3955,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,to_unix_timestamp,"(timestamp, format)",3978,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,to_timestamp_ltz,"(timestamp, format)",3991,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,to_timestamp_ntz,"(timestamp, format)",4004,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,bucket,"(numBuckets, col)",4020,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,years,(col),4030,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,months,(col),4040,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,days,(col),4050,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,hours,(col),4060,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,convert_timezone,"(sourceTz, targetTz, sourceTs)",4070,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,make_dt_interval,"(days, hours, mins, secs)",4082,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,try_make_interval,"(years, months, weeks, days, hours, mins, secs)",4099,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,make_interval,"(years, months, weeks, days, hours, mins, secs)",4124,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,make_time,"(hour, minute, second)",4149,done,
-sql/connect/functions/builtin.py,function,,time_from_seconds,(col),4156,done,
-sql/connect/functions/builtin.py,function,,time_from_millis,(col),4163,done,
-sql/connect/functions/builtin.py,function,,time_from_micros,(col),4170,done,
-sql/connect/functions/builtin.py,function,,time_to_seconds,(col),4177,done,
-sql/connect/functions/builtin.py,function,,time_to_millis,(col),4184,done,
-sql/connect/functions/builtin.py,function,,time_to_micros,(col),4191,done,
-sql/connect/functions/builtin.py,function,,make_timestamp,"(years, months, days, hours, mins, secs)",4212,done,
-sql/connect/functions/builtin.py,function,,make_timestamp,"(years, months, days, hours, mins, secs, timezone)",4223,done,
-sql/connect/functions/builtin.py,function,,make_timestamp,"(*, date, time)",4235,done,
-sql/connect/functions/builtin.py,function,,make_timestamp,"(*, date, time, timezone)",4239,done,
-sql/connect/functions/builtin.py,function,,make_timestamp,"(years, months, days, hours, mins, secs, timezone, date, time)",4244,done,
-sql/connect/functions/builtin.py,function,,try_make_timestamp,"(years, months, days, hours, mins, secs)",4305,done,
-sql/connect/functions/builtin.py,function,,try_make_timestamp,"(years, months, days, hours, mins, secs, timezone)",4316,done,
-sql/connect/functions/builtin.py,function,,try_make_timestamp,"(*, date, time)",4328,done,
-sql/connect/functions/builtin.py,function,,try_make_timestamp,"(*, date, time, timezone)",4332,done,
-sql/connect/functions/builtin.py,function,,try_make_timestamp,"(years, months, days, hours, mins, secs, timezone, date, time)",4337,done,
-sql/connect/functions/builtin.py,function,,make_timestamp_ltz,"(years, months, days, hours, mins, secs, timezone)",4398,done,
-sql/connect/functions/builtin.py,function,,try_make_timestamp_ltz,"(years, months, days, hours, mins, secs, timezone)",4420,done,
-sql/connect/functions/builtin.py,function,,make_timestamp_ntz,"(years, months, days, hours, mins, secs)",4443,done,
-sql/connect/functions/builtin.py,function,,make_timestamp_ntz,"(*, date, time)",4454,done,
-sql/connect/functions/builtin.py,function,,make_timestamp_ntz,"(years, months, days, hours, mins, secs, date, time)",4461,done,
-sql/connect/functions/builtin.py,function,,try_make_timestamp_ntz,"(years, months, days, hours, mins, secs)",4501,done,
-sql/connect/functions/builtin.py,function,,try_make_timestamp_ntz,"(*, date, time)",4512,done,
-sql/connect/functions/builtin.py,function,,try_make_timestamp_ntz,"(years, months, days, hours, mins, secs, date, time)",4519,done,
-sql/connect/functions/builtin.py,function,,make_ym_interval,"(years, months)",4558,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,current_catalog,(),4572,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,current_path,(),4579,done,
-sql/connect/functions/builtin.py,function,,current_database,(),4586,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,current_schema,(),4593,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,current_user,(),4600,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,user,(),4607,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,session_user,(),4614,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,uuid,(seed),4621,done,
-sql/connect/functions/builtin.py,function,,assert_true,"(col, errMsg)",4628,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,raise_error,(errMsg),4647,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,crc32,(col),4664,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,hash,(*cols),4671,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,xxhash64,(*cols),4678,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,md5,(col),4685,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,sha1,(col),4692,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,sha2,"(col, numBits)",4699,done,
-sql/connect/functions/builtin.py,function,,hll_sketch_agg,"(col, lgConfigK)",4716,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,hll_union_agg,"(col, allowDifferentLgConfigK)",4729,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,hll_sketch_estimate,(col),4742,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,hll_union,"(col1, col2, allowDifferentLgConfigK)",4749,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,theta_sketch_agg,"(col, lgNomEntries)",4763,done,
-sql/connect/functions/builtin.py,function,,theta_union_agg,"(col, lgNomEntries)",4777,done,
-sql/connect/functions/builtin.py,function,,theta_intersection_agg,(col),4791,done,
-sql/connect/functions/builtin.py,function,,tuple_sketch_agg_double,"(key, summary, lgNomEntries, mode)",4801,done,
-sql/connect/functions/builtin.py,function,,tuple_sketch_agg_integer,"(key, summary, lgNomEntries, mode)",4817,done,
-sql/connect/functions/builtin.py,function,,tuple_union_agg_double,"(col, lgNomEntries, mode)",4833,done,
-sql/connect/functions/builtin.py,function,,tuple_union_agg_integer,"(col, lgNomEntries, mode)",4848,done,
-sql/connect/functions/builtin.py,function,,tuple_intersection_agg_double,"(col, mode)",4863,done,
-sql/connect/functions/builtin.py,function,,tuple_intersection_agg_integer,"(col, mode)",4877,done,
-sql/connect/functions/builtin.py,function,,kll_sketch_agg_bigint,"(col, k)",4891,done,
-sql/connect/functions/builtin.py,function,,kll_sketch_agg_float,"(col, k)",4905,done,
-sql/connect/functions/builtin.py,function,,kll_sketch_agg_double,"(col, k)",4919,done,
-sql/connect/functions/builtin.py,function,,kll_merge_agg_bigint,"(col, k)",4933,done,
-sql/connect/functions/builtin.py,function,,kll_merge_agg_float,"(col, k)",4947,done,
-sql/connect/functions/builtin.py,function,,kll_merge_agg_double,"(col, k)",4961,done,
-sql/connect/functions/builtin.py,function,,kll_sketch_to_string_bigint,(col),4975,done,
-sql/connect/functions/builtin.py,function,,kll_sketch_to_string_float,(col),4983,done,
-sql/connect/functions/builtin.py,function,,kll_sketch_to_string_double,(col),4991,done,
-sql/connect/functions/builtin.py,function,,kll_sketch_get_n_bigint,(col),4999,done,
-sql/connect/functions/builtin.py,function,,kll_sketch_get_n_float,(col),5007,done,
-sql/connect/functions/builtin.py,function,,kll_sketch_get_n_double,(col),5015,done,
-sql/connect/functions/builtin.py,function,,kll_sketch_merge_bigint,"(left, right)",5023,done,
-sql/connect/functions/builtin.py,function,,kll_sketch_merge_float,"(left, right)",5031,done,
-sql/connect/functions/builtin.py,function,,kll_sketch_merge_double,"(left, right)",5039,done,
-sql/connect/functions/builtin.py,function,,kll_sketch_get_quantile_bigint,"(sketch, rank)",5047,done,
-sql/connect/functions/builtin.py,function,,kll_sketch_get_quantile_float,"(sketch, rank)",5055,done,
-sql/connect/functions/builtin.py,function,,kll_sketch_get_quantile_double,"(sketch, rank)",5063,done,
-sql/connect/functions/builtin.py,function,,kll_sketch_get_rank_bigint,"(sketch, quantile)",5071,done,
-sql/connect/functions/builtin.py,function,,kll_sketch_get_rank_float,"(sketch, quantile)",5079,done,
-sql/connect/functions/builtin.py,function,,kll_sketch_get_rank_double,"(sketch, quantile)",5087,done,
-sql/connect/functions/builtin.py,function,,theta_sketch_estimate,(col),5095,done,
-sql/connect/functions/builtin.py,function,,theta_union,"(col1, col2, lgNomEntries)",5103,done,
-sql/connect/functions/builtin.py,function,,theta_intersection,"(col1, col2)",5116,done,
-sql/connect/functions/builtin.py,function,,theta_difference,"(col1, col2)",5124,done,
-sql/connect/functions/builtin.py,function,,tuple_sketch_estimate_double,(col),5132,done,
-sql/connect/functions/builtin.py,function,,tuple_sketch_estimate_integer,(col),5140,done,
-sql/connect/functions/builtin.py,function,,tuple_sketch_summary_double,"(col, mode)",5148,done,
-sql/connect/functions/builtin.py,function,,tuple_sketch_summary_integer,"(col, mode)",5162,done,
-sql/connect/functions/builtin.py,function,,tuple_sketch_theta_double,(col),5176,done,
-sql/connect/functions/builtin.py,function,,tuple_sketch_theta_integer,(col),5183,done,
-sql/connect/functions/builtin.py,function,,tuple_union_double,"(col1, col2, lgNomEntries, mode)",5190,done,
-sql/connect/functions/builtin.py,function,,tuple_union_integer,"(col1, col2, lgNomEntries, mode)",5206,done,
-sql/connect/functions/builtin.py,function,,tuple_intersection_double,"(col1, col2, mode)",5222,done,
-sql/connect/functions/builtin.py,function,,tuple_intersection_integer,"(col1, col2, mode)",5237,done,
-sql/connect/functions/builtin.py,function,,tuple_difference_double,"(col1, col2)",5252,done,
-sql/connect/functions/builtin.py,function,,tuple_difference_integer,"(col1, col2)",5259,done,
-sql/connect/functions/builtin.py,function,,tuple_difference_theta_double,"(col1, col2)",5266,done,
-sql/connect/functions/builtin.py,function,,tuple_difference_theta_integer,"(col1, col2)",5273,done,
-sql/connect/functions/builtin.py,function,,tuple_intersection_theta_double,"(col1, col2, mode)",5280,done,
-sql/connect/functions/builtin.py,function,,tuple_intersection_theta_integer,"(col1, col2, mode)",5295,done,
-sql/connect/functions/builtin.py,function,,tuple_union_theta_double,"(col1, col2, lgNomEntries, mode)",5310,done,
-sql/connect/functions/builtin.py,function,,tuple_union_theta_integer,"(col1, col2, lgNomEntries, mode)",5326,done,
-sql/connect/functions/builtin.py,function,,ifnull,"(col1, col2)",5345,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,isnotnull,(col),5352,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,equal_null,"(col1, col2)",5359,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,nullif,"(col1, col2)",5366,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,nullifzero,(col),5373,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,nvl,"(col1, col2)",5380,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,nvl2,"(col1, col2, col3)",5387,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,zeroifnull,(col),5394,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,hmac,"(key, message, algorithm)",5401,done,
-sql/connect/functions/builtin.py,function,,aes_encrypt,"(input, key, mode, padding, iv, aad)",5415,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,aes_decrypt,"(input, key, mode, padding, aad)",5434,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,try_aes_decrypt,"(input, key, mode, padding, aad)",5451,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,sha,(col),5468,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,input_file_block_length,(),5475,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,input_file_block_start,(),5482,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,reflect,(*cols),5489,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,java_method,(*cols),5496,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,try_reflect,(*cols),5503,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,version,(),5510,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,typeof,(col),5517,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,stack,(*cols),5524,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,bitmap_bit_position,(col),5531,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,bitmap_bucket_number,(col),5538,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,bitmap_construct_agg,(col),5545,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,bitmap_count,(col),5552,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,bitmap_or_agg,(col),5559,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,bitmap_and_agg,(col),5566,done,
-sql/connect/functions/builtin.py,function,,st_asbinary,"(geo, endianness)",5576,done,
-sql/connect/functions/builtin.py,function,,st_geogfromwkb,(wkb),5587,done,
-sql/connect/functions/builtin.py,function,,st_geomfromwkb,"(wkb, srid)",5594,done,
-sql/connect/functions/builtin.py,function,,st_setsrid,"(geo, srid)",5608,done,
-sql/connect/functions/builtin.py,function,,st_srid,(geo),5617,done,
-sql/connect/functions/builtin.py,function,,call_udf,"(udfName, *cols)",5627,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,unwrap_udt,(col),5634,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,udf,"(f, returnType, *, useArrow)",5641,done,
-sql/connect/functions/builtin.py,function,,udtf,"(cls, *, returnType, useArrow)",5663,done,
-sql/connect/functions/builtin.py,function,,arrow_udtf,"(cls, *, returnType)",5678,done,
-sql/connect/functions/builtin.py,function,,call_function,"(funcName, *cols)",5692,verified,functions.rs golden-verified
-sql/connect/functions/builtin.py,function,,vector_cosine_similarity,"(left, right)",5705,done,
-sql/connect/functions/builtin.py,function,,vector_inner_product,"(left, right)",5712,done,
-sql/connect/functions/builtin.py,function,,vector_l2_distance,"(left, right)",5719,done,
-sql/connect/functions/builtin.py,function,,vector_norm,"(vector, degree)",5726,done,
-sql/connect/functions/builtin.py,function,,vector_normalize,"(vector, degree)",5736,done,
-sql/connect/functions/builtin.py,function,,vector_avg,(col),5746,done,
-sql/connect/functions/builtin.py,function,,vector_sum,(col),5753,done,
+sql/connect/functions/builtin.py,function,,collect_union,(col),1085,done,
+sql/connect/functions/builtin.py,function,,listagg,"(col, delimiter)",1092,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,listagg_distinct,"(col, delimiter)",1102,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,string_agg,"(col, delimiter)",1120,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,string_agg_distinct,"(col, delimiter)",1132,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,corr,"(col1, col2)",1150,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,count,(col),1157,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,countDistinct,"(col, *cols)",1166,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,count_distinct,"(col, *cols)",1173,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,covar_pop,"(col1, col2)",1185,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,covar_samp,"(col1, col2)",1192,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,first,"(col, ignorenulls)",1199,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,grouping,(col),1206,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,grouping_id,(*cols),1213,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,count_min_sketch,"(col, eps, confidence, seed)",1220,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,kurtosis,(col),1233,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,last,"(col, ignorenulls)",1240,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,max,(col),1247,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,max_by,"(col, ord, k)",1254,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,mean,(col),1263,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,median,(col),1270,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,min,(col),1277,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,min_by,"(col, ord, k)",1284,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,mode,"(col, deterministic)",1293,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,percentile,"(col, percentage, frequency)",1300,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,percentile_approx,"(col, percentage, accuracy)",1322,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,approx_percentile,"(col, percentage, accuracy)",1334,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,product,(col),1346,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,skewness,(col),1353,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,stddev,(col),1360,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,std,(col),1367,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,stddev_samp,(col),1374,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,stddev_pop,(col),1381,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,sum,(col),1388,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,sumDistinct,(col),1395,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,sum_distinct,(col),1403,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,var_pop,(col),1414,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,regr_avgx,"(y, x)",1421,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,regr_avgy,"(y, x)",1428,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,regr_count,"(y, x)",1435,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,regr_intercept,"(y, x)",1442,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,regr_r2,"(y, x)",1449,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,regr_slope,"(y, x)",1456,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,regr_sxx,"(y, x)",1463,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,regr_sxy,"(y, x)",1470,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,regr_syy,"(y, x)",1477,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,var_samp,(col),1484,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,variance,(col),1491,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,every,(col),1498,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,bool_and,(col),1505,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,some,(col),1512,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,bool_or,(col),1519,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,bit_and,(col),1526,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,bit_or,(col),1533,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,bit_xor,(col),1540,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,counter_diff,"(value, startTime)",1550,done,
+sql/connect/functions/builtin.py,function,,cume_dist,(),1559,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,dense_rank,(),1566,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,lag,"(col, offset, default)",1573,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,lead,"(col, offset, default)",1583,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,nth_value,"(col, offset, ignoreNulls)",1593,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,any_value,"(col, ignoreNulls)",1603,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,first_value,"(col, ignoreNulls)",1615,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,last_value,"(col, ignoreNulls)",1627,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,count_if,(col),1639,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,histogram_numeric,"(col, nBins)",1646,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,ntile,(n),1653,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,percent_rank,(),1660,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,rank,(),1667,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,row_number,(),1674,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,aggregate,"(col, initialValue, merge, finish)",1681,verified,functions.rs HOF (12 golden)
+sql/connect/functions/builtin.py,function,,reduce,"(col, initialValue, merge, finish)",1697,verified,functions.rs HOF (12 golden)
+sql/connect/functions/builtin.py,function,,array,(*cols),1713,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,array_append,"(col, value)",1724,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,array_contains,"(col, value)",1731,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,array_distinct,(col),1738,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,array_except,"(col1, col2)",1745,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,array_insert,"(arr, pos, value)",1752,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,array_intersect,"(col1, col2)",1761,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,array_compact,(col),1768,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,array_join,"(col, delimiter, null_replacement)",1775,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,array_max,(col),1787,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,array_min,(col),1794,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,array_size,(col),1801,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,cardinality,(col),1808,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,array_position,"(col, value)",1815,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,array_prepend,"(col, value)",1822,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,array_remove,"(col, element)",1829,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,array_repeat,"(col, count)",1836,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,array_sort,"(col, comparator)",1845,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,array_union,"(col1, col2)",1857,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,arrays_overlap,"(a1, a2)",1864,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,arrays_zip,(*cols),1871,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,concat,(*cols),1878,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,create_map,(*cols),1885,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,element_at,"(col, extraction)",1896,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,try_element_at,"(col, extraction)",1903,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,exists,"(col, f)",1910,verified,functions.rs HOF (12 golden)
+sql/connect/functions/builtin.py,function,,explode,(col),1917,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,explode_outer,(col),1924,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,filter,"(col, f)",1931,verified,functions.rs HOF (12 golden)
+sql/connect/functions/builtin.py,function,,flatten,(col),1941,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,forall,"(col, f)",1948,verified,functions.rs HOF (12 golden)
+sql/connect/functions/builtin.py,function,,from_csv,"(col, schema, options)",1955,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,from_json,"(col, schema, options)",1983,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,from_xml,"(col, schema, options)",2011,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,get,"(col, index)",2039,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,get_json_object,"(col, path)",2049,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,json_array_length,(col),2056,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,json_object_keys,(col),2063,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,inline,(col),2070,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,inline_outer,(col),2077,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,json_tuple,"(col, *fields)",2084,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,map_concat,(*cols),2096,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,map_contains_key,"(col, value)",2107,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,map_entries,(col),2114,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,map_filter,"(col, f)",2121,verified,functions.rs HOF (12 golden)
+sql/connect/functions/builtin.py,function,,map_from_arrays,"(col1, col2)",2128,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,map_from_entries,(col),2135,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,map_keys,(col),2142,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,map_values,(col),2149,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,map_zip_with,"(col1, col2, f)",2156,verified,functions.rs HOF (12 golden)
+sql/connect/functions/builtin.py,function,,str_to_map,"(text, pairDelim, keyValueDelim)",2167,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,try_parse_json,(col),2181,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,to_variant_object,(col),2188,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,parse_json,(col),2195,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,is_variant_null,(v),2202,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,is_valid_variant,(v),2209,done,
+sql/connect/functions/builtin.py,function,,variant_delete,"(v, *paths)",2216,done,
+sql/connect/functions/builtin.py,function,,variant_insert,"(v, path, value)",2229,done,
+sql/connect/functions/builtin.py,function,,try_variant_insert,"(v, path, value)",2237,done,
+sql/connect/functions/builtin.py,function,,variant_set,"(v, path, value, create_if_missing)",2247,done,
+sql/connect/functions/builtin.py,function,,try_variant_set,"(v, path, value, create_if_missing)",2262,done,
+sql/connect/functions/builtin.py,function,,variant_array_append,"(v, path, value)",2277,done,
+sql/connect/functions/builtin.py,function,,try_variant_array_append,"(v, path, value)",2287,done,
+sql/connect/functions/builtin.py,function,,variant_strip_nulls,"(v, include_arrays)",2297,done,
+sql/connect/functions/builtin.py,function,,variant_get,"(v, path, targetType)",2304,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,try_variant_get,"(v, path, targetType)",2315,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,schema_of_variant,(v),2326,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,schema_of_variant_agg,(v),2333,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,posexplode,(col),2340,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,posexplode_outer,(col),2347,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,reverse,(col),2354,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,sequence,"(start, stop, step)",2361,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,schema_of_csv,"(csv, options)",2373,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,schema_of_json,"(json, options)",2394,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,schema_of_xml,"(xml, options)",2415,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,shuffle,"(col, seed)",2436,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,size,(col),2444,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,slice,"(x, start, length)",2451,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,sort_array,"(col, asc)",2490,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,struct,(*cols),2497,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,named_struct,(*cols),2508,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,to_csv,"(col, options)",2515,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,to_json,"(col, options)",2525,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,to_xml,"(col, options)",2535,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,transform,"(col, f)",2545,verified,functions.rs HOF (12 golden)
+sql/connect/functions/builtin.py,function,,transform_keys,"(col, f)",2555,verified,functions.rs HOF (12 golden)
+sql/connect/functions/builtin.py,function,,transform_values,"(col, f)",2562,verified,functions.rs HOF (12 golden)
+sql/connect/functions/builtin.py,function,,zip_with,"(left, right, f)",2569,verified,functions.rs HOF (12 golden)
+sql/connect/functions/builtin.py,function,,upper,(col),2583,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,lower,(col),2590,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,ascii,(col),2597,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,base64,(col),2604,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,to_base32,(col),2611,done,
+sql/connect/functions/builtin.py,function,,unbase64,(col),2618,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,from_base32,(col),2625,done,
+sql/connect/functions/builtin.py,function,,ltrim,"(col, trim)",2632,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,rtrim,"(col, trim)",2642,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,trim,"(col, trim)",2652,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,concat_ws,"(sep, *cols)",2662,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,decode,"(col, charset)",2669,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,encode,"(col, charset)",2676,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,is_valid_utf8,(str),2683,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,make_valid_utf8,(str),2690,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,validate_utf8,(str),2697,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,try_validate_utf8,(str),2704,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,format_number,"(col, d)",2711,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,format_string,"(format, *cols)",2718,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,instr,"(str, substr, start, occurrence)",2725,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,overlay,"(src, replace, pos, len)",2745,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,sentences,"(string, language, country)",2783,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,substring,"(str, pos, len)",2797,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,substring_index,"(str, delim, count)",2810,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,levenshtein,"(left, right, threshold)",2817,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,jaro_winkler_similarity,"(left, right)",2829,done,
+sql/connect/functions/builtin.py,function,,locate,"(substr, str, pos)",2836,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,lpad,"(col, len, pad)",2843,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,rpad,"(col, len, pad)",2854,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,repeat,"(col, n)",2865,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,split,"(str, pattern, limit)",2874,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,rlike,"(str, regexp)",2887,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,regexp,"(str, regexp)",2894,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,regexp_like,"(str, regexp)",2901,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,randstr,"(length, seed)",2908,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,regexp_count,"(str, regexp)",2920,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,regexp_extract,"(str, pattern, idx)",2927,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,regexp_extract_all,"(str, regexp, idx)",2934,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,regexp_replace,"(string, pattern, replacement, position)",2946,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,regexp_substr,"(str, regexp)",2972,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,regexp_instr,"(str, regexp, idx)",2979,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,initcap,(col),2991,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,soundex,(col),2998,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,length,(col),3005,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,octet_length,(col),3012,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,bit_length,(col),3019,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,translate,"(srcCol, matching, replace)",3026,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,to_binary,"(col, format)",3033,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,to_char,"(col, format)",3043,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,to_varchar,"(col, format)",3050,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,to_number,"(col, format)",3057,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,replace,"(src, search, replace)",3064,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,split_part,"(src, delimiter, partNum)",3076,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,substr,"(str, pos, len)",3083,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,parse_url,"(url, partToExtract, key)",3095,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,try_parse_url,"(url, partToExtract, key)",3107,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,printf,"(format, *cols)",3119,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,url_decode,(str),3126,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,try_url_decode,(str),3133,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,url_encode,(str),3140,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,position,"(substr, str, start)",3147,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,endswith,"(str, suffix)",3159,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,startswith,"(str, prefix)",3166,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,char,(col),3173,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,try_to_binary,"(col, format)",3180,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,try_to_number,"(col, format)",3190,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,btrim,"(str, trim)",3197,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,char_length,(str),3207,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,character_length,(str),3214,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,chr,(n),3221,done,
+sql/connect/functions/builtin.py,function,,contains,"(left, right)",3228,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,elt,(*inputs),3235,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,find_in_set,"(str, str_array)",3242,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,like,"(str, pattern, escapeChar)",3249,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,ilike,"(str, pattern, escapeChar)",3261,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,lcase,(str),3273,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,ucase,(str),3280,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,left,"(str, len)",3287,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,right,"(str, len)",3294,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,mask,"(col, upperChar, lowerChar, digitChar, otherChar)",3301,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,collate,"(col, collation)",3321,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,collation,(col),3328,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,quote,(col),3335,done,
+sql/connect/functions/builtin.py,function,,curdate,(),3345,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,current_date,(),3352,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,current_time,(),3360,done,
+sql/connect/functions/builtin.py,function,,current_time,(precision),3364,done,
+sql/connect/functions/builtin.py,function,,current_time,(precision),3367,done,
+sql/connect/functions/builtin.py,function,,current_timestamp,(),3377,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,now,(),3384,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,current_timezone,(),3391,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,localtimestamp,(),3398,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,date_format,"(date, format)",3405,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,year,(col),3412,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,quarter,(col),3419,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,month,(col),3426,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,dayofweek,(col),3433,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,dayofmonth,(col),3440,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,day,(col),3447,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,dayofyear,(col),3454,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,hour,(col),3461,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,minute,(col),3468,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,second,(col),3475,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,weekofyear,(col),3482,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,weekday,(col),3489,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,monthname,(col),3496,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,dayname,(col),3503,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,extract,"(field, source)",3510,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,date_part,"(field, source)",3517,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,datepart,"(field, source)",3524,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,make_date,"(year, month, day)",3531,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,date_add,"(start, days)",3538,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,dateadd,"(start, days)",3547,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,date_sub,"(start, days)",3556,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,datediff,"(end, start)",3565,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,date_diff,"(end, start)",3572,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,date_from_unix_date,(days),3579,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,add_months,"(start, months)",3586,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,months_between,"(date1, date2, roundOff)",3595,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,to_date,"(col, format)",3602,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,try_to_date,"(col, format)",3612,done,
+sql/connect/functions/builtin.py,function,,unix_date,(col),3622,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,unix_micros,(col),3629,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,unix_millis,(col),3636,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,unix_nanos,(col),3643,done,
+sql/connect/functions/builtin.py,function,,unix_seconds,(col),3650,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,to_time,(str),3658,done,
+sql/connect/functions/builtin.py,function,,to_time,"(str, format)",3662,done,
+sql/connect/functions/builtin.py,function,,to_time,"(str, format)",3665,done,
+sql/connect/functions/builtin.py,function,,to_timestamp,(col),3676,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,to_timestamp,"(col, format)",3680,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,to_timestamp,"(col, format)",3683,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,try_to_time,(str),3694,done,
+sql/connect/functions/builtin.py,function,,try_to_time,"(str, format)",3698,done,
+sql/connect/functions/builtin.py,function,,try_to_time,"(str, format)",3701,done,
+sql/connect/functions/builtin.py,function,,try_to_timestamp,"(col, format)",3711,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,xpath,"(xml, path)",3721,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,xpath_boolean,"(xml, path)",3728,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,xpath_double,"(xml, path)",3735,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,xpath_number,"(xml, path)",3742,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,xpath_float,"(xml, path)",3749,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,xpath_int,"(xml, path)",3756,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,xpath_long,"(xml, path)",3763,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,xpath_short,"(xml, path)",3770,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,xpath_string,"(xml, path)",3777,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,trunc,"(date, format)",3784,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,date_trunc,"(format, timestamp)",3791,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,next_day,"(date, dayOfWeek)",3798,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,last_day,(date),3805,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,from_unixtime,"(timestamp, format)",3812,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,unix_timestamp,"(timestamp, format)",3820,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,unix_timestamp,(),3824,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,unix_timestamp,"(timestamp, format)",3827,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,from_utc_timestamp,"(timestamp, tz)",3838,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,to_utc_timestamp,"(timestamp, tz)",3845,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,timestamp_seconds,(col),3852,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,time_diff,"(unit, start, end)",3859,done,
+sql/connect/functions/builtin.py,function,,time_trunc,"(unit, time)",3866,done,
+sql/connect/functions/builtin.py,function,,timestamp_millis,(col),3873,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,timestamp_micros,(col),3880,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,timestamp_nanos,(col),3887,done,
+sql/connect/functions/builtin.py,function,,timestamp_diff,"(unit, start, end)",3894,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,timestamp_add,"(unit, quantity, ts)",3901,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,time_bucket,"(bucket_size, ts, origin)",3908,done,
+sql/connect/functions/builtin.py,function,,window,"(timeColumn, windowDuration, slideDuration, startTime)",3921,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,window_time,(windowColumn),3974,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,session_window,"(timeColumn, gapDuration)",3983,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,to_unix_timestamp,"(timestamp, format)",4006,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,to_timestamp_ltz,"(timestamp, format)",4019,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,to_timestamp_ntz,"(timestamp, format)",4032,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,bucket,"(numBuckets, col)",4048,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,years,(col),4058,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,months,(col),4068,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,days,(col),4078,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,hours,(col),4088,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,convert_timezone,"(sourceTz, targetTz, sourceTs)",4098,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,make_dt_interval,"(days, hours, mins, secs)",4110,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,try_make_interval,"(years, months, weeks, days, hours, mins, secs)",4127,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,make_interval,"(years, months, weeks, days, hours, mins, secs)",4152,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,make_time,"(hour, minute, second)",4177,done,
+sql/connect/functions/builtin.py,function,,time_from_seconds,(col),4184,done,
+sql/connect/functions/builtin.py,function,,time_from_millis,(col),4191,done,
+sql/connect/functions/builtin.py,function,,time_from_micros,(col),4198,done,
+sql/connect/functions/builtin.py,function,,time_to_seconds,(col),4205,done,
+sql/connect/functions/builtin.py,function,,time_to_millis,(col),4212,done,
+sql/connect/functions/builtin.py,function,,time_to_micros,(col),4219,done,
+sql/connect/functions/builtin.py,function,,make_timestamp,"(years, months, days, hours, mins, secs)",4240,done,
+sql/connect/functions/builtin.py,function,,make_timestamp,"(years, months, days, hours, mins, secs, timezone)",4251,done,
+sql/connect/functions/builtin.py,function,,make_timestamp,"(*, date, time)",4263,done,
+sql/connect/functions/builtin.py,function,,make_timestamp,"(*, date, time, timezone)",4267,done,
+sql/connect/functions/builtin.py,function,,make_timestamp,"(years, months, days, hours, mins, secs, timezone, date, time)",4272,done,
+sql/connect/functions/builtin.py,function,,try_make_timestamp,"(years, months, days, hours, mins, secs)",4333,done,
+sql/connect/functions/builtin.py,function,,try_make_timestamp,"(years, months, days, hours, mins, secs, timezone)",4344,done,
+sql/connect/functions/builtin.py,function,,try_make_timestamp,"(*, date, time)",4356,done,
+sql/connect/functions/builtin.py,function,,try_make_timestamp,"(*, date, time, timezone)",4360,done,
+sql/connect/functions/builtin.py,function,,try_make_timestamp,"(years, months, days, hours, mins, secs, timezone, date, time)",4365,done,
+sql/connect/functions/builtin.py,function,,make_timestamp_ltz,"(years, months, days, hours, mins, secs, timezone)",4426,done,
+sql/connect/functions/builtin.py,function,,try_make_timestamp_ltz,"(years, months, days, hours, mins, secs, timezone)",4448,done,
+sql/connect/functions/builtin.py,function,,make_timestamp_ntz,"(years, months, days, hours, mins, secs)",4471,done,
+sql/connect/functions/builtin.py,function,,make_timestamp_ntz,"(*, date, time)",4482,done,
+sql/connect/functions/builtin.py,function,,make_timestamp_ntz,"(years, months, days, hours, mins, secs, date, time)",4489,done,
+sql/connect/functions/builtin.py,function,,try_make_timestamp_ntz,"(years, months, days, hours, mins, secs)",4529,done,
+sql/connect/functions/builtin.py,function,,try_make_timestamp_ntz,"(*, date, time)",4540,done,
+sql/connect/functions/builtin.py,function,,try_make_timestamp_ntz,"(years, months, days, hours, mins, secs, date, time)",4547,done,
+sql/connect/functions/builtin.py,function,,make_ym_interval,"(years, months)",4586,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,current_catalog,(),4600,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,current_path,(),4607,done,
+sql/connect/functions/builtin.py,function,,current_database,(),4614,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,current_schema,(),4621,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,current_user,(),4628,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,user,(),4635,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,session_user,(),4642,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,uuid,(seed),4649,done,
+sql/connect/functions/builtin.py,function,,assert_true,"(col, errMsg)",4656,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,raise_error,(errMsg),4675,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,crc32,(col),4692,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,hash,(*cols),4699,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,xxhash64,(*cols),4706,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,md5,(col),4713,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,sha1,(col),4720,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,sha2,"(col, numBits)",4727,done,
+sql/connect/functions/builtin.py,function,,hll_sketch_agg,"(col, lgConfigK)",4744,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,hll_union_agg,"(col, allowDifferentLgConfigK)",4757,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,hll_sketch_estimate,(col),4770,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,hll_union,"(col1, col2, allowDifferentLgConfigK)",4777,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,theta_sketch_agg,"(col, lgNomEntries)",4791,done,
+sql/connect/functions/builtin.py,function,,theta_union_agg,"(col, lgNomEntries)",4805,done,
+sql/connect/functions/builtin.py,function,,theta_intersection_agg,(col),4819,done,
+sql/connect/functions/builtin.py,function,,tuple_sketch_agg_double,"(key, summary, lgNomEntries, mode)",4829,done,
+sql/connect/functions/builtin.py,function,,tuple_sketch_agg_integer,"(key, summary, lgNomEntries, mode)",4845,done,
+sql/connect/functions/builtin.py,function,,tuple_union_agg_double,"(col, lgNomEntries, mode)",4861,done,
+sql/connect/functions/builtin.py,function,,tuple_union_agg_integer,"(col, lgNomEntries, mode)",4876,done,
+sql/connect/functions/builtin.py,function,,tuple_intersection_agg_double,"(col, mode)",4891,done,
+sql/connect/functions/builtin.py,function,,tuple_intersection_agg_integer,"(col, mode)",4905,done,
+sql/connect/functions/builtin.py,function,,kll_sketch_agg_bigint,"(col, k)",4919,done,
+sql/connect/functions/builtin.py,function,,kll_sketch_agg_float,"(col, k)",4933,done,
+sql/connect/functions/builtin.py,function,,kll_sketch_agg_double,"(col, k)",4947,done,
+sql/connect/functions/builtin.py,function,,kll_merge_agg_bigint,"(col, k)",4961,done,
+sql/connect/functions/builtin.py,function,,kll_merge_agg_float,"(col, k)",4975,done,
+sql/connect/functions/builtin.py,function,,kll_merge_agg_double,"(col, k)",4989,done,
+sql/connect/functions/builtin.py,function,,kll_sketch_to_string_bigint,(col),5003,done,
+sql/connect/functions/builtin.py,function,,kll_sketch_to_string_float,(col),5011,done,
+sql/connect/functions/builtin.py,function,,kll_sketch_to_string_double,(col),5019,done,
+sql/connect/functions/builtin.py,function,,kll_sketch_get_n_bigint,(col),5027,done,
+sql/connect/functions/builtin.py,function,,kll_sketch_get_n_float,(col),5035,done,
+sql/connect/functions/builtin.py,function,,kll_sketch_get_n_double,(col),5043,done,
+sql/connect/functions/builtin.py,function,,kll_sketch_merge_bigint,"(left, right)",5051,done,
+sql/connect/functions/builtin.py,function,,kll_sketch_merge_float,"(left, right)",5059,done,
+sql/connect/functions/builtin.py,function,,kll_sketch_merge_double,"(left, right)",5067,done,
+sql/connect/functions/builtin.py,function,,kll_sketch_get_quantile_bigint,"(sketch, rank)",5075,done,
+sql/connect/functions/builtin.py,function,,kll_sketch_get_quantile_float,"(sketch, rank)",5083,done,
+sql/connect/functions/builtin.py,function,,kll_sketch_get_quantile_double,"(sketch, rank)",5091,done,
+sql/connect/functions/builtin.py,function,,kll_sketch_get_rank_bigint,"(sketch, quantile)",5099,done,
+sql/connect/functions/builtin.py,function,,kll_sketch_get_rank_float,"(sketch, quantile)",5107,done,
+sql/connect/functions/builtin.py,function,,kll_sketch_get_rank_double,"(sketch, quantile)",5115,done,
+sql/connect/functions/builtin.py,function,,theta_sketch_estimate,(col),5123,done,
+sql/connect/functions/builtin.py,function,,theta_union,"(col1, col2, lgNomEntries)",5131,done,
+sql/connect/functions/builtin.py,function,,theta_intersection,"(col1, col2)",5144,done,
+sql/connect/functions/builtin.py,function,,theta_difference,"(col1, col2)",5152,done,
+sql/connect/functions/builtin.py,function,,tuple_sketch_estimate_double,(col),5160,done,
+sql/connect/functions/builtin.py,function,,tuple_sketch_estimate_integer,(col),5168,done,
+sql/connect/functions/builtin.py,function,,tuple_sketch_summary_double,"(col, mode)",5176,done,
+sql/connect/functions/builtin.py,function,,tuple_sketch_summary_integer,"(col, mode)",5190,done,
+sql/connect/functions/builtin.py,function,,tuple_sketch_theta_double,(col),5204,done,
+sql/connect/functions/builtin.py,function,,tuple_sketch_theta_integer,(col),5211,done,
+sql/connect/functions/builtin.py,function,,tuple_union_double,"(col1, col2, lgNomEntries, mode)",5218,done,
+sql/connect/functions/builtin.py,function,,tuple_union_integer,"(col1, col2, lgNomEntries, mode)",5234,done,
+sql/connect/functions/builtin.py,function,,tuple_intersection_double,"(col1, col2, mode)",5250,done,
+sql/connect/functions/builtin.py,function,,tuple_intersection_integer,"(col1, col2, mode)",5265,done,
+sql/connect/functions/builtin.py,function,,tuple_difference_double,"(col1, col2)",5280,done,
+sql/connect/functions/builtin.py,function,,tuple_difference_integer,"(col1, col2)",5287,done,
+sql/connect/functions/builtin.py,function,,tuple_difference_theta_double,"(col1, col2)",5294,done,
+sql/connect/functions/builtin.py,function,,tuple_difference_theta_integer,"(col1, col2)",5301,done,
+sql/connect/functions/builtin.py,function,,tuple_intersection_theta_double,"(col1, col2, mode)",5308,done,
+sql/connect/functions/builtin.py,function,,tuple_intersection_theta_integer,"(col1, col2, mode)",5323,done,
+sql/connect/functions/builtin.py,function,,tuple_union_theta_double,"(col1, col2, lgNomEntries, mode)",5338,done,
+sql/connect/functions/builtin.py,function,,tuple_union_theta_integer,"(col1, col2, lgNomEntries, mode)",5354,done,
+sql/connect/functions/builtin.py,function,,ifnull,"(col1, col2)",5373,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,isnotnull,(col),5380,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,equal_null,"(col1, col2)",5387,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,nullif,"(col1, col2)",5394,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,nullifzero,(col),5401,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,nvl,"(col1, col2)",5408,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,nvl2,"(col1, col2, col3)",5415,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,zeroifnull,(col),5422,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,hmac,"(key, message, algorithm)",5429,done,
+sql/connect/functions/builtin.py,function,,aes_encrypt,"(input, key, mode, padding, iv, aad)",5443,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,aes_decrypt,"(input, key, mode, padding, aad)",5462,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,try_aes_decrypt,"(input, key, mode, padding, aad)",5479,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,sha,(col),5496,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,input_file_block_length,(),5503,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,input_file_block_start,(),5510,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,reflect,(*cols),5517,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,java_method,(*cols),5524,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,try_reflect,(*cols),5531,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,version,(),5538,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,typeof,(col),5545,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,stack,(*cols),5552,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,bitmap_bit_position,(col),5559,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,bitmap_bucket_number,(col),5566,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,bitmap_construct_agg,(col),5573,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,bitmap_count,(col),5580,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,bitmap_or_agg,(col),5587,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,bitmap_and_agg,(col),5594,done,
+sql/connect/functions/builtin.py,function,,st_asbinary,"(geo, endianness)",5604,done,
+sql/connect/functions/builtin.py,function,,st_geogfromwkb,(wkb),5615,done,
+sql/connect/functions/builtin.py,function,,st_geomfromwkb,"(wkb, srid)",5622,done,
+sql/connect/functions/builtin.py,function,,st_setsrid,"(geo, srid)",5636,done,
+sql/connect/functions/builtin.py,function,,st_srid,(geo),5645,done,
+sql/connect/functions/builtin.py,function,,call_udf,"(udfName, *cols)",5655,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,unwrap_udt,(col),5662,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,udf,"(f, returnType, *, useArrow)",5669,done,
+sql/connect/functions/builtin.py,function,,udtf,"(cls, *, returnType, useArrow)",5691,done,
+sql/connect/functions/builtin.py,function,,arrow_udtf,"(cls, *, returnType)",5706,done,
+sql/connect/functions/builtin.py,function,,call_function,"(funcName, *cols)",5720,verified,functions.rs golden-verified
+sql/connect/functions/builtin.py,function,,vector_cosine_similarity,"(left, right)",5733,done,
+sql/connect/functions/builtin.py,function,,vector_inner_product,"(left, right)",5740,done,
+sql/connect/functions/builtin.py,function,,vector_l2_distance,"(left, right)",5747,done,
+sql/connect/functions/builtin.py,function,,vector_norm,"(vector, degree)",5754,done,
+sql/connect/functions/builtin.py,function,,vector_normalize,"(vector, degree)",5764,done,
+sql/connect/functions/builtin.py,function,,vector_avg,(col),5774,done,
+sql/connect/functions/builtin.py,function,,vector_sum,(col),5781,done,
 sql/connect/functions/partitioning.py,function,,bucket,"(numBuckets, col)",29,done,
 sql/connect/functions/partitioning.py,function,,years,(col),50,done,
 sql/connect/functions/partitioning.py,function,,months,(col),57,done,
@@ -1171,7 +1175,7 @@ sql/connect/group.py,method,GroupedData,sum,"(self, *cols)",199,done,group.rs
 sql/connect/group.py,method,GroupedData,avg,"(self, *cols)",204,done,group.rs
 sql/connect/group.py,method,GroupedData,count,(self),211,done,group.rs
 sql/connect/group.py,method,GroupedData,pivot,"(self, pivot_col, values)",216,done,
-sql/connect/group.py,method,GroupedData,apply,"(self, udf)",270,done,"Rust: deprecated grouped-map apply; delegates to applyInPandas with the udf's func/returnType (group.rs)"
+sql/connect/group.py,method,GroupedData,apply,"(self, udf)",270,done,Rust: deprecated grouped-map apply; delegates to applyInPandas with the udf's func/returnType (group.rs)
 sql/connect/group.py,method,GroupedData,applyInPandas,"(self, func, schema)",296,done,
 sql/connect/group.py,method,GroupedData,applyInPandasWithState,"(self, func, outputStructType, stateStructType, outputMode, timeoutConf)",337,done,
 sql/connect/group.py,method,GroupedData,transformWithStateInPandas,"(self, statefulProcessor, outputStructType, outputMode, timeMode, initialState, eventTimeColumnName)",381,done,
@@ -1182,6 +1186,29 @@ sql/connect/group.py,class,,PandasCogroupedOps,,533,done,
 sql/connect/group.py,method,PandasCogroupedOps,__init__,"(self, gd1, gd2)",534,n/a,n/a: Python object-protocol/class-internal; not a client API method
 sql/connect/group.py,method,PandasCogroupedOps,applyInPandas,"(self, func, schema)",539,done,
 sql/connect/group.py,method,PandasCogroupedOps,applyInArrow,"(self, func, schema)",570,done,
+sql/connect/local_server.py,class,,Discovery,,96,done,vendored (scripts/check_vendored_upstream.sh)
+sql/connect/local_server.py,method,Discovery,__init__,"(self, path)",118,done,vendored (scripts/check_vendored_upstream.sh)
+sql/connect/local_server.py,method,Discovery,directory,(self),127,done,vendored (scripts/check_vendored_upstream.sh)
+sql/connect/local_server.py,method,Discovery,daemon_pid_path,(self),131,done,vendored (scripts/check_vendored_upstream.sh)
+sql/connect/local_server.py,method,Discovery,daemon_pid,(self),134,done,vendored (scripts/check_vendored_upstream.sh)
+sql/connect/local_server.py,method,Discovery,__enter__,(self),144,done,vendored (scripts/check_vendored_upstream.sh)
+sql/connect/local_server.py,method,Discovery,__exit__,"(self, exc_type, exc_value, traceback)",152,done,vendored (scripts/check_vendored_upstream.sh)
+sql/connect/local_server.py,method,Discovery,load,(self),160,done,vendored (scripts/check_vendored_upstream.sh)
+sql/connect/local_server.py,method,Discovery,save,"(self, data)",179,done,vendored (scripts/check_vendored_upstream.sh)
+sql/connect/local_server.py,method,Discovery,clear,(self),191,done,vendored (scripts/check_vendored_upstream.sh)
+sql/connect/local_server.py,class,,LocalConnectServer,,199,done,vendored (scripts/check_vendored_upstream.sh)
+sql/connect/local_server.py,method,LocalConnectServer,__init__,"(self, discovery)",202,done,vendored (scripts/check_vendored_upstream.sh)
+sql/connect/local_server.py,method,LocalConnectServer,url,(self),218,done,vendored (scripts/check_vendored_upstream.sh)
+sql/connect/local_server.py,method,LocalConnectServer,is_listening,(self),222,done,vendored (scripts/check_vendored_upstream.sh)
+sql/connect/local_server.py,method,LocalConnectServer,is_reusable,(self),229,done,vendored (scripts/check_vendored_upstream.sh)
+sql/connect/local_server.py,method,LocalConnectServer,reuse_or_start,"(self, master, opts)",238,done,vendored (scripts/check_vendored_upstream.sh)
+sql/connect/local_server.py,method,LocalConnectServer,stop,(self),246,done,vendored (scripts/check_vendored_upstream.sh)
+sql/connect/local_server.py,class,,ServerLauncher,,262,done,vendored (scripts/check_vendored_upstream.sh)
+sql/connect/local_server.py,method,ServerLauncher,__init__,"(self, master, opts, discovery)",269,done,vendored (scripts/check_vendored_upstream.sh)
+sql/connect/local_server.py,method,ServerLauncher,launch,(self),275,done,vendored (scripts/check_vendored_upstream.sh)
+sql/connect/local_server.py,function,,reuse_or_start_local_connect_server,"(master, opts)",473,done,vendored (scripts/check_vendored_upstream.sh)
+sql/connect/local_server.py,function,,stop_local_connect_server,(),493,done,vendored (scripts/check_vendored_upstream.sh)
+sql/connect/local_server.py,function,,main,(),503,done,vendored (scripts/check_vendored_upstream.sh)
 sql/connect/logging.py,function,,configureLogging,(level),27,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
 sql/connect/logging.py,function,,getLogLevel,(),56,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
 sql/connect/merge.py,class,,MergeIntoWriter,,57,done,
@@ -1635,47 +1662,49 @@ sql/connect/readwriter.py,method,DataFrameWriterV2,overwritePartitions,(self),10
 sql/connect/resource/profile.py,class,,ResourceProfile,,25,done,vendored (pyspark/sql/connect/resource/profile.py); the profile is created by SparkSession.client._create_profile (pyspark/sql/connect/client/core.py)
 sql/connect/resource/profile.py,method,ResourceProfile,__init__,"(self, exec_req, task_req)",29,n/a,n/a: Python object-protocol/class-internal; not a client API method
 sql/connect/resource/profile.py,method,ResourceProfile,id,(self),68,done,vendored (pyspark/sql/connect/resource/profile.py): the server's profile id of SparkSession.client._create_profile
-sql/connect/session.py,class,,SparkSession,,115,done,
-sql/connect/session.py,method,SparkSession,__init__,"(self, connection, userId, hook_factories)",280,n/a,n/a: Python object-protocol/class-internal; not a client API method
-sql/connect/session.py,method,SparkSession,getActiveSession,(cls),334,verified,session.rs (e2e-tested)
-sql/connect/session.py,method,SparkSession,active,(cls),363,done,
-sql/connect/session.py,method,SparkSession,table,"(self, tableName)",376,done,
-sql/connect/session.py,method,SparkSession,read,(self),392,done,
-sql/connect/session.py,method,SparkSession,readStream,(self),398,done,
-sql/connect/session.py,method,SparkSession,tvf,(self),404,done,
-sql/connect/session.py,method,SparkSession,registerProgressHandler,"(self, handler)",411,done,
-sql/connect/session.py,method,SparkSession,removeProgressHandler,"(self, handler)",416,done,
-sql/connect/session.py,method,SparkSession,clearProgressHandlers,(self),421,done,
-sql/connect/session.py,method,SparkSession,createDataFrame,"(self, data, schema, samplingRatio, verifySchema)",467,verified,session.rs (e2e-tested)
-sql/connect/session.py,method,SparkSession,emptyDataFrame,"(self, schema)",796,done,
-sql/connect/session.py,method,SparkSession,sql,"(self, sqlQuery, args, **kwargs)",801,verified,session.rs (e2e-tested)
-sql/connect/session.py,method,SparkSession,range,"(self, start, end, step, numPartitions)",844,verified,session.rs (e2e-tested)
-sql/connect/session.py,method,SparkSession,catalog,(self),870,done,
-sql/connect/session.py,method,SparkSession,__del__,(self),877,n/a,n/a: Python object-protocol/class-internal; not a client API method
-sql/connect/session.py,method,SparkSession,interruptAll,(self),887,done,
-sql/connect/session.py,method,SparkSession,interruptTag,"(self, tag)",894,done,
-sql/connect/session.py,method,SparkSession,interruptOperation,"(self, op_id)",901,done,
-sql/connect/session.py,method,SparkSession,addTag,"(self, tag)",908,done,
-sql/connect/session.py,method,SparkSession,removeTag,"(self, tag)",913,done,
-sql/connect/session.py,method,SparkSession,getTags,(self),918,done,
-sql/connect/session.py,method,SparkSession,clearTags,(self),923,done,
-sql/connect/session.py,method,SparkSession,stop,(self),928,verified,session.rs (e2e-tested)
-sql/connect/session.py,method,SparkSession,is_stopped,(self),993,done,"Rust: SparkSession.is_stopped -> session.is_stopped() (session.rs)"
-sql/connect/session.py,method,SparkSession,conf,(self),1000,verified,session.rs (e2e-tested)
-sql/connect/session.py,method,SparkSession,streams,(self),1006,done,
-sql/connect/session.py,method,SparkSession,__getattr__,"(self, name)",1014,n/a,n/a: Python object-protocol/class-internal; not a client API method
-sql/connect/session.py,method,SparkSession,udf,(self),1022,done,
-sql/connect/session.py,method,SparkSession,udtf,(self),1030,done,
-sql/connect/session.py,method,SparkSession,dataSource,(self),1038,n/a,n/a: Python DataSource registration (server-side Python worker API)
-sql/connect/session.py,method,SparkSession,version,(self),1046,done,
-sql/connect/session.py,method,SparkSession,client,(self),1054,done,
-sql/connect/session.py,method,SparkSession,addArtifacts,"(self, *path, pyfile, archive, file)",1059,done,
-sql/connect/session.py,method,SparkSession,copyFromLocalToFs,"(self, local_path, dest_path)",1153,done,
-sql/connect/session.py,method,SparkSession,session_id,(self),1251,done,
-sql/connect/session.py,method,SparkSession,profile,(self),1259,done,
-sql/connect/session.py,method,SparkSession,__reduce__,(self),1264,n/a,n/a: Python object-protocol/class-internal; not a client API method
-sql/connect/session.py,method,SparkSession,cloneSession,"(self, new_session_id)",1290,done,
-sql/connect/session.py,method,SparkSession,newSession,(self),1325,done,
+sql/connect/session.py,class,,SparkSession,,117,done,
+sql/connect/session.py,method,SparkSession,__init__,"(self, connection, userId, hook_factories)",282,n/a,n/a: Python object-protocol/class-internal; not a client API method
+sql/connect/session.py,method,SparkSession,getActiveSession,(cls),336,verified,session.rs (e2e-tested)
+sql/connect/session.py,method,SparkSession,active,(cls),365,done,
+sql/connect/session.py,method,SparkSession,table,"(self, tableName)",378,done,
+sql/connect/session.py,method,SparkSession,read,(self),394,done,
+sql/connect/session.py,method,SparkSession,readStream,(self),400,done,
+sql/connect/session.py,method,SparkSession,tvf,(self),406,done,
+sql/connect/session.py,method,SparkSession,registerProgressHandler,"(self, handler)",413,done,
+sql/connect/session.py,method,SparkSession,removeProgressHandler,"(self, handler)",418,done,
+sql/connect/session.py,method,SparkSession,clearProgressHandlers,(self),423,done,
+sql/connect/session.py,method,SparkSession,createDataFrame,"(self, data, schema, samplingRatio, verifySchema)",469,verified,session.rs (e2e-tested)
+sql/connect/session.py,method,SparkSession,emptyDataFrame,"(self, schema)",798,done,
+sql/connect/session.py,method,SparkSession,sql,"(self, sqlQuery, args, **kwargs)",803,verified,session.rs (e2e-tested)
+sql/connect/session.py,method,SparkSession,range,"(self, start, end, step, numPartitions)",846,verified,session.rs (e2e-tested)
+sql/connect/session.py,method,SparkSession,catalog,(self),872,done,
+sql/connect/session.py,method,SparkSession,__del__,(self),879,n/a,n/a: Python object-protocol/class-internal; not a client API method
+sql/connect/session.py,method,SparkSession,interruptAll,(self),889,done,
+sql/connect/session.py,method,SparkSession,interruptTag,"(self, tag)",896,done,
+sql/connect/session.py,method,SparkSession,interruptOperation,"(self, op_id)",903,done,
+sql/connect/session.py,method,SparkSession,addTag,"(self, tag)",910,done,
+sql/connect/session.py,method,SparkSession,removeTag,"(self, tag)",915,done,
+sql/connect/session.py,method,SparkSession,getTags,(self),920,done,
+sql/connect/session.py,method,SparkSession,clearTags,(self),925,done,
+sql/connect/session.py,method,SparkSession,stop,(self),930,verified,session.rs (e2e-tested)
+sql/connect/session.py,method,SparkSession,__enter__,(self),994,done,
+sql/connect/session.py,method,SparkSession,__exit__,"(self, exc_type, exc_value, traceback)",1016,done,
+sql/connect/session.py,method,SparkSession,is_stopped,(self),1044,done,Rust: SparkSession.is_stopped -> session.is_stopped() (session.rs)
+sql/connect/session.py,method,SparkSession,conf,(self),1051,verified,session.rs (e2e-tested)
+sql/connect/session.py,method,SparkSession,streams,(self),1057,done,
+sql/connect/session.py,method,SparkSession,__getattr__,"(self, name)",1065,n/a,n/a: Python object-protocol/class-internal; not a client API method
+sql/connect/session.py,method,SparkSession,udf,(self),1073,done,
+sql/connect/session.py,method,SparkSession,udtf,(self),1081,done,
+sql/connect/session.py,method,SparkSession,dataSource,(self),1089,n/a,n/a: Python DataSource registration (server-side Python worker API)
+sql/connect/session.py,method,SparkSession,version,(self),1097,done,
+sql/connect/session.py,method,SparkSession,client,(self),1105,done,
+sql/connect/session.py,method,SparkSession,addArtifacts,"(self, *path, pyfile, archive, file)",1110,done,
+sql/connect/session.py,method,SparkSession,copyFromLocalToFs,"(self, local_path, dest_path)",1204,done,
+sql/connect/session.py,method,SparkSession,session_id,(self),1302,done,
+sql/connect/session.py,method,SparkSession,profile,(self),1310,done,
+sql/connect/session.py,method,SparkSession,__reduce__,(self),1315,n/a,n/a: Python object-protocol/class-internal; not a client API method
+sql/connect/session.py,method,SparkSession,cloneSession,"(self, new_session_id)",1341,done,
+sql/connect/session.py,method,SparkSession,newSession,(self),1376,done,
 sql/connect/shell/__init__.py,function,,progress_bar_enabled,(),25,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
 sql/connect/shell/progress.py,class,,StageInfo,,42,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
 sql/connect/shell/progress.py,class,,ProgressHandler,,50,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
@@ -2046,39 +2075,39 @@ sql/types.py,method,Geometry,getSrid,(self),2194,done,
 sql/types.py,method,Geometry,getBytes,(self),2200,done,
 sql/types.py,method,Geometry,__eq__,"(self, other)",2206,done,spark-connect/src/types.rs
 sql/types.py,method,Geometry,fromWKB,"(cls, wkb, srid)",2214,done,
-sql/types.py,class,,Row,,3490,done,spark-connect/src/types.rs
-sql/types.py,method,Row,__new__,"(cls, *args)",3547,done,
-sql/types.py,method,Row,__new__,"(cls, **kwargs)",3550,done,
-sql/types.py,method,Row,__new__,"(cls, *args, **kwargs)",3552,done,
-sql/types.py,method,Row,asDict,"(self, recursive)",3567,done,
-sql/types.py,method,Row,__contains__,"(self, item)",3620,done,
-sql/types.py,method,Row,__call__,"(self, *args)",3627,done,
-sql/types.py,method,Row,__getitem__,"(self, item)",3640,done,
-sql/types.py,method,Row,__getattr__,"(self, item)",3653,done,
-sql/types.py,method,Row,__setattr__,"(self, key, value)",3672,done,
-sql/types.py,method,Row,__reduce__,(self),3680,done,
-sql/types.py,method,Row,__repr__,(self),3689,done,spark-connect/src/types.rs
-sql/types.py,class,,DateConverter,,3699,done,spark-connect/src/types.rs
-sql/types.py,method,DateConverter,can_convert,"(self, obj)",3700,done,
-sql/types.py,method,DateConverter,convert,"(self, obj, gateway_client)",3703,done,
-sql/types.py,class,,TimeConverter,,3710,done,spark-connect/src/types.rs
-sql/types.py,method,TimeConverter,can_convert,"(self, obj)",3711,done,
-sql/types.py,method,TimeConverter,convert,"(self, obj, gateway_client)",3714,done,
-sql/types.py,class,,DatetimeConverter,,3721,done,spark-connect/src/types.rs
-sql/types.py,method,DatetimeConverter,can_convert,"(self, obj)",3722,done,
-sql/types.py,method,DatetimeConverter,convert,"(self, obj, gateway_client)",3725,done,
-sql/types.py,class,,DatetimeNTZConverter,,3737,done,spark-connect/src/types.rs
-sql/types.py,method,DatetimeNTZConverter,can_convert,"(self, obj)",3738,done,
-sql/types.py,method,DatetimeNTZConverter,convert,"(self, obj, gateway_client)",3747,done,
-sql/types.py,class,,DayTimeIntervalTypeConverter,,3758,done,spark-connect/src/types.rs
-sql/types.py,method,DayTimeIntervalTypeConverter,can_convert,"(self, obj)",3759,done,
-sql/types.py,method,DayTimeIntervalTypeConverter,convert,"(self, obj, gateway_client)",3762,done,
-sql/types.py,class,,NumpyScalarConverter,,3774,done,spark-connect/src/types.rs
-sql/types.py,method,NumpyScalarConverter,can_convert,"(self, obj)",3775,done,
-sql/types.py,method,NumpyScalarConverter,convert,"(self, obj, gateway_client)",3784,done,
-sql/types.py,class,,NumpyArrayConverter,,3788,done,spark-connect/src/types.rs
-sql/types.py,method,NumpyArrayConverter,can_convert,"(self, obj)",3814,done,
-sql/types.py,method,NumpyArrayConverter,convert,"(self, obj, gateway_client)",3823,done,
+sql/types.py,class,,Row,,3483,done,spark-connect/src/types.rs
+sql/types.py,method,Row,__new__,"(cls, *args)",3540,done,
+sql/types.py,method,Row,__new__,"(cls, **kwargs)",3543,done,
+sql/types.py,method,Row,__new__,"(cls, *args, **kwargs)",3545,done,
+sql/types.py,method,Row,asDict,"(self, recursive)",3560,done,
+sql/types.py,method,Row,__contains__,"(self, item)",3613,done,
+sql/types.py,method,Row,__call__,"(self, *args)",3620,done,
+sql/types.py,method,Row,__getitem__,"(self, item)",3633,done,
+sql/types.py,method,Row,__getattr__,"(self, item)",3646,done,
+sql/types.py,method,Row,__setattr__,"(self, key, value)",3665,done,
+sql/types.py,method,Row,__reduce__,(self),3673,done,
+sql/types.py,method,Row,__repr__,(self),3682,done,spark-connect/src/types.rs
+sql/types.py,class,,DateConverter,,3692,done,spark-connect/src/types.rs
+sql/types.py,method,DateConverter,can_convert,"(self, obj)",3693,done,
+sql/types.py,method,DateConverter,convert,"(self, obj, gateway_client)",3696,done,
+sql/types.py,class,,TimeConverter,,3703,done,spark-connect/src/types.rs
+sql/types.py,method,TimeConverter,can_convert,"(self, obj)",3704,done,
+sql/types.py,method,TimeConverter,convert,"(self, obj, gateway_client)",3707,done,
+sql/types.py,class,,DatetimeConverter,,3714,done,spark-connect/src/types.rs
+sql/types.py,method,DatetimeConverter,can_convert,"(self, obj)",3715,done,
+sql/types.py,method,DatetimeConverter,convert,"(self, obj, gateway_client)",3718,done,
+sql/types.py,class,,DatetimeNTZConverter,,3730,done,spark-connect/src/types.rs
+sql/types.py,method,DatetimeNTZConverter,can_convert,"(self, obj)",3731,done,
+sql/types.py,method,DatetimeNTZConverter,convert,"(self, obj, gateway_client)",3740,done,
+sql/types.py,class,,DayTimeIntervalTypeConverter,,3751,done,spark-connect/src/types.rs
+sql/types.py,method,DayTimeIntervalTypeConverter,can_convert,"(self, obj)",3752,done,
+sql/types.py,method,DayTimeIntervalTypeConverter,convert,"(self, obj, gateway_client)",3755,done,
+sql/types.py,class,,NumpyScalarConverter,,3767,done,spark-connect/src/types.rs
+sql/types.py,method,NumpyScalarConverter,can_convert,"(self, obj)",3768,done,
+sql/types.py,method,NumpyScalarConverter,convert,"(self, obj, gateway_client)",3777,done,
+sql/types.py,class,,NumpyArrayConverter,,3781,done,spark-connect/src/types.rs
+sql/types.py,method,NumpyArrayConverter,can_convert,"(self, obj)",3807,done,
+sql/types.py,method,NumpyArrayConverter,convert,"(self, obj, gateway_client)",3816,done,
 sql/column.py,class,,Column,,41,done,
 sql/column.py,method,Column,__new__,"(cls, *args, **kwargs)",74,n/a,n/a: Python object-protocol/class-internal; not a client API method
 sql/column.py,method,Column,__neg__,(self),81,done,
@@ -2148,61 +2177,62 @@ sql/column.py,method,Column,when,"(self, condition, value)",1356,done,
 sql/column.py,method,Column,otherwise,"(self, value)",1432,done,
 sql/column.py,method,Column,over,"(self, window)",1472,done,
 sql/column.py,method,Column,transform,"(self, f)",1515,done,
-sql/column.py,method,Column,outer,(self),1567,done,"Rust: Column.outer() returns the same expression (outer resolution is server-side via plan id); matches connect Column.outer"
+sql/column.py,method,Column,outer,(self),1567,done,Rust: Column.outer() returns the same expression (outer resolution is server-side via plan id); matches connect Column.outer
 sql/column.py,method,Column,__nonzero__,(self),1607,done,
 sql/column.py,method,Column,__bool__,(self),1610,done,
 sql/column.py,method,Column,__repr__,(self),1613,done,
 errors/exceptions/connect.py,class,,SparkConnectException,,51,done,error.rs
-errors/exceptions/connect.py,function,,convert_exception,"(info, truncated_message, resp, display_server_stacktrace, grpc_status_code)",57,done,pyspark/errors/exceptions/connect.py (upstream's); error.rs
-errors/exceptions/connect.py,function,,convert_observation_errors,"(root_error_idx, errors)",89,done,pyspark/errors/exceptions/connect.py (upstream's); error.rs
-errors/exceptions/connect.py,class,,SparkConnectGrpcException,,253,done,error.rs
-errors/exceptions/connect.py,method,SparkConnectGrpcException,__init__,"(self, message, errorClass, messageParameters, reason, sql_state, server_stacktrace, display_server_stacktrace, contexts, grpc_status_code, breaking_change_info)",258,done,error.rs
-errors/exceptions/connect.py,method,SparkConnectGrpcException,getSqlState,(self),301,done,error.rs
-errors/exceptions/connect.py,method,SparkConnectGrpcException,getStackTrace,(self),307,done,error.rs
-errors/exceptions/connect.py,method,SparkConnectGrpcException,getMessage,(self),310,done,error.rs
-errors/exceptions/connect.py,method,SparkConnectGrpcException,getGrpcStatusCode,(self),316,done,error.rs
-errors/exceptions/connect.py,method,SparkConnectGrpcException,getBreakingChangeInfo,(self),319,done,error.rs
-errors/exceptions/connect.py,method,SparkConnectGrpcException,__str__,(self),328,done,error.rs
-errors/exceptions/connect.py,class,,UnknownException,,332,done,error.rs
-errors/exceptions/connect.py,method,UnknownException,__init__,"(self, message, errorClass, messageParameters, reason, sql_state, server_stacktrace, display_server_stacktrace, contexts, grpc_status_code, breaking_change_info)",339,done,error.rs
-errors/exceptions/connect.py,class,,AnalysisException,,366,done,error.rs
-errors/exceptions/connect.py,class,,ParseException,,372,done,error.rs
-errors/exceptions/connect.py,class,,IllegalArgumentException,,378,done,error.rs
-errors/exceptions/connect.py,class,,StreamingQueryException,,384,done,error.rs
-errors/exceptions/connect.py,class,,QueryExecutionException,,390,done,error.rs
-errors/exceptions/connect.py,class,,PythonException,,396,done,error.rs
-errors/exceptions/connect.py,class,,ArithmeticException,,402,done,error.rs
-errors/exceptions/connect.py,class,,UnsupportedOperationException,,408,done,error.rs
-errors/exceptions/connect.py,class,,ArrayIndexOutOfBoundsException,,414,done,error.rs
-errors/exceptions/connect.py,class,,DateTimeException,,420,done,error.rs
-errors/exceptions/connect.py,class,,NumberFormatException,,426,done,error.rs
-errors/exceptions/connect.py,class,,SparkRuntimeException,,432,done,error.rs
-errors/exceptions/connect.py,class,,SparkUpgradeException,,438,done,error.rs
-errors/exceptions/connect.py,class,,SparkException,,444,done,error.rs
-errors/exceptions/connect.py,class,,SparkNoSuchElementException,,448,done,error.rs
-errors/exceptions/connect.py,class,,InvalidPlanInput,,454,done,error.rs
-errors/exceptions/connect.py,class,,StreamingPythonRunnerInitializationException,,460,done,error.rs
-errors/exceptions/connect.py,class,,PickleException,,468,done,error.rs
-errors/exceptions/connect.py,class,,SQLQueryContext,,503,done,error.rs
-errors/exceptions/connect.py,method,SQLQueryContext,__init__,"(self, q)",504,done,error.rs
-errors/exceptions/connect.py,method,SQLQueryContext,contextType,(self),507,done,error.rs
-errors/exceptions/connect.py,method,SQLQueryContext,objectType,(self),510,done,error.rs
-errors/exceptions/connect.py,method,SQLQueryContext,objectName,(self),513,done,error.rs
-errors/exceptions/connect.py,method,SQLQueryContext,startIndex,(self),516,done,error.rs
-errors/exceptions/connect.py,method,SQLQueryContext,stopIndex,(self),519,done,error.rs
-errors/exceptions/connect.py,method,SQLQueryContext,fragment,(self),522,done,error.rs
-errors/exceptions/connect.py,method,SQLQueryContext,callSite,(self),525,done,error.rs
-errors/exceptions/connect.py,method,SQLQueryContext,summary,(self),536,done,error.rs
-errors/exceptions/connect.py,class,,DataFrameQueryContext,,540,done,error.rs
-errors/exceptions/connect.py,method,DataFrameQueryContext,__init__,"(self, q)",541,done,error.rs
-errors/exceptions/connect.py,method,DataFrameQueryContext,contextType,(self),544,done,error.rs
-errors/exceptions/connect.py,method,DataFrameQueryContext,objectType,(self),547,done,error.rs
-errors/exceptions/connect.py,method,DataFrameQueryContext,objectName,(self),558,done,error.rs
-errors/exceptions/connect.py,method,DataFrameQueryContext,startIndex,(self),569,done,error.rs
-errors/exceptions/connect.py,method,DataFrameQueryContext,stopIndex,(self),580,done,error.rs
-errors/exceptions/connect.py,method,DataFrameQueryContext,fragment,(self),591,done,error.rs
-errors/exceptions/connect.py,method,DataFrameQueryContext,callSite,(self),594,done,error.rs
-errors/exceptions/connect.py,method,DataFrameQueryContext,summary,(self),597,done,error.rs
+errors/exceptions/connect.py,method,SparkConnectException,operation_id,(self),57,done,error.rs
+errors/exceptions/connect.py,function,,convert_exception,"(info, truncated_message, resp, display_server_stacktrace, grpc_status_code)",65,done,pyspark/errors/exceptions/connect.py (upstream's); error.rs
+errors/exceptions/connect.py,function,,convert_observation_errors,"(root_error_idx, errors)",97,done,pyspark/errors/exceptions/connect.py (upstream's); error.rs
+errors/exceptions/connect.py,class,,SparkConnectGrpcException,,261,done,error.rs
+errors/exceptions/connect.py,method,SparkConnectGrpcException,__init__,"(self, message, errorClass, messageParameters, reason, sql_state, server_stacktrace, display_server_stacktrace, contexts, grpc_status_code, breaking_change_info)",266,done,error.rs
+errors/exceptions/connect.py,method,SparkConnectGrpcException,getSqlState,(self),309,done,error.rs
+errors/exceptions/connect.py,method,SparkConnectGrpcException,getStackTrace,(self),315,done,error.rs
+errors/exceptions/connect.py,method,SparkConnectGrpcException,getMessage,(self),318,done,error.rs
+errors/exceptions/connect.py,method,SparkConnectGrpcException,getGrpcStatusCode,(self),324,done,error.rs
+errors/exceptions/connect.py,method,SparkConnectGrpcException,getBreakingChangeInfo,(self),327,done,error.rs
+errors/exceptions/connect.py,method,SparkConnectGrpcException,__str__,(self),336,done,error.rs
+errors/exceptions/connect.py,class,,UnknownException,,340,done,error.rs
+errors/exceptions/connect.py,method,UnknownException,__init__,"(self, message, errorClass, messageParameters, reason, sql_state, server_stacktrace, display_server_stacktrace, contexts, grpc_status_code, breaking_change_info)",347,done,error.rs
+errors/exceptions/connect.py,class,,AnalysisException,,374,done,error.rs
+errors/exceptions/connect.py,class,,ParseException,,380,done,error.rs
+errors/exceptions/connect.py,class,,IllegalArgumentException,,386,done,error.rs
+errors/exceptions/connect.py,class,,StreamingQueryException,,392,done,error.rs
+errors/exceptions/connect.py,class,,QueryExecutionException,,398,done,error.rs
+errors/exceptions/connect.py,class,,PythonException,,404,done,error.rs
+errors/exceptions/connect.py,class,,ArithmeticException,,410,done,error.rs
+errors/exceptions/connect.py,class,,UnsupportedOperationException,,416,done,error.rs
+errors/exceptions/connect.py,class,,ArrayIndexOutOfBoundsException,,422,done,error.rs
+errors/exceptions/connect.py,class,,DateTimeException,,428,done,error.rs
+errors/exceptions/connect.py,class,,NumberFormatException,,434,done,error.rs
+errors/exceptions/connect.py,class,,SparkRuntimeException,,440,done,error.rs
+errors/exceptions/connect.py,class,,SparkUpgradeException,,446,done,error.rs
+errors/exceptions/connect.py,class,,SparkException,,452,done,error.rs
+errors/exceptions/connect.py,class,,SparkNoSuchElementException,,456,done,error.rs
+errors/exceptions/connect.py,class,,InvalidPlanInput,,462,done,error.rs
+errors/exceptions/connect.py,class,,StreamingPythonRunnerInitializationException,,468,done,error.rs
+errors/exceptions/connect.py,class,,PickleException,,476,done,error.rs
+errors/exceptions/connect.py,class,,SQLQueryContext,,511,done,error.rs
+errors/exceptions/connect.py,method,SQLQueryContext,__init__,"(self, q)",512,done,error.rs
+errors/exceptions/connect.py,method,SQLQueryContext,contextType,(self),515,done,error.rs
+errors/exceptions/connect.py,method,SQLQueryContext,objectType,(self),518,done,error.rs
+errors/exceptions/connect.py,method,SQLQueryContext,objectName,(self),521,done,error.rs
+errors/exceptions/connect.py,method,SQLQueryContext,startIndex,(self),524,done,error.rs
+errors/exceptions/connect.py,method,SQLQueryContext,stopIndex,(self),527,done,error.rs
+errors/exceptions/connect.py,method,SQLQueryContext,fragment,(self),530,done,error.rs
+errors/exceptions/connect.py,method,SQLQueryContext,callSite,(self),533,done,error.rs
+errors/exceptions/connect.py,method,SQLQueryContext,summary,(self),544,done,error.rs
+errors/exceptions/connect.py,class,,DataFrameQueryContext,,548,done,error.rs
+errors/exceptions/connect.py,method,DataFrameQueryContext,__init__,"(self, q)",549,done,error.rs
+errors/exceptions/connect.py,method,DataFrameQueryContext,contextType,(self),552,done,error.rs
+errors/exceptions/connect.py,method,DataFrameQueryContext,objectType,(self),555,done,error.rs
+errors/exceptions/connect.py,method,DataFrameQueryContext,objectName,(self),566,done,error.rs
+errors/exceptions/connect.py,method,DataFrameQueryContext,startIndex,(self),577,done,error.rs
+errors/exceptions/connect.py,method,DataFrameQueryContext,stopIndex,(self),588,done,error.rs
+errors/exceptions/connect.py,method,DataFrameQueryContext,fragment,(self),599,done,error.rs
+errors/exceptions/connect.py,method,DataFrameQueryContext,callSite,(self),602,done,error.rs
+errors/exceptions/connect.py,method,DataFrameQueryContext,summary,(self),605,done,error.rs
 errors/exceptions/base.py,class,,PySparkException,,34,done,error.rs
 errors/exceptions/base.py,method,PySparkException,__init__,"(self, message, errorClass, messageParameters, contexts)",39,done,error.rs
 errors/exceptions/base.py,method,PySparkException,getCondition,(self),61,done,error.rs
