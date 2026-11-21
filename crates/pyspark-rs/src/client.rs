@@ -35,8 +35,8 @@ use spark_connect_core::client::{ResultChunking, RpcDeadlines};
 use spark_connect_core::error::GrpcCall;
 use spark_connect_core::error::SparkError;
 use spark_connect_core::retries::{
-    BackgroundFailure, BackgroundRequest, CallRetries, Decision, Delivery, RetriesExceeded,
-    RetriesListener, RetryDecider, RetryPolicy,
+    BackgroundFailure, BackgroundRequest, CallRetries, Decision, Delivery, LongSleep,
+    RetriesExceeded, RetriesListener, RetryDecider, RetryPolicy,
 };
 use spark_connect_proto as proto;
 
@@ -356,7 +356,7 @@ impl RetriesListener for RetriesWarning {
         });
     }
 
-    fn retrying(&self, error: &str, wait_ms: u64, policy: &str) {
+    fn retrying(&self, error: &str, wait_ms: i128, policy: &str) {
         log_to_connect_logger(
             "debug",
             format!("Got error: {error}. Will retry after {wait_ms} ms (policy: {policy})"),
@@ -371,11 +371,17 @@ impl RetriesListener for RetriesWarning {
         log_to_connect_logger("debug", format!("Given up on retrying. error: {error}"));
     }
 
-    fn server_retry_delay(&self, delay_ms: u64) {
+    fn server_retry_delay(&self, delay_ms: i128) {
         log_to_connect_logger(
             "debug",
             format!("The server has sent a retry delay of {delay_ms} ms."),
         );
+    }
+
+    fn sleep_long(&self, wait_ms: i128, watched: bool) -> LongSleep {
+        // As PySpark's `Retrying`, which sleeps `wait_time / 1000`: the true division of the int of
+        // the wait, which the f64 gives exactly up to 2^53 ms, and past it of the same error.
+        sleep_of_python(wait_ms as f64 / 1000.0, watched)
     }
 
     fn rpc_error(&self, error: &spark_connect_core::error::GrpcioError) -> Delivery {
@@ -403,6 +409,33 @@ impl RetriesListener for RetriesWarning {
             Ok(())
         })
     }
+}
+
+/// The sleep of `seconds` before a retry of Python's `time.sleep`, as PySpark's `Retrying` sleeps
+/// it, which raises its error at once of a wait that it cannot hold (see
+/// [`RetriesListener::sleep_long`]): on the thread of the call, a thread of Python, whose wait is
+/// `watched` when a signal ends it; of a request that no caller waits for, on a thread of the
+/// runtime, as PySpark's sender sleeps it on a thread of Python, on a thread of its own, as the
+/// sleep may last decades, which would hold the delivery thread meanwhile.
+fn sleep_of_python(seconds: f64, watched: bool) -> LongSleep {
+    let sleep = move |py: Python<'_>| -> PyResult<()> {
+        py.import("time")?.call_method1("sleep", (seconds,))?;
+        Ok(())
+    };
+    if !crate::deliver::on_python_thread() {
+        return Box::pin(crate::deliver::call_apart(move |py| {
+            sleep(py).map_err(crate::errors::callback_error)
+        }));
+    }
+    let slept = Python::attach(|py| match sleep(py) {
+        Ok(()) => Some(Ok(())),
+        // The KeyboardInterrupt of a signal that came while it slept is the watch's, which ends the
+        // wait of the core as of a signal that came while it waited: the execution in flight is
+        // interrupted, as PySpark's `except KeyboardInterrupt` interrupts it.
+        Err(error) if watched && crate::deliver::keep_interrupt(py, &error) => None,
+        Err(error) => Some(Err(crate::errors::callback_error(error))),
+    });
+    Box::pin(std::future::ready(slept))
 }
 
 /// Run `log`, a log of the error of a call, whose error is dropped, as [`log_to_connect_logger`]
@@ -493,6 +526,10 @@ struct PolicyCallRetries {
     retries: Option<PyResult<Py<PyAny>>>,
 }
 
+/// The least wait before a retry of decades, in seconds, of 2^30 s (34 years), which is slept of
+/// Python's `time.sleep` (see [`sleep_of_python`]).
+const LONG_WAIT_SECONDS: f64 = (1u64 << 30) as f64;
+
 /// The `_CallRetries` of `policies`, a `Retrying` of their states.
 fn call_retries(py: Python<'_>, policies: &Py<PyAny>) -> PyResult<Py<PyAny>> {
     Ok(py
@@ -545,14 +582,19 @@ impl CallRetries for PolicyCallRetries {
                     Err(failed) => Err(failed.clone_ref(py)),
                 };
                 let decision = match decided {
-                    Ok(Some(seconds)) => Decision::Retry(
+                    // A wait that `time.sleep` refuses, negative or NaN, or one of decades, which
+                    // is slept of it, as PySpark's `Retrying` sleeps it.
+                    Ok(Some(seconds)) if !(0.0..LONG_WAIT_SECONDS).contains(&seconds) => {
+                        Err(seconds)
+                    }
+                    Ok(Some(seconds)) => Ok(Decision::Retry(
                         std::time::Duration::try_from_secs_f64(seconds)
                             .unwrap_or(std::time::Duration::MAX),
-                    ),
-                    Ok(None) => Decision::GiveUp,
-                    Err(raised) => {
-                        Decision::Failed(Box::new(crate::errors::callback_error(raised)))
-                    }
+                    )),
+                    Ok(None) => Ok(Decision::GiveUp),
+                    Err(raised) => Ok(Decision::Failed(Box::new(crate::errors::callback_error(
+                        raised,
+                    )))),
                 };
                 (decision, retries)
             };
@@ -565,7 +607,18 @@ impl CallRetries for PolicyCallRetries {
             match decided {
                 Some((decision, retries)) => {
                     self.retries = Some(retries);
-                    decision
+                    match decision {
+                        Ok(decision) => decision,
+                        Err(seconds) => {
+                            let watched = spark_connect_core::runtime::in_watched_wait();
+                            match sleep_of_python(seconds, watched).await {
+                                Some(Ok(())) => Decision::Retry(std::time::Duration::ZERO),
+                                Some(Err(error)) => Decision::Failed(Box::new(error)),
+                                // The watch ends the wait, of the signal that ended the sleep.
+                                None => Decision::Retry(std::time::Duration::MAX),
+                            }
+                        }
+                    }
                 }
                 // The interpreter exits: the failure is the error of the call.
                 None => Decision::GiveUp,

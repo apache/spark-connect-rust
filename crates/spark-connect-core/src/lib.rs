@@ -17,6 +17,7 @@ mod metadata;
 mod proxy;
 pub mod reattach;
 pub mod retries;
+mod rpc_status;
 pub mod runtime;
 // Shared with `apache-spark-connect`, whose session keeps per-thread tags the same way.
 #[doc(hidden)]

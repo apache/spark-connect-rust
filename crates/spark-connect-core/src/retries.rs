@@ -85,13 +85,26 @@ impl RetryPolicy {
     /// grpc-python gives the failure (see [`grpc_python_code`]): retry transient `UNAVAILABLE`,
     /// and `INTERNAL` errors whose message carries `INVALID_CURSOR.DISCONNECTED` (a mid-stream
     /// cursor drop resumed via reattach). Any failure with a `RetryInfo` detail is retried too,
-    /// whatever its code, as the server asks for it. A policy that retries no failure
+    /// whatever its code, as the server asks for it (in the dialect of grpcio, the one that
+    /// PySpark's `extract_retry_info` reads: see `retry_info`). A policy that retries no failure
     /// ([`RetryPolicy::retries_failures`]) retries none of them.
     pub fn can_retry(&self, status: &tonic::Status) -> bool {
+        let read = crate::connector::grpcio_dialect()
+            .then(|| crate::rpc_status::Details::of(status.details()));
+        self.can_retry_read(status, read.as_ref())
+    }
+
+    /// [`RetryPolicy::can_retry`], of `read`, the details of `status` as upb reads them in the
+    /// dialect of grpcio, which the other readers of the failure share, or none out of it.
+    fn can_retry_read(
+        &self,
+        status: &tonic::Status,
+        read: Option<&crate::rpc_status::Details>,
+    ) -> bool {
         if !self.retries_failures {
             return false;
         }
-        self.retries_code_of(status) || retry_info(status).is_some()
+        self.retries_code_of(status) || retry_info(status, read).is_some()
     }
 
     /// Whether `DefaultPolicy.can_retry` retries the failure `status` of its code alone, a
@@ -156,10 +169,27 @@ struct RetryInfo {
     retry_delay: Option<prost_types::Duration>,
 }
 
-/// The `google.rpc.RetryInfo` detail of a status, if it has one, each message decoded within the
-/// limit of the nesting of the responses (see `spark_connect_proto::ClientCodec`).
-fn retry_info(status: &tonic::Status) -> Option<RetryInfo> {
+/// The `google.rpc.RetryInfo` detail of a status, if it has one. Of `read`, the details of the
+/// status as upb reads them, in the dialect of grpcio: as PySpark's `extract_retry_info` reads it,
+/// the first detail of the type (`Any.Is`) of the `google.rpc.Status`, as upb reads it, none of
+/// details that upb fails to read so, of which the policy raises protobuf's `DecodeError` (see
+/// [`crate::error::from_call_error`]); else, the first of the details whose type URL ends in its
+/// name, each message decoded within the limit of the nesting of the responses (see
+/// `spark_connect_proto::ClientCodec`).
+fn retry_info(
+    status: &tonic::Status,
+    read: Option<&crate::rpc_status::Details>,
+) -> Option<RetryInfo> {
     use spark_connect_proto::decode_status_detail;
+    if let Some(read) = read {
+        let info = read.retry_info()?.ok()?;
+        return Some(RetryInfo {
+            retry_delay: info.retry_delay.map(|delay| prost_types::Duration {
+                seconds: delay.seconds,
+                nanos: delay.nanos,
+            }),
+        });
+    }
     decode_status_detail::<StatusDetails>("google.rpc.Status", status.details())?
         .details
         .into_iter()
@@ -167,11 +197,23 @@ fn retry_info(status: &tonic::Status) -> Option<RetryInfo> {
         .and_then(|detail| decode_status_detail("google.rpc.RetryInfo", &detail.value))
 }
 
+/// The delay that the server asks for in the first `RetryInfo` of `read`, the details of a status
+/// as upb reads them, in milliseconds, as PySpark's `extract_retry_delay` takes it: the
+/// `ToMilliseconds()` of its `retry_delay`, its seconds in milliseconds and its nanoseconds in
+/// milliseconds truncated toward zero, signed and unbounded, and 0 of a `RetryInfo` of none, the
+/// delay of the default `Duration`. None of a status of no `RetryInfo`.
+fn pyspark_retry_delay_ms(read: &crate::rpc_status::Details) -> Option<i128> {
+    let delay = read.retry_info()?.ok()?.retry_delay.unwrap_or_default();
+    Some(i128::from(delay.seconds) * 1000 + i128::from(delay.nanos / 1_000_000))
+}
+
 /// The delay that the server asks for in the `RetryInfo` detail of a status, in milliseconds.
 ///
 /// Mirrors `pyspark.sql.connect.client.retries.extract_retry_delay`. A negative delay is zero.
 pub fn retry_delay_ms(status: &tonic::Status) -> Option<u64> {
-    let delay = retry_info(status)?.retry_delay?;
+    let read = crate::connector::grpcio_dialect()
+        .then(|| crate::rpc_status::Details::of(status.details()));
+    let delay = retry_info(status, read.as_ref())?.retry_delay?;
     let seconds = u64::try_from(delay.seconds).unwrap_or(0);
     let nanos = u64::try_from(delay.nanos).unwrap_or(0);
     Some(
@@ -331,12 +373,105 @@ impl RetryPolicyState {
         Some(wait_time.floor() as u64)
     }
 
+    /// [`RetryPolicyState::next_attempt`] of Python's numbers, as PySpark's
+    /// `RetryPolicyState.next_attempt` computes it, of `server_retry_delay_ms`, signed and
+    /// unbounded (see `pyspark_retry_delay_ms`): the backoff is a float, which the delay, an int,
+    /// takes the place of when it is longer, as Python's `max` keeps the first of equal values,
+    /// after the cap of the server's delay, as `min`; the jitter makes the wait a float, which
+    /// `int()` truncates toward zero. A negative delay never lengthens the wait. The wait in
+    /// milliseconds, or None once the retries are spent.
+    pub(crate) fn next_attempt_pyspark(
+        &mut self,
+        server_retry_delay_ms: Option<i128>,
+    ) -> Option<i128> {
+        if let Some(max) = self.policy.max_retries {
+            if self.attempt >= max {
+                return None;
+            }
+        }
+        self.attempt += 1;
+        let backoff = self.next_wait_ms;
+        if let Some(max_backoff) = self.policy.max_backoff_ms {
+            self.next_wait_ms =
+                f64::min(max_backoff as f64, backoff * self.policy.backoff_multiplier);
+        }
+        let mut wait = PyNumber::Float(backoff);
+        if self.policy.recognize_server_retry_delay {
+            if let Some(delay) = server_retry_delay_ms {
+                let delay = match self.policy.max_server_retry_delay_ms {
+                    Some(max) => delay.min(i128::from(max)),
+                    None => delay,
+                };
+                if PyNumber::Int(delay).exceeds(wait) {
+                    wait = PyNumber::Int(delay);
+                }
+            }
+        }
+        // As `wait_time >= min_jitter_threshold`.
+        let threshold = PyNumber::Int(i128::from(self.policy.min_jitter_threshold_ms));
+        if !wait.is_nan() && !threshold.exceeds(wait) {
+            wait = PyNumber::Float(wait.as_f64() + rand_jitter(self.policy.jitter_ms));
+        }
+        Some(wait.truncated())
+    }
+
     pub fn policy(&self) -> &RetryPolicy {
         &self.policy
     }
 
     pub fn attempt(&self) -> u32 {
         self.attempt
+    }
+}
+
+/// A number of Python, of the waits of PySpark's `RetryPolicyState.next_attempt`: the float of a
+/// backoff, or the int of a delay of the server.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum PyNumber {
+    Float(f64),
+    Int(i128),
+}
+
+impl PyNumber {
+    /// Whether this number is greater than `other`, as Python compares an int and a float, of
+    /// their exact values, and never of a NaN.
+    fn exceeds(self, other: PyNumber) -> bool {
+        // 2^127, past every i128.
+        const LIMIT: f64 = 170_141_183_460_469_231_731_687_303_715_884_105_728.0;
+        match (self, other) {
+            (PyNumber::Int(a), PyNumber::Int(b)) => a > b,
+            (PyNumber::Float(a), PyNumber::Float(b)) => a > b,
+            // An integer exceeds a float exactly when it exceeds the float's floor.
+            (PyNumber::Int(a), PyNumber::Float(b)) => {
+                let floor = b.floor();
+                !b.is_nan() && (floor < -LIMIT || (floor < LIMIT && a > floor as i128))
+            }
+            // A float exceeds an integer exactly when its ceiling does.
+            (PyNumber::Float(a), PyNumber::Int(b)) => {
+                let ceil = a.ceil();
+                !a.is_nan() && (ceil >= LIMIT || (ceil >= -LIMIT && ceil as i128 > b))
+            }
+        }
+    }
+
+    fn is_nan(self) -> bool {
+        matches!(self, PyNumber::Float(value) if value.is_nan())
+    }
+
+    /// The float of this number, as Python converts an int, to the nearest.
+    fn as_f64(self) -> f64 {
+        match self {
+            PyNumber::Float(value) => value,
+            PyNumber::Int(value) => value as f64,
+        }
+    }
+
+    /// `int()` of this number: a float truncated toward zero.
+    fn truncated(self) -> i128 {
+        match self {
+            PyNumber::Float(value) => value.trunc() as i128,
+            PyNumber::Int(value) => value,
+        }
     }
 }
 
@@ -450,8 +585,9 @@ impl Retrying {
 
     /// These retries, of the calls of a reattachable execution if `reads`, the failures of whose
     /// `google.rpc.Status` does not match them end the call, of the `ValueError` of grpc_status,
-    /// before the policy or the decider sees them, as the `_call_iter` of PySpark's iterator reads
-    /// the status of each failure first (see [`crate::error::from_call_error`]).
+    /// or that upb does not read, of protobuf's `DecodeError`, before the policy or the decider
+    /// sees them, as the `_call_iter` of PySpark's iterator reads the status of each failure first
+    /// (see [`crate::error::from_call_error`]).
     pub(crate) fn reading_status_first(mut self, reads: bool) -> Self {
         self.reads_status_first = reads;
         self
@@ -482,9 +618,24 @@ impl Retrying {
     /// wait before it, which this awaits. It is not when the policy cannot retry the failure,
     /// or once its retries are spent: `status` is then the error of the call.
     pub(crate) async fn backoff(&mut self, status: &tonic::Status) -> Backoff {
-        let mismatch = || crate::error::from_call_error(status, self.call);
+        use crate::error::StatusRead;
+        // The details as upb reads them, in the dialect of grpcio, read once for the readers of the
+        // failure. Boxed, as they are kept across the waits.
+        let read = crate::connector::grpcio_dialect()
+            .then(|| Box::new(crate::rpc_status::Details::of(status.details())));
+        let call = self.call;
+        // What PySpark's `extract_retry_info` raises of the status of the failure, and of its
+        // first `RetryInfo`.
+        let mismatch = |read: Option<&crate::rpc_status::Details>| {
+            read.and_then(|read| {
+                crate::error::from_call_error_of(status, read, call, StatusRead::RetryInfo)
+            })
+        };
         if self.reads_status_first {
-            if let Some(mismatch) = mismatch() {
+            // The `google.rpc.Status` alone, of `_call_iter`.
+            if let Some(mismatch) = read.as_deref().and_then(|read| {
+                crate::error::from_call_error_of(status, read, call, StatusRead::Status)
+            }) {
                 return Backoff::Failed(Box::new(mismatch));
             }
         }
@@ -498,27 +649,44 @@ impl Retrying {
         // PySpark's `DefaultPolicy` reads the status of a failure that it does not retry for its
         // code, for a `RetryInfo`, and of one that it retries, for the delay of its `RetryInfo`,
         // unless its retries are spent, with grpc_status, whose `ValueError` of a status that
-        // does not match the failure ends the call.
+        // does not match the failure ends the call, as does protobuf's `DecodeError` of a status,
+        // or of its first `RetryInfo`, that upb does not read.
         let policy = self.state.policy();
         if policy.retries_failures && !policy.retries_code_of(status) {
-            if let Some(mismatch) = mismatch() {
+            if let Some(mismatch) = mismatch(read.as_deref()) {
                 return Backoff::Failed(Box::new(mismatch));
             }
         }
-        if !policy.can_retry(status) {
+        if !policy.can_retry_read(status, read.as_deref()) {
             return Backoff::GiveUp;
         }
-        let server_delay_ms = retry_delay_ms(status);
-        let Some(wait_ms) = self.state.next_attempt(server_delay_ms) else {
+        // The delay of the server and the wait, in the dialect of grpcio as PySpark computes them
+        // (see `RetryPolicyState::next_attempt_pyspark`), else as the Rust client does.
+        let recognized = policy.recognize_server_retry_delay;
+        let next = match read.as_deref() {
+            Some(read) => {
+                let delay = pyspark_retry_delay_ms(read);
+                self.state
+                    .next_attempt_pyspark(delay)
+                    .map(|wait| (delay, wait))
+            }
+            None => {
+                let delay = retry_delay_ms(status);
+                self.state
+                    .next_attempt(delay)
+                    .map(|wait| (delay.map(i128::from), i128::from(wait)))
+            }
+        };
+        let Some((server_delay_ms, wait_ms)) = next else {
             // As PySpark's `Retrying._wait` logs it before it warns of the spent retries.
             log(|listener| {
-                let error = crate::error::grpcio_error_text(status, self.call);
+                let error = crate::error::grpcio_error_text(status, call);
                 listener.given_up(&error);
             });
             return Backoff::Exceeded;
         };
-        if self.state.policy().recognize_server_retry_delay {
-            if let Some(mut mismatch) = mismatch() {
+        if recognized {
+            if let Some(mut mismatch) = mismatch(read.as_deref()) {
                 // Of no context: PySpark's `Retrying` waits between its attempts, where no error
                 // is handled.
                 mismatch.grpcio = None;
@@ -527,14 +695,23 @@ impl Retrying {
         }
         // As PySpark's `RetryPolicyState.next_attempt` and `Retrying._wait` log them.
         log(|listener| {
-            if let Some(delay_ms) =
-                server_delay_ms.filter(|_| self.state.policy().recognize_server_retry_delay)
-            {
+            if let Some(delay_ms) = server_delay_ms.filter(|_| recognized) {
                 listener.server_retry_delay(delay_ms);
             }
-            let error = crate::error::grpcio_error_text(status, self.call);
+            let error = crate::error::grpcio_error_text(status, call);
             listener.retrying(&error, wait_ms, "DefaultPolicy");
         });
+        // PySpark sleeps the wait of Python's `time.sleep`, which refuses a negative one at once, of
+        // its error, and one of decades that the clock or its nanoseconds of 64 bits cannot hold.
+        if read.is_some() && !(0..LONG_WAIT_MS).contains(&wait_ms) {
+            let watched = self.ends_with_abort && crate::runtime::in_watched_wait();
+            match sleep_long(wait_ms, watched).await {
+                Some(Ok(())) => return Backoff::Retry,
+                Some(Err(error)) => return Backoff::Failed(Box::new(error)),
+                None => {}
+            }
+        }
+        let wait_ms = u64::try_from(wait_ms).unwrap_or(if wait_ms < 0 { 0 } else { u64::MAX });
         self.wait(std::time::Duration::from_millis(wait_ms)).await
     }
 
@@ -689,7 +866,7 @@ pub trait RetriesListener: Send + Sync {
     /// error gives it, is made again after `wait_ms` milliseconds under the policy of the name
     /// `policy`, as PySpark's `Retrying._wait` logs it (`Got error: ... Will retry after ...`).
     /// On the thread that polls the call.
-    fn retrying(&self, _error: &str, _wait_ms: u64, _policy: &str) {}
+    fn retrying(&self, _error: &str, _wait_ms: i128, _policy: &str) {}
 
     /// A failure that PySpark raises as a `RetryException` of the `repr` `error` is retried at
     /// once, as `Retrying._wait` logs it (`Got error: RetryException(). Retrying.`).
@@ -700,8 +877,25 @@ pub trait RetriesListener: Send + Sync {
     fn given_up(&self, _error: &str) {}
 
     /// The server asked for a delay of `delay_ms` before the retry, which the policy recognizes,
-    /// as `RetryPolicyState.next_attempt` logs it.
-    fn server_retry_delay(&self, _delay_ms: u64) {}
+    /// as `RetryPolicyState.next_attempt` logs it: in the dialect of grpcio, signed and unbounded,
+    /// as PySpark takes it (see `pyspark_retry_delay_ms`).
+    fn server_retry_delay(&self, _delay_ms: i128) {}
+
+    /// The wait of `wait_ms` milliseconds before a retry, negative or of decades (of 2^30 s, 34
+    /// years, or more), which PySpark's `Retrying` sleeps of Python's `time.sleep(wait_ms /
+    /// 1000)`: the sleep, which gives Ok once it slept it, or the error that it raised in place of
+    /// it, which the call fails with at once, of no context, as PySpark's does: the `ValueError`
+    /// of a negative wait, the `OverflowError` of a wait past its nanoseconds of 64 bits, or the
+    /// system's `OSError` of a wait that the clock cannot hold. It gives None when the listener
+    /// does not sleep it, so that the core waits it, a negative one as none. `watched` tells that
+    /// a signal of the process ends the wait of the core (see [`crate::runtime::until_abort`]):
+    /// the listener may then keep the exception of a signal that ended its sleep for the watch of
+    /// the wait, and give None, so that the watch ends the wait of the core in its place as of a
+    /// signal that came while it waited, which interrupts the execution in flight. In the dialect
+    /// of grpcio only, polled on the thread that polls the call.
+    fn sleep_long(&self, _wait_ms: i128, _watched: bool) -> LongSleep {
+        Box::pin(std::future::ready(None))
+    }
 
     /// A failed RPC of grpcio's error `error` is converted into the error of its call, as
     /// PySpark's `_handle_rpc_error` logs it first (`GRPC Error received`, of the exception): the
@@ -723,6 +917,11 @@ pub trait RetriesListener: Send + Sync {
 /// on, so that the log precedes what the call does next, as PySpark's client logs on the thread
 /// of the call before it raises. None when it is done. Not a stable API.
 pub type Delivery = Option<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>>;
+
+/// The sleep of a wait before a retry that a listener sleeps, which the call awaits (see
+/// [`RetriesListener::sleep_long`]). Not a stable API.
+pub type LongSleep =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Option<crate::error::Result<()>>> + Send>>;
 
 /// The failure of a request that the transport sent in the background.
 #[derive(Debug)]
@@ -762,6 +961,19 @@ pub(crate) fn retries_exceeded(exceeded: RetriesExceeded) -> crate::error::Resul
     match listener() {
         Some(listener) => listener.retries_exceeded(exceeded),
         None => Ok(()),
+    }
+}
+
+/// The least wait before a retry of decades, of 2^30 s (34 years), which the listener sleeps, as it
+/// sleeps a negative one (see [`RetriesListener::sleep_long`]).
+pub(crate) const LONG_WAIT_MS: i128 = (1 << 30) * 1000;
+
+/// What the listener of the process does of the wait of `wait_ms` milliseconds before a retry, if
+/// one is set (see [`RetriesListener::sleep_long`]).
+fn sleep_long(wait_ms: i128, watched: bool) -> LongSleep {
+    match listener() {
+        Some(listener) => listener.sleep_long(wait_ms, watched),
+        None => Box::pin(std::future::ready(None)),
     }
 }
 
@@ -1110,6 +1322,156 @@ mod tests {
             details: vec![detail],
         };
         tonic::Status::with_details(code, "retry", details.encode_to_vec().into())
+    }
+
+    #[test]
+    fn the_retry_info_of_a_status_is_read_as_pyspark_reads_it_in_the_dialect_of_grpcio() {
+        // In the dialect of grpcio, as PySpark's `extract_retry_info`: the first detail that
+        // `Any.Is` tells of a RetryInfo, of a type URL of a `/`, of the status that upb reads, as
+        // upb reads it; else, as the Rust client read it, the first detail of a type URL that ends
+        // in its name, that prost decodes.
+        let with_details = |details: Vec<prost_types::Any>| {
+            let details = StatusDetails { details }.encode_to_vec();
+            tonic::Status::with_details(tonic::Code::Internal, "retry", details.into())
+        };
+        let any = |type_url: &str, value: Vec<u8>| prost_types::Any {
+            type_url: type_url.to_string(),
+            value,
+        };
+        let delay = RetryInfo {
+            retry_delay: Some(prost_types::Duration {
+                seconds: 2,
+                nanos: 500_000_000,
+            }),
+        }
+        .encode_to_vec();
+        let delay_of = |status: &tonic::Status, grpcio: bool| {
+            let read = grpcio.then(|| crate::rpc_status::Details::of(status.details()));
+            retry_info(status, read.as_ref()).and_then(|info| info.retry_delay)
+        };
+        let usual = with_details(vec![any(
+            "type.googleapis.com/google.rpc.RetryInfo",
+            delay.clone(),
+        )]);
+        let no_slash = with_details(vec![any("google.rpc.RetryInfo", delay.clone())]);
+        let corrupt_first = with_details(vec![
+            any("x/google.rpc.RetryInfo", b"abc".to_vec()),
+            any("x/google.rpc.RetryInfo", delay.clone()),
+        ]);
+        for grpcio in [true, false] {
+            assert_eq!(delay_of(&usual, grpcio).map(|delay| delay.seconds), Some(2));
+            assert_eq!(delay_of(&corrupt_first, grpcio), None);
+        }
+        assert_eq!(delay_of(&no_slash, true), None);
+        assert_eq!(
+            delay_of(&no_slash, false).map(|delay| delay.seconds),
+            Some(2)
+        );
+        // A status that prost does not decode, of its details of another wire type, which upb
+        // skips.
+        let mut lenient = vec![0x18, 0x07];
+        lenient.extend_from_slice(usual.details());
+        let lenient = tonic::Status::with_details(tonic::Code::Internal, "retry", lenient.into());
+        assert_eq!(
+            delay_of(&lenient, true).map(|delay| delay.nanos),
+            Some(500_000_000)
+        );
+        assert_eq!(delay_of(&lenient, false), None);
+    }
+
+    #[test]
+    fn the_delay_and_the_wait_of_the_dialect_of_grpcio_are_pyspark_s() {
+        // As PySpark's `extract_retry_delay`, the `ToMilliseconds()` of the delay of the first
+        // RetryInfo, signed and unbounded, 0 of a RetryInfo of none, of nanoseconds truncated
+        // toward zero; and its `RetryPolicyState.next_attempt`, of Python's numbers.
+        let delay_of = |seconds: i64, nanos: i32| {
+            let info = RetryInfo {
+                retry_delay: Some(prost_types::Duration { seconds, nanos }),
+            };
+            let detail = prost_types::Any {
+                type_url: "type.googleapis.com/google.rpc.RetryInfo".to_string(),
+                value: info.encode_to_vec(),
+            };
+            let details = StatusDetails {
+                details: vec![detail],
+            }
+            .encode_to_vec();
+            pyspark_retry_delay_ms(&crate::rpc_status::Details::of(&details))
+        };
+        assert_eq!(delay_of(2, 500_000_000), Some(2500));
+        assert_eq!(delay_of(-1, 500_000_000), Some(-500));
+        assert_eq!(delay_of(2, -1_900_000_000), Some(100));
+        assert_eq!(delay_of(0, -1_999_999), Some(-1));
+        assert_eq!(delay_of(0, 1_999_999), Some(1));
+        assert_eq!(delay_of(i64::MAX, 0), Some(9_223_372_036_854_775_807_000));
+        assert_eq!(delay_of(i64::MIN, 0), Some(-9_223_372_036_854_775_808_000));
+        let empty = StatusDetails {
+            details: vec![prost_types::Any {
+                type_url: "x/google.rpc.RetryInfo".to_string(),
+                value: Vec::new(),
+            }],
+        }
+        .encode_to_vec();
+        assert_eq!(
+            pyspark_retry_delay_ms(&crate::rpc_status::Details::of(&empty)),
+            Some(0)
+        );
+        assert_eq!(
+            pyspark_retry_delay_ms(&crate::rpc_status::Details::of(&[])),
+            None
+        );
+
+        let policy = |max_server_retry_delay_ms| RetryPolicy {
+            max_retries: Some(3),
+            initial_backoff_ms: 50,
+            max_backoff_ms: Some(60_000),
+            backoff_multiplier: 4.0,
+            jitter_ms: 0,
+            min_jitter_threshold_ms: 2000,
+            max_server_retry_delay_ms,
+            ..RetryPolicy::default()
+        };
+        let first = |delay, cap| RetryPolicyState::new(policy(cap)).next_attempt_pyspark(delay);
+        // A negative delay never lengthens the wait, nor does a cap below the backoff.
+        assert_eq!(first(Some(-500), Some(300)), Some(50));
+        assert_eq!(first(Some(100), Some(300)), Some(100));
+        assert_eq!(first(Some(10_000), Some(300)), Some(300));
+        assert_eq!(first(None, Some(300)), Some(50));
+        // Of no cap, the delay as it is: the float that the jitter makes of an int past its
+        // threshold, and below it the int itself, past what an f64 holds exactly.
+        let huge = 4_611_686_018_427_387_904_123;
+        assert_eq!(first(Some(huge), None), Some(huge as f64 as i128));
+        let odd = (1 << 53) + 1;
+        assert_eq!(
+            RetryPolicyState::new(RetryPolicy {
+                min_jitter_threshold_ms: u64::MAX,
+                ..policy(None)
+            })
+            .next_attempt_pyspark(Some(odd)),
+            Some(odd)
+        );
+        // The retries are spent, and the backoff grows as PySpark's.
+        let mut state = RetryPolicyState::new(policy(None));
+        let waits: Vec<_> = std::iter::from_fn(|| state.next_attempt_pyspark(None)).collect();
+        assert_eq!(waits, vec![50, 200, 800]);
+    }
+
+    #[test]
+    fn python_s_numbers_compare_of_their_exact_values() {
+        use PyNumber::{Float, Int};
+        assert!(Int(3).exceeds(Float(2.5)) && !Int(2).exceeds(Float(2.5)));
+        assert!(!Int(2).exceeds(Float(2.0)) && Int(3).exceeds(Float(2.0)));
+        assert!(Float(2.5).exceeds(Int(2)) && !Float(2.0).exceeds(Int(2)));
+        assert!(!Float(-0.5).exceeds(Int(0)) && Float(-0.5).exceeds(Int(-1)));
+        // Past what an f64 holds exactly: 2^53 + 1 exceeds the float of 2^53.
+        let float = (1u64 << 53) as f64;
+        assert!(Int((1 << 53) + 1).exceeds(Float(float)));
+        assert!(!Float(float).exceeds(Int((1 << 53) + 1)));
+        assert!(!Int(i128::MAX).exceeds(Float(f64::INFINITY)));
+        assert!(Int(i128::MIN).exceeds(Float(f64::NEG_INFINITY)));
+        assert!(!Int(0).exceeds(Float(f64::NAN)) && !Float(f64::NAN).exceeds(Int(0)));
+        assert_eq!(Float(-2.9).truncated(), -2);
+        assert_eq!(Int(7).truncated(), 7);
     }
 
     #[test]

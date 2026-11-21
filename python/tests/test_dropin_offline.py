@@ -29091,6 +29091,773 @@ def test_details_of_an_error_that_grpc_s_core_cannot_read_fail_as_grpc_status_re
         listener.close()
 
 
+def _rpc_status_wire():
+    # Builders of the bytes of the protobuf of a google.rpc.Status, of its fields as the wire
+    # format has them: (varint, key, field, groups, status), so that a test can write the bytes
+    # that a server of its own sends, which a protobuf message would not encode.
+    def varint(value):
+        out = bytearray()
+        while value >= 0x80:
+            out.append((value & 0x7F) | 0x80)
+            value >>= 7
+        out.append(value)
+        return bytes(out)
+
+    def key(number, wire_type):
+        return varint(number << 3 | wire_type)
+
+    def field(number, data):
+        return key(number, 2) + varint(len(data)) + data
+
+    def groups(levels, number=5):
+        # `levels` groups of a field that no type of google.rpc knows, nested in each other.
+        return key(number, 3) * levels + key(number, 4) * levels
+
+    def status(code=13, message=b"boom", extra=b""):
+        return key(1, 0) + varint(code) + field(2, message) + extra
+
+    return varint, key, field, groups, status
+
+
+def _raw_failing_server(answer):
+    # A raw server of HTTP/2 that fails each call with the trailers of `answer`: its code, the
+    # message "boom" and the base64 of its details: its listening socket.
+    import base64
+
+    def hpack_int(value):
+        # An integer of HPACK of a prefix of 7 bits (RFC 7541, section 5.1).
+        if value < 127:
+            return bytes([value])
+        out, value = [127], value - 127
+        while value >= 128:
+            out.append(value % 128 + 128)
+            value //= 128
+        return bytes(out + [value])
+
+    def literal(name, value):
+        return b"\x00" + hpack_int(len(name)) + name.encode() + hpack_int(len(value)) + value
+
+    def respond(stream):
+        details = base64.b64encode(answer["details"])
+        block = b"\x88" + literal("content-type", b"application/grpc")
+        block += literal("grpc-status", str(answer["code"]).encode())
+        block += literal("grpc-message", b"boom") + literal("grpc-status-details-bin", details)
+        return _http2_frame(1, 5, stream, block)
+
+    return _raw_http2_server(respond)
+
+
+def test_details_that_upb_does_not_read_as_a_status_raise_its_decode_error_as_grpc_status():
+    # As PySpark's `rpc_status.from_call`, which parses the details of a failure with upb: past
+    # upb's limit of 100 levels, of the groups of a field that the type does not know, each a level
+    # below what holds it, and of a detail (an Any, a level of its own), protobuf's DecodeError of
+    # the google.rpc.Status, whatever its code and message, as of a tag of more than five bytes;
+    # of a string that is not UTF-8, its DecodeError of that; and a field that the type knows but
+    # of another wire type, a field of the number 0 in a group and a varint of a tenth byte above 1
+    # are read, as upb reads them. Raised as grpcio's error of the call is handled, its context.
+    pytest.importorskip("grpc")
+    pytest.importorskip("grpc_status")
+    from pyspark.errors.exceptions.connect import SparkConnectGrpcException
+
+    varint, key, field, groups, status = _rpc_status_wire()
+    answer = {"code": 13}
+    listener = _raw_failing_server(answer)
+    spark = SparkSession.builder.remote(f"sc://127.0.0.1:{listener.getsockname()[1]}").create()
+    decode = "Error parsing message with type 'google.rpc.Status': {}"
+    corrupt, bad_utf8 = decode.format("Wire format was corrupt"), decode.format(
+        "String field had bad UTF-8"
+    )
+    code_ok = "Code in Status proto (StatusCode.OK) doesn't match status code (StatusCode.INTERNAL)"
+    try:
+        spark.client.set_retry_policies([])
+        calls = [
+            (lambda: spark.conf.get("k"), "_InactiveRpcError"),
+            (lambda: spark.range(1).collect(), "_MultiThreadedRendezvous"),
+        ]
+        for details, exception, text in [
+            (status(extra=groups(100)), "SparkConnectGrpcException", "boom"),
+            (status(extra=groups(101)), "DecodeError", corrupt),
+            (status(extra=groups(101, 1000)), "DecodeError", corrupt),
+            (status(extra=field(3, field(1, b"x/y") + groups(99))), "SparkConnectGrpcException",
+             "boom"),
+            (status(extra=field(3, field(1, b"x/y") + groups(100))), "DecodeError", corrupt),
+            (status(extra=key(3, 3) + groups(100) + key(3, 4)), "DecodeError", corrupt),
+            (status(5, b"other", groups(101)), "DecodeError", corrupt),
+            (status(13, b"other", groups(101)), "DecodeError", corrupt),
+            (b"\x88\x80\x80\x80\x80\x00" + varint(13) + field(2, b"boom"), "DecodeError", corrupt),
+            (key(1, 0) + varint(13) + field(2, b"\xff\xfe"), "DecodeError", bad_utf8),
+            (status(extra=field(3, field(1, b"\xff"))), "DecodeError", bad_utf8),
+            (field(1, b"") + field(2, b"boom"), "ValueError", code_ok),
+            (field(1, b"zz") + status(), "SparkConnectGrpcException", "boom"),
+            (status(extra=key(3, 0) + varint(7)), "SparkConnectGrpcException", "boom"),
+            (status(extra=key(5, 3) + b"\x00\x01" + key(5, 4)), "SparkConnectGrpcException",
+             "boom"),
+            (key(1, 0) + b"\x8d" + b"\x80" * 8 + b"\x7f" + field(2, b"boom"),
+             "SparkConnectGrpcException", "boom"),
+        ]:
+            answer["details"] = details
+            for call, name in calls:
+                with pytest.raises(Exception) as error:
+                    call()
+                case = (details[:12], name)
+                assert type(error.value).__name__ == exception, case
+                if isinstance(error.value, SparkConnectGrpcException):
+                    assert error.value.getMessage() == text, case
+                    continue
+                assert str(error.value) == text, case
+                context = error.value.__context__
+                assert (type(context).__name__, context.details()) == (name, "boom"), case
+                assert not error.value.__suppress_context__, case
+    finally:
+        spark.stop()
+        listener.close()
+
+
+def test_the_error_info_and_the_retry_info_of_a_status_are_unpacked_as_pyspark_unpacks_them():
+    # As PySpark's client, which reads the first ErrorInfo of the status of a failure (its
+    # `_handle_rpc_error`) and its `DefaultPolicy` the first RetryInfo (`extract_retry_info`), each
+    # of a detail that protobuf's `Any.Is` tells of the type, of a type URL of a `/` of any host,
+    # and parses it with upb (`Any.Unpack`): of one that upb does not read, protobuf's DecodeError
+    # of its type, raised in place of the failure, of the call's error as its context but where
+    # the policy reads it between its attempts; an entry of the metadata of an ErrorInfo of a field
+    # that the type does not know is not in the map, as upb does not set it.
+    import warnings
+
+    pytest.importorskip("grpc")
+    pytest.importorskip("grpc_status")
+    from pyspark.errors.exceptions.connect import AnalysisException, SparkConnectGrpcException
+    from pyspark.sql.connect.client.retries import DefaultPolicy
+
+    varint, key, field, groups, status = _rpc_status_wire()
+
+    def detail(type_url, value):
+        return field(3, field(1, type_url) + field(2, value))
+
+    def entry(name, value, extra=b""):
+        return field(3, field(1, name) + field(2, value) + extra)
+
+    error_info = field(1, b"REASON") + field(2, b"org.apache.spark")
+    error_info += entry(b"classes", b'["org.apache.spark.sql.AnalysisException"]')
+    analysis = error_info + entry(b"errorClass", b"TABLE_OR_VIEW_NOT_FOUND")
+    unknown_entry = error_info + entry(
+        b"errorClass", b"TABLE_OR_VIEW_NOT_FOUND", key(3, 0) + b"\x01"
+    )
+    of_type = b"type.googleapis.com/google.rpc.{}"
+    info, retry = of_type.replace(b"{}", b"ErrorInfo"), of_type.replace(b"{}", b"RetryInfo")
+    answer = {"code": 13}
+    listener = _raw_failing_server(answer)
+    spark = SparkSession.builder.remote(f"sc://127.0.0.1:{listener.getsockname()[1]}").create()
+    unpack = "Error parsing message with type 'google.rpc.{}': Wire format was corrupt"
+    calls = [
+        (lambda: spark.conf.get("k"), "_InactiveRpcError"),
+        (lambda: spark.range(1).collect(), "_MultiThreadedRendezvous"),
+    ]
+
+    def failures(details, code=13):
+        # Of each call of a failure of `code` and `details`: the class and the text of its error,
+        # the class and the details of its context (none of a converted exception, whose context
+        # PySpark suppresses), and the records of the failure that the client logs.
+        answer.update(code=code, details=details)
+        out = []
+        for call, name in calls:
+            with _connect_log() as records:
+                with pytest.raises(Exception) as error:
+                    call()
+            logged = [str(record.msg).split(":")[0] for record in records]
+            logged = [m for m in logged if m in ("GRPC Error received", "Received ErrorInfo")]
+            if isinstance(error.value, SparkConnectGrpcException):
+                out.append((type(error.value).__name__, error.value.getMessage(), None, logged))
+                continue
+            context = error.value.__context__
+            if context is not None:
+                assert type(context).__name__ == name
+                context = (type(context).__name__, context.details())
+            out.append((type(error.value).__name__, str(error.value), context, logged))
+        return out
+
+    try:
+        spark.client.set_retry_policies([])
+        # The first execution of the session looks its plan compression up, which fails too.
+        answer.update(code=13, details=status())
+        with pytest.raises(SparkConnectGrpcException):
+            spark.range(1).collect()
+        decode = ("DecodeError", unpack.format("ErrorInfo"))
+        assert failures(status(extra=detail(info, b"abc"))) == [
+            (*decode, ("_InactiveRpcError", "boom"), ["GRPC Error received"]),
+            (*decode, ("_MultiThreadedRendezvous", "boom"), ["GRPC Error received"]),
+        ]
+        first_corrupt = status(extra=detail(info, b"abc") + detail(info, analysis))
+        assert failures(first_corrupt)[0][:2] == decode
+        assert failures(status(extra=detail(info, error_info + groups(101))))[0][:2] == decode
+        # Of a type URL of another host, an AnalysisException; of no `/`, not an ErrorInfo.
+        converted = failures(status(extra=detail(b"x.com/google.rpc.ErrorInfo", analysis)))
+        assert [outcome[0] for outcome in converted] == ["AnalysisException"] * 2
+        plain = failures(status(extra=detail(b"google.rpc.ErrorInfo", analysis)))
+        assert [outcome[:2] for outcome in plain] == [("SparkConnectGrpcException", "boom")] * 2
+        for call, _ in calls:
+            answer["details"] = status(extra=detail(info, unknown_entry))
+            with pytest.raises(AnalysisException) as error:
+                call()
+            assert error.value.getCondition() is None
+        # Of the policy: of a failure that it does not retry for its code, in its `can_retry`, as
+        # the failure is handled; of one that it retries, in the wait before the retry, of no
+        # context; not logged, as PySpark's `_handle_rpc_error` does not read the failure then.
+        spark.client.set_retry_policies(
+            [DefaultPolicy(max_retries=1, initial_backoff=1, max_backoff=1, jitter=0)]
+        )
+        decode = ("DecodeError", unpack.format("RetryInfo"))
+        assert failures(status(extra=detail(retry, b"abc"))) == [
+            (*decode, ("_InactiveRpcError", "boom"), []),
+            (*decode, ("_MultiThreadedRendezvous", "boom"), []),
+        ]
+        assert failures(status(14, extra=detail(retry, b"abc")), code=14) == [
+            (*decode, None, []),
+            (*decode, None, []),
+        ]
+        assert failures(status(14, extra=groups(101)), code=14)[0] == (
+            "DecodeError",
+            "Error parsing message with type 'google.rpc.Status': Wire format was corrupt",
+            None,
+            [],
+        )
+        # A RetryInfo of a type URL of no `/` is not one: the failure is not retried.
+        delay = field(1, key(2, 0) + varint(1000000))
+        with warnings.catch_warnings(record=True) as warned:
+            warnings.simplefilter("always")
+            plain = failures(status(extra=detail(b"google.rpc.RetryInfo", delay)))
+        assert [outcome[:2] for outcome in plain] == [("SparkConnectGrpcException", "boom")] * 2
+        assert not [w for w in warned if "RETRIES_EXCEEDED" in str(w.message)]
+    finally:
+        spark.client.set_retry_policies([DefaultPolicy()])
+        spark.stop()
+        listener.close()
+
+
+def test_details_of_a_status_take_upbs_limit_of_set_allow_oversize_protos():
+    # The details of a failure nested past upb's limit of 100 levels raise protobuf's DecodeError;
+    # once upb's SetAllowOversizeProtos(True) is called, also after the session is made, and also
+    # through a reference to it taken before the drop-in's runtime is installed, which the reader
+    # of the details asks upb about as it reaches the limit, upb reads them of up to 65535 levels,
+    # and so does the drop-in, of the groups of a status and of a detail: their google.rpc.Status
+    # is read, of its message, or does not match.
+    api_implementation = pytest.importorskip("google.protobuf.internal.api_implementation")
+    pytest.importorskip("grpc_status")
+    if api_implementation.Type() != "upb":
+        pytest.skip("of upb's SetAllowOversizeProtos, of a protobuf install of upb")
+    script = """
+        import json, sys
+        from google._upb import _message
+
+        # Taken before pyspark, whose protobuf runtime then wraps the function of the module.
+        set_allow_oversize_protos = _message.SetAllowOversizeProtos
+        sys.path.insert(0, "tests")
+        from _mock_connect_server import message_field, mock_connect_session, varint
+
+        def groups(levels):
+            return varint(5 << 3 | 3) * levels + varint(5 << 3 | 4) * levels
+
+        def status(code, message, extra):
+            return varint(1 << 3) + varint(code) + message_field(2, message) + extra
+
+        def outcome(call):
+            try:
+                call()
+                return "ok"
+            except Exception as error:
+                return f"{type(error).__name__}: {error}"
+
+        out = {}
+        with mock_connect_session() as (spark, service):
+            spark.client.set_retry_policies([])
+
+            def outcomes(details):
+                service.failed_details = ("INTERNAL", "boom", details)
+                return [
+                    outcome(lambda: spark.conf.get("spark.sql.session.timeZone")),
+                    outcome(lambda: spark.range(1).collect()),
+                ]
+
+            out["before"] = outcomes(status(13, "boom", groups(101)))
+            SET_ALLOW
+            for name, details in [
+                ("101 groups", status(13, "boom", groups(101))),
+                ("1000 groups", status(13, "boom", groups(1000))),
+                ("a detail of 1000 groups", status(13, "boom", message_field(3, groups(1000)))),
+                ("101 groups of code 5", status(5, "boom", groups(101))),
+            ]:
+                out[name] = outcomes(details)
+            service.failed_details = None
+        print(json.dumps(out))
+        """
+    mismatch = (
+        "ValueError: Code in Status proto (StatusCode.NOT_FOUND) doesn't match status code "
+        "(StatusCode.INTERNAL)"
+    )
+    corrupt = (
+        "DecodeError: Error parsing message with type 'google.rpc.Status': Wire format was corrupt"
+    )
+    for set_allow in [
+        "api_implementation._c_module.SetAllowOversizeProtos(True)",
+        "set_allow_oversize_protos(True)",
+    ]:
+        out = _run_dropin_script(
+            script.replace(
+                "SET_ALLOW",
+                "from google.protobuf.internal import api_implementation; " + set_allow,
+            )
+        )
+        assert out == {
+            "before": [corrupt] * 2,
+            "101 groups": ["SparkConnectGrpcException: boom"] * 2,
+            "1000 groups": ["SparkConnectGrpcException: boom"] * 2,
+            "a detail of 1000 groups": ["SparkConnectGrpcException: boom"] * 2,
+            "101 groups of code 5": [mismatch] * 2,
+        }, set_allow
+
+
+def test_the_errors_of_a_policy_that_retrying_decides_have_the_failure_as_their_context():
+    # As PySpark's `AttemptManager.__exit__`, which asks the policies of the error of the attempt
+    # as it is handled: of a policy that is not exactly a DefaultPolicy or a RetryPolicy, which
+    # PySpark's `Retrying` decides in the drop-in too, what its `can_retry` raises, grpc_status's
+    # ValueError, protobuf's DecodeError of the status or of its first RetryInfo, or an exception
+    # of its own, has grpcio's error of the call as its context; what the wait before a retry
+    # raises has none.
+    pytest.importorskip("grpc")
+    pytest.importorskip("grpc_status")
+    from pyspark.sql.connect.client.retries import DefaultPolicy
+
+    class SubPolicy(DefaultPolicy):
+        pass
+
+    class Raising(DefaultPolicy):
+        def can_retry(self, error):
+            raise RuntimeError("of the policy")
+
+    varint, key, field, groups, status = _rpc_status_wire()
+    retry_info = b"type.googleapis.com/google.rpc.RetryInfo"
+    answer = {"code": 13}
+    listener = _raw_failing_server(answer)
+    spark = SparkSession.builder.remote(f"sc://127.0.0.1:{listener.getsockname()[1]}").create()
+    corrupt = "Error parsing message with type 'google.rpc.{}': Wire format was corrupt"
+    fast = dict(max_retries=2, initial_backoff=1, max_backoff=1, jitter=0)
+    calls = [
+        (lambda: spark.conf.get("k"), "_InactiveRpcError"),
+        (lambda: spark.range(1).collect(), "_MultiThreadedRendezvous"),
+    ]
+    try:
+        for policy, code, details, exception, text, context in [
+            (SubPolicy(**fast), 13, status(extra=groups(101)), "DecodeError",
+             corrupt.format("Status"), True),
+            (SubPolicy(**fast), 13, status(extra=field(3, field(1, retry_info) + field(2, b"abc"))),
+             "DecodeError", corrupt.format("RetryInfo"), True),
+            (SubPolicy(**fast), 13, status(5), "ValueError",
+             "Code in Status proto (StatusCode.NOT_FOUND) doesn't match status code "
+             "(StatusCode.INTERNAL)", True),
+            (Raising(), 13, status(), "RuntimeError", "of the policy", True),
+            (SubPolicy(**fast), 14,
+             status(14, extra=field(3, field(1, retry_info) + field(2, b"abc"))),
+             "DecodeError", corrupt.format("RetryInfo"), False),
+        ]:
+            spark.client.set_retry_policies([policy])
+            answer.update(code=code, details=details)
+            for call, name in calls[: 1 if code == 14 else 2]:
+                with pytest.raises(Exception) as error:
+                    call()
+                case = (type(policy).__name__, details[:8], name)
+                assert (type(error.value).__name__, str(error.value)) == (exception, text), case
+                held = error.value.__context__
+                if context:
+                    assert (type(held).__name__, held.details()) == (name, "boom"), case
+                else:
+                    assert held is None, case
+    finally:
+        spark.client.set_retry_policies([DefaultPolicy()])
+        spark.stop()
+        listener.close()
+
+
+def test_the_delay_of_a_retry_info_is_the_one_that_pyspark_takes():
+    # As PySpark's `extract_retry_delay`, the `ToMilliseconds()` of the delay of the first
+    # RetryInfo, signed, of nanoseconds truncated toward zero, 0 of one of no delay, logged as it
+    # is: a negative delay never lengthens the wait. A wait that Python's `time.sleep` refuses, of
+    # no cap of the server's delay, raises its OverflowError at once, of no context, as PySpark's
+    # `Retrying` sleeps it.
+    from pyspark.sql.connect.client.retries import DefaultPolicy
+
+    varint, key, field, groups, status = _rpc_status_wire()
+    retry_info = b"type.googleapis.com/google.rpc.RetryInfo"
+
+    def delayed(seconds, nanos=0):
+        delay = key(1, 0) + varint(seconds % 2**64) + key(2, 0) + varint(nanos % 2**64)
+        return status(14, extra=field(3, field(1, retry_info) + field(2, field(1, delay))))
+
+    answer = {"code": 14}
+    listener = _raw_failing_server(answer)
+    spark = SparkSession.builder.remote(f"sc://127.0.0.1:{listener.getsockname()[1]}").create()
+    fast = dict(max_retries=1, initial_backoff=1, max_backoff=1, jitter=0)
+
+    def logged(details, cap=300):
+        spark.client.set_retry_policies([DefaultPolicy(max_server_retry_delay=cap, **fast)])
+        answer["details"] = details
+        with _connect_log() as records, warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            start = time.monotonic()
+            with pytest.raises(Exception) as error:
+                spark.conf.get("k")
+            elapsed = time.monotonic() - start
+        texts = [str(record.msg).split(" (policy")[0] for record in records]
+        delays = [t for t in texts if t.startswith("The server has sent")]
+        waits = [t.split(". Will retry after ")[1] for t in texts if ". Will retry after " in t]
+        return error.value, delays, waits, elapsed
+
+    import warnings
+
+    try:
+        _, delays, waits, _ = logged(delayed(-1, 500_000_000))
+        assert (delays, waits) == (["The server has sent a retry delay of -500 ms."], ["1 ms"])
+        _, delays, waits, _ = logged(delayed(2, -1_900_000_000))
+        assert (delays, waits) == (["The server has sent a retry delay of 100 ms."], ["100 ms"])
+        empty = status(14, extra=field(3, field(1, retry_info)))
+        _, delays, waits, _ = logged(empty)
+        assert (delays, waits) == (["The server has sent a retry delay of 0 ms."], ["1 ms"])
+        error, delays, waits, elapsed = logged(delayed(2**62), cap=None)
+        # The error of the sleep of PySpark's `Retrying`, of the true division of the wait, whose
+        # text is of the version of Python.
+        with pytest.raises(OverflowError) as slept:
+            time.sleep(4611686018427387904000 / 1000)
+        assert type(error) is OverflowError, error
+        assert str(error) == str(slept.value)
+        assert error.__context__ is None and elapsed < 5
+        assert delays == ["The server has sent a retry delay of 4611686018427387904000 ms."]
+        assert waits == ["4611686018427387904000 ms"]
+    finally:
+        # The release of the session is not retried, of a failure that no policy retries.
+        answer.update(code=13, details=status())
+        spark.client.set_retry_policies([DefaultPolicy()])
+        spark.stop()
+        listener.close()
+
+
+def test_a_negative_wait_before_a_retry_raises_the_value_error_of_time_sleep_as_pyspark():
+    # As PySpark's `Retrying`, which sleeps the wait before a retry of Python's `time.sleep`: the
+    # second wait of a negative backoff multiplier is negative, whose ValueError is raised at
+    # once, of no context, rather than waited as none, of a DefaultPolicy and of a subclass.
+    import threading
+
+    from pyspark.sql.connect.client.retries import DefaultPolicy
+
+    varint, key, field, groups, status = _rpc_status_wire()
+    answer = {"code": 14, "details": status(14)}
+    listener = _raw_failing_server(answer)
+    spark = SparkSession.builder.remote(f"sc://127.0.0.1:{listener.getsockname()[1]}").create()
+    with pytest.raises(ValueError) as slept:
+        time.sleep(-0.02)
+    negative = dict(max_retries=3, initial_backoff=10, max_backoff=100, backoff_multiplier=-2.0)
+
+    class Decided(DefaultPolicy):
+        pass
+
+    try:
+        for policy in (DefaultPolicy, Decided):
+            spark.client.set_retry_policies([policy(jitter=0, **negative)])
+            for call in (lambda: spark.conf.get("k"), lambda: spark.range(1).collect()):
+                with _connect_log() as records:
+                    with pytest.raises(ValueError) as error:
+                        call()
+                # The logs of this thread: the release of a failed execution, in the background,
+                # fails of its own.
+                ours = [r for r in records if r.thread == threading.get_ident()]
+                texts = [str(record.msg).split(" (policy")[0] for record in ours]
+                after = ". Will retry after "
+                waits = [t.split(after)[1] for t in texts if after in t]
+                assert str(error.value) == str(slept.value), policy
+                assert error.value.__context__ is None, policy
+                # The lookup of the plan compression of the first plan catches its own.
+                assert waits[-2:] == ["10 ms", "-20 ms"], (policy, waits)
+    finally:
+        # The release of the session is not retried, of a failure that no policy retries.
+        answer.update(code=13, details=status())
+        spark.client.set_retry_policies([DefaultPolicy()])
+        spark.stop()
+        listener.close()
+
+
+def test_a_signal_during_a_wait_of_decades_before_a_retry_interrupts_the_execution(mock_connect):
+    # As PySpark's `Retrying`, which sleeps a wait of decades of Python's `time.sleep`, where the
+    # handler of SIGINT raises its KeyboardInterrupt, which the `except KeyboardInterrupt` of the
+    # execution takes, which interrupts the operation: the signal ends the wait as it ends any
+    # other wait of the call, and the execution is interrupted, of a DefaultPolicy and of a
+    # subclass, which PySpark's `Retrying` decides.
+    import signal
+    import threading
+
+    from pyspark.sql.connect.client.retries import DefaultPolicy
+
+    class Decided(DefaultPolicy):
+        pass
+
+    spark, service = mock_connect
+    uncapped = dict(max_retries=1, initial_backoff=1, max_backoff=1, max_server_retry_delay=None)
+    try:
+        for policy in (DefaultPolicy, Decided):
+            spark.client.set_retry_policies([policy(jitter=0, **uncapped)])
+            service.retry_info_failures = [("UNAVAILABLE", 2**31 * 1000)]
+            executions = len(service.execute_requests)
+            interrupts = len(service.interrupt_requests)
+
+            def interrupt():
+                # Once the execution failed, and its wait began.
+                deadline = time.monotonic() + 10
+                while len(service.execute_requests) == executions:
+                    if time.monotonic() > deadline:
+                        break
+                    time.sleep(0.05)
+                time.sleep(0.5)
+                os.kill(os.getpid(), signal.SIGINT)
+
+            signaling = threading.Thread(target=interrupt, daemon=True)
+            started = time.monotonic()
+            signaling.start()
+            try:
+                with pytest.raises(KeyboardInterrupt):
+                    spark.range(1).collect()
+                elapsed = time.monotonic() - started
+            finally:
+                signaling.join()
+            assert elapsed < 10, policy
+            assert len(service.interrupt_requests) == interrupts + 1, policy
+    finally:
+        spark.client.set_retry_policies([DefaultPolicy()])
+
+
+def test_a_wait_that_time_sleep_refuses_fails_a_release_in_the_background_as_pyspark(mock_connect):
+    # As PySpark's release, whose `Retrying` sleeps the wait before a retry of Python's
+    # `time.sleep` on a thread of its executor: a wait that it refuses fails the release at once,
+    # which the sender logs, of the error: one of a RetryInfo past what `time.sleep` holds, of no
+    # cap of the server's delay, and the negative one of a negative backoff multiplier.
+    from pyspark.sql.connect.client.retries import DefaultPolicy
+
+    varint, key, field, groups, status = _rpc_status_wire()
+    retry_info = b"type.googleapis.com/google.rpc.RetryInfo"
+    delay = key(1, 0) + varint(10**10)
+    details = status(14, extra=field(3, field(1, retry_info) + field(2, field(1, delay))))
+    spark, service = mock_connect
+    with pytest.raises(OverflowError) as too_long:
+        time.sleep(10**13 / 1000)
+    with pytest.raises(ValueError) as negative:
+        time.sleep(-0.02)
+    uncapped = dict(max_retries=1, initial_backoff=1, max_backoff=1, max_server_retry_delay=None)
+    reversed_ = dict(max_retries=3, initial_backoff=10, max_backoff=100, backoff_multiplier=-2.0)
+    cases = [
+        (("UNAVAILABLE", "boom", details), uncapped, too_long.value),
+        (("UNAVAILABLE", "boom"), reversed_, negative.value),
+    ]
+    try:
+        for failure, parameters, raised in cases:
+            service.release_failure = failure
+            spark.client.set_retry_policies([DefaultPolicy(jitter=0, **parameters)])
+            expected = f"ReleaseExecute failed with exception: {raised}."
+            with _connect_log() as records:
+                spark.range(1).collect()
+                deadline = time.monotonic() + 10
+                while time.monotonic() < deadline:
+                    if expected in [record.getMessage() for record in records]:
+                        break
+                    time.sleep(0.05)
+            warned = [r.getMessage() for r in records if r.levelname == "WARNING"]
+            assert expected in warned, warned
+    finally:
+        service.release_failure = None
+        spark.client.set_retry_policies([DefaultPolicy()])
+
+
+def test_a_release_that_sleeps_a_wait_of_decades_holds_no_later_release_as_pyspark(mock_connect):
+    # As PySpark's releases, each of which sleeps the wait before its retry on a thread of its
+    # executor: a release that sleeps a wait of decades, which `time.sleep` holds, holds neither
+    # the delivery thread nor the decisions of a policy that PySpark's `Retrying` decides, so that
+    # the failure of a later release is logged as PySpark's sender logs it, of a DefaultPolicy and
+    # of a subclass. The sleep of decades is on a thread that the exit does not wait for.
+    from pyspark.sql.connect.client.retries import DefaultPolicy
+
+    class Decided(DefaultPolicy):
+        pass
+
+    varint, key, field, groups, status = _rpc_status_wire()
+    retry_info = b"type.googleapis.com/google.rpc.RetryInfo"
+
+    def delayed(seconds):
+        delay = key(1, 0) + varint(seconds)
+        return status(14, extra=field(3, field(1, retry_info) + field(2, field(1, delay))))
+
+    def logged(records, text):
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if text in [record.getMessage() for record in records]:
+                return True
+            time.sleep(0.05)
+        return False
+
+    spark, service = mock_connect
+    with pytest.raises(OverflowError) as too_long:
+        time.sleep(10**13 / 1000)
+    uncapped = dict(max_retries=1, initial_backoff=1, max_backoff=1, max_server_retry_delay=None)
+    try:
+        for policy in (DefaultPolicy, Decided):
+            spark.client.set_retry_policies([policy(jitter=0, **uncapped)])
+            with _connect_log() as records:
+                service.release_failure = ("UNAVAILABLE", "boom", delayed(2**31))
+                spark.range(1).collect()
+                sleeping = "The server has sent a retry delay of 2147483648000 ms."
+                assert logged(records, sleeping), policy
+                service.release_failure = ("UNAVAILABLE", "boom", delayed(10**10))
+                spark.range(1).collect()
+                failed = f"ReleaseExecute failed with exception: {too_long.value}."
+                assert logged(records, failed), policy
+    finally:
+        service.release_failure = None
+        spark.client.set_retry_policies([DefaultPolicy()])
+
+
+def test_the_metadata_of_an_error_info_is_read_as_pyspark_s_convert_exception_reads_it():
+    # As PySpark's `convert_exception`, which parses the classes and the message parameters of the
+    # metadata with `json.loads` as it handles grpcio's error of the call: of JSON that does not
+    # parse, its JSONDecodeError, of the context of its own StopIteration then, of grpcio's error;
+    # of other JSON, its values as they are; and the errorClass of the metadata, also empty, which
+    # the log of the ErrorInfo prints, as upb prints the empty value of an entry of a map.
+    pytest.importorskip("grpc")
+    from pyspark.errors.exceptions.connect import AnalysisException
+
+    varint, key, field, groups, status = _rpc_status_wire()
+
+    def entry(name, value):
+        return field(3, field(1, name) + field(2, value))
+
+    def of_metadata(*entries):
+        info = field(1, b"REASON") + field(2, b"org.apache.spark") + b"".join(entries)
+        detail = field(1, b"type.googleapis.com/google.rpc.ErrorInfo") + field(2, info)
+        return status(extra=field(3, detail))
+
+    classes = entry(b"classes", b'["org.apache.spark.sql.AnalysisException"]')
+    answer = {"code": 13}
+    listener = _raw_failing_server(answer)
+    spark = SparkSession.builder.remote(f"sc://127.0.0.1:{listener.getsockname()[1]}").create()
+
+    def chain(error):
+        names = []
+        while error is not None:
+            names.append(type(error).__name__ + ("!" if error.__suppress_context__ else ""))
+            error = error.__context__
+        return names
+
+    calls = [
+        (lambda: spark.conf.get("k"), "_InactiveRpcError"),
+        (lambda: spark.range(1).collect(), "_MultiThreadedRendezvous"),
+    ]
+    try:
+        spark.client.set_retry_policies([])
+        for details, expected in [
+            (of_metadata(entry(b"classes", b"not json")),
+             ("JSONDecodeError", "Expecting value: line 1 column 1 (char 0)",
+              ["JSONDecodeError!", "StopIteration", None])),
+            (of_metadata(classes, entry(b"messageParameters", b"{bad")),
+             ("JSONDecodeError",
+              "Expecting property name enclosed in double quotes: line 1 column 2 (char 1)",
+              ["JSONDecodeError", None])),
+            (of_metadata(entry(b"classes", b"null")),
+             ("TypeError", "argument of type 'NoneType' is not iterable", ["TypeError", None])),
+        ]:
+            answer["details"] = details
+            for call, name in calls:
+                with pytest.raises(Exception) as error:
+                    call()
+                exception, text, names = expected
+                assert (type(error.value).__name__, str(error.value)) == (exception, text)
+                assert chain(error.value) == [n if n is not None else name for n in names]
+        answer["details"] = of_metadata(
+            classes, entry(b"errorClass", b"E"), entry(b"messageParameters", b'[1, {"a": 2}]')
+        )
+        for call, _ in calls:
+            with pytest.raises(AnalysisException) as error:
+                call()
+            assert error.value.getMessageParameters() == [1, {"a": 2}]
+            assert error.value.getCondition() == "E"
+        answer["details"] = of_metadata(classes)
+        for call, _ in calls:
+            with pytest.raises(AnalysisException) as error:
+                call()
+            assert error.value.getCondition() is None
+        answer["details"] = of_metadata(classes, entry(b"errorClass", b""))
+        for call, _ in calls:
+            with _connect_log() as records:
+                with pytest.raises(AnalysisException) as error:
+                    call()
+            assert error.value.getCondition() == ""
+            infos = [str(r.msg) for r in records if str(r.msg).startswith("Received ErrorInfo")]
+            assert 'metadata {\n  key: "errorClass"\n  value: ""\n}\n' in infos[0], infos
+    finally:
+        spark.stop()
+        listener.close()
+
+
+def test_an_execution_on_a_closed_channel_raises_its_value_error_of_its_operation_id():
+    # As PySpark's `_handle_error`, which sets the operation ID of an execution on the error of
+    # its call of `_stub`, as grpc's ValueError of a channel that its client closed; an RPC of one
+    # response has none.
+    varint, key, field, groups, status = _rpc_status_wire()
+    answer = {"code": 13, "details": status()}
+    listener = _raw_failing_server(answer)
+    spark = SparkSession.builder.remote(f"sc://127.0.0.1:{listener.getsockname()[1]}").create()
+    try:
+        spark.client.close()
+        spark.client._closed = False
+        with pytest.raises(ValueError, match="Cannot invoke RPC: Channel closed!") as error:
+            spark.range(1).collect()
+        assert getattr(error.value, "_operation_id", None)
+        with pytest.raises(ValueError, match="Cannot invoke RPC on closed channel!") as error:
+            spark.conf.get("k")
+        assert not hasattr(error.value, "_operation_id")
+    finally:
+        spark.stop()
+        listener.close()
+
+
+def test_the_hooks_of_an_execution_of_a_closed_client_or_channel_run_as_pyspark_s():
+    # As PySpark's `_execute_and_fetch_as_iterator`, which runs the hooks of the session on the
+    # request before it reads its `_stub`, which raises NO_ACTIVE_SESSION of a closed client, or
+    # calls the channel that its client closed: the hook sees the request, of the operation ID
+    # that the error carries.
+    from pyspark.errors.exceptions.connect import SparkConnectException
+    from pyspark.sql.connect.session import SparkSession as ConnectSession
+
+    varint, key, field, groups, status = _rpc_status_wire()
+    answer = {"code": 13, "details": status()}
+    listener = _raw_failing_server(answer)
+    seen = []
+
+    class Hook(ConnectSession.Hook):
+        def on_execute_plan(self, request):
+            seen.append(request.operation_id)
+            return request
+
+    builder = ConnectSession.builder.remote(f"sc://127.0.0.1:{listener.getsockname()[1]}")
+    builder._registerHook(lambda _: Hook())
+    spark = builder.create()
+    try:
+        df = spark.range(1)
+        spark.client.close()
+        with pytest.raises(SparkConnectException) as error:
+            df.collect()
+        assert error.value.getCondition() == "NO_ACTIVE_SESSION"
+        assert seen == [error.value._operation_id]
+        spark.client._closed = False
+        with pytest.raises(ValueError, match="Cannot invoke RPC: Channel closed!") as error:
+            df.collect()
+        assert seen[1:] == [error.value._operation_id]
+    finally:
+        spark.stop()
+        listener.close()
+
+
 def test_a_message_over_the_size_limit_of_a_call_is_grpcio_s_resource_exhausted():
     # As grpcio's channel of PySpark, of grpc.max_{receive,send}_message_length of 128 MiB: a
     # response over the limit fails its call with RESOURCE_EXHAUSTED, of the details of gRPC's
@@ -29322,8 +30089,9 @@ def test_the_transport_retries_with_the_parameters_of_pyspark_s_own_policies_onl
 
 def test_pyspark_s_retrying_of_a_call_decides_as_pyspark_s_does():
     # `_CallRetries`, PySpark's `Retrying` of the policies of a call, which the transport asks of
-    # each failed RPC: the wait of the policy that retries it, None once no policy does, and the
-    # error of a wait that `time.sleep` refuses, as PySpark's sleep raises it.
+    # each failed RPC: the wait of the policy that retries it, None once no policy does, and a
+    # wait that `time.sleep` refuses as it is, which the transport sleeps of `time.sleep`, as
+    # PySpark's sleep raises its error.
     pytest.importorskip("grpc")
     pytest.importorskip("grpc_status")
     from pyspark.sql.connect.client import core as connect_client
@@ -29340,8 +30108,7 @@ def test_pyspark_s_retrying_of_a_call_decides_as_pyspark_s_does():
     negative = connect_client._CallRetries(
         [DefaultPolicy(max_retries=1, initial_backoff=-1000, jitter=0)]
     )
-    with pytest.raises(ValueError):
-        negative.decide(*unavailable)
+    assert negative.decide(*unavailable) == -1.0
 
 
 def test_the_logs_of_grpc_of_the_client_are_written_as_grpcio_writes_them(monkeypatch, capfd):

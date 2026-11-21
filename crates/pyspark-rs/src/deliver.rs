@@ -80,9 +80,11 @@ pub(crate) fn run_dropping_errors(job: impl FnOnce(Python<'_>) -> PyResult<()> +
 /// exception is kept for the thread, which the next check of the wait raises in place of the
 /// signals' (see [`take_interrupt`]), once, of the first that comes, so that the handler runs once
 /// for the signal, as PySpark's. Of another thread, which runs no handler of a signal, the error
-/// is not of a signal, and is dropped.
-pub(crate) fn keep_interrupt(py: Python<'_>, error: &PyErr) {
-    if error.is_instance_of::<pyo3::exceptions::PyKeyboardInterrupt>(py) && on_main_thread(py) {
+/// is not of a signal, and is dropped. Whether the error is of a signal.
+pub(crate) fn keep_interrupt(py: Python<'_>, error: &PyErr) -> bool {
+    let of_a_signal =
+        error.is_instance_of::<pyo3::exceptions::PyKeyboardInterrupt>(py) && on_main_thread(py);
+    if of_a_signal {
         INTERRUPT.with(|kept| {
             let mut kept = kept.borrow_mut();
             if kept.is_none() {
@@ -90,6 +92,7 @@ pub(crate) fn keep_interrupt(py: Python<'_>, error: &PyErr) {
             }
         });
     }
+    of_a_signal
 }
 
 /// The KeyboardInterrupt that [`keep_interrupt`] kept for this thread, if any, which a check of

@@ -87,6 +87,16 @@ def abort_with_mismatched_status(context, mismatched):
     context.abort(getattr(grpc.StatusCode, code), message)
 
 
+def abort_with_details(context, failed):
+    # Abort the call of `context` with the failure (code name, message, details) `failed`, whose
+    # grpc-status-details-bin is the bytes of `details`, as a server sends them.
+    import grpc
+
+    code, message, details = failed
+    context.set_trailing_metadata((("grpc-status-details-bin", details),))
+    context.abort(getattr(grpc.StatusCode, code), message)
+
+
 def parse_message(data):
     """Decode protobuf wire bytes into {field: [value, ...]}: varints as ints and
     length-delimited fields as bytes (decode nested messages with another call)."""
@@ -401,6 +411,7 @@ def serve(connection):
             self.execute_failure = None
             self.execute_error = None
             self.mismatched_status = None
+            self.failed_details = None
             self.get_status_error = None
             self.fetch_error_details_requests = []
             self.stream_failure = None
@@ -432,7 +443,9 @@ def serve(connection):
             self.rpc_events = []
             self.set_confs = []
             self.clone_requests = []
-            # The (code, message) that CloneSession and ReleaseExecute abort with, if any.
+            # The (code, message) that CloneSession and ReleaseExecute abort with, if any; of
+            # ReleaseExecute, also (code, message, details), of the bytes of `details` in
+            # grpc-status-details-bin.
             self.clone_failure = None
             self.release_failure = None
             # The GetStatusRequests of each GetStatus.
@@ -614,6 +627,10 @@ def serve(connection):
         # google.rpc.Status message), Config, but the plan compression lookup, and ExecutePlan
         # fail with that code and message, of the details of a google.rpc.Status of the others.
         mismatched_status = None
+        # With `failed_details` set to (code name, message, details), Config, but the plan
+        # compression lookup, and ExecutePlan fail with that code and message, of the bytes of
+        # `details` in grpc-status-details-bin.
+        failed_details = None
         # Each (code name, delay in ms) of this list fails an ExecutePlan of a session that is not
         # forgotten, once, as the server does for a failure with a google.rpc.RetryInfo that asks
         # for the delay.
@@ -872,6 +889,8 @@ def serve(connection):
                 abort_with_error_info(context, self.execute_error)
             if self.mismatched_status:
                 abort_with_mismatched_status(context, self.mismatched_status)
+            if self.failed_details:
+                abort_with_details(context, self.failed_details)
             # ExecutePlanRequest.operation_id=6; ExecutePlanResponse.operation_id=12,
             # response_id=13, result_complete=14.
             operation_id = parse_message(request).get(6, [b""])[0]
@@ -943,6 +962,8 @@ def serve(connection):
             if self.is_recorded(request, "release_execute"):
                 self.release_execute_requests.append(request)
                 if self.release_failure:
+                    if len(self.release_failure) == 3:
+                        abort_with_details(context, self.release_failure)
                     code, message = self.release_failure
                     context.abort(getattr(grpc.StatusCode, code), message)
             return b""
@@ -1060,6 +1081,8 @@ def serve(connection):
                 context.abort(grpc.StatusCode.INVALID_ARGUMENT, self.config_failure)
             if not lookup and self.mismatched_status:
                 abort_with_mismatched_status(context, self.mismatched_status)
+            if not lookup and self.failed_details:
+                abort_with_details(context, self.failed_details)
             request = parse_message(request)
             operation = parse_message(request[3][0])
             if 1 in operation:

@@ -105,6 +105,14 @@ pub fn set_depth_probe(probe: fn() -> Option<u32>) {
     let _ = PROBE.set(probe);
 }
 
+/// The limit of the levels of messages once the probe has told it again (see [`set_depth_probe`]),
+/// which a read of a message that would nest past [`depth_limit`] takes, as the client's read of
+/// the details of a failed call does. Not a stable API.
+#[doc(hidden)]
+pub fn probed_depth_limit() -> u32 {
+    probed_limit(depth_limit())
+}
+
 /// The limit of a scan that reached `limit`, once the probe has told it again.
 fn probed_limit(limit: u32) -> u32 {
     match PROBE.get().and_then(|probe| probe()) {
