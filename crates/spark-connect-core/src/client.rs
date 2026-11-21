@@ -1753,7 +1753,20 @@ impl SparkConnectClient {
     /// [`SparkConnectClient::verify_response`]), and disables its plan compression when the server
     /// cannot parse a plan, as PySpark's `_handle_rpc_error` does.
     fn grpc_error(&self, status: tonic::Status, call: GrpcCall) -> SparkError {
-        let error = SparkError::from_grpc_status_of(status, call);
+        let read = crate::connector::grpcio_dialect()
+            .then(|| crate::rpc_status::Details::of(status.details()));
+        self.grpc_error_read(status, call, read)
+    }
+
+    /// [`SparkConnectClient::grpc_error`], of `read`, the details of `status` as upb reads them in
+    /// the dialect of grpcio, which the other readers of the failure share, or none out of it.
+    fn grpc_error_read(
+        &self,
+        status: tonic::Status,
+        call: GrpcCall,
+        read: Option<crate::rpc_status::Details>,
+    ) -> SparkError {
+        let error = SparkError::from_grpc_status_read(status, call, read);
         let condition = error.get_condition();
         if self.session_tracking && condition.as_deref() == Some("INVALID_HANDLE.SESSION_CHANGED") {
             self.set_closed(true);
@@ -2227,7 +2240,13 @@ impl SparkConnectClient {
         compressed: bool,
     ) -> Result<ExecutePlanRequest> {
         self.fill_client_type(&mut request.client_type)?;
-        self.ensure_open_for_stream()?;
+        // As PySpark's `_handle_error`, which sets the operation ID of the request on the error of
+        // its call of `_stub`, as of a client or a channel that is closed.
+        let operation_id = request.operation_id.clone().filter(|id| !id.is_empty());
+        let of_operation = |error: SparkError| match &operation_id {
+            Some(operation_id) => error.with_operation_id(operation_id.clone()),
+            None => error,
+        };
         add_result_chunking_option(&mut request, self.result_chunking);
         self.session_on(&mut request.session_id);
         // The caller has extended the user context with the extensions of its thread.
@@ -2255,7 +2274,7 @@ impl SparkConnectClient {
         // As PySpark reads its `_stub` once the plan is built and the hooks ran: the lookup of
         // the plan compression of the first plan closes the client when it sees that the server
         // restarted, and then the execution raises NO_ACTIVE_SESSION and sends nothing.
-        self.ensure_open_for_stream()?;
+        self.ensure_open_for_stream().map_err(of_operation)?;
         Ok(request)
     }
 
@@ -2687,7 +2706,15 @@ impl SparkConnectClient {
         // Before the iterator: its ReattachExecute and ReleaseExecute requests take the
         // user context and the client type of this request, and the request of the hook, as
         // PySpark's iterator is of the request that the hooks return. PySpark reads its `_stub`
-        // before it makes the iterator, so nothing is released of a closed client.
+        // before it makes the iterator, so nothing is released of a closed client. In the dialect
+        // of grpcio, the operation ID that the iterator would give the request is given it first,
+        // as PySpark's request has one before its hooks run and its stub is called.
+        let mut request = request;
+        if crate::connector::grpcio_dialect()
+            && request.operation_id.as_deref().is_none_or(str::is_empty)
+        {
+            request.operation_id = Some(Uuid::new_v4().to_string());
+        }
         let request = self.execution_request(request, compressed).await?;
         let reattachable = self.reattachable_execute();
         let iter = if reattachable {
@@ -2815,20 +2842,30 @@ impl SparkConnectClient {
         // As PySpark's `_handle_rpc_error`, which logs the error of grpc before it reads it, and
         // then the `ErrorInfo` of a status of the server, but of a call past its deadline, which
         // it raises at once. It reads the `google.rpc.Status` of the call with grpc_status, which
-        // raises its `ValueError` of one that does not match the call before the `ErrorInfo` is
-        // read.
+        // raises its `ValueError` of one that does not match the call, or protobuf's `DecodeError`
+        // of one that upb does not read, before the `ErrorInfo` is read, and so does the unpacking
+        // of its first `ErrorInfo`, before it is logged.
         let deadline = crate::retries::grpc_python_code(&status) == tonic::Code::DeadlineExceeded;
-        // Boxed, as it is kept across the wait for the logs.
-        let mismatch = if deadline {
-            None
-        } else {
-            crate::error::from_call_error(&status, call).map(Box::new)
+        // The details as upb reads them, in the dialect of grpcio, read once for the readers of the
+        // failure. Boxed, as they are kept across the wait for the logs, and so is the mismatch.
+        let read = crate::connector::grpcio_dialect()
+            .then(|| Box::new(crate::rpc_status::Details::of(status.details())));
+        let mismatch = match (&read, deadline) {
+            (Some(read), false) => crate::error::from_call_error_of(
+                &status,
+                read,
+                call,
+                crate::error::StatusRead::ErrorInfo,
+            )
+            .map(Box::new),
+            _ => None,
         };
         let mut deliveries = Vec::new();
         crate::retries::log(|listener| {
             deliveries.push(listener.rpc_error(&crate::error::grpcio_error(&status, call)));
             if !deadline && mismatch.is_none() {
-                if let Some(text) = crate::error::error_info_text(status.details()) {
+                if let Some(text) = crate::error::error_info_text(status.details(), read.as_deref())
+                {
                     deliveries.push(listener.error_info(&text));
                 }
             }
@@ -2841,7 +2878,7 @@ impl SparkConnectClient {
         if let Some(mismatch) = mismatch {
             return *mismatch;
         }
-        let error = self.grpc_error(status, call);
+        let error = self.grpc_error_read(status, call, read.map(|read| *read));
         if error.server.is_none() {
             return error;
         }
@@ -4482,7 +4519,11 @@ impl ReattachableResponseStream {
         if !self.reattachable {
             return None;
         }
-        crate::error::from_call_error(status, GrpcCall::ServerStreaming)
+        crate::error::from_call_error(
+            status,
+            GrpcCall::ServerStreaming,
+            crate::error::StatusRead::Status,
+        )
     }
 
     /// Ends the stream with the error of `status`, as [`Self::fail`].
@@ -5429,7 +5470,7 @@ mod tests {
             None
         }
 
-        fn retrying(&self, error: &str, wait_ms: u64, policy: &str) {
+        fn retrying(&self, error: &str, wait_ms: i128, policy: &str) {
             let error = error.lines().next().unwrap_or_default();
             self.log(format!("retrying {error} {wait_ms} {policy}"));
         }

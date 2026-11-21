@@ -158,6 +158,13 @@ impl Drop for AbortScope {
     }
 }
 
+/// Whether the calling thread runs a wait that a watch polls, whose signals end the parts of it
+/// that [`until_abort`] covers. Not a stable API.
+#[doc(hidden)]
+pub fn in_watched_wait() -> bool {
+    WAIT_ABORT.with(|abort| abort.borrow().is_some())
+}
+
 /// `f`, which a wait of the calling thread ends at once, dropping it unfinished, when the wait
 /// reaches `level` (see [`ABORT_RETRIES`] and [`ABORT_ALL`]): None then, else the output of `f`.
 /// Outside a wait that a watch polls, `f` is awaited as it is.
@@ -966,6 +973,22 @@ mod tests {
         assert!(interrupted.load(std::sync::atomic::Ordering::SeqCst));
         // Outside a watch, a future is awaited as it is.
         assert_eq!(block_on(until_abort(ABORT_ALL, async { 8 })), Some(8));
+    }
+
+    #[test]
+    fn test_in_watched_wait_is_of_the_waits_that_a_watch_polls() {
+        // A wait of a watch, of `block_on` or of `block_on_abortable`, and the futures that it
+        // polls on the calling thread; not a wait without one, nor a task of the runtime.
+        let watched = with_wait_watch(Arc::new(|| Watch::Continue), || {
+            let polled = block_on(async {
+                let spawned = tokio::spawn(async { in_watched_wait() }).await.unwrap();
+                (in_watched_wait(), spawned)
+            });
+            let abortable = block_on_abortable(async { in_watched_wait() });
+            (polled, abortable, in_watched_wait())
+        });
+        assert_eq!(watched, ((true, false), Some(true), false));
+        assert!(!block_on(async { in_watched_wait() }));
     }
 
     #[test]

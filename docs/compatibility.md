@@ -243,10 +243,11 @@ These are the changes for Rust users after v4.3.0, on `master`, which ship in 4.
 `SparkErrorKind` adds `BuiltinAttributeError` and `BuiltinAssertionError`, Python's `AttributeError`
 and `AssertionError` as PySpark's client raises them, which `SparkError::builtin_attribute` and
 `SparkError::builtin_assertion` make. `SparkErrorKind` is not `#[non_exhaustive]`, so an exhaustive
-match of it must handle them. `ServerErrorInfo` adds a hidden `rpc_error`, the kind of the call that
-failed and the text of grpcio's error of it, which is not a stable API: a struct expression of
-`ServerErrorInfo` that names every field adds it, or takes the others of
-`..ServerErrorInfo::default()`.
+match of it must handle them. `ServerErrorInfo` adds a hidden `rpc_error`, grpcio's error of the
+call that failed (an `error::GrpcioError`), `metadata`, the metadata of its `ErrorInfo`, and
+`fetched_parameters`, whether `FetchErrorDetails` gave its message parameters, which are not a
+stable API: a struct expression of `ServerErrorInfo` that names every field adds them, or takes the
+others of `..ServerErrorInfo::default()`.
 
 `LiteralExpression` adds a hidden `ByteArray { value, rendered }` variant, the literal of a Python
 `bytearray`, which the Python client makes: it is sent as a `Binary` literal of `value`, and its
@@ -300,7 +301,10 @@ the error of the call; when a request that it sends in the background, which no 
 fails (`background_failure`, of a `retries::BackgroundRequest` and a `retries::BackgroundFailure`),
 where PySpark's sender warns and logs; and of what PySpark's client logs of its retries and of its
 errors (`retrying`, `retrying_at_once`, `given_up`, `server_retry_delay`, `rpc_error` and
-`error_info`). These methods have default bodies that do nothing. The listener is one of the
+`error_info`), and, in the dialect of grpcio, of a wait before a retry that is negative or of
+decades, which the Python binding sleeps of Python's `time.sleep` (`sleep_long`, of a
+`retries::LongSleep`, which the call awaits). These methods have default bodies that do nothing.
+The listener is one of the
 process, for the calls of every client: the Python binding sets it, to warn from the thread of the
 call and to log to the logger of Spark Connect. `SparkError` adds a hidden `pyspark_message`, the
 message of PySpark's exception of a gRPC failure whose status carries no error of the server, which
@@ -501,10 +505,12 @@ of `INTERNAL`, or ended the connection of a far larger one, of `UNAVAILABLE`, wh
 retried: hyper now takes a header list of up to 16 MiB, which the channel checks, while the
 connection still advertises 16 KiB as the size of a header list that it takes, as grpcio's channel
 does, so that a server that honours it, as grpc-java's, resets the stream of a call of more rather
-than sending it. A binary value (of a name ending in `-bin`) that is not base64 fails the call
-`INTERNAL`, `Error parsing '<name>' metadata: illegal base64 encoding`, as gRPC's core fails it, but
-the `grpc-status-details-bin` of an error, which gRPC's core gives the call empty, where tonic
-panicked of it: the error is of its code and message, of empty details. A stream that the server
+than sending it. A binary value (of a name ending in `-bin`) that gRPC's core does not decode as
+base64 fails the call `INTERNAL`, `Error parsing '<name>' metadata: illegal base64 encoding`,
+whatever the code of the server, as gRPC's core fails it, the `grpc-status-details-bin` of an error
+too, where tonic panicked of it, of which the call has the details, empty, as gRPC's core gives them
+the call. gRPC's core takes base64 of no padding and of any `=` at its end, such as `YWJj=`, and
+refuses a last group whose unused bits are not zero, such as `YW==`. A stream that the server
 resets fails its call of the code that gRPC's
 core gives the reason, `CANCELLED` of `CANCEL`, `UNAVAILABLE` of `REFUSED_STREAM`,
 `RESOURCE_EXHAUSTED` of `ENHANCE_YOUR_CALM`, `PERMISSION_DENIED` of `INADEQUATE_SECURITY` and
@@ -517,8 +523,18 @@ the server's error, which gRPC's core still gives the call; a reset stream has g
 `google.rpc.Status` (its `grpc-status-details-bin`) is not of its code or its details, as of
 metadata past the soft limit or of empty details, a status of the code `OK`, is the `ValueError` of
 grpc_status's `rpc_status.from_call` where PySpark's client reads the status, and one whose details
-are not a `google.rpc.Status` is protobuf's `DecodeError` (`Error parsing message with type
-'google.rpc.Status': Wire format was corrupt`) there (see `SparkError::grpcio`, not a stable API).
+upb's parser does not read as a `google.rpc.Status`, as of one nested past its limit, is protobuf's
+`DecodeError` (`Error parsing message with type 'google.rpc.Status': Wire format was corrupt`)
+there, and so is one whose first `ErrorInfo` or `RetryInfo` upb does not read, of its type, where
+PySpark unpacks it (see `SparkError::grpcio`, not a stable API). In the dialect of grpcio, the delay
+of a `RetryInfo` is PySpark's, signed (the `ToMilliseconds()` of its `retry_delay`, 0 of one of
+none), and so is the wait before a retry, of Python's numbers; `retry_delay_ms` and
+`RetryPolicyState::next_attempt` are unchanged, of a delay of a `u64` of milliseconds, of the
+seconds and the nanoseconds each clamped at 0 and of a sum that saturates, which the Rust client
+waits as it is. The error of a closed client or channel of an execution comes once the lookup of
+the plan compression and the hook of the executions ran (`set_execute_plan_hook`), as PySpark reads
+its `_stub` once its plan is built and its hooks ran, and carries the operation ID of its request,
+when it has one (`SparkError::operation_id`), as of its other failures.
 
 `PythonUDFPayload` and `LogicalPlan::CommonInlineUdtf` add a `pickler` field, which is not a
 stable API: the pickling of the command of a UDF or UDTF of the Python client, which a request
@@ -2730,11 +2746,14 @@ and `hash()` and `repr()` raise their own of about 500 structs, while `==`, `sim
 `treeString()`, `toNullable()` and pickling take the types of 600 structs, as far as tried. On
 Python 3.11, PySpark's raise their `RecursionError` from about 100 nested structs (`copy.deepcopy`),
 125 (pickling), 145 (`==`), 165 (`hash()` and `repr()`), 250 (`json()` and `simpleString()`) and 330
-(`treeString()`), and its `repr()` overflows a thread of
-256 KiB from about 150. The `grpc-status-details-bin` of a failure is read within the same limit;
-one past it is of no error of the server, as one that does not decode, where PySpark raises
-protobuf's `DecodeError` of the `google.rpc.Status`. The server is trusted, as SECURITY.md sets out,
-so the limit is not a bound on the size of the responses.
+(`treeString()`), and its `repr()` overflows a thread of 256 KiB from about 150. The
+`grpc-status-details-bin` of a failure is read within the same limit, as upb reads it where
+PySpark's `rpc_status.from_call` does: a `google.rpc.Status` nested past it, as of 101 nested groups
+of a field that the type does not know, or of 100 in a detail, which is a level of its own, raises
+protobuf's `DecodeError` (`Error parsing message with type 'google.rpc.Status': Wire format was
+corrupt`) in both clients, whatever its code and message, as details that are not a
+`google.rpc.Status` do (see below). The server is trusted, as SECURITY.md sets out, so the limit is
+not a bound on the size of the responses.
 
 The error of grpcio of a response that the client fails to decode, of the details "Exception
 deserializing response!" and no `debug_error_string`, is also the one that PySpark's client sees
@@ -3753,11 +3772,42 @@ status code (StatusCode.RESOURCE_EXHAUSTED)`, where it was the `SparkConnectGrpc
 their message, is that `ValueError`, raised as grpcio's error of the call is handled (its
 `__context__`), of no log of the error where the `DefaultPolicy` or the iterator of a reattachable
 execution reads it, and after `GRPC Error received` where `_handle_rpc_error` does (see
-`dev/parity/known-differences.md`). So is the failure of the `grpc-status-details-bin` of an error
-that is not base64, which gRPC's core gives the call empty, a status of the code `OK` (`Code in
-Status proto (StatusCode.OK) doesn't match status code (StatusCode.INTERNAL)`), where the drop-in
-failed the call of its own `INTERNAL`, and of details of base64 that are not a `google.rpc.Status`
-protobuf's `DecodeError`, as PySpark's `rpc_status.from_call` raises it. A channel that cannot
+`dev/parity/known-differences.md`), of no context where the `DefaultPolicy` reads it before a
+retry, as PySpark's `Retrying` does between its attempts. So is the failure of a
+`grpc-status-details-bin` that gRPC's core does not decode as base64: as gRPC's core, the client
+fails the call `INTERNAL` of the details `Stream removed (Error parsing 'grpc-status-details-bin'
+metadata: illegal base64 encoding)`, whatever the code of the server, and gives it the status
+details empty, a status of the code `OK` (`Code in Status proto (StatusCode.OK) doesn't match
+status code (StatusCode.INTERNAL)`). Of details of base64 that upb's parser, PySpark's protobuf,
+does not read as a `google.rpc.Status`, as of one nested past its limit (see above), of a string
+that is not UTF-8 (`String field had bad UTF-8`) or of a tag of more than five bytes, the failure is
+protobuf's `DecodeError`, as PySpark's `rpc_status.from_call` raises it, while a field that the type
+knows of another wire type is read as one that it does not know, as upb reads it; and so is the
+failure of a status whose first `ErrorInfo`, which `_handle_rpc_error` unpacks, or first
+`RetryInfo`, which the `DefaultPolicy` unpacks, upb does not read (`Error parsing message with type
+'google.rpc.ErrorInfo': Wire format was corrupt`), where PySpark unpacks it. The first detail of a
+type is the first that protobuf's `Any.Is` tells of it, of a type URL of a `/`, of any host, and the
+metadata of an `ErrorInfo` holds the entries that upb sets in its map, not those of a field that the
+entry type does not know or of a key or a value of another wire type. As PySpark's
+`convert_exception`, the `classes` and the `messageParameters` of the metadata are parsed with
+Python's `json.loads`, of the values of the JSON as they are, and its error is the failure, as the
+`JSONDecodeError` of JSON that does not parse, of grpcio's error as its context (or as that of the
+`StopIteration` of `json` that it suppresses); the `errorClass` of the metadata, also empty, is the
+condition. The delay of a `RetryInfo` is PySpark's, the
+`ToMilliseconds()` of its `retry_delay`, signed and unbounded and 0 of one of none, which the log
+gives as it is, and so is the wait before a retry, of Python's numbers, which a negative delay
+never lengthens. A negative wait, and one of decades, are slept of Python's `time.sleep`, as
+PySpark's `Retrying` sleeps them, which raises at once, of no context, of one that it cannot hold:
+its `ValueError` of a negative one (`sleep length must be non-negative`), its `OverflowError` of one
+past its nanoseconds of 64 bits (`timestamp out of range for platform time_t` from Python 3.11 on),
+or the system's `OSError` of one that the clock cannot hold. A signal that comes while it sleeps
+ends the wait as one that comes during any other wait of the call: its KeyboardInterrupt interrupts
+the execution in flight. A request sent in the background sleeps it on a thread of Python of its
+own, and fails of its error, which is logged as PySpark's sender logs it (`ReleaseExecute failed
+with exception: ...`). A policy that
+PySpark's `Retrying` decides, as a subclass of `DefaultPolicy`, is asked of a failure as grpcio's
+error of the call is handled, as PySpark's `AttemptManager` asks it, so that what its `can_retry`
+raises has that error as its context. A channel that cannot
 connect fails its calls with
 `UNAVAILABLE`, which the retry policy retries, of the last error of its addresses: of a plaintext
 server that accepts the connection and never answers, grpcio's `failed to connect to all addresses;

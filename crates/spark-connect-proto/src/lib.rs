@@ -38,6 +38,7 @@ mod depth;
 pub use codec::{is_client_decode_error, ClientCodec, ClientDecodeError, ClientDecoder};
 #[doc(hidden)]
 pub use depth::{
-    decode_status_detail, depth_limit, kept_too_deep, response_depth, response_depth_of,
-    set_depth_limit, set_depth_probe, Depth, TooDeep, DEFAULT_DEPTH_LIMIT, MAX_KEPT_DEPTH,
+    decode_status_detail, depth_limit, kept_too_deep, probed_depth_limit, response_depth,
+    response_depth_of, set_depth_limit, set_depth_probe, Depth, TooDeep, DEFAULT_DEPTH_LIMIT,
+    MAX_KEPT_DEPTH,
 };

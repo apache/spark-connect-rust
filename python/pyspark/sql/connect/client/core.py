@@ -2821,22 +2821,23 @@ class _CallRetries:
         exception = _grpc_error(
             streaming, code, details, debug_error_string, trailing_metadata, text
         )
-        if not self._retrying.accept_exception(exception):
-            return None
+        # As PySpark's `AttemptManager.__exit__`, which asks the policies of the exception of the
+        # attempt as it is handled, so that what they raise has it as its `__context__`; the wait
+        # is out of the handling, as `Retrying._wait` waits.
+        try:
+            raise exception
+        except BaseException:
+            if not self._retrying.accept_exception(exception):
+                return None
         try:
             self._retrying._wait()
         except BaseException as raised:
             if raised is exception:
                 return None
             raise
-        wait = self._waits.pop()
-        # A wait that `time.sleep` refuses, negative, NaN or past its nanoseconds of 64 bits,
-        # raises its error at once, as PySpark's sleep does.
-        if not (0 <= wait < 9223372036.854775):
-            import time
-
-            time.sleep(wait)
-        return wait
+        # The transport sleeps a wait that `time.sleep` refuses, negative or NaN, and one of
+        # decades, of Python's `time.sleep`, as PySpark's sleep does.
+        return self._waits.pop()
 
 
 class _InactiveRpcError(Exception):

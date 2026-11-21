@@ -500,11 +500,20 @@ requests of the unpickled object pickle as it is then. This case still differs:
   past the 100 levels of a response from 32 nested structs, so a server's result reaches the
   difference only after `SetAllowOversizeProtos(True)`.
 
-- **A `grpc-status-details-bin` that does not decode** (tracked). The `google.rpc.Status` of the
-  details of a failure that does not decode, also of one nested past the limit of upb's parser,
-  is of no error of the server: the drop-in raises the `SparkConnectGrpcException` of the code
-  and the message of the status. PySpark's `rpc_status.from_call` raises protobuf's `DecodeError`
-  of it (`Error parsing message with type 'google.rpc.Status': Wire format was corrupt`).
+- **The details of a failure, of protobuf's pure-Python implementation** (intentional; one parser
+  of them). With `PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python`, the drop-in reads the
+  `grpc-status-details-bin` of a failure, its `google.rpc.Status` and the first `ErrorInfo` or
+  `RetryInfo` of its details, as upb's parser reads them, within the limit of the decoder's
+  `SetRecursionLimit` (100 of none), counted as upb counts it, where PySpark parses them with
+  protobuf's Python decoder, of its own rules and errors. So PySpark raises the `DecodeError` of a
+  message of groups nested as deep as the limit (`Error parsing message: too many levels of
+  nesting.`), which the drop-in reads, raising upb's of one level more; of other details that do
+  not decode, its own texts (`unpack requires a buffer of 8 bytes` of `abc`, `Truncated string.`),
+  where the drop-in's are upb's (`Error parsing message with type 'google.rpc.Status': Wire format
+  was corrupt`); of a string that is not UTF-8, a `UnicodeDecodeError` (`... in field:
+  google.rpc.Status.message`), where the drop-in raises upb's `DecodeError` (`String field had bad
+  UTF-8`); and it reads a tag or a length of more than five bytes, of which the drop-in raises upb's
+  `DecodeError`.
 
 - **The check of the dependencies at `import pyspark.sql.connect` and `import pyspark.ml.connect`**
   (intentional; the transport is native). PySpark's packages run `check_dependencies()` when they
@@ -598,7 +607,14 @@ requests of the unpickled object pickle as it is then. This case still differs:
   drop-in, a thread of its own, where PySpark warns from the thread that sends it: the threads of
   the transport are not threads of Python, and do not wait for the GIL. So the warnings come in the
   order of the delivery thread, and the exception of a filter of `"error"` is dropped there, as
-  PySpark's senders in the background catch it.
+  PySpark's senders in the background catch it. A wait before a retry of such a request is slept
+  as PySpark's `Retrying` sleeps it, of Python's `time.sleep`, when it is negative or of decades,
+  on a thread of Python of the drop-in's own: a wait that `time.sleep` refuses fails the request at
+  once, of its error, logged as PySpark's sender logs it (`ReleaseExecute failed with exception:
+  timestamp out of range for platform time_t.`). That thread is one that the exit of the
+  interpreter does not wait for, where PySpark's release sleeps on a thread of its
+  `ThreadPoolExecutor`, which its exit joins (`concurrent.futures`): of a release that waits 2^31 s
+  (68 years), PySpark's exit waits for the end of the sleep, and the drop-in exits.
 - **The details of a failure that the client detects** (intentional; the transport is native). The
   message of a gRPC failure of no error of the server is the text of grpcio's error of the call, as
   PySpark's, of the details and the `debug_error_string` of gRPC's C core for a failure that the
@@ -678,8 +694,12 @@ requests of the unpickled object pickle as it is then. This case still differs:
   exception that the drop-in raises of a failed call that it converts, of an error of the server or
   of gRPC, has no `__context__`, where PySpark's, raised as it handles grpcio's error of the call,
   has that error as its context, which it suppresses (`raise ... from None`), so that a traceback
-  shows neither; the `ValueError` of a `google.rpc.Status` that does not match its call has
-  grpcio's error as its context, as PySpark's, which does not suppress it.
+  shows neither; the `ValueError` of a `google.rpc.Status` that does not match its call, protobuf's
+  `DecodeError` of details that upb does not read, what the `can_retry` of a retry policy raises of
+  the failure, also of a policy of the user's, and Python's `JSONDecodeError` of the metadata of an
+  `ErrorInfo` that is not JSON (or the `StopIteration` of `json` that it suppresses, its context)
+  have grpcio's error as their context, as PySpark's, which does not suppress it, but where the
+  `DefaultPolicy` reads the status before a retry, of no context in both.
 - **The children of a fork** (intentional; the transport is native). A child of `os.fork()` makes
   the threads, the runtime and the channels of the client again, as grpcio's fork support does,
   leaves the objects of its parent to the parent, and closes the sockets of its parent's connections

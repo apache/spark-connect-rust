@@ -223,10 +223,17 @@ fn server_error_to_py<'py>(
     let kwargs = PyDict::new(py);
     kwargs.set_item("classes", &server.classes)?;
     kwargs.set_item("sql_state", err.sql_state.as_deref())?;
-    kwargs.set_item(
-        "error_class",
-        (!err.error_class.is_empty()).then_some(err.error_class.as_str()),
-    )?;
+    // As PySpark's `convert_exception`, the `errorClass` of the metadata, also empty, or else the
+    // error class of the details of `FetchErrorDetails`.
+    let fetched_class = (!err.error_class.is_empty()).then_some(err.error_class.as_str());
+    let error_class = match &server.metadata {
+        Some(metadata) => metadata
+            .get("errorClass")
+            .map(String::as_str)
+            .or(fetched_class),
+        None => fetched_class,
+    };
+    kwargs.set_item("error_class", error_class)?;
     kwargs.set_item("reason", &server.reason)?;
     kwargs.set_item("message", &err.message)?;
     // In the order that the server gave the parameters, as the reference client keeps it.
@@ -241,7 +248,32 @@ fn server_error_to_py<'py>(
             parameters.set_item(name, value)?;
         }
     }
+    // Those of the metadata are parsed of its JSON, as PySpark parses them (see below).
+    let parameters = (server.metadata.is_none() || server.fetched_parameters).then_some(parameters);
     kwargs.set_item("message_parameters", parameters)?;
+    // The JSON of the metadata of the `ErrorInfo` that PySpark's `convert_exception` parses with
+    // `json.loads`, its `classes` and its `messageParameters`, as it handles grpcio's error of the
+    // call, the context of what it raises, which the converter makes only then.
+    if let Some(metadata) = &server.metadata {
+        let json = (
+            metadata.get("classes").map(String::as_str),
+            metadata.get("messageParameters").map(String::as_str),
+        );
+        kwargs.set_item("json_metadata", json)?;
+        if let Some(grpcio) = server.rpc_error.as_deref() {
+            let grpcio = grpcio.clone();
+            let handled = pyo3::types::PyCFunction::new_closure(
+                py,
+                None,
+                None,
+                move |args: &Bound<'_, pyo3::types::PyTuple>, _| {
+                    let py = args.py();
+                    grpcio_context(py, &grpcio).map(|handled| handled.into_value(py))
+                },
+            )?;
+            kwargs.set_item("handled", handled)?;
+        }
+    }
     kwargs.set_item("stacktrace", err.server_stacktrace.as_deref())?;
     kwargs.set_item("display_server_stacktrace", server.display_stacktrace)?;
     kwargs.set_item("contexts", contexts)?;
@@ -251,10 +283,12 @@ fn server_error_to_py<'py>(
     // grpcio's error of the call, which the query context loggers log as the exception.
     kwargs.set_item(
         "rpc_error",
-        server
-            .rpc_error
-            .as_ref()
-            .map(|(call, text)| (*call == GrpcCall::ServerStreaming, text.as_str())),
+        server.rpc_error.as_deref().map(|grpcio| {
+            (
+                grpcio.call == GrpcCall::ServerStreaming,
+                grpcio.text.as_str(),
+            )
+        }),
     )?;
     py.import("pyspark.errors.exceptions.connect")?.call_method(
         "_convert_server_error",
@@ -729,31 +763,45 @@ fn grpcio_exception(error: &spark_connect_core::error::GrpcioError) -> Option<Py
     })
 }
 
+/// grpcio's error of the failed call of `grpcio`, as the exception that PySpark handles as it reads
+/// the status of the call, the context of what it raises then: grpcio's own, or, without grpcio, an
+/// exception of the class name and the text of grpcio's error (see
+/// `pyspark.sql.connect.client.core._InactiveRpcError`). None if neither can be made.
+fn grpcio_context(
+    py: Python<'_>,
+    grpcio: &spark_connect_core::error::GrpcioError,
+) -> Option<PyErr> {
+    grpcio_exception(grpcio).or_else(|| {
+        let class = if grpcio.call == GrpcCall::ServerStreaming {
+            "_MultiThreadedRendezvous"
+        } else {
+            "_InactiveRpcError"
+        };
+        py.import("pyspark.sql.connect.client.core")
+            .and_then(|client| client.getattr(class))
+            .and_then(|class| class.call1((grpcio.text.as_str(),)))
+            .ok()
+            .map(PyErr::from_value)
+    })
+}
+
 /// PySpark's error of `grpc_status.rpc_status.from_call` of the failed call of `grpcio`, whose
-/// `google.rpc.Status` does not match it, its `ValueError`, or whose details are not one,
-/// protobuf's `DecodeError` (see `spark_connect_core::error::SparkError::grpcio`): raised as
-/// grpcio's error of the call is handled, its `__context__`, and of the operation ID of an
-/// execution, which PySpark's `_handle_error` sets on any exception of it. Without grpcio, its
-/// context is an exception of the class name and the text of grpcio's error (see
+/// `google.rpc.Status` does not match it, its `ValueError`, or whose details upb does not read,
+/// protobuf's `DecodeError`, also of the `Any.Unpack` of its `ErrorInfo` or `RetryInfo` (see
+/// `spark_connect_core::error::SparkError::grpcio`): raised as grpcio's error of the call is
+/// handled, its `__context__`, and of the operation ID of an execution, which PySpark's
+/// `_handle_error` sets on any exception of it. Without grpcio, its context is an exception of the
+/// class name and the text of grpcio's error (see
 /// `pyspark.sql.connect.client.core._InactiveRpcError`); without protobuf, the `DecodeError` is the
-/// runtime's (see `pyspark.sql.connect.proto._rust.DecodeError`).
+/// runtime's (see `pyspark.sql.connect.proto._rust.DecodeError`). Of no `grpcio`, as of the status
+/// that PySpark's `Retrying` reads between its attempts, where no error is handled, it has no
+/// context of the call.
 fn rpc_status_value_error(
     err: &SparkError,
-    grpcio: &spark_connect_core::error::GrpcioError,
+    grpcio: Option<&spark_connect_core::error::GrpcioError>,
 ) -> PyErr {
     Python::attach(|py| {
-        let context = grpcio_exception(grpcio).or_else(|| {
-            let class = if grpcio.call == GrpcCall::ServerStreaming {
-                "_MultiThreadedRendezvous"
-            } else {
-                "_InactiveRpcError"
-            };
-            py.import("pyspark.sql.connect.client.core")
-                .and_then(|client| client.getattr(class))
-                .and_then(|class| class.call1((grpcio.text.as_str(),)))
-                .ok()
-                .map(PyErr::from_value)
-        });
+        let context = grpcio.and_then(|grpcio| grpcio_context(py, grpcio));
         // As PySpark, where the KeyboardInterrupt of a signal that comes while the error is made
         // is raised in its place.
         if let Some(context) = context.as_ref() {
@@ -795,7 +843,7 @@ fn rpc_status_value_error(
 pub fn spark_error_to_py_exception(err: SparkError) -> PyErr {
     if let Some(grpcio) = err.grpcio.as_deref() {
         if err.kind == SparkErrorKind::BuiltinValueError {
-            return rpc_status_value_error(&err, grpcio);
+            return rpc_status_value_error(&err, Some(grpcio));
         }
         if let Some(exception) = grpcio_exception(grpcio) {
             return exception;
@@ -815,8 +863,10 @@ pub fn spark_error_to_py_exception(err: SparkError) -> PyErr {
         return pyo3::exceptions::PyRecursionError::new_err(err.message());
     }
     if err.kind == SparkErrorKind::BuiltinValueError {
-        // A builtin, as the `int()` or `urllib` of the connection string raises it.
-        return exceptions::PyValueError::new_err(err.message());
+        // A builtin, as the `int()` or `urllib` of the connection string raises it, or the error of
+        // the status of a failure that PySpark's `Retrying` reads between its attempts, of no
+        // context: grpc_status's `ValueError` or protobuf's `DecodeError`.
+        return rpc_status_value_error(&err, None);
     }
     if err.kind == SparkErrorKind::BuiltinTypeError {
         // A builtin, as the protobuf of a plan's argument raises it.
