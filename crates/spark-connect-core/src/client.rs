@@ -643,19 +643,23 @@ fn with_deadline<T>(mut request: Request<T>, deadline: Option<Duration>) -> Requ
 fn background_failure<E>(request: BackgroundRequest, failed: RetryError<E>) {
     use crate::retries::BackgroundFailure;
     let text = |status: &tonic::Status| crate::error::grpcio_error_text(status, GrpcCall::Unary);
-    crate::retries::log(|listener| match failed {
-        RetryError::Exceeded(status) => listener.background_failure(
-            request,
-            Some(RetriesExceeded::Policy),
-            BackgroundFailure::Rpc(&text(&status)),
-        ),
-        RetryError::Status(status) => {
-            listener.background_failure(request, None, BackgroundFailure::Rpc(&text(&status)))
+    // A log that no caller waits for, of no error.
+    let _ = crate::retries::log(|listener| {
+        match failed {
+            RetryError::Exceeded(status) => listener.background_failure(
+                request,
+                Some(RetriesExceeded::Policy),
+                BackgroundFailure::Rpc(&text(&status)),
+            ),
+            RetryError::Status(status) => {
+                listener.background_failure(request, None, BackgroundFailure::Rpc(&text(&status)))
+            }
+            RetryError::Failed(error) => {
+                listener.background_failure(request, None, BackgroundFailure::Error(error))
+            }
+            RetryError::Aborted(_) | RetryError::WaitAborted => {}
         }
-        RetryError::Failed(error) => {
-            listener.background_failure(request, None, BackgroundFailure::Error(error))
-        }
-        RetryError::Aborted(_) | RetryError::WaitAborted => {}
+        Ok(())
     });
 }
 
@@ -739,16 +743,106 @@ enum PlanCompression {
     Zstd { threshold: usize },
 }
 
-/// The plan compression of the confs of the server, as PySpark reads them: zstd above a threshold
-/// that is not negative. Any other algorithm, or a missing or invalid threshold, disables it.
-fn plan_compression_of(threshold: Option<&str>, algorithm: Option<&str>) -> PlanCompression {
-    let threshold = threshold
-        .filter(|threshold| !threshold.is_empty())
-        .and_then(|threshold| threshold.parse::<usize>().ok());
-    match (threshold, algorithm) {
-        (Some(threshold), Some("ZSTD")) => PlanCompression::Zstd { threshold },
+/// The threshold of the plan compression of the conf `threshold` of the server, as PySpark's
+/// `int(plan_compression_threshold_str) if plan_compression_threshold_str else -1` reads it, or
+/// None where `int()` raises.
+fn plan_compression_threshold(threshold: Option<&str>) -> Option<i128> {
+    match threshold {
+        None | Some("") => Some(-1),
+        Some(threshold) => crate::client_log::python_int(threshold),
+    }
+}
+
+/// The plan compression of the threshold `threshold`, as PySpark reads it of its conf, and of the
+/// algorithm `algorithm`: zstd above a threshold that is not negative.
+fn plan_compression_above(threshold: i128, algorithm: Option<&str>) -> PlanCompression {
+    match algorithm {
+        Some("ZSTD") if threshold >= 0 => PlanCompression::Zstd {
+            threshold: usize::try_from(threshold).unwrap_or(usize::MAX),
+        },
         _ => PlanCompression::Disabled,
     }
+}
+
+/// The plan compression of the confs `threshold` and `algorithm` of the server, as PySpark reads
+/// them: zstd above a threshold that is not negative, which any other algorithm, or a missing or
+/// invalid threshold, disables; and what PySpark's `_get_plan_compression_threshold_and_algorithm`
+/// logs of them: `Plan compression threshold: ..., algorithm: ...`, or, of a threshold that `int()`
+/// does not read, its `ValueError` with which it disables the compression.
+fn looked_up_plan_compression(
+    threshold: Option<&str>,
+    algorithm: Option<&str>,
+) -> (PlanCompression, crate::client_log::Message) {
+    use crate::client_log::Message;
+    match plan_compression_threshold(threshold) {
+        Some(value) => (
+            plan_compression_above(value, algorithm),
+            Message::Text(format!(
+                "Plan compression threshold: {value}, algorithm: {}",
+                algorithm.unwrap_or("None")
+            )),
+        ),
+        None => {
+            let text = threshold.unwrap_or_default();
+            let error = SparkError::builtin_value_msg(format!(
+                "invalid literal for int() with base 10: {}",
+                python_str_repr(text)
+            ));
+            (
+                PlanCompression::Disabled,
+                Message::WithError {
+                    text: PLAN_COMPRESSION_UNSUPPORTED,
+                    error: Box::new(error),
+                },
+            )
+        }
+    }
+}
+
+/// What PySpark's `_get_plan_compression_threshold_and_algorithm` logs, of the exception that it
+/// catches as its argument, when it disables the plan compression of a lookup that failed.
+const PLAN_COMPRESSION_UNSUPPORTED: &str =
+    "Plan compression is disabled because the server does not support it.";
+
+/// The `repr` of the Python string `text`: in single quotes, or in double quotes of a text of
+/// single quotes and of no double quotes, with the escapes of Python's `repr` of the backslash,
+/// the quote, the whitespace controls and the other characters that are not printable.
+fn python_str_repr(text: &str) -> String {
+    let quote = if text.contains('\'') && !text.contains('"') {
+        '"'
+    } else {
+        '\''
+    };
+    let mut repr = String::with_capacity(text.len() + 2);
+    repr.push(quote);
+    for c in text.chars() {
+        match c {
+            '\\' => repr.push_str("\\\\"),
+            '\n' => repr.push_str("\\n"),
+            '\r' => repr.push_str("\\r"),
+            '\t' => repr.push_str("\\t"),
+            c if c == quote => {
+                repr.push('\\');
+                repr.push(c);
+            }
+            c if (c as u32) < 0x20 || c as u32 == 0x7f => {
+                repr.push_str(&format!("\\x{:02x}", c as u32));
+            }
+            c if c.is_control() => {
+                let code = c as u32;
+                if code <= 0xff {
+                    repr.push_str(&format!("\\x{code:02x}"));
+                } else if code <= 0xffff {
+                    repr.push_str(&format!("\\u{code:04x}"));
+                } else {
+                    repr.push_str(&format!("\\U{code:08x}"));
+                }
+            }
+            c => repr.push(c),
+        }
+    }
+    repr.push(quote);
+    repr
 }
 
 /// The stack that a clone of a request takes for the levels of its plan: prost's derived `Clone`
@@ -768,33 +862,48 @@ fn clone_on_grown_stack<T: Clone>(value: &T) -> T {
 }
 
 /// Replace the relation or command of `plan` with its zstd-compressed operation, when it is over
-/// `threshold` bytes and compression makes it smaller, as PySpark's `_try_compress_and_set_plan`.
-fn compress_over_threshold(plan: &mut Plan, threshold: usize) {
+/// `threshold` bytes and compression makes it smaller, as PySpark's `_try_compress_and_set_plan`:
+/// what it logs of a compression, its sizes and its time (`Plan compression: ...`), and that it was
+/// not effective. The frame is that of the `compress` of python-zstandard, of the same level, which
+/// writes the size of the content: the same bytes, of the same version of zstd.
+fn compress_over_threshold(plan: &mut Plan, threshold: usize) -> Vec<String> {
     let (op_type, size) = match &plan.op_type {
         Some(PlanOpType::Root(relation)) => (CompressedOpType::Relation, relation.encoded_len()),
         Some(PlanOpType::Command(command)) => (CompressedOpType::Command, command.encoded_len()),
-        _ => return,
+        _ => return Vec::new(),
     };
     // The size of the encoding, without encoding the plans that are not over the threshold.
     if size <= threshold {
-        return;
+        return Vec::new();
     }
     let message = match &plan.op_type {
         Some(PlanOpType::Root(relation)) => relation.encode_to_vec(),
         Some(PlanOpType::Command(command)) => command.encode_to_vec(),
-        _ => return,
+        _ => return Vec::new(),
     };
-    let Ok(data) = zstd::encode_all(message.as_slice(), zstd::DEFAULT_COMPRESSION_LEVEL) else {
-        return;
+    let started = std::time::Instant::now();
+    let Ok(data) = zstd::bulk::compress(message.as_slice(), zstd::DEFAULT_COMPRESSION_LEVEL) else {
+        return Vec::new();
     };
+    let duration = started.elapsed().as_secs_f64();
+    // As PySpark's f-string of the ratio and the time, of Python's rounding of a float.
+    let mut logged = vec![format!(
+        "Plan compression: original_size={}, compressed_size={}, saving_ratio={:.2}, \
+         duration_s={duration:.1}",
+        message.len(),
+        data.len(),
+        1.0 - data.len() as f64 / message.len() as f64,
+    )];
     if data.len() >= message.len() {
-        return;
+        logged.push("Plan compression not effective. Using original plan.".to_string());
+        return logged;
     }
     plan.op_type = Some(PlanOpType::CompressedOperation(CompressedOperation {
         data: data.into(),
         op_type: op_type as i32,
         compression_codec: CompressionCodec::Zstd as i32,
     }));
+    logged
 }
 
 /// The plans of an analysis, which PySpark builds with its plan compression. The plans of
@@ -816,6 +925,16 @@ fn analyze_plans(analyze: &mut Analyze) -> Vec<&mut Option<Plan>> {
         | Analyze::GetStorageLevel(_)
         | Analyze::JsonToDdl(_) => Vec::new(),
     }
+}
+
+/// An execution whose request is built, as PySpark's client builds it before its `Progress` of
+/// the execution starts, and not sent yet: [`SparkConnectClient::build_execution`] builds it and
+/// [`SparkConnectClient::execute_built`] sends it. Not a stable API.
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct BuiltExecution {
+    request: ExecutePlanRequest,
+    log: crate::client_log::ExecutionLog,
 }
 
 /// A hook of the executions of a client, as PySpark's `SparkSession.Hook.on_execute_plan`: it is
@@ -859,6 +978,168 @@ fn add_result_chunking_option(request: &mut ExecutePlanRequest, chunking: Result
             },
         )),
     });
+}
+
+/// What PySpark's `execute_command` logs of the command of `request` before it sets the command in
+/// the plan of its request (`Execute command for command ...`), or its
+/// `execute_command_as_iterator`, of the command truncated.
+fn logged_command(
+    request: &ExecutePlanRequest,
+    log: crate::client_log::ExecutionLog,
+) -> crate::client_log::Message {
+    use crate::client_log::{types, Encoded, ExecutionLog, Message};
+    let prefix = match log {
+        ExecutionLog::ExecuteCommandAsIterator => "Execute command as iterator for command ",
+        _ => "Execute command for command ",
+    };
+    let message = match request.plan.as_ref().and_then(|plan| plan.op_type.as_ref()) {
+        Some(PlanOpType::Command(command)) => Encoded::of(types::COMMAND, command),
+        _ => Encoded::of(types::COMMAND, &spark_connect_proto::Command::default()),
+    };
+    Message::Proto {
+        prefix: prefix.into(),
+        message,
+        truncated: true,
+    }
+}
+
+/// Log what the method of PySpark's client that the execution of `request` stands for logs as it
+/// is called, before it builds the request, as `log` says: the plan of `to_table` and of
+/// `to_table_as_iterator`, of the plan as it is sent (`Executing plan ...`), and the command of
+/// `execute_command` and of `execute_command_as_iterator`, before it is compressed (`Execute
+/// command for command ...`), truncated. The error of a record fails the execution there.
+async fn log_execution_call(
+    request: &ExecutePlanRequest,
+    log: crate::client_log::ExecutionLog,
+) -> Result<()> {
+    use crate::client_log::{logged, ExecutionLog, Level};
+    match log {
+        ExecutionLog::ToTable | ExecutionLog::ToTableAsIterator => {
+            logged(Level::Debug, || {
+                crate::client_log::executing_plan(request.plan.as_ref())
+            })
+            .await
+        }
+        ExecutionLog::ExecuteCommand | ExecutionLog::ExecuteCommandAsIterator => {
+            logged(Level::Debug, || logged_command(request, log)).await
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Log what PySpark's client logs of the execution once its request is built, before its
+/// `Progress` of the execution starts, as `log` says: the `ExecuteAndFetch` of
+/// `_execute_and_fetch` or the `Execute` of `_execute`. The error of the record fails the execution
+/// there, before its request is sent.
+async fn log_execution(log: crate::client_log::ExecutionLog) -> Result<()> {
+    use crate::client_log::{logged, ExecutionLog, Level, Message};
+    let started = match log {
+        ExecutionLog::ToTable | ExecutionLog::Fetch | ExecutionLog::ExecuteCommand => {
+            Some("ExecuteAndFetch")
+        }
+        ExecutionLog::Execute => Some("Execute"),
+        _ => None,
+    };
+    if let Some(started) = started {
+        logged(Level::Debug, || Message::Text(started.to_string())).await?;
+    }
+    Ok(())
+}
+
+/// Log the request of an execution as `_execute_and_fetch_as_iterator` logs it as it starts, in
+/// the `Progress` of the execution, before the hooks of the executions run
+/// (`ExecuteAndFetchAsIterator. Request: ...`), of an execution whose responses are logged. The
+/// error of the record fails the execution there, before its request is sent.
+async fn log_execution_request(
+    request: &ExecutePlanRequest,
+    log: crate::client_log::ExecutionLog,
+) -> Result<()> {
+    use crate::client_log::{logged, types, Encoded, Level, Message};
+    if log.logs_responses() {
+        logged(Level::Debug, || Message::Proto {
+            prefix: "ExecuteAndFetchAsIterator. Request: ".into(),
+            message: Encoded::of(types::EXECUTE_PLAN_REQUEST, request),
+            truncated: false,
+        })
+        .await?;
+    }
+    Ok(())
+}
+
+/// Log what PySpark's `schema` logs of the plan of the analysis `request` as it starts, as `log`
+/// says, of the plan that `to_proto` built, compressed, truncated: `Schema for plan: ...`. The error
+/// of the record fails the analysis there, before its request is sent.
+async fn log_analysis(
+    request: &AnalyzePlanRequest,
+    log: crate::client_log::AnalysisLog,
+) -> Result<()> {
+    use crate::client_log::{logged, types, AnalysisLog, Encoded, Level, Message};
+    let plan = match (log, request.analyze.as_ref()) {
+        (AnalysisLog::Schema, Some(Analyze::Schema(schema))) => schema.plan.as_ref(),
+        _ => return Ok(()),
+    };
+    logged(Level::Debug, || {
+        let message = match plan {
+            Some(plan) => Encoded::of(types::PLAN, plan),
+            None => Encoded::of(types::PLAN, &Plan::default()),
+        };
+        Message::Proto {
+            prefix: "Schema for plan: ".into(),
+            message,
+            truncated: true,
+        }
+    })
+    .await
+}
+
+/// Log `response`, a response of an execution as the stream reads it, as PySpark's
+/// `_execute_and_fetch_as_iterator` logs each response that it reads: the response
+/// (`ExecuteAndFetchAsIterator. Response received: ...`), and what it has of the metrics, the
+/// observed metrics, the schema, the result of a SQL command and an Arrow batch, or a chunk of one,
+/// in that order. The joining of the chunks of a batch logs it once it is whole (`Assembling arrow
+/// batch ...`). The error of a record fails the execution there.
+pub(crate) async fn log_response(response: &ExecutePlanResponse) -> Result<()> {
+    use crate::client_log::{logged, types, Encoded, Level, Message};
+    use spark_connect_proto::execute_plan_response::ResponseType;
+    if !crate::client_log::enabled(Level::Debug) {
+        return Ok(());
+    }
+    logged(Level::Debug, || Message::Proto {
+        prefix: "ExecuteAndFetchAsIterator. Response received: ".into(),
+        message: Encoded::of(types::EXECUTE_PLAN_RESPONSE, response),
+        truncated: false,
+    })
+    .await?;
+    let text = |text: &str| Message::Text(text.to_string());
+    if response.metrics.is_some() {
+        logged(Level::Debug, || text("Received metric batch.")).await?;
+    }
+    if !response.observed_metrics.is_empty() {
+        logged(Level::Debug, || text("Received observed metric batch.")).await?;
+    }
+    if response.schema.is_some() {
+        logged(Level::Debug, || text("Received the schema.")).await?;
+    }
+    match &response.response_type {
+        Some(ResponseType::SqlCommandResult(_)) => {
+            logged(Level::Debug, || text("Received the SQL command result.")).await?;
+        }
+        Some(ResponseType::ArrowBatch(batch)) => {
+            logged(Level::Debug, || {
+                Message::Text(format!(
+                    "Received arrow batch rows={} Number of chunks in batch={} Chunk index={} \
+                     size={}",
+                    batch.row_count,
+                    batch.num_chunks_in_batch.unwrap_or(0),
+                    batch.chunk_index.unwrap_or(0),
+                    batch.data.len()
+                ))
+            })
+            .await?;
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 /// A Spark Connect client for communicating with a remote Spark server.
@@ -1124,6 +1405,10 @@ struct UserContextExtensions {
     /// binding gave them (see [`SparkConnectClient::set_thread_request_context`]), which take the
     /// place of those of the client for the requests of that thread.
     request_by_thread: std::collections::HashMap<std::thread::ThreadId, ThreadRequestContext>,
+    /// The call stack of the user's code of the call of each thread that a binding gave it (see
+    /// [`SparkConnectClient::set_thread_call_stack`]), which the requests of its executions, its
+    /// analyses and its configurations carry last of their user context extensions.
+    call_stack_by_thread: std::collections::HashMap<std::thread::ThreadId, prost_types::Any>,
     /// What a binding keeps to bring the extensions up to date before the calls of a thread send
     /// requests (see [`SparkConnectClient::set_user_context_refresher`]).
     refresher: Option<UserContextRefresher>,
@@ -1148,6 +1433,7 @@ pub struct ThreadRequestState {
     thread: std::thread::ThreadId,
     request: Option<ThreadRequestContext>,
     own: Option<SharedUserContextExtensions>,
+    call_stack: Option<prost_types::Any>,
 }
 
 /// The opaque refresher of the user context extensions of a binding.
@@ -1199,6 +1485,7 @@ impl SharedUserContextExtensions {
 fn forget_thread_extensions(extensions: &mut UserContextExtensions, thread: std::thread::ThreadId) {
     extensions.by_thread.remove(&thread);
     extensions.request_by_thread.remove(&thread);
+    extensions.call_stack_by_thread.remove(&thread);
 }
 
 impl SparkConnectClient {
@@ -1404,6 +1691,7 @@ impl SparkConnectClient {
             thread,
             request: extensions.request_by_thread.get(&thread).cloned(),
             own: extensions.by_thread.get(&thread).cloned(),
+            call_stack: extensions.call_stack_by_thread.get(&thread).cloned(),
         }
     }
 
@@ -1435,6 +1723,61 @@ impl SparkConnectClient {
             None => {
                 extensions.by_thread.remove(&thread);
             }
+        }
+        match state.call_stack {
+            Some(call_stack) => {
+                extensions.call_stack_by_thread.insert(thread, call_stack);
+            }
+            None => {
+                extensions.call_stack_by_thread.remove(&thread);
+            }
+        }
+    }
+
+    /// Make the requests of the executions, the analyses and the configurations of the calling
+    /// thread carry `call_stack`, the call stack of the user's code of the call that the thread
+    /// runs, last of their user context extensions, or none, until the thread ends or is given
+    /// another: as PySpark's requests carry the call stack of their build when
+    /// `SPARK_CONNECT_DEBUG_CLIENT_CALL_STACK` is set (`_build_call_stack_trace`), which a
+    /// binding reads as each call starts. Not a stable API.
+    #[doc(hidden)]
+    pub fn set_thread_call_stack(&self, call_stack: Option<prost_types::Any>) {
+        let mut extensions = self
+            .user_context_extensions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let thread = crate::runtime::calling_thread_id();
+        let Some(call_stack) = call_stack else {
+            extensions.call_stack_by_thread.remove(&thread);
+            return;
+        };
+        if !extensions.by_thread.contains_key(&thread)
+            && !extensions.request_by_thread.contains_key(&thread)
+            && !extensions.call_stack_by_thread.contains_key(&thread)
+        {
+            forget_when_thread_ends(&self.user_context_extensions, forget_thread_extensions);
+        }
+        extensions.call_stack_by_thread.insert(thread, call_stack);
+    }
+
+    /// Append the call stack of the calling thread (see
+    /// [`SparkConnectClient::set_thread_call_stack`]), if it has one, to the user context
+    /// extensions of a request, after those of the client and of the thread, as PySpark's
+    /// `_execute_plan_request_with_metadata`, `_analyze_plan_request_with_metadata` and
+    /// `_config_request_with_metadata` append the call stack that they build.
+    fn add_call_stack(&self, context: &mut Option<UserContext>) {
+        let extensions = self
+            .user_context_extensions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(call_stack) = extensions
+            .call_stack_by_thread
+            .get(&crate::runtime::calling_thread_id())
+        {
+            context
+                .get_or_insert_with(UserContext::default)
+                .extensions
+                .push(call_stack.clone());
         }
     }
 
@@ -1753,16 +2096,22 @@ impl SparkConnectClient {
     /// [`SparkConnectClient::verify_response`]), and disables its plan compression when the server
     /// cannot parse a plan, as PySpark's `_handle_rpc_error` does.
     fn grpc_error(&self, status: tonic::Status, call: GrpcCall) -> SparkError {
-        let error = SparkError::from_grpc_status_of(status, call);
-        let condition = error.get_condition();
-        if self.session_tracking && condition.as_deref() == Some("INVALID_HANDLE.SESSION_CHANGED") {
-            self.set_closed(true);
+        let error = self.session_checked_grpc_error(status, call);
+        if error.get_condition().as_deref() == Some("CONNECT_INVALID_PLAN.CANNOT_PARSE") {
+            self.keep_plan_compression(PlanCompression::Disabled);
         }
-        if condition.as_deref() == Some("CONNECT_INVALID_PLAN.CANNOT_PARSE") {
-            *self
-                .plan_compression
-                .lock()
-                .unwrap_or_else(|e| e.into_inner()) = PlanCompression::Disabled;
+        error
+    }
+
+    /// The gRPC failure of a call of the kind `call` as a [`SparkError`], which marks the client
+    /// closed when the server reports that the session changed (see
+    /// [`SparkConnectClient::grpc_error`]).
+    fn session_checked_grpc_error(&self, status: tonic::Status, call: GrpcCall) -> SparkError {
+        let error = SparkError::from_grpc_status_of(status, call);
+        if self.session_tracking
+            && error.get_condition().as_deref() == Some("INVALID_HANDLE.SESSION_CHANGED")
+        {
+            self.set_closed(true);
         }
         error
     }
@@ -1793,28 +2142,6 @@ impl SparkConnectClient {
         let _callback = crate::runtime::CallbackGuard::enter();
         let mut request = hook(request)?;
         request.operation_id = operation_id;
-        Ok(request)
-    }
-
-    /// `request` as the hook of the executions returns it, with its plan compressed again when a
-    /// hook ran: a hook may put in a plan, such as the drop-in's hook, which resolves the plan of
-    /// a DataFrame there, as PySpark's hook would put in the plan of `to_proto`, which compresses
-    /// it. A plan that is compressed already is kept.
-    async fn hooked_and_compressed(
-        &self,
-        request: ExecutePlanRequest,
-    ) -> Result<ExecutePlanRequest> {
-        let hook_set = self
-            .execute_plan_hook
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .is_some();
-        let mut request = self.hooked(request)?;
-        if hook_set {
-            if let Some(plan) = request.plan.as_mut() {
-                self.compress_plan(plan).await?;
-            }
-        }
         Ok(request)
     }
 
@@ -2163,31 +2490,103 @@ impl SparkConnectClient {
             None => PlanCompression::Disabled,
             Some(Ok(values)) => match values.as_slice() {
                 [threshold, algorithm] => {
-                    plan_compression_of(threshold.as_deref(), algorithm.as_deref())
+                    // As PySpark's lookup, which logs the settings that it read, or the error of a
+                    // threshold that is not an integer, which disables the compression.
+                    let (looked_up, logged) =
+                        looked_up_plan_compression(threshold.as_deref(), algorithm.as_deref());
+                    let of_error = match &logged {
+                        crate::client_log::Message::WithError { error, .. } => {
+                            Some(error.as_ref().clone())
+                        }
+                        _ => None,
+                    };
+                    match crate::client_log::logged(crate::client_log::Level::Debug, || logged)
+                        .await
+                    {
+                        Ok(()) => looked_up,
+                        Err(error) => match &of_error {
+                            // The log of the error of the threshold is in PySpark's `except
+                            // Exception as e`: its error is raised, of the compression disabled,
+                            // of the error of the threshold as its context.
+                            Some(caught) => {
+                                self.keep_plan_compression(PlanCompression::Disabled);
+                                return Err(crate::retries::raised_in_handling(
+                                    error,
+                                    crate::retries::Handled::Error(caught),
+                                ));
+                            }
+                            // The log of the settings is in its `try`, whose `except Exception`
+                            // catches the error of a handler of the log, as a failed lookup.
+                            None => {
+                                return self
+                                    .plan_compression_after_error(error, Some(looked_up))
+                                    .await
+                            }
+                        },
+                    }
                 }
                 _ => PlanCompression::Disabled,
             },
             Some(Err(error)) => {
-                let aborted = is_wait_aborted(&error);
-                // As PySpark's `except Exception` of the lookup, which catches its failure, and the
-                // exception of the warning of its retries once they are spent, or of a policy,
-                // but not a `BaseException` only, as the KeyboardInterrupt of a policy's Python.
-                if let Some(error) = crate::retries::caught(error) {
-                    return Err(error);
-                }
                 // An aborted lookup is not the answer of the server: nothing is kept, so the
                 // lookup is made again by the next plan.
-                if aborted {
+                if is_wait_aborted(&error) {
+                    if let Some(error) = crate::retries::caught(error) {
+                        return Err(error);
+                    }
                     return Ok(PlanCompression::Disabled);
                 }
-                PlanCompression::Disabled
+                return self.plan_compression_after_error(error, None).await;
             }
         };
+        self.keep_plan_compression(looked_up);
+        Ok(looked_up)
+    }
+
+    /// Keep `looked_up` as the plan compression of this client, for its later plans.
+    fn keep_plan_compression(&self, looked_up: PlanCompression) {
         *self
             .plan_compression
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = looked_up;
-        Ok(looked_up)
+    }
+
+    /// The plan compression after `error`, of the lookup of its settings or of the log of them, as
+    /// the `except Exception` of PySpark's `_get_plan_compression_threshold_and_algorithm` catches
+    /// it: the error of a lookup, the exception of the warning of its spent retries or of a policy,
+    /// or that of a handler of the log of the settings, `read` the settings that it logged. The
+    /// compression is disabled, and the exception that it caught is logged, as the argument of a
+    /// text of no placeholder for it, whose error is raised, as the log is in the `except` clause.
+    /// An error that is not caught, of a `BaseException` only, as the `KeyboardInterrupt` of a
+    /// policy's Python or of a handler, is raised: of the settings that the log read, which
+    /// PySpark has set before it logs them, else of none kept, so that the next plan looks them up.
+    async fn plan_compression_after_error(
+        &self,
+        error: SparkError,
+        read: Option<PlanCompression>,
+    ) -> Result<PlanCompression> {
+        // Of the error as it is, before it is caught, of which the listener logs only one of an
+        // `Exception`. The error of the log has the error that it logs as its context, as the log
+        // is in the `except Exception as e` of PySpark's lookup.
+        let logged = crate::client_log::logged(crate::client_log::Level::Debug, || {
+            crate::client_log::Message::WithError {
+                text: PLAN_COMPRESSION_UNSUPPORTED,
+                error: Box::new(error.clone()),
+            }
+        })
+        .await
+        .map_err(|raised| {
+            crate::retries::raised_in_handling(raised, crate::retries::Handled::Error(&error))
+        });
+        if let Some(error) = crate::retries::caught(error) {
+            if let Some(read) = read {
+                self.keep_plan_compression(read);
+            }
+            return Err(error);
+        }
+        self.keep_plan_compression(PlanCompression::Disabled);
+        logged?;
+        Ok(PlanCompression::Disabled)
     }
 
     /// Read the server's plan compression settings, unless this client has them, as PySpark's
@@ -2202,60 +2601,156 @@ impl SparkConnectClient {
         self.plan_compression().await.map(drop)
     }
 
-    /// Compress `plan` as the plan compression of this client asks.
+    /// The plan compression of this client once its settings are read, of the first plan, and
+    /// None before: the threshold over which the plans of relations and of commands are
+    /// compressed, the size of their encoding, or None when the compression is disabled. A caller
+    /// that encodes a plan outside the core tells with it that the core would send the plan as it
+    /// is (see [`SparkConnectClient::prepare_plan`]). Not a stable API.
+    #[doc(hidden)]
+    pub fn known_plan_compression(&self) -> Option<Option<usize>> {
+        match *self
+            .plan_compression
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+        {
+            PlanCompression::Unknown => None,
+            PlanCompression::Disabled => Some(None),
+            PlanCompression::Zstd { threshold } => Some(Some(threshold)),
+        }
+    }
+
+    /// Compress `plan` as the plan compression of this client asks, after the lookup of its
+    /// settings of the first plan, as PySpark's `to_proto` builds a plan, with what it logs of
+    /// them. The compression is tried once: a plan prepared so is sent as it is, compressed or
+    /// not, with [`SparkConnectClient::execute_plan_reattachable_as_is`]. A caller that reads
+    /// settings of its own between building a plan and sending it, as PySpark's `toPandas` and
+    /// `toLocalIterator` do, prepares its plan first. The error is that of
+    /// [`SparkConnectClient::read_plan_compression`], or of a record of the compression. Not a
+    /// stable API.
+    #[doc(hidden)]
+    pub async fn prepare_plan(&self, plan: &mut Plan) -> Result<()> {
+        self.compress_plan(plan).await
+    }
+
+    /// Compress `plan` as the plan compression of this client asks, with what PySpark's
+    /// `_try_compress_and_set_plan` logs of it, whose error fails the call there.
     async fn compress_plan(&self, plan: &mut Plan) -> Result<()> {
         if let PlanCompression::Zstd { threshold } = self.plan_compression().await? {
-            compress_over_threshold(plan, threshold);
+            for logged in compress_over_threshold(plan, threshold) {
+                crate::client_log::logged(crate::client_log::Level::Debug, || {
+                    crate::client_log::Message::Text(logged)
+                })
+                .await?;
+            }
         }
         Ok(())
     }
 
-    /// `request`, the request of an execution, as PySpark's client sends it: of its client type,
-    /// its result chunking options, its user context, the server-side session ID that it
-    /// observes, its plan compressed as the plan compression of this client asks when
-    /// `compressed`, and as the hook of the executions, if any, returns it.
+    /// `request`, the request of an execution, as PySpark's client sends it (see
+    /// [`SparkConnectClient::unstarted_execution_request`] and
+    /// [`SparkConnectClient::started_execution_request`]).
+    async fn execution_request(
+        &self,
+        request: ExecutePlanRequest,
+        compressed: bool,
+        log: crate::client_log::ExecutionLog,
+    ) -> Result<ExecutePlanRequest> {
+        let request = self
+            .unstarted_execution_request(request, compressed, log)
+            .await?;
+        self.started_execution_request(request, log).await
+    }
+
+    /// `request`, the request of an execution, as PySpark's client builds it before its
+    /// `Progress` of the execution starts: of its client type, its result chunking options, its
+    /// user context, the server-side session ID that it observes, and its plan compressed as the
+    /// plan compression of this client asks when `compressed`.
     ///
     /// PySpark builds the plan of a relation, with the lookup of the plan compression of its
     /// first plan, before the request (`to_proto`), which then observes the server-side session
     /// ID that the response of the lookup gives. It builds the request of a command before it sets
     /// the command in its plan (`execute_command`), so the request of the first command of a
     /// session observes none. A plan that is not `compressed` is set as it is, without the lookup,
-    /// as the registrations of PySpark's `_execute` set their command.
-    async fn execution_request(
+    /// as the registrations of PySpark's `_execute` set their command, and as PySpark's client
+    /// sends the plan that it is given, which `to_proto` built and compressed.
+    ///
+    /// It logs what PySpark's client logs of the execution then, as `log` says (see
+    /// [`ExecutionLog`](crate::client_log::ExecutionLog)): a command before the request is built
+    /// and the command compressed, as `execute_command` logs it before it builds the request and
+    /// sets the command in its plan; a plan of a relation once it is compressed, before the request
+    /// is built, as `to_table` logs the plan that `to_proto` built; and the `ExecuteAndFetch` of
+    /// `_execute_and_fetch`. The error of a record fails the execution there. A closed client
+    /// raises once the records are written, when the request is sent (see
+    /// [`SparkConnectClient::started_execution_request`]), as PySpark's client reads its `_stub`
+    /// only then: a compression of the plan, of the first plan of the client, looks its settings up
+    /// first, which fails of the closed client as PySpark's lookup does, and disables it.
+    async fn unstarted_execution_request(
         &self,
         mut request: ExecutePlanRequest,
         compressed: bool,
+        log: crate::client_log::ExecutionLog,
     ) -> Result<ExecutePlanRequest> {
-        self.fill_client_type(&mut request.client_type)?;
-        self.ensure_open_for_stream()?;
-        add_result_chunking_option(&mut request, self.result_chunking);
-        self.session_on(&mut request.session_id);
-        // The caller has extended the user context with the extensions of its thread.
-        self.fill_user_context(&mut request.user_context);
+        use crate::client_log::{ExecutionLog, Level};
         let of_a_relation = matches!(
             request.plan.as_ref().and_then(|plan| plan.op_type.as_ref()),
             Some(PlanOpType::Root(_))
         );
-        if !of_a_relation {
-            self.observe_on(&mut request.client_observed_server_side_session_id);
-        }
-        if compressed {
+        // As PySpark's `to_proto`, which compresses the plan of a relation before the method of
+        // the client is called with it.
+        if compressed && of_a_relation {
             if let Some(plan) = request.plan.as_mut() {
                 self.compress_plan(plan).await?;
             }
         }
-        if of_a_relation {
-            self.observe_on(&mut request.client_observed_server_side_session_id);
+        // Boxed, of an execution that is logged only: the future of the request holds its pointer.
+        if log != ExecutionLog::Silent && crate::client_log::enabled(Level::Debug) {
+            Box::pin(log_execution_call(&request, log)).await?;
         }
-        let request = if compressed {
-            self.hooked_and_compressed(request).await?
-        } else {
-            self.hooked(request)?
-        };
-        // As PySpark reads its `_stub` once the plan is built and the hooks ran: the lookup of
-        // the plan compression of the first plan closes the client when it sees that the server
-        // restarted, and then the execution raises NO_ACTIVE_SESSION and sends nothing.
-        self.ensure_open_for_stream()?;
+        self.fill_client_type(&mut request.client_type)?;
+        add_result_chunking_option(&mut request, self.result_chunking);
+        self.session_on(&mut request.session_id);
+        // The caller has extended the user context with the extensions of its thread.
+        self.fill_user_context(&mut request.user_context);
+        // Of the server-side session ID that the lookup of the plan compression of the first plan
+        // of a relation gave, and before that of a command, which PySpark builds the request of
+        // before it sets the command in its plan.
+        self.observe_on(&mut request.client_observed_server_side_session_id);
+        if compressed && !of_a_relation {
+            if let Some(plan) = request.plan.as_mut() {
+                self.compress_plan(plan).await?;
+            }
+        }
+        if log != ExecutionLog::Silent && crate::client_log::enabled(Level::Debug) {
+            Box::pin(log_execution(log)).await?;
+        }
+        Ok(request)
+    }
+
+    /// `request`, an execution request that [`SparkConnectClient::unstarted_execution_request`]
+    /// built, as PySpark's `_execute_and_fetch_as_iterator` sends it, in the `Progress` of the
+    /// execution: it logs the request, as `log` says, and the hook of the executions, if any, gives
+    /// the request to send, as it is, as PySpark sends the request of its hooks.
+    async fn started_execution_request(
+        &self,
+        request: ExecutePlanRequest,
+        log: crate::client_log::ExecutionLog,
+    ) -> Result<ExecutePlanRequest> {
+        use crate::client_log::Level;
+        if log.logs_responses() && crate::client_log::enabled(Level::Debug) {
+            Box::pin(log_execution_request(&request, log)).await?;
+        }
+        let request = self.hooked(request)?;
+        // As PySpark reads its `_stub` once the plan is built, the records are written and the
+        // hooks ran: a closed client raises NO_ACTIVE_SESSION and sends nothing, as of the lookup
+        // of the plan compression of the first plan, which closes the client when it sees that the
+        // server restarted. Its error carries the operation ID of the request, as the
+        // `_handle_error` of PySpark's execution sets it.
+        if let Err(closed) = self.ensure_open_for_stream() {
+            return Err(match request.operation_id.as_deref() {
+                Some(operation_id) => closed.with_operation_id(operation_id),
+                None => closed,
+            });
+        }
         Ok(request)
     }
 
@@ -2271,7 +2766,10 @@ impl SparkConnectClient {
         mut request: ExecutePlanRequest,
     ) -> Result<Streaming<ExecutePlanResponse>> {
         self.extend_user_context(&mut request.user_context);
-        let request = self.execution_request(request, true).await?;
+        self.add_call_stack(&mut request.user_context);
+        let request = self
+            .execution_request(request, true, crate::client_log::ExecutionLog::Silent)
+            .await?;
         let mut req = Request::new(request);
         self._attach_metadata(&mut req);
         match self.stub().execute_plan(req).await {
@@ -2402,22 +2900,57 @@ impl SparkConnectClient {
     /// Analyze a plan and return metadata about it.
     ///
     /// Mirrors `pyspark.sql.connect.client.core.SparkConnectClient.analyze_plan`.
-    pub async fn analyze_plan(
+    pub async fn analyze_plan(&self, request: AnalyzePlanRequest) -> Result<AnalyzePlanResponse> {
+        self.analyze_plan_logged(request, crate::client_log::AnalysisLog::Silent)
+            .await
+    }
+
+    /// As [`SparkConnectClient::analyze_plan`], with what the method of PySpark's client that the
+    /// analysis stands for logs of its plan as it is sent, compressed, as `log` says: `Schema for
+    /// plan: ...` of `schema`. Not a stable API.
+    #[doc(hidden)]
+    pub async fn analyze_plan_logged(
         &self,
         mut request: AnalyzePlanRequest,
+        log: crate::client_log::AnalysisLog,
     ) -> Result<AnalyzePlanResponse> {
-        self.session_on(&mut request.session_id);
-        self.fill_client_type(&mut request.client_type)?;
-        self.ensure_open()?;
-        self.extend_user_context(&mut request.user_context);
-        self.fill_user_context(&mut request.user_context);
+        // As PySpark's `to_proto`, which builds the plans of an analysis, of the lookup of the plan
+        // compression of its first plan, before the method of the analysis logs its plan and
+        // `_analyze` builds the request. A closed client raises when the request is sent, once the
+        // plan is logged, as PySpark's `_analyze` reads its `_stub` only then; the lookup of the
+        // first plan fails of it, as PySpark's does, and disables the compression.
         if let Some(analyze) = request.analyze.as_mut() {
             for plan in analyze_plans(analyze).into_iter().flatten() {
                 self.compress_plan(plan).await?;
             }
         }
-        // As in `execute_plan`: the lookup of the plan compression may have closed the client.
+        self.analyze_plan_as_is(request, log).await
+    }
+
+    /// As [`SparkConnectClient::analyze_plan_logged`], for an analysis whose plans are sent as
+    /// they are, neither compressed nor with the lookup of the plan compression of the client: a
+    /// plan that [`SparkConnectClient::prepare_plan`] prepared, and the plans that PySpark's
+    /// `SparkConnectClient.schema`, `explain_string`, `same_semantics`, `semantic_hash` and
+    /// `_analyze` are given, which they send as they are. Not a stable API.
+    #[doc(hidden)]
+    pub async fn analyze_plan_as_is(
+        &self,
+        mut request: AnalyzePlanRequest,
+        log: crate::client_log::AnalysisLog,
+    ) -> Result<AnalyzePlanResponse> {
+        // As the method of PySpark's client, which logs the plan before `_analyze` builds the
+        // request: the error of the record fails the analysis there.
+        if log != crate::client_log::AnalysisLog::Silent
+            && crate::client_log::enabled(crate::client_log::Level::Debug)
+        {
+            Box::pin(log_analysis(&request, log)).await?;
+        }
+        self.session_on(&mut request.session_id);
+        self.fill_client_type(&mut request.client_type)?;
         self.ensure_open()?;
+        self.extend_user_context(&mut request.user_context);
+        self.add_call_stack(&mut request.user_context);
+        self.fill_user_context(&mut request.user_context);
         let response = self
             .with_retry(|| {
                 let deadline = self.rpc_deadlines.analyze_plan;
@@ -2623,35 +3156,105 @@ impl SparkConnectClient {
     /// False: its request has no reattach option, its `ExecutePlan` has no deadline, the stream
     /// is never reattached or released, and a failure that the retry policy retries, of the call
     /// or of its stream, sends the `ExecutePlan` again, under the retries of the whole execution.
+    ///
+    /// It logs what PySpark's `to_table` logs of a plan of a relation, and what its
+    /// `execute_command` logs of a command (see [`crate::client_log`]).
     pub async fn execute_plan_reattachable(
         &self,
         request: ExecutePlanRequest,
     ) -> Result<ReattachableResponseStream> {
-        self.execute_reattachable(request, true).await
+        let log = match request.plan.as_ref().and_then(|plan| plan.op_type.as_ref()) {
+            Some(PlanOpType::Root(_)) => crate::client_log::ExecutionLog::ToTable,
+            _ => crate::client_log::ExecutionLog::ExecuteCommand,
+        };
+        self.execute_reattachable(request, true, log).await
+    }
+
+    /// As [`SparkConnectClient::execute_plan_reattachable`], with the logs of the method of
+    /// PySpark's client that the execution stands for, as `log` says. Not a stable API.
+    #[doc(hidden)]
+    pub async fn execute_plan_reattachable_logged(
+        &self,
+        request: ExecutePlanRequest,
+        log: crate::client_log::ExecutionLog,
+    ) -> Result<ReattachableResponseStream> {
+        self.execute_reattachable(request, true, log).await
+    }
+
+    /// As [`SparkConnectClient::execute_plan_reattachable_logged`], for a request whose plan is
+    /// sent as it is, neither compressed nor with the lookup of the plan compression of the
+    /// client: a plan that [`SparkConnectClient::prepare_plan`] prepared, whose compression was
+    /// tried once, as PySpark's `to_proto` tries it, and the plan that PySpark's
+    /// `SparkConnectClient.to_table`, `to_table_as_iterator` and `to_pandas` are given, which they
+    /// send as it is. Not a stable API.
+    #[doc(hidden)]
+    pub async fn execute_plan_reattachable_as_is(
+        &self,
+        request: ExecutePlanRequest,
+        log: crate::client_log::ExecutionLog,
+    ) -> Result<ReattachableResponseStream> {
+        self.execute_reattachable(request, false, log).await
     }
 
     /// As [`SparkConnectClient::execute_plan_reattachable`], for a request whose plan is sent as
     /// it is, neither compressed nor with the lookup of the plan compression of the client, as
     /// PySpark's registrations of functions, table functions, data sources and Java functions
     /// (`register_udf`, `register_udtf`, `register_data_source` and `register_java`) set their
-    /// command in the plan of their request.
+    /// command in the plan of their request, whose `_execute` logs `Execute`.
     pub async fn execute_plan_reattachable_uncompressed(
         &self,
         request: ExecutePlanRequest,
     ) -> Result<ReattachableResponseStream> {
-        self.execute_reattachable(request, false).await
+        self.execute_reattachable(request, false, crate::client_log::ExecutionLog::Execute)
+            .await
     }
 
     /// The execution of `request` as a reattachable stream, of its plan compressed when
-    /// `compressed` (see [`SparkConnectClient::execute_plan_reattachable`]).
+    /// `compressed` (see [`SparkConnectClient::execute_plan_reattachable`]), and of the logs that
+    /// `log` says.
     async fn execute_reattachable(
+        &self,
+        request: ExecutePlanRequest,
+        compressed: bool,
+        log: crate::client_log::ExecutionLog,
+    ) -> Result<ReattachableResponseStream> {
+        let built = self.build_execution(request, compressed, log).await?;
+        self.execute_built(built).await
+    }
+
+    /// The first part of the execution of `request` that
+    /// [`SparkConnectClient::execute_plan_reattachable_logged`] makes, of its plan compressed when
+    /// `compressed`, as PySpark's client builds an execution before its `Progress` of the
+    /// execution starts: the request of the user context extensions of the calling thread, of the
+    /// call stack of its call, and of the client, its plan compressed, and the records that
+    /// PySpark's client logs then (see [`SparkConnectClient::unstarted_execution_request`]). An
+    /// error of it, as of one of the records, fails the execution before its `Progress` starts:
+    /// [`SparkConnectClient::execute_built`] sends it. Not a stable API.
+    #[doc(hidden)]
+    pub async fn build_execution(
         &self,
         mut request: ExecutePlanRequest,
         compressed: bool,
-    ) -> Result<ReattachableResponseStream> {
+        log: crate::client_log::ExecutionLog,
+    ) -> Result<BuiltExecution> {
         self.extend_user_context(&mut request.user_context);
-        self.execute_plan_reattachable_in_context(request, compressed)
-            .await
+        self.add_call_stack(&mut request.user_context);
+        let request = self
+            .unstarted_execution_request(request, compressed, log)
+            .await?;
+        Ok(BuiltExecution { request, log })
+    }
+
+    /// Send `built`, an execution that [`SparkConnectClient::build_execution`] built, as
+    /// PySpark's `_execute_and_fetch_as_iterator` sends it in the `Progress` of the execution: the
+    /// record of the request, the hook of the executions, and the stream of the responses, as
+    /// [`SparkConnectClient::execute_plan_reattachable`] reads them. Not a stable API.
+    #[doc(hidden)]
+    pub async fn execute_built(&self, built: BuiltExecution) -> Result<ReattachableResponseStream> {
+        let request = self
+            .started_execution_request(built.request, built.log)
+            .await?;
+        self.execute_plan_reattachable_of(request, built.log).await
     }
 
     /// Run `request` as [`SparkConnectClient::execute_plan_reattachable`] runs it, without
@@ -2666,10 +3269,15 @@ impl SparkConnectClient {
     #[doc(hidden)]
     pub fn spawn_execute_plan_reattachable(&self, mut request: ExecutePlanRequest) {
         self.extend_user_context(&mut request.user_context);
+        self.add_call_stack(&mut request.user_context);
         let client = self.clone();
         drop(crate::runtime::get_runtime().spawn(async move {
             if let Ok(mut stream) = client
-                .execute_plan_reattachable_in_context(request, true)
+                .execute_plan_reattachable_in_context(
+                    request,
+                    true,
+                    crate::client_log::ExecutionLog::ExecuteCommand,
+                )
                 .await
             {
                 while let Ok(Some(_)) = stream.message().await {}
@@ -2683,12 +3291,23 @@ impl SparkConnectClient {
         &self,
         request: ExecutePlanRequest,
         compressed: bool,
+        log: crate::client_log::ExecutionLog,
     ) -> Result<ReattachableResponseStream> {
         // Before the iterator: its ReattachExecute and ReleaseExecute requests take the
         // user context and the client type of this request, and the request of the hook, as
         // PySpark's iterator is of the request that the hooks return. PySpark reads its `_stub`
         // before it makes the iterator, so nothing is released of a closed client.
-        let request = self.execution_request(request, compressed).await?;
+        let request = self.execution_request(request, compressed, log).await?;
+        self.execute_plan_reattachable_of(request, log).await
+    }
+
+    /// The stream of the execution of `request`, the request to send, which
+    /// [`SparkConnectClient::execution_request`] built, of the logs of `log`.
+    async fn execute_plan_reattachable_of(
+        &self,
+        request: ExecutePlanRequest,
+        log: crate::client_log::ExecutionLog,
+    ) -> Result<ReattachableResponseStream> {
         let reattachable = self.reattachable_execute();
         let iter = if reattachable {
             ExecutePlanResponseReattachableIterator::new(request)
@@ -2760,6 +3379,7 @@ impl SparkConnectClient {
         };
         Ok(ReattachableResponseStream {
             client: self.clone(),
+            log,
             reattachable,
             first_response_retries: Some(first_response_retries),
             iter,
@@ -2824,36 +3444,72 @@ impl SparkConnectClient {
         } else {
             crate::error::from_call_error(&status, call).map(Box::new)
         };
-        let mut deliveries = Vec::new();
-        crate::retries::log(|listener| {
-            deliveries.push(listener.rpc_error(&crate::error::grpcio_error(&status, call)));
-            if !deadline && mismatch.is_none() {
-                if let Some(text) = crate::error::error_info_text(status.details()) {
-                    deliveries.push(listener.error_info(&text));
+        // The logs of a call off the thread of its caller, as of a stream that is read in the
+        // background, precede what the call does next with its error, as PySpark's do. The error
+        // of a log, of a handler or a filter of the logger that raised, is the error of the call,
+        // of the failure as its context, as the exception of PySpark's log goes out of
+        // `_handle_rpc_error`, before what follows the log.
+        let failure = crate::error::grpcio_error(&status, call);
+        if let Err(error) =
+            crate::retries::log_delivered(|listener| listener.rpc_error(&failure)).await
+        {
+            return crate::retries::raised_in_handling(
+                error,
+                crate::retries::Handled::Rpc(&failure),
+            );
+        }
+        if !deadline && mismatch.is_none() {
+            if let Some(text) = crate::error::error_info_text(status.details()) {
+                if let Err(error) =
+                    crate::retries::log_delivered(|listener| listener.error_info(&text)).await
+                {
+                    return crate::retries::raised_in_handling(
+                        error,
+                        crate::retries::Handled::Rpc(&failure),
+                    );
                 }
             }
-        });
-        // The logs of a call off the thread of its caller, as of a stream that is read in the
-        // background, precede what the call does next with its error, as PySpark's do.
-        for delivery in deliveries.into_iter().flatten() {
-            delivery.await;
         }
         if let Some(mismatch) = mismatch {
             return *mismatch;
         }
-        let error = self.grpc_error(status, call);
+        let error = self.session_checked_grpc_error(status, call);
+        if error.get_condition().as_deref() == Some("CONNECT_INVALID_PLAN.CANNOT_PARSE") {
+            // As PySpark's `_handle_rpc_error`, which logs that it disables the plan compression
+            // before it disables it and asks for the details of the error.
+            if let Err(logged) = crate::client_log::logged(crate::client_log::Level::Info, || {
+                crate::client_log::Message::Text(
+                    "Disabling plan compression for the session due to \
+                     CONNECT_INVALID_PLAN.CANNOT_PARSE error."
+                        .to_string(),
+                )
+            })
+            .await
+            {
+                return crate::retries::raised_in_handling(
+                    logged,
+                    crate::retries::Handled::Rpc(&failure),
+                );
+            }
+            self.keep_plan_compression(PlanCompression::Disabled);
+        }
         if error.server.is_none() {
             return error;
         }
         // Boxed: the fetch of the details and the reads of the confs, which retry, would
         // otherwise make the future of every call that converts its failure much larger, in a
         // debug build past the stack of a thread that polls it.
-        Box::pin(self.server_error_with_details(error)).await
+        Box::pin(self.server_error_with_details(error, &failure)).await
     }
 
     /// `error`, an error that the server raised, with its details and its stack trace, as
-    /// [`SparkConnectClient::error_from_status`] completes it.
-    async fn server_error_with_details(&self, error: SparkError) -> SparkError {
+    /// [`SparkConnectClient::error_from_status`] completes it, of the failed RPC of grpcio's error
+    /// `failure`.
+    async fn server_error_with_details(
+        &self,
+        error: SparkError,
+        failure: &crate::error::GrpcioError,
+    ) -> SparkError {
         let Some(server) = &error.server else {
             return error;
         };
@@ -2887,8 +3543,11 @@ impl SparkConnectClient {
         match self.display_server_stacktrace().await {
             Ok(display_stacktrace) => error.with_details(details, display_stacktrace),
             // As PySpark's `_display_server_stack_trace`, whose `except Exception` lets out a
-            // `BaseException` only, which replaces the error that is raised.
-            Err(uncaught) => uncaught,
+            // `BaseException` only, which replaces the error that is raised, as it is raised while
+            // `_handle_rpc_error` handles the failure.
+            Err(uncaught) => {
+                crate::retries::raised_in_handling(uncaught, crate::retries::Handled::Rpc(failure))
+            }
         }
     }
 
@@ -2985,8 +3644,10 @@ impl SparkConnectClient {
             ..Default::default()
         };
         // As the request of PySpark's `RuntimeConf.get`, which carries the user context
-        // extensions, as every Config request, and which `config` builds before its retries.
+        // extensions and the call stack of the user's code, as every Config request, of
+        // `_config_request_with_metadata`, and which `config` builds before its retries.
         self.extend_user_context(&mut request.user_context);
+        self.add_call_stack(&mut request.user_context);
         self.observe_on(&mut request.client_observed_server_side_session_id);
         let request = &request;
         let mut retries = self.retries_of(GrpcCall::Unary).ending_with_abort();
@@ -3049,6 +3710,7 @@ impl SparkConnectClient {
         self.fill_client_type(&mut request.client_type)?;
         self.ensure_open()?;
         self.extend_user_context(&mut request.user_context);
+        self.add_call_stack(&mut request.user_context);
         self.fill_user_context(&mut request.user_context);
         let response = self
             .with_retry(|| {
@@ -3908,6 +4570,8 @@ pub struct ReattachableResponseStream {
     /// The client that started the execution, whose stub, headers, session and retry policy it
     /// uses.
     client: SparkConnectClient,
+    /// What PySpark's client logs of the execution, of its responses as they are read.
+    log: crate::client_log::ExecutionLog,
     /// Whether the execution is reattachable, as
     /// [`SparkConnectClient::set_reattachable_execute`] sets the executions of a client.
     reattachable: bool,
@@ -4061,6 +4725,7 @@ impl SparkConnectClient {
         }
         add_result_chunking_option(&mut request, self.result_chunking);
         self.extend_user_context(&mut request.user_context);
+        self.add_call_stack(&mut request.user_context);
         self.fill_user_context(&mut request.user_context);
         // A user agent that PySpark refuses raises as its finalizer builds the request, before
         // anything is sent, and the error of a finalizer is only reported.
@@ -4122,6 +4787,15 @@ impl SparkConnectClient {
 }
 
 impl ReattachableResponseStream {
+    /// Whether the responses of the execution are logged as PySpark's client logs them (see
+    /// [`crate::client_log::ExecutionLog`]): a reader that joins the chunks of an Arrow batch logs
+    /// the batch once it is whole, as PySpark's `_execute_and_fetch_as_iterator` does
+    /// (`Assembling arrow batch ...`). Not a stable API.
+    #[doc(hidden)]
+    pub fn logs_responses(&self) -> bool {
+        self.log.logs_responses()
+    }
+
     /// The handle of the execution of this stream, to mark the waits of the caller that starts it
     /// for the execution while the caller reads its responses from another thread (see
     /// [`InflightHandle::waiting`]).
@@ -4172,13 +4846,23 @@ impl ReattachableResponseStream {
                 .ending_with_abort()
                 .reading_status_first(true),
         };
-        if self.stream.is_none() && !retrying.retry_at_once() {
-            // The initial ExecutePlan passed its deadline, a RetryException that fails at once
-            // when the bound of the retries has passed, as it has when the bound is 0.
-            let status = tonic::Status::deadline_exceeded("Deadline Exceeded");
-            return Err(self
-                .fail_exceeded(status, RetriesExceeded::RetryException)
-                .await);
+        if self.stream.is_none() {
+            // The initial ExecutePlan passed its deadline, which PySpark's iterator logs as it
+            // reads it, then a RetryException that fails at once when the bound of the retries
+            // has passed, as it has when the bound is 0.
+            if let Err(error) = self.log_deadline().await {
+                return Err(self.fail(error));
+            }
+            let retried = match retrying.retry_at_once() {
+                Ok(retried) => retried,
+                Err(error) => return Err(self.fail(error)),
+            };
+            if !retried {
+                let status = tonic::Status::deadline_exceeded("Deadline Exceeded");
+                return Err(self
+                    .fail_exceeded(status, RetriesExceeded::RetryException)
+                    .await);
+            }
         }
         loop {
             let Some(stream) = self.stream.as_mut() else {
@@ -4229,6 +4913,9 @@ impl ReattachableResponseStream {
                         self.done = true;
                         return Err(refused);
                     }
+                    if let Err(error) = self.log_response(&resp).await {
+                        return Err(self.fail(error));
+                    }
                     return Ok(Some(resp));
                 }
                 // The server completes a reattachable stream before `ResultComplete` on
@@ -4242,7 +4929,14 @@ impl ReattachableResponseStream {
                     if status.code() == tonic::Code::DeadlineExceeded
                         && !self.iter.is_completed().await =>
                 {
-                    if !retrying.retry_at_once() {
+                    if let Err(error) = self.log_deadline().await {
+                        return Err(self.fail(error));
+                    }
+                    let retried = match retrying.retry_at_once() {
+                        Ok(retried) => retried,
+                        Err(error) => return Err(self.fail(error)),
+                    };
+                    if !retried {
                         return Err(self
                             .fail_exceeded(status, RetriesExceeded::RetryException)
                             .await);
@@ -4259,7 +4953,11 @@ impl ReattachableResponseStream {
                         let error_type = unknown_operation(&status).unwrap_or_default();
                         return Err(self.fail(response_already_received(error_type)));
                     }
-                    if !retrying.retry_at_once() {
+                    let retried = match retrying.retry_at_once() {
+                        Ok(retried) => retried,
+                        Err(error) => return Err(self.fail(error)),
+                    };
+                    if !retried {
                         return Err(self
                             .fail_exceeded(status, RetriesExceeded::RetryException)
                             .await);
@@ -4351,6 +5049,9 @@ impl ReattachableResponseStream {
                         return Err(self.fail(error));
                     }
                     self.iter.set_last_response_id(&resp).await;
+                    if let Err(error) = self.log_response(&resp).await {
+                        return Err(self.fail(error));
+                    }
                     return Ok(Some(resp));
                 }
                 Ok(None) => {
@@ -4411,7 +5112,11 @@ impl ReattachableResponseStream {
                 if self.iter.last_response_id().await.is_some() {
                     return Err(self.fail(response_already_received(error_type)));
                 }
-                if !retrying.retry_at_once() {
+                let retried = match retrying.retry_at_once() {
+                    Ok(retried) => retried,
+                    Err(error) => return Err(self.fail(error)),
+                };
+                if !retried {
                     return Err(self
                         .fail_exceeded(status, RetriesExceeded::RetryException)
                         .await);
@@ -4422,7 +5127,14 @@ impl ReattachableResponseStream {
             if status.code() == tonic::Code::DeadlineExceeded {
                 // As the reference: a call past its deadline, whether it is sent again or
                 // reattached, is retried at once, the execution going on on the server.
-                if !retrying.retry_at_once() {
+                if let Err(error) = self.log_deadline().await {
+                    return Err(self.fail(error));
+                }
+                let retried = match retrying.retry_at_once() {
+                    Ok(retried) => retried,
+                    Err(error) => return Err(self.fail(error)),
+                };
+                if !retried {
                     return Err(self
                         .fail_exceeded(status, RetriesExceeded::RetryException)
                         .await);
@@ -4440,6 +5152,43 @@ impl ReattachableResponseStream {
                 Backoff::Failed(error) => return Err(self.fail(*error)),
             }
         }
+    }
+
+    /// Log `response`, which the stream returns, as PySpark's `_execute_and_fetch_as_iterator`
+    /// logs each response that it reads, of an execution whose responses are logged (see
+    /// [`log_response`]): the error of a record, which ends the stream.
+    async fn log_response(&self, response: &ExecutePlanResponse) -> Result<()> {
+        // Boxed, of a response that is logged only: the stream's future holds its pointer.
+        if self.log.logs_responses() && crate::client_log::enabled(crate::client_log::Level::Debug)
+        {
+            return Box::pin(log_response(response)).await;
+        }
+        Ok(())
+    }
+
+    /// Log that the deadline of the stream passed, as the `_call_iter` of PySpark's iterator logs
+    /// it before the iterator reattaches (`Deadline exceeded on stream for operation ...`): the
+    /// error of the record, which ends the stream in place of the reattach.
+    async fn log_deadline(&self) -> Result<()> {
+        use crate::client_log::{Level, Message};
+        if self.log == crate::client_log::ExecutionLog::Silent
+            || !crate::client_log::enabled(Level::Debug)
+        {
+            return Ok(());
+        }
+        Box::pin(async {
+            let last = self.iter.last_response_id().await;
+            crate::client_log::logged(Level::Debug, || {
+                Message::Text(format!(
+                    "Deadline exceeded on stream for operation {}; will reattach. (last \
+                     response: {})",
+                    self.iter.operation_id(),
+                    last.as_deref().unwrap_or("None")
+                ))
+            })
+            .await
+        })
+        .await
     }
 
     /// ReattachExecute from the last response read, bounded by the deadline of the call.
@@ -5429,14 +6178,16 @@ mod tests {
             None
         }
 
-        fn retrying(&self, error: &str, wait_ms: u64, policy: &str) {
+        fn retrying(&self, error: &str, wait_ms: u64, policy: &str) -> Result<()> {
             let error = error.lines().next().unwrap_or_default();
             self.log(format!("retrying {error} {wait_ms} {policy}"));
+            Ok(())
         }
 
-        fn given_up(&self, error: &str) {
+        fn given_up(&self, error: &str) -> Result<()> {
             let error = error.lines().next().unwrap_or_default();
             self.log(format!("given up {error}"));
+            Ok(())
         }
 
         fn rpc_error(&self, error: &crate::error::GrpcioError) -> crate::retries::Delivery {
@@ -6313,13 +7064,13 @@ mod plan_compression_tests {
     #[test]
     fn plan_compression_is_zstd_above_the_threshold_of_the_confs() {
         assert_eq!(
-            plan_compression_of(Some("10485760"), Some("ZSTD")),
+            looked_up_plan_compression(Some("10485760"), Some("ZSTD")).0,
             PlanCompression::Zstd {
                 threshold: 10485760
             }
         );
         assert_eq!(
-            plan_compression_of(Some("0"), Some("ZSTD")),
+            looked_up_plan_compression(Some("0"), Some("ZSTD")).0,
             PlanCompression::Zstd { threshold: 0 }
         );
         for (threshold, algorithm) in [
@@ -6332,11 +7083,101 @@ mod plan_compression_tests {
             (Some("10"), None),
         ] {
             assert_eq!(
-                plan_compression_of(threshold, algorithm),
+                looked_up_plan_compression(threshold, algorithm).0,
                 PlanCompression::Disabled,
                 "threshold {threshold:?}, algorithm {algorithm:?}"
             );
         }
+    }
+
+    #[test]
+    fn the_lookup_of_the_plan_compression_logs_what_pyspark_logs_of_it() {
+        // As PySpark's `int(threshold)`, of its text: the threshold that it read, or the
+        // ValueError of a threshold that is not an integer, which disables the compression.
+        let texts = |threshold, algorithm| match looked_up_plan_compression(threshold, algorithm) {
+            (_, crate::client_log::Message::Text(text)) => text,
+            (compression, crate::client_log::Message::WithError { text, error }) => {
+                assert_eq!(compression, PlanCompression::Disabled);
+                assert_eq!(error.kind, SparkErrorKind::BuiltinValueError);
+                format!("{text} % {}", error.message())
+            }
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            texts(Some(" +1_000 "), Some("ZSTD")),
+            "Plan compression threshold: 1000, algorithm: ZSTD"
+        );
+        assert_eq!(
+            texts(None, None),
+            "Plan compression threshold: -1, algorithm: None"
+        );
+        assert_eq!(
+            texts(Some("-5"), Some("LZ4")),
+            "Plan compression threshold: -5, algorithm: LZ4"
+        );
+        assert_eq!(
+            texts(Some("10m"), Some("ZSTD")),
+            "Plan compression is disabled because the server does not support it. % invalid \
+             literal for int() with base 10: '10m'"
+        );
+        assert_eq!(
+            looked_up_plan_compression(Some("1_000"), Some("ZSTD")).0,
+            PlanCompression::Zstd { threshold: 1000 }
+        );
+        assert_eq!(python_str_repr("a'b"), "\"a'b\"");
+        assert_eq!(
+            python_str_repr("a'\"b\\\n\u{1}\u{85}"),
+            "'a\\'\"b\\\\\\n\\x01\\x85'"
+        );
+    }
+
+    #[test]
+    fn a_plan_is_compressed_as_python_zstandard_compresses_it_with_its_logs() {
+        // The frame of python-zstandard 0.25's `ZstdCompressor().compress` (zstd 1.5.7), of the
+        // size of its content, of the encoding of this relation, and what PySpark logs of it.
+        let mut data: Vec<u8> = (0..=255u8).cycle().take(256 * 8).collect();
+        data.extend("spark connect plan ".repeat(200).bytes());
+        let compressed = zstd::bulk::compress(&data, zstd::DEFAULT_COMPRESSION_LEVEL).unwrap();
+        let expected = "28b52ffd60d8150d09003411000102030405060708090a0b0c0d0e0f101112131415161718\
+                        191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d\
+                        3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162\
+                        636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f8081828384858687\
+                        88898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabac\
+                        adaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1\
+                        d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6\
+                        f7f8f9fafbfcfdfeff737061726b20636f6e6e65637420706c616e200200856de38700fd0e\
+                        fc740a";
+        let hex: String = compressed.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(hex, expected);
+
+        let relation = relation_with(vec![7; PAYLOAD]);
+        let encoded = relation.encode_to_vec();
+        let mut plan = root(&relation);
+        let logged = compress_over_threshold(&mut plan, encoded.len() - 1);
+        let Some(PlanOpType::CompressedOperation(operation)) = &plan.op_type else {
+            panic!("the plan over the threshold was not compressed");
+        };
+        let size = operation.data.len();
+        let ratio = 1.0 - size as f64 / encoded.len() as f64;
+        assert_eq!(logged.len(), 1);
+        assert!(
+            logged[0].starts_with(&format!(
+                "Plan compression: original_size={}, compressed_size={size}, \
+                 saving_ratio={ratio:.2}, duration_s=",
+                encoded.len()
+            )),
+            "{logged:?}"
+        );
+        let random = relation_with(incompressible(PAYLOAD));
+        let mut not_smaller = root(&random);
+        let logged = compress_over_threshold(&mut not_smaller, 0);
+        assert_eq!(logged.len(), 2, "{logged:?}");
+        assert_eq!(
+            logged[1],
+            "Plan compression not effective. Using original plan."
+        );
+        // Of no log, a plan that is not over the threshold.
+        assert!(compress_over_threshold(&mut root(&relation), encoded.len()).is_empty());
     }
 
     #[test]
@@ -7258,10 +8099,12 @@ mod request_fields_tests {
         assert_eq!(accepted(), 5);
     }
 
-    /// As PySpark's hook, which would put in the plan of `to_proto`, which compresses it: the plan
-    /// that a hook puts in is compressed, and one that the hook keeps compressed is kept.
+    /// As PySpark's executions, which send the request that the hooks return as it is: a plan that
+    /// a hook puts in is sent as it is, over the threshold too, and the plan of the execution,
+    /// compressed once, before the hook, as `to_proto` compresses it, is kept so by a hook that
+    /// keeps it.
     #[tokio::test]
-    async fn the_plan_that_a_hook_puts_in_is_compressed_as_pyspark() {
+    async fn the_request_that_a_hook_returns_is_sent_as_it_is_as_pyspark() {
         let received: Received = Default::default();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -7293,22 +8136,33 @@ mod request_fields_tests {
             )),
             ..Default::default()
         };
+        let putting = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let puts = std::sync::Arc::clone(&putting);
+        let put = large.clone();
         client.set_execute_plan_hook(Some(std::sync::Arc::new(move |mut request| {
-            request.plan = Some(Plan {
-                op_type: Some(PlanOpType::Root(large.clone())),
-            });
+            if puts.load(std::sync::atomic::Ordering::SeqCst) {
+                request.plan = Some(Plan {
+                    op_type: Some(PlanOpType::Root(put.clone())),
+                });
+            }
             Ok(request)
         })));
-        let small = || ExecutePlanRequest {
+        let of = |relation: spark_connect_proto::Relation| ExecutePlanRequest {
             session_id: client.session_id().to_string(),
             plan: Some(Plan {
-                op_type: Some(PlanOpType::Root(Default::default())),
+                op_type: Some(PlanOpType::Root(relation)),
             }),
             ..Default::default()
         };
-        let mut stream = client.execute_plan(small()).await.unwrap();
+        let mut stream = client.execute_plan(of(Default::default())).await.unwrap();
         while stream.message().await.unwrap().is_some() {}
-        let mut stream = client.execute_plan_reattachable(small()).await.unwrap();
+        let mut stream = client
+            .execute_plan_reattachable(of(Default::default()))
+            .await
+            .unwrap();
+        while stream.message().await.unwrap().is_some() {}
+        putting.store(false, std::sync::atomic::Ordering::SeqCst);
+        let mut stream = client.execute_plan_reattachable(of(large)).await.unwrap();
         while stream.message().await.unwrap().is_some() {}
         let executions: Vec<_> = received
             .lock()
@@ -7317,14 +8171,22 @@ mod request_fields_tests {
             .filter(|(method, _)| method == "ExecutePlan")
             .map(|(_, bytes)| ExecutePlanRequest::decode(bytes.as_slice()).unwrap())
             .collect();
-        assert_eq!(executions.len(), 2);
-        for request in executions {
-            let op_type = request.plan.and_then(|plan| plan.op_type);
-            assert!(
-                matches!(op_type, Some(PlanOpType::CompressedOperation(_))),
-                "{op_type:?}"
-            );
-        }
+        assert_eq!(executions.len(), 3);
+        let op_types: Vec<_> = executions
+            .into_iter()
+            .map(|request| request.plan.and_then(|plan| plan.op_type))
+            .collect();
+        assert!(
+            matches!(
+                op_types.as_slice(),
+                [
+                    Some(PlanOpType::Root(_)),
+                    Some(PlanOpType::Root(_)),
+                    Some(PlanOpType::CompressedOperation(_))
+                ]
+            ),
+            "{op_types:?}"
+        );
     }
 
     #[tokio::test]

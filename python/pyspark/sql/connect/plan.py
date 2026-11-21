@@ -104,10 +104,11 @@ class LogicalPlan:
         debug: bool
             if enabled, the proto plan will be printed.
         """
-        # As PySpark's, of its relation as the root of the plan. The transport compresses the
-        # plans that it sends itself, so the plan is the relation as it is.
+        # As PySpark's, of its relation set in the plan by the client, which compresses it as its
+        # plan compression asks, with what it logs of it, of the relations of its placeholders.
         plan = proto.Plan()
-        plan.root.CopyFrom(self.plan(session))
+        relation = self.plan(session)
+        session._set_relation_in_plan(plan, relation)
 
         if debug:
             print(plan)

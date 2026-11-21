@@ -692,13 +692,89 @@ requests of the unpickled object pickle as it is then. This case still differs:
   children hold as many as their parent; the objects of the parent that the child frees are left in
   its memory; a read in the child of an execution that the parent started waits forever, as the
   parent's runtime, which would answer it, has no thread there.
-- **The debug logs of the client** (tracked). With `SPARK_CONNECT_LOG_LEVEL`, the client logs what
-  PySpark's logs of its retries and of its errors of grpc (`Spark Connect RPC deadlines: ...`, `Got
-  error: ... Will retry after ...`, `Given up on retrying. error: ...`, `GRPC Error received`,
-  `Received ErrorInfo: ...`), whose exception has no frames of PySpark's client, but not the debug
-  logs of the plans, the requests and the responses of the executions and of the plan compression
-  (`Executing plan ...`, `ExecuteAndFetchAsIterator. Request: ...`, `Received the schema.`, `Plan
-  compression threshold: ...`), which the transport builds and reads in Rust.
+- **The logs of the client** (intentional; the transport is native). With
+  `SPARK_CONNECT_LOG_LEVEL`, or a level of the logger of `pyspark.sql.connect.logging`, the client
+  logs the records of PySpark's client, of their logger, levels, messages and order, at the points
+  of each call where PySpark's logs them, those of the plans, the requests and the responses that
+  the transport builds and reads too (see `docs/compatibility.md`); the exception of `GRPC Error
+  received` has no frames of PySpark's client. The exception of a handler or a filter of the logger
+  at a record fails the call there, as it goes out of PySpark's log: a `KeyboardInterrupt` at a
+  response of an execution, also of `toLocalIterator`, interrupts it, as the `except
+  KeyboardInterrupt` of PySpark's does, and one at a record of the conversion of its failure
+  (`GRPC Error received`, `Received ErrorInfo: ...`), which PySpark's `except Exception` writes,
+  interrupts nothing, of the failure as its context. What stays different:
+  - the levels are read as each call of the client starts (`logger.isEnabledFor`), for the records
+    of the transport until the next call of the process starts, where PySpark reads them at each
+    record: a change during a call, as by a progress handler or another thread, that enables a level
+    applies from the next call on, and one that disables it, of a higher level or of
+    `logger.disabled`, at once, as the records are written through the methods of the logger;
+  - the settings of the plan compression of a plan that `to_proto` builds are read, and logged
+    (`Plan compression threshold: ...`), by the first call of the client that sends a plan, before
+    the records of that call, where PySpark's `to_proto` reads them (see "Plan logging of a deep
+    DataFrame");
+  - the records hold the requests that the drop-in sends: its own plan IDs of the client, and so the
+    bytes and the sizes of a compressed plan, which hold them; the pickles of its UDFs, which pickle
+    the return type of its JSON (`_parse_datatype_json_string('"integer"')`) where PySpark's pickle
+    the type (`IntegerType()`); the Arrow IPC streams of arrow-rs of its local relations, and so the
+    hashes of their cached artifacts; and of a server that sends an empty server-side session ID,
+    no observed one, where PySpark's requests observe it empty
+    (`client_observed_server_side_session_id: ""`; a Spark server sends one, but in its answer to
+    the release of a session that it does not have). The time of a compression (`duration_s`) is
+    its own;
+  - the records of the deletion of a model from the ML cache by its finalizer, which the transport
+    sends in the background, are written on the delivery thread as the deletion goes, where
+    PySpark's finalizer sends it, and logs it, on its own thread before it goes on;
+  - the records of the responses of the listener bus of streaming queries are written on the thread
+    of the bus, which runs the listeners, as on PySpark's thread of its `_query_event_handler`, but
+    a thread of the drop-in, which Python names `Dummy-N`, where PySpark's is `Thread-N
+    (_query_event_handler)`;
+  - a handler or a filter of the logger that raises at a record of the retries of a request that
+    the transport sends in the background, which no caller waits for (the release of an execution,
+    the removal of the relation of a dropped checkpoint): PySpark's sender catches the exception
+    and logs it as the failure of the request (`ReleaseExecute failed with exception: ...`); the
+    drop-in drops it, but for the `KeyboardInterrupt` of a signal, which the next wait of a call
+    of the main thread raises;
+  - the record of the interrupt of an execution by a `KeyboardInterrupt` of Python code of the
+    client at a response, of a handler or a filter of the logger at a record or of a retry policy
+    (`Interrupt request received for operation=...`), is written after the done call of the
+    progress handlers, where PySpark's writes it before that call;
+  - at the exit of the interpreter, the cleanup of the ML cache of a client whose server is gone or
+    unreachable logs the failure of its execution (`GRPC Error received`), where PySpark's does
+    not: there its release of the failed execution raises `RuntimeError: cannot schedule new
+    futures after interpreter shutdown` in place of the failure, before the failure is converted;
+  - after a `KeyboardInterrupt` of a signal interrupted an execution, the drop-in reads it, of no
+    records, until the server ends it, and then releases it, where PySpark's reads nothing more of
+    it and releases it as it interrupts it: the server may refuse that release, in a race with the
+    interrupt (`[STATE_CONSISTENCY_EXECUTION_STATE_TRANSITION_INVALID_OPERATION_STATUS_MISMATCH]`),
+    which PySpark logs from the thread of its releases (`ReleaseExecute failed with exception:
+    ...`, a warning), where the release of the drop-in, of an execution that ended, is not refused;
+  - a read of the file of an artifact that fails during its upload, once the client has opened it
+    (a file removed or made unreadable meanwhile), fails without the record that PySpark's generator
+    of the requests writes (`Failed to submit addArtifacts request: ...`); the interceptors of a
+    channel builder, which the transport does not apply, are not logged (`Applying interceptors
+    (...)`); and the schema of a DataFrame is not pickled, so nothing is logged of a schema of a
+    user-defined type that pickle refuses, where PySpark's `_schema` logs that it falls back to a
+    deep copy (`DataFrame schema pickle dumps failed with exception: ...`).
+- **The call stack of the requests** (intentional; the methods of the extension have no frames).
+  With `SPARK_CONNECT_DEBUG_CLIENT_CALL_STACK` (`true` or `1`), the requests of the executions, the
+  analyses and the configurations carry the call stack of the user's code last of their user context
+  extensions, as PySpark's `_build_call_stack_trace` builds it: a `FetchErrorDetailsResponse.Error`
+  of the frames from the outermost to the first frame of the pyspark package, each of the function
+  of the frame after it, which the reattaches and the releases of an execution copy; the request of
+  a finalizer, of the stack as it runs, of its `__del__`; an attribute that is a
+  `functools.cached_property` of PySpark's (`DataFrame.isStreaming`, `SparkSession.version`), of
+  the frame of the `__get__` of `functools`; and a call that runs during another call of its
+  thread, as of a progress handler, a hook or a finalizer, of the stack of that call, as PySpark's
+  ends at the first frame of the pyspark package of that call. What stays different: the innermost
+  frame of the user's code that calls a method of the extension, which has no frame, has the name of
+  the method or the attribute that the source of its call names (`collect` of `df.collect()`), where
+  PySpark's has the name of the function of PySpark that it calls, the same but of a call whose
+  source names no attribute, as of an alias or of `getattr`, or of no source, as of `exec`, of which
+  it has its own name; the stack is read once, as the call starts, for all the requests of the call
+  and of the calls during it, of the same frames of the user's code as those of PySpark's requests;
+  and a call of a listener of streaming queries, which the drop-in runs on the thread of its
+  listener bus, a thread of its own, carries the frames of the listener, where PySpark's carries
+  those of the `threading` module of its thread, up to its handler of the pyspark package.
 - **`SparkConnectClient.thread_local`** (intentional; the transport is native). The
   `thread_local` of the client, its set of tags and its lists of user context extensions are
   PySpark's plain `threading.local`, set and lists, as are the `global_user_context_extensions` of
@@ -778,17 +854,25 @@ requests of the unpickled object pickle as it is then. This case still differs:
   raises the error of the `host` of `ChannelBuilder`, where PySpark's connects through its channel.
 - **Plan logging of a deep DataFrame** (intentional; DESIGN). `DataFrame._plan` is a
   placeholder over the relation of the Rust core, whose `to_proto(client)` is the `Plan` of the
-  placeholder, `plan(client)`, as the root. The `to_proto` of a `LogicalPlan` is the `Plan` of
-  its relation as it is, as the transport compresses the plans that it sends, where PySpark's
-  compresses one of over `spark.connect.session.planCompression.threshold` bytes (10 MiB, which
-  its client asks the server for at its first plan) into a `compressed_operation`. Python
-  protobuf refuses to decode a relation nested beyond its limit (`too many levels of nesting`),
-  and the drop-in never decodes a deep plan. `SparkConnectClient._proto_to_string` renders a
-  message of the drop-in's protobuf runtime in Rust at any depth: past about 125 levels, PySpark's
-  `text_format` raises its `RecursionError`, and it returns `<Truncated message due to recursion
-  error>`, where the drop-in returns the full text; with `truncate=True`, both cut it at 8
-  levels. Plan logging of a deep DataFrame therefore does not reach the recursion handling that
-  the test `test_recursion_handling_for_plan_logging` exercises.
+  placeholder, `plan(client)`, which the client's `_set_relation_in_plan` sets as the root, or
+  compresses, as PySpark's, of the relation that the placeholder holds, into a
+  `compressed_operation` of over `spark.connect.session.planCompression.threshold` bytes (10 MiB,
+  which the client asks the server for at its first plan). Python's protobuf refuses to decode a
+  message nested more than 100 levels deep: its default implementation, upb, raises a `DecodeError`
+  (`Error parsing message with type 'spark.connect.Plan': Exceeded upb_DecodeOptions_MaxDepth` of
+  protobuf 7, of no reason after the type of protobuf 6, where the drop-in's runtime gives
+  protobuf 7's), its pure-Python one `Error parsing message: too many levels of nesting.`; the
+  drop-in never decodes a deep plan in Python. `SparkConnectClient._proto_to_string` renders a
+  message of the drop-in's protobuf runtime in Rust at any depth, as do the logs of the plans, the
+  requests and the responses of the transport: past about 120 nested relations (of Python's
+  recursion limit, of a caller of few frames), PySpark's `text_format` raises its `RecursionError`,
+  and it returns `<Truncated message due to recursion error>`, where the drop-in returns the full
+  text. With `truncate=True`, both cut the text at 8 levels, and their strings and bytes short, of
+  protobuf 6; `_truncate` reads `FieldDescriptor.label`, which protobuf 7 and the drop-in's runtime
+  without protobuf do not have, so that both return `<Truncated message due to truncation error>`
+  of a message of a field of a message, a string or bytes, as the truncated plans of the logs are.
+  Plan logging of a deep DataFrame therefore does not reach the recursion handling that the test
+  `test_recursion_handling_for_plan_logging` exercises.
 - **Client session ID** (intentional). `SparkConnectClient._session_id` is the session ID that
   the requests carry, an attribute that a set changes for them, as PySpark's, so the next response
   of another server-side session marks the session closed, of an open channel, as PySpark's

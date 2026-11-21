@@ -194,7 +194,10 @@ impl PyDataFrame {
     ) -> PyResult<Py<PyAny>> {
         let session = self.dataframe.spark_session();
         let execution = interruptible(py, &session, || {
-            self.dataframe.prepare_execution().map_err(Box::new)
+            let execution = self.dataframe.prepare_execution().map_err(Box::new)?;
+            // As PySpark's `to_pandas`, which logs the plan before it reads its settings.
+            execution.log_plan_of_conversion().map_err(Box::new)?;
+            Ok::<_, Box<spark_connect_core::error::SparkError>>(execution)
         })?;
         let settings = interruptible(py, &session, || {
             session.conf().get_many(&[
@@ -3244,8 +3247,11 @@ impl PyDataFrame {
     #[getter]
     fn is_streaming(&self, py: Python<'_>) -> PyResult<bool> {
         cached(&self.is_streaming, || {
-            interruptible(py, &self.dataframe.spark_session(), || {
-                self.dataframe.is_streaming().map_err(Box::new)
+            // A `functools.cached_property` of PySpark's.
+            crate::client_log::of_cached_property("isStreaming", || {
+                interruptible(py, &self.dataframe.spark_session(), || {
+                    self.dataframe.is_streaming().map_err(Box::new)
+                })
             })
         })
     }
@@ -8339,11 +8345,11 @@ impl PyLocalRowIterator {
             Some(row) => Some(Ok(row)),
             // The first fetch sends the execution, of the request context of the client; the
             // others continue it, as PySpark's generator reads nothing of the client again.
-            None if self.prepared.is_some() => interruptible(py, &session, || {
-                Ok::<_, Box<spark_connect_core::error::SparkError>>(self.next_row())
-            })?,
+            None if self.prepared.is_some() => {
+                interruptible(py, &session, || out_of_the_wait(self.next_row()))?
+            }
             None => crate::interrupt::interruptible_continuation(py, &session, || {
-                Ok::<_, Box<spark_connect_core::error::SparkError>>(self.next_row())
+                out_of_the_wait(self.next_row())
             })?,
         };
         if let Some(iterator) = self.iterator.as_ref() {
@@ -8400,6 +8406,26 @@ impl PyLocalRowIterator {
             Some(Err(error)) => Err(crate::errors::spark_error_to_py_exception(error)),
             None => Ok(None),
         }
+    }
+}
+
+/// `next`, the next row of an iterator of rows, of its error as the error of the wait of the call
+/// when it is the exception of Python code of the client that is a `BaseException` only, as the
+/// `KeyboardInterrupt` of a handler of the logs at a response, which goes out of PySpark's
+/// generator before the row and the checks of its schema, and which the wait converts, as the
+/// `except KeyboardInterrupt` of PySpark's execution, into the interrupt of the execution (see
+/// `crate::interrupt::interruptible`). The other errors of a row are raised once the schema of the
+/// result that came before them is checked.
+#[allow(clippy::type_complexity)]
+fn out_of_the_wait(
+    next: Option<spark_connect_core::error::Result<spark_connect::row::Row>>,
+) -> Result<
+    Option<spark_connect_core::error::Result<spark_connect::row::Row>>,
+    Box<spark_connect_core::error::SparkError>,
+> {
+    match next {
+        Some(Err(error)) if crate::errors::is_base_exception_only(&error) => Err(Box::new(error)),
+        next => Ok(next),
     }
 }
 

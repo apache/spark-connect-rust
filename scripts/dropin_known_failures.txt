@@ -14,7 +14,6 @@
 # --- whole files: the gRPC client internals, which the Rust transport replaces by design ---
 pyspark/sql/tests/connect/client/test_client.py  # tests grpcio channel/stub internals; this client's transport is Rust (SPARK-61111 module audit)
 pyspark/sql/tests/connect/client/test_client_retries.py  # tests the grpcio retry policy of the Python client; the Rust transport has its own
-pyspark/sql/tests/connect/client/test_client_call_stack_trace.py  # tests the Python client's call-stack trace plumbing, which the Rust transport replaces
 # --- test_connect_channel.py runs against the drop-in; these three need a grpcio channel ---
 pyspark/sql/tests/connect/test_connect_channel.py::ChannelBuilderTests::test_channel_options  # passes channelOptions, which raises NOT_IMPLEMENTED by design (dev/parity/known-differences.md, custom gRPC channels)
 pyspark/sql/tests/connect/test_connect_channel.py::ChannelBuilderTests::test_keepalive_explicit_channel_option_wins  # passes channelOptions, as above
