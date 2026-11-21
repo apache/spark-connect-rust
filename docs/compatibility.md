@@ -2477,7 +2477,7 @@ dropped. The current inventory covers roughly:
 
 | Kind      | Count |
 |-----------|-------|
-| Methods   | ~1340 |
+| Methods   | ~1360 |
 | Functions | ~620  |
 | Classes   | ~300  |
 

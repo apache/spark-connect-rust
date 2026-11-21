@@ -143,6 +143,9 @@ VENDORED_FILES=(
   "sql/connect/_typing.py"
   # The conversions of the storage levels and the cached relations of their messages.
   "sql/connect/conversion.py"
+  # The reuse of a persistent local Spark Connect server (`spark.local.connect.reuse`), which the
+  # builder of pyspark.sql.SparkSession (sql/session.py) imports for a `local` master.
+  "sql/connect/local_server.py"
 
   # The spatial reference systems of the spatial types, and the SQLStringFormatter, of
   # pyspark.sql.
