@@ -204,7 +204,7 @@ impl JvmEngine {
                 pointer: 0,
                 core: self.clone(),
                 permit: None,
-                lane: CleanupLane::Task,
+                kind: HandleKind::Task,
                 retained_task: None,
             },
             |_| Err(Status::internal("injected Java cleanup failure")),
@@ -264,7 +264,7 @@ impl JvmEngine {
         )
     }
     /// Only an explicit owner close retries failed cleanup. Preserve each item's
-    /// original lane, Java ownership and admission until success.
+    /// cleanup ownership, Java handles and admission until success.
     pub(super) fn retry_failed_cleanup(&self) {
         for failure in self.take_failed_cleanup() {
             queue(failure.item);
@@ -476,21 +476,6 @@ enum HandleKind {
     Session,
     Query,
 }
-#[derive(Clone, Copy)]
-enum CleanupLane {
-    Task,
-    Query,
-    Session,
-}
-impl HandleKind {
-    fn cleanup_lane(self) -> CleanupLane {
-        match self {
-            Self::Task => CleanupLane::Task,
-            Self::Query => CleanupLane::Query,
-            Self::Session => CleanupLane::Session,
-        }
-    }
-}
 unsafe impl Send for Handle {}
 unsafe impl Sync for Handle {}
 impl Handle {
@@ -503,7 +488,7 @@ impl Drop for Handle {
         queue(Cleanup::Free {
             pointer: self.pointer as usize,
             core: self.core.clone(),
-            lane: self.kind.cleanup_lane(),
+            kind: self.kind,
             retained_task: self.retained_task.take(),
             permit: self
                 .permit
@@ -519,12 +504,12 @@ enum Cleanup {
         pointer: usize,
         core: Arc<JvmEngine>,
         permit: Option<OwnedSemaphorePermit>,
-        lane: CleanupLane,
+        kind: HandleKind,
         retained_task: Option<Arc<Handle>>,
     },
     #[cfg(test)]
     TestAction {
-        lane: CleanupLane,
+        kind: HandleKind,
         action: Box<dyn FnOnce() + Send>,
     },
 }
@@ -541,19 +526,19 @@ impl Cleanup {
             Self::TestAction { .. } => None,
         }
     }
-    fn lane(&self) -> CleanupLane {
+    fn kind(&self) -> HandleKind {
         match self {
-            Self::Cancel(_) => CleanupLane::Task,
-            Self::Free { lane, .. } => *lane,
+            Self::Cancel(_) => HandleKind::Task,
+            Self::Free { kind, .. } => *kind,
             #[cfg(test)]
-            Self::TestAction { lane, .. } => *lane,
+            Self::TestAction { kind, .. } => *kind,
         }
     }
 }
 
-/// Cleanup lanes outlive individual servers. Retain an attachment only during
-/// a burst, and count that whole lifetime as activity so shutdown waits for the
-/// same-thread detach before it releases the engine factory.
+/// The shared task lane can outlive individual servers. Retain an attachment
+/// during a burst or an individual owner close, and count that whole lifetime as
+/// activity so shutdown waits for detach before releasing the engine factory.
 struct CleanupAttachment<W> {
     worker: Option<W>,
     activity: Activity,
@@ -678,20 +663,6 @@ fn cleanup_loop_with<W>(
     }
 }
 
-fn cleanup_sender(
-    lane: CleanupLane,
-) -> (&'static Mutex<Option<mpsc::Sender<Cleanup>>>, &'static str) {
-    // Session close may block on Spark teardown. Isolate it from Query frees
-    // that hold task admission, and Task/cancel reclamation itself.
-    static TASK: Mutex<Option<mpsc::Sender<Cleanup>>> = Mutex::new(None);
-    static QUERY: Mutex<Option<mpsc::Sender<Cleanup>>> = Mutex::new(None);
-    static SESSION: Mutex<Option<mpsc::Sender<Cleanup>>> = Mutex::new(None);
-    match lane {
-        CleanupLane::Task => (&TASK, "spark-connect-engine-task-cleanup"),
-        CleanupLane::Query => (&QUERY, "spark-connect-engine-query-cleanup"),
-        CleanupLane::Session => (&SESSION, "spark-connect-engine-session-cleanup"),
-    }
-}
 fn release_native(pointer: usize) -> Result<(), Status> {
     let mut error = BridgeBuffer::default();
     let result = unsafe { spark_connect_engine_free_checked(pointer as *mut c_void, &mut error) };
@@ -720,7 +691,7 @@ fn cancel_native(pointer: *mut c_void) -> Result<(), Status> {
 fn retain_failed_cleanup(item: Cleanup, error: Status) {
     let message = error.to_string();
     // Retain native ownership and admission before attempting diagnostics.
-    // Explicit close retries a transient failure on the item's original lane.
+    // Explicit close retries with the same ownership; Query/Session use a fresh closer.
     let core = item.core().expect("native cleanup has an engine").clone();
     core.counts
         .lock()
@@ -753,7 +724,7 @@ fn cleanup_with_actions(
             pointer: _,
             core,
             permit,
-            lane: _,
+            kind: _,
             retained_task,
         } => {
             // Publish resource/admission release before reporting this handle
@@ -772,7 +743,17 @@ fn cleanup_with_actions(
     }
 }
 fn queue(item: Cleanup) {
-    let (sender, name) = cleanup_sender(item.lane());
+    static TASK: Mutex<Option<mpsc::Sender<Cleanup>>> = Mutex::new(None);
+    // A query/session close may wait indefinitely for Spark work. Give each
+    // owner its own closer so it cannot retain unrelated owners' admission.
+    // Dropping the local sender stops that closer after its one item; the same
+    // cleanup loop still tracks attachment/detachment through shutdown.
+    let owner = Mutex::new(None);
+    let (sender, name) = match item.kind() {
+        HandleKind::Task => (&TASK, "spark-connect-engine-task-cleanup"),
+        HandleKind::Query => (&owner, "spark-connect-engine-query-cleanup"),
+        HandleKind::Session => (&owner, "spark-connect-engine-session-cleanup"),
+    };
     if let Err((item, error)) = enqueue_cleanup(item, sender, |rx| {
         std::thread::Builder::new()
             .name(name.into())
@@ -1716,13 +1697,55 @@ mod tests {
         }
     }
     fn empty_cleanup(core: &Arc<JvmEngine>) -> Cleanup {
+        empty_cleanup_with(core, HandleKind::Task, None, None)
+    }
+    fn empty_cleanup_with(
+        core: &Arc<JvmEngine>,
+        kind: HandleKind,
+        permit: Option<OwnedSemaphorePermit>,
+        retained_task: Option<Arc<Handle>>,
+    ) -> Cleanup {
         core.counts.lock().unwrap().handles += 1;
         Cleanup::Free {
             pointer: 0,
             core: core.clone(),
-            permit: None,
-            lane: CleanupLane::Task,
-            retained_task: None,
+            permit,
+            kind,
+            retained_task,
+        }
+    }
+    fn owner_cleanup(
+        core: &Arc<JvmEngine>,
+        kind: HandleKind,
+        permit_count: u32,
+    ) -> (Cleanup, Arc<Semaphore>, usize) {
+        match kind {
+            HandleKind::Query => {
+                let admission = core.permits.clone();
+                let permit = admission
+                    .clone()
+                    .try_acquire_many_owned(permit_count)
+                    .unwrap();
+                let task = empty_handle(core, HandleKind::Task, Some(permit), None);
+                (
+                    empty_cleanup_with(core, kind, None, Some(task)),
+                    admission,
+                    2,
+                )
+            }
+            HandleKind::Session => {
+                let admission = core.session_permits.clone();
+                let permit = admission
+                    .clone()
+                    .try_acquire_many_owned(permit_count)
+                    .unwrap();
+                (
+                    empty_cleanup_with(core, kind, Some(permit), None),
+                    admission,
+                    1,
+                )
+            }
+            HandleKind::Task => unreachable!(),
         }
     }
     fn attachment_event(rx: &mpsc::Receiver<CleanupAttachmentEvent>) -> CleanupAttachmentEvent {
@@ -2028,7 +2051,7 @@ mod tests {
             pointer: 0,
             core: core.clone(),
             permit: Some(permit),
-            lane: CleanupLane::Session,
+            kind: HandleKind::Session,
             retained_task: None,
         };
         let attempts = AtomicUsize::new(0);
@@ -2046,7 +2069,7 @@ mod tests {
             .contains("injected Java close failure"));
         let mut failed = core.take_failed_cleanup();
         assert_eq!(failed.len(), 1);
-        assert!(matches!(failed[0].item.lane(), CleanupLane::Session));
+        assert!(matches!(failed[0].item.kind(), HandleKind::Session));
         cleanup_with(failed.pop().unwrap().item, |_| {
             attempts.fetch_add(1, Ordering::SeqCst);
             Ok(())
@@ -2078,7 +2101,7 @@ mod tests {
         let failure = core.take_failed_cleanup().pop().unwrap();
         assert!(matches!(failure.item, Cleanup::Cancel(_)));
         cleanup_with_actions(failure.item, |_| unreachable!(), |_| Ok(()));
-        cleanup_fence(CleanupLane::Task);
+        task_cleanup_fence();
         assert_eq!(core.permits.available_permits(), 64);
         assert_eq!(core.counts.lock().unwrap().handles, 0);
     }
@@ -2128,6 +2151,37 @@ mod tests {
         assert_eq!(core.counts.lock().unwrap().handles, 0);
     }
     #[test]
+    fn owner_cleanup_dispatch_failure_retains_admission_for_retry() {
+        let _serial = CLEANUP_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for kind in [HandleKind::Query, HandleKind::Session] {
+            for spawn_fails in [true, false] {
+                let core = JvmEngine::new(std::ptr::null_mut());
+                let (item, admission, expected_handles) = owner_cleanup(&core, kind, 64);
+                let sender = Mutex::new(None);
+                let (item, error) = enqueue_cleanup(item, &sender, |rx| {
+                    drop(rx);
+                    if spawn_fails {
+                        Err(std::io::Error::other("injected spawn failure"))
+                    } else {
+                        Ok(())
+                    }
+                })
+                .err()
+                .unwrap();
+                assert!(sender.lock().unwrap().is_none());
+                retain_failed_cleanup(item, error);
+                assert_eq!(admission.available_permits(), 0);
+                assert_eq!(core.counts.lock().unwrap().handles, expected_handles);
+                core.retry_failed_cleanup();
+                cleanup_drained(core.clone());
+                assert_eq!(admission.available_permits(), 64);
+                assert!(core.cleanup_failure().is_none());
+            }
+        }
+    }
+    #[test]
     fn detach_retries_only_on_the_owning_thread_and_reports_persistent_failure() {
         let owner = std::thread::current().id();
         let mut attempts = 0;
@@ -2165,7 +2219,7 @@ mod tests {
         log_diagnostic_to(BrokenPipe, format_args!("failed cleanup"));
     }
     #[test]
-    fn failed_query_cleanup_retains_its_task_and_retries_on_the_query_lane() {
+    fn failed_query_cleanup_retains_its_task_and_retries_independently() {
         let _serial = CLEANUP_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -2178,25 +2232,28 @@ mod tests {
                 pointer: 0,
                 core: core.clone(),
                 permit: None,
-                lane: CleanupLane::Query,
+                kind: HandleKind::Query,
                 retained_task: Some(task),
             },
             |_| Err(Status::internal("injected query close failure")),
         );
-        cleanup_fence(CleanupLane::Task);
+        task_cleanup_fence();
         assert_eq!(core.permits.available_permits(), 0);
         assert_eq!(core.counts.lock().unwrap().handles, 2);
-        let blocked = block_cleanup(CleanupLane::Query);
+        let blocked_core = JvmEngine::new(std::ptr::null_mut());
+        let blocked = block_owner_cleanup(empty_cleanup_with(
+            &blocked_core,
+            HandleKind::Query,
+            None,
+            None,
+        ));
         core.retry_failed_cleanup();
-        cleanup_fence(CleanupLane::Task);
-        assert_eq!(core.permits.available_permits(), 0);
-        assert_eq!(core.counts.lock().unwrap().handles, 2);
-        drop(blocked);
-        cleanup_fence(CleanupLane::Query);
-        cleanup_fence(CleanupLane::Task);
+        cleanup_drained(core.clone());
         assert_eq!(core.permits.available_permits(), 64);
         assert_eq!(core.counts.lock().unwrap().handles, 0);
         assert!(core.cleanup_failure().is_none());
+        drop(blocked);
+        cleanup_drained(blocked_core);
     }
     #[test]
     fn cleanup_retry_snapshot_preserves_failures_arriving_during_retry() {
@@ -2242,25 +2299,28 @@ mod tests {
             let _ = self.0.send(());
         }
     }
-    fn block_cleanup(lane: CleanupLane) -> CleanupBlock {
+    fn block_owner_cleanup(item: Cleanup) -> CleanupBlock {
         let (entered_tx, entered_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
         queue(Cleanup::TestAction {
-            lane,
+            kind: item.kind(),
             action: Box::new(move || {
-                if entered_tx.send(()).is_ok() {
-                    let _ = release_rx.recv();
-                }
+                cleanup_with(item, |_| {
+                    if entered_tx.send(()).is_ok() {
+                        let _ = release_rx.recv();
+                    }
+                    Ok(())
+                });
             }),
         });
         let block = CleanupBlock(release_tx);
         entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         block
     }
-    fn cleanup_fence(lane: CleanupLane) {
+    fn task_cleanup_fence() {
         let (done_tx, done_rx) = mpsc::channel();
         queue(Cleanup::TestAction {
-            lane,
+            kind: HandleKind::Task,
             action: Box::new(move || {
                 let _ = done_tx.send(());
             }),
@@ -2289,7 +2349,6 @@ mod tests {
         let _serial = CLEANUP_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let blocked = block_cleanup(CleanupLane::Session);
         let core = JvmEngine::new(std::ptr::null_mut());
         let session_permit = core
             .session_permits
@@ -2297,7 +2356,7 @@ mod tests {
             .try_acquire_many_owned(64)
             .unwrap();
         let task_permit = core.permits.clone().try_acquire_many_owned(64).unwrap();
-        drop(empty_handle(
+        let blocked = block_owner_cleanup(empty_cleanup_with(
             &core,
             HandleKind::Session,
             Some(session_permit),
@@ -2309,12 +2368,12 @@ mod tests {
             Some(task_permit),
             None,
         ));
-        cleanup_fence(CleanupLane::Task);
+        task_cleanup_fence();
         assert_eq!(core.permits.available_permits(), 64);
         assert_eq!(core.session_permits.available_permits(), 0);
         assert_eq!(core.counts.lock().unwrap().handles, 1);
         drop(blocked);
-        core.wait_drained();
+        cleanup_drained(core.clone());
         assert_eq!(core.session_permits.available_permits(), 64);
     }
     #[test]
@@ -2322,16 +2381,20 @@ mod tests {
         let _serial = CLEANUP_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let blocked = block_cleanup(CleanupLane::Query);
         let core = JvmEngine::new(std::ptr::null_mut());
         let permit = core.permits.clone().try_acquire_many_owned(64).unwrap();
         let task = empty_handle(&core, HandleKind::Task, Some(permit), None);
-        drop(empty_handle(&core, HandleKind::Query, None, Some(task)));
-        cleanup_fence(CleanupLane::Task);
+        let blocked = block_owner_cleanup(empty_cleanup_with(
+            &core,
+            HandleKind::Query,
+            None,
+            Some(task),
+        ));
+        task_cleanup_fence();
         assert_eq!(core.permits.available_permits(), 0);
         assert_eq!(core.counts.lock().unwrap().handles, 2);
         drop(blocked);
-        core.wait_drained();
+        cleanup_drained(core.clone());
         assert_eq!(core.permits.available_permits(), 64);
     }
     #[test]
@@ -2339,17 +2402,60 @@ mod tests {
         let _serial = CLEANUP_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let blocked = block_cleanup(CleanupLane::Session);
+        let blocked_core = JvmEngine::new(std::ptr::null_mut());
+        let blocked = block_owner_cleanup(empty_cleanup_with(
+            &blocked_core,
+            HandleKind::Session,
+            None,
+            None,
+        ));
         let core = JvmEngine::new(std::ptr::null_mut());
         let permit = core.permits.clone().try_acquire_many_owned(64).unwrap();
         let task = empty_handle(&core, HandleKind::Task, Some(permit), None);
         drop(empty_handle(&core, HandleKind::Query, None, Some(task)));
-        cleanup_fence(CleanupLane::Query);
-        cleanup_fence(CleanupLane::Task);
+        cleanup_drained(core.clone());
         assert_eq!(core.permits.available_permits(), 64);
         assert_eq!(core.counts.lock().unwrap().handles, 0);
         drop(blocked);
-        core.wait_drained();
+        cleanup_drained(blocked_core);
+    }
+    #[test]
+    fn blocked_owner_retains_only_its_own_admission_across_engines() {
+        let _serial = CLEANUP_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for kind in [HandleKind::Query, HandleKind::Session] {
+            let core = JvmEngine::new(std::ptr::null_mut());
+            let other = JvmEngine::new(std::ptr::null_mut());
+            let (item, admission, expected_handles) = owner_cleanup(&core, kind, 1);
+            let blocked = block_owner_cleanup(item);
+            let (peer, _, _) = owner_cleanup(&core, kind, 63);
+            let (other_peer, other_admission, _) = owner_cleanup(&other, kind, 64);
+            let (done_tx, done_rx) = mpsc::channel();
+            queue(Cleanup::TestAction {
+                kind,
+                action: Box::new(move || {
+                    cleanup(peer);
+                    let _ = done_tx.send(());
+                }),
+            });
+            queue(other_peer);
+            done_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            cleanup_drained(other.clone());
+            task_cleanup_fence();
+            assert_eq!(admission.available_permits(), 63);
+            assert_eq!(other_admission.available_permits(), 64);
+            assert_eq!(core.counts.lock().unwrap().handles, expected_handles);
+            core.shutdown();
+            assert!(core
+                .take_factory_after_drain()
+                .unwrap_err()
+                .contains("requires drained work"));
+            drop(blocked);
+            cleanup_drained(core.clone());
+            assert_eq!(admission.available_permits(), 64);
+            core.release_factory().unwrap();
+        }
     }
     #[tokio::test]
     async fn session_admission_times_out_and_recovers_after_actual_session_free() {
@@ -2371,7 +2477,7 @@ mod tests {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             drop(empty_handle(&core, HandleKind::Session, Some(held), None));
-            cleanup_fence(CleanupLane::Session);
+            cleanup_drained(core.clone());
         }
         let restored = core
             .admit_session(Instant::now() + Duration::from_millis(2))

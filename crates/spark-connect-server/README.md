@@ -504,15 +504,24 @@ attachment failure can recover during that close. A persistent worker
 detach failure or a partial Java cleanup failure remains retained until the
 hosting JVM restarts.
 
-Deferred session closes run serially on one process-wide cleanup lane shared by
-all embedded engines using the native library. A slow or blocked session close
-therefore delays later session cleanup and session-capacity recovery in other
-engines too. Session permits remain reserved until the corresponding Java close
-completes successfully. Task cancellation has a separate process-wide lane;
-a slow cancellation delays other cancellations on that lane. Query cleanup has
-its own lane, so session teardown does not directly block task-capacity recovery
-from task cancellation or query cleanup. These lanes do not isolate engines from
-other shared Spark resources or from a query's own slow cleanup.
+Each deferred query or session close runs on its own cleanup thread. A slow or
+blocked close retains that owner's resources and admission without serializing
+unrelated query and session closes, including those in other embedded engines.
+Permits remain reserved until the corresponding Java close completes successfully.
+A running closer uses one OS thread and may retain a daemon JVM attachment.
+
+Blocked closes that hold admission are limited to 64 query and 64 session owners
+per engine. Permits are released before detachment and thread exit, so cleanup
+threads and attachments from completed closes can overlap newly admitted work;
+these admission limits are not a strict global thread or attachment bound.
+
+If a closer thread cannot start, its owner's handles and permits stay retained
+for failed-cleanup retry by an explicit `NativeEngineServer.close()`.
+
+Task cancellation and task frees still share one process-wide cleanup lane; a
+slow cancellation or task free can delay other task cleanup and admission recovery.
+Independent cleanup threads do not isolate engines from shared Spark resources or
+from a query's own slow cleanup.
 
 Native server close waits up to ten seconds for shutdown. If work still owns
 JNI resources, close reports an incomplete shutdown and retains its handle for
