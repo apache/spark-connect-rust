@@ -2065,17 +2065,10 @@ impl PySparkSession {
         })?;
         let large = options.use_large_var_types() == Some("true");
         if pandas {
-            // As PySpark's conversion of a frame of a struct, which first deduplicates the names
-            // of its fields (`_deduplicate_field_names`), of the `IndexError` of an element of
-            // `fields` past its cached `names`, as of one that is not a `StructField`, and then
-            // (`create_from_pandas_arrow`) takes a frame of the width of the struct.
-            py.import("pyspark.sql.pandas.types")?
-                .getattr("_deduplicate_field_names")?
-                .call1((schema,))?;
-            let width = data.getattr("columns")?.len()?;
-            if width != fields {
-                return Err(crate::infer::axis_length_mismatch(py, fields, width));
-            }
+            // As PySpark's conversion of a frame of a struct (`prepare_pandas_table`), which first
+            // deduplicates the names of its fields (`_deduplicate_field_names`), of the
+            // `IndexError` of an element of `fields` past its cached `names`, as of one that is
+            // not a `StructField`, and then zips the columns with the fields.
             let table = pandas_input.getattr("prepare_pandas_table")?.call1((
                 data,
                 schema,
@@ -2469,12 +2462,12 @@ impl PySparkSession {
 
     /// A DataFrame of a non-empty pandas DataFrame, of any class, under an explicit struct
     /// schema, converted as PySpark does (`prepare_pandas_table`): each column by its Arrow
-    /// conversion (session time zone, safe casts), then the table cast to the schema, which the
-    /// importer sends as Arrow. A frame of another width than the struct raises
-    /// `AXIS_LENGTH_MISMATCH` rather than drop columns, as PySpark's conversion does
-    /// (`dev/parity/known-differences.md`). None for a frame that the row path converts: an empty
-    /// one, and one of a schema whose classes, or the type names that the conversion resolves,
-    /// are customized (`accepts_pandas_schema`).
+    /// conversion (session time zone, safe casts), of the columns that it zips with the fields,
+    /// then the table renamed and cast to the schema, which the importer sends as Arrow. So the
+    /// columns of a frame past the fields are dropped, and of fewer columns than the fields the
+    /// rename raises PyArrow's `ArrowInvalid`, as PySpark's. None for a frame that the row path
+    /// converts: an empty one, and one of a schema whose classes, or the type names that the
+    /// conversion resolves, are customized (`accepts_pandas_schema`).
     fn create_from_pandas_arrow(
         &self,
         py: Python<'_>,
@@ -2485,13 +2478,6 @@ impl PySparkSession {
     ) -> PyResult<Option<PyDataFrame>> {
         if data.len()? == 0 {
             return Ok(None);
-        }
-        // PySpark's conversion zips the columns with the fields: it drops the columns past them,
-        // and fails the rename of fewer. A frame of no columns under a struct of no fields is the
-        // table of its index, whose columns are checked below, as PySpark checks them.
-        let width = data.getattr("columns")?.len()?;
-        if width != fields.len() {
-            return Err(crate::infer::axis_length_mismatch(py, fields.len(), width));
         }
         let helper = py.import("pyspark.sql._pandas_input")?;
         if !helper
@@ -2540,8 +2526,8 @@ impl PySparkSession {
         // repeat the names of the fields of a struct (DUPLICATED_FIELD_NAME_IN_ARROW_STRUCT).
         let spark_schema = crate::types::py_to_data_type_as_given(schema_py.bind(py))?;
         // As PySpark's, which checks the number of columns of the table against the number of
-        // fields, which only the columns of the index of a frame of no columns can fail, and
-        // then writes the `json()` of the schema.
+        // fields, which only the columns of the index of a frame of no columns under a struct of
+        // no fields can fail, and then writes the `json()` of the schema.
         let actual: usize = table.getattr("num_columns")?.extract()?;
         if actual != fields.len() {
             return Err(crate::infer::axis_length_mismatch(py, fields.len(), actual));
@@ -2750,6 +2736,49 @@ impl PySparkSession {
         Ok(PyDataFrame::new(df))
     }
 
+    /// The error of PySpark's conversion of a pandas DataFrame of rows of fewer columns than the
+    /// `fields` of its struct schema (`prepare_pandas_table`), where PyArrow is: of the columns
+    /// that it zips with the fields, and then of the rename of its table to the names of the
+    /// fields, PyArrow's `ArrowInvalid` (`tried to rename a table of 1 columns but only 2 names
+    /// were provided`). Of the struct as the schema object is, which may read its fields of its
+    /// own, as PySpark's conversion reads them.
+    fn raise_of_fewer_pandas_columns(
+        &self,
+        py: Python<'_>,
+        data: &Bound<'_, PyAny>,
+        fields: &[StructField],
+        schema_object: Option<&Bound<'_, PyAny>>,
+        options: &Option<spark_connect::ArrowInputOptions>,
+    ) -> PyResult<()> {
+        let helper = py.import("pyspark.sql._pandas_input")?;
+        let Some(options) = options else {
+            return Ok(());
+        };
+        if !helper.getattr("pyarrow_available")?.call0()?.is_truthy()? {
+            return Ok(());
+        }
+        let schema = match schema_object
+            .filter(|schema| schema.is_instance_of::<crate::types::PyStructType>())
+        {
+            Some(schema) => schema.clone(),
+            None => crate::types::data_type_to_py(
+                py,
+                &DataType::Struct {
+                    fields: fields.to_vec(),
+                },
+            )?
+            .into_bound(py),
+        };
+        helper.getattr("prepare_pandas_table")?.call1((
+            data,
+            schema,
+            options.timezone().unwrap_or("UTC"),
+            options.safecheck(),
+            options.use_large_var_types() == Some("true"),
+        ))?;
+        Ok(())
+    }
+
     /// A DataFrame of a pandas DataFrame on the row path, which converts it where PySpark's
     /// conversion does not: without PyArrow, which the path does not need; when the type names
     /// that the conversion resolves are rebound, or the classes of a struct schema customized
@@ -2783,6 +2812,40 @@ impl PySparkSession {
                 ));
             }
         }
+        // As PySpark's conversion of a frame of rows under a struct, which zips the columns with
+        // the fields (`prepare_pandas_table`): the columns past the fields are dropped, and of no
+        // fields the rows too, as its table of no columns has none; of fewer columns than the
+        // fields, its conversion of the columns, and then the rename of its table to the names of
+        // the fields, raise, of PyArrow's `ArrowInvalid`, where PyArrow is. Without it, such a
+        // frame raises `AXIS_LENGTH_MISMATCH` below.
+        let zipped;
+        let data = match &spec {
+            Spec::Struct(fields) if data.len()? > 0 => {
+                let width = data.getattr("columns")?.len()?;
+                if width > fields.len() {
+                    let rows = if fields.is_empty() {
+                        pyo3::types::PySlice::new(py, 0, 0, 1)
+                    } else {
+                        pyo3::types::PySlice::full(py)
+                    };
+                    let columns = pyo3::types::PySlice::new(py, 0, fields.len() as isize, 1);
+                    zipped = data.getattr("iloc")?.get_item((rows, columns))?;
+                    &zipped
+                } else {
+                    if width < fields.len() {
+                        self.raise_of_fewer_pandas_columns(
+                            py,
+                            data,
+                            fields,
+                            schema_object,
+                            &options,
+                        )?;
+                    }
+                    data
+                }
+            }
+            _ => data,
+        };
         // Without a struct schema, PySpark infers the Arrow type of each column, which has
         // no int64 for a Python int beyond the 64-bit range.
         let inferred = !matches!(spec, Spec::Struct(_));

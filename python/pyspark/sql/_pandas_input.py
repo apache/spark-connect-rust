@@ -1485,11 +1485,13 @@ def prepare_pandas_table(frame, schema, timezone, safecheck, prefers_large_types
     Each column goes through PySpark's own Arrow conversion, with the session time zone
     and the safe-cast setting, and the table is then renamed and cast to the schema's
     Arrow types. The values and errors therefore match PySpark, including the nullability
-    and overflow messages. A frame of no columns, under a struct of no fields, is the table of
-    `pa.RecordBatch.from_pandas`, which keeps its number of rows, with a column of each level
-    of its index unless it is a RangeIndex, and is not renamed; the caller checks its number
-    of columns, as PySpark does. The caller checks the schema with `accepts_pandas_schema`, and
-    the number of columns of the frame against the fields first.
+    and overflow messages. As PySpark's, the columns are zipped with the fields: the columns
+    past the fields are not converted and are dropped, of no fields the table has no column and
+    no row, and of fewer columns than the fields the rename raises PyArrow's `ArrowInvalid`. A
+    frame of no columns is the table of `pa.RecordBatch.from_pandas`, which keeps its number of
+    rows, with a column of each level of its index unless it is a RangeIndex; the caller checks
+    the number of columns of a struct of no fields, as PySpark does. The caller checks the
+    schema with `accepts_pandas_schema` first.
     """
     import pyarrow as pa
 

@@ -6693,27 +6693,34 @@ class _PandasSubclass(pd.DataFrame):
 
 
 @pytest.mark.parametrize("frame_class", [pd.DataFrame, _PandasSubclass], ids=["frame", "subclass"])
-@pytest.mark.parametrize("data,schema,expected,actual", [
-    ({"a": [1], "b": [2]}, "a long", "1", "2"),
-    ({"a": [1]}, "x long, y long", "2", "1"),
-    ({"a": [1, 2]}, T.StructType([]), "0", "1"),
-    (None, "a long", "1", "0"),
-], ids=["more-columns", "fewer-columns", "no-fields", "no-columns"])
-def test_pandas_explicit_struct_of_another_width_raises_axis_length_mismatch(
-        protocol, frame_class, data, schema, expected, actual):
-    from pyspark.errors import PySparkValueError
-
-    # PySpark's conversion zips the columns with the fields: it drops the columns past the
-    # fields, fails the rename of fewer with PyArrow's ArrowInvalid, and takes the index of a
-    # frame of no columns as its columns. This client raises AXIS_LENGTH_MISMATCH for each
-    # rather than drop data (dev/parity/known-differences.md).
+@pytest.mark.parametrize("data,schema,rows,names", [
+    ({"a": [1], "b": [2]}, "a long", [{"a": 1}], ["a"]),
+    ({"a": [1], "b": [2], "c": [3]}, "x long, y long", [{"x": 1, "y": 2}], ["x", "y"]),
+    (None, "a long", [{"a": 5}, {"a": 6}], ["a"]),
+], ids=["more-columns", "more-columns-of-two-fields", "no-columns"])
+def test_pandas_explicit_struct_of_another_width_zips_the_columns_as_pyspark(
+        protocol, frame_class, data, schema, rows, names):
+    # As PySpark Connect's conversion of a frame of any class, which zips its columns with the
+    # fields: the columns past the fields are dropped, and a frame of no columns is the table of
+    # its index (one that is not a RangeIndex), which the rename takes.
     frame = frame_class(index=[5, 6]) if data is None else frame_class(data)
     with _arrow_input_service(protocol) as (spark, state):
-        with pytest.raises(PySparkValueError) as error:
-            spark.createDataFrame(frame, schema)
-        assert error.value.getCondition() == "AXIS_LENGTH_MISMATCH"
-        assert error.value.getMessageParameters() == {
-            "expected_length": expected, "actual_length": actual}
+        spark.createDataFrame(frame, schema).toArrow()
+        assert state["input_tables"][0].to_pylist() == rows
+        assert state["column_names"] == names
+
+
+@pytest.mark.parametrize("frame_class", [pd.DataFrame, _PandasSubclass], ids=["frame", "subclass"])
+def test_pandas_explicit_struct_of_more_fields_raises_the_rename_of_pyspark(protocol, frame_class):
+    # As PySpark Connect's conversion, of a frame of fewer columns than the fields, whose table it
+    # renames to the names of the fields, of PyArrow's ArrowInvalid; and of a struct of no fields,
+    # whose table of no columns has no rows.
+    with _arrow_input_service(protocol) as (spark, state):
+        with pytest.raises(pa.ArrowInvalid) as error:
+            spark.createDataFrame(frame_class({"a": [1]}), "x long, y long")
+        assert str(error.value) == (
+            "tried to rename a table of 1 columns but only 2 names were provided")
+        spark.createDataFrame(frame_class({"a": [1, 2]}), T.StructType([]))
         assert state["relations"] == []
 
 
