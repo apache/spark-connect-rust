@@ -34,8 +34,16 @@ pub struct TransformWithStateInfo {
 /// DataFrame uses it: such as the Python plan of `pyspark.ml`, which keeps the models whose
 /// cached objects on the server the relation refers to, as PySpark Connect's DataFrame keeps its
 /// plan.
-#[derive(Clone)]
 pub struct RelationOwner(pub Arc<dyn std::any::Any + Send + Sync>);
+
+/// A handle of the same owner, of which the check of the clones of a binding is told (see
+/// [`crate::gc::check_clones_with`]).
+impl Clone for RelationOwner {
+    fn clone(&self) -> Self {
+        crate::gc::cloned(Arc::as_ptr(&self.0) as *const () as usize);
+        RelationOwner(Arc::clone(&self.0))
+    }
+}
 
 impl std::fmt::Debug for RelationOwner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -827,7 +835,12 @@ impl PlanIds {
             .filter(|(_, node_id, _)| *node_id == id)
             .filter_map(|(node, _, order)| node.upgrade().map(|node| (*order, node)))
             .min_by_key(|(order, _)| *order)
-            .map(|(_, node)| node)
+            .map(|(_, node)| {
+                // A new reference to the node, which the check of the clones of a binding is
+                // told of (see `crate::gc::check_clones_with`).
+                crate::gc::cloned(Arc::as_ptr(&node) as usize);
+                node
+            })
     }
 
     #[cfg(test)]
@@ -907,6 +920,7 @@ fn placeholder_target(marker: i64) -> Option<(Arc<LogicalPlan>, Arc<PlanIds>)> {
         .values()
         .find(|entry| entry.marker == marker)
         .and_then(|entry| Some((entry.node.upgrade()?, entry.ids.upgrade()?)))
+        .inspect(|(node, _)| crate::gc::cloned(Arc::as_ptr(node) as usize))
 }
 
 /// The placeholder of the relation of `node`, a DataFrame of the session of `ids`, of its marker
@@ -1186,6 +1200,51 @@ impl<M> BuiltOutside<M> {
     /// The message, as it was given.
     pub(crate) fn message(&self) -> &M {
         &self.message
+    }
+}
+
+/// A message built outside the core whose placeholders a request of it replaces (see
+/// [`BuiltOutside::resolved`]). Not a stable API.
+#[doc(hidden)]
+pub trait Resolvable {
+    /// Replace the placeholders of this message, whose encoding holds `urls` type URLs of
+    /// placeholders, or None when the core was not given its encoding.
+    fn resolve(&mut self, urls: Option<usize>) -> Result<()>;
+}
+
+impl Resolvable for proto::Plan {
+    fn resolve(&mut self, urls: Option<usize>) -> Result<()> {
+        resolve_plan(self, urls)
+    }
+}
+
+impl Resolvable for proto::Command {
+    fn resolve(&mut self, urls: Option<usize>) -> Result<()> {
+        resolve_command(self, urls)
+    }
+}
+
+impl Resolvable for proto::AnalyzePlanRequest {
+    fn resolve(&mut self, urls: Option<usize>) -> Result<()> {
+        match self.analyze.as_mut() {
+            Some(analyze) => resolve_analysis(analyze, urls),
+            None => Ok(()),
+        }
+    }
+}
+
+impl<M: Resolvable> BuiltOutside<M> {
+    /// The message with its placeholders replaced by the relations of their DataFrames, as a
+    /// request of it replaces them, which then holds none: so its request reads no DataFrame, as
+    /// a binding that sends it without its lock, which it replaced them with, needs. Not a stable
+    /// API.
+    pub fn resolved(self) -> Result<Self> {
+        let (mut message, urls) = self.into_parts();
+        message.resolve(urls)?;
+        Ok(BuiltOutside {
+            message,
+            urls: Some(0),
+        })
     }
 }
 
@@ -2097,6 +2156,9 @@ thread_local! {
 pub(crate) fn refer_to(plan: &Arc<LogicalPlan>, ids: Option<&Arc<PlanIds>>) {
     SUBQUERY_REFERENCES.with(|frames| {
         if let Some(frame) = frames.borrow_mut().last_mut() {
+            // A new reference to the plan, which the check of the clones of a binding is told of
+            // (see `crate::gc::check_clones_with`).
+            crate::gc::cloned(Arc::as_ptr(plan) as usize);
             frame.push((Arc::clone(plan), ids.cloned()));
         }
     });
@@ -2665,7 +2727,7 @@ impl LogicalPlan {
     }
 
     /// The expressions, the UDFs and the pickler of the UDTF of this node, without those of its
-    /// inputs, whose picklers [`crate::udf::exclusive_pickler_objects`] visits.
+    /// inputs, whose picklers [`crate::udf::all_picklers`] visits.
     pub(crate) fn push_own_pickler_holders<'a>(
         &'a self,
         pending: &mut Vec<crate::udf::PicklerHolder<'a>>,

@@ -89,27 +89,13 @@ impl TableArg {
         TableArg { subquery }
     }
 
-    /// The objects of the picklers of the UDFs and the UDTFs of the plan and of the expressions
-    /// of this table argument that it alone keeps alive, as
-    /// [`DataFrame::exclusive_pickler_objects`] gives those of a DataFrame, which a Python
-    /// wrapper reports to Python's garbage collector, as PySpark's table argument, of Python
-    /// objects, holds the plan of its DataFrame: the plan once the DataFrame is gone, and the
-    /// partitioning and the ordering. Not a stable API.
+    /// The references of this table argument to the shared parts of its plan and of its
+    /// partitioning and ordering (see [`crate::gc`]). Not a stable API.
     #[doc(hidden)]
-    pub fn exclusive_pickler_objects(&self) -> Vec<&(dyn std::any::Any + Send + Sync)> {
-        crate::udf::exclusive_pickler_objects(vec![crate::udf::PicklerHolder::Subquery(
-            &self.subquery,
-        )])
-    }
-
-    /// The owners of the relations built outside the core of the plan of this table argument and
-    /// of its expressions that it alone keeps alive, as [`TableArg::exclusive_pickler_objects`]
-    /// gives the objects of the picklers, which a Python wrapper reports to Python's garbage
-    /// collector, as PySpark's table argument holds the plan objects of its DataFrame (see
-    /// `crate::udf::exclusive_owners`). Not a stable API.
-    #[doc(hidden)]
-    pub fn exclusive_owners(&self) -> Vec<&(dyn std::any::Any + Send + Sync)> {
-        crate::udf::exclusive_owners(vec![crate::udf::PicklerHolder::Subquery(&self.subquery)])
+    pub fn held_parts(&self) -> Vec<crate::gc::PartRef<'_>> {
+        let mut held = Vec::new();
+        crate::gc::subquery_parts(&self.subquery, &mut held);
+        held
     }
 
     /// Drop the plan and the expressions of this table argument, as [`DataFrame::clear_plan`]

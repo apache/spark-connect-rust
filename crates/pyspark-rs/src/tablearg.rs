@@ -21,10 +21,13 @@ use crate::window::window_columns;
 )]
 pub struct PyTableArg {
     pub(crate) inner: TableArg,
+    /// The references of the table argument to the parts of its plan and of its partitioning and
+    /// ordering, which `__traverse__` reports (see [`crate::gc::Parts`]).
+    parts: crate::gc::Parts,
     /// The ID of the session of the DataFrame of the table argument, which its pickle keeps: it
     /// unpickles of the active session of that ID (see `__reduce__`).
     session_id: String,
-    /// Set once the value is written, as `__traverse__` reads `inner`, which is not valid while
+    /// Set once the value is written, as `__traverse__` reads `parts`, which is not valid while
     /// the object is created (see [`crate::gc::GcReady`]).
     gc_ready: crate::gc::GcReady,
 }
@@ -33,10 +36,18 @@ impl PyTableArg {
     /// The table argument `inner` of a DataFrame of the session of `session_id`.
     pub fn new(inner: TableArg, session_id: String) -> Self {
         PyTableArg {
+            parts: Python::attach(|py| crate::gc::Parts::of(py, inner.held_parts())),
             inner,
             session_id,
             gc_ready: crate::gc::GcReady::new(),
         }
+    }
+
+    /// Replace the table argument by `inner`, of its parts.
+    fn set_inner(&mut self, py: Python<'_>, inner: TableArg) {
+        self.parts.release();
+        self.inner = inner;
+        self.parts = crate::gc::Parts::of(py, self.inner.held_parts());
     }
 
     /// The table argument `inner`, of the session of this one, as the methods of PySpark's table
@@ -131,7 +142,8 @@ impl PyTableArg {
         memo.set_item(slf.as_ptr() as usize, &copy)?;
         let copies = crate::udf_command::deep_copied_picklers(py, inner.picklers(), memo)?;
         if !copies.is_empty() {
-            copy.borrow_mut().inner = inner.with_pickler_copies(&copies);
+            copy.borrow_mut()
+                .set_inner(py, inner.with_pickler_copies(&copies));
         }
         let deepcopy = py.import("copy")?.getattr("deepcopy")?;
         let state = slf.getattr("__dict__")?;
@@ -284,24 +296,22 @@ impl PyTableArg {
     }
 
     /// As PySpark's table argument, a Python object that holds the plan of its DataFrame and its
-    /// partitioning and ordering columns, which Python's garbage collector sees: the functions of
-    /// the UDFs that the table argument alone keeps alive are reported, those of the plan once its
-    /// DataFrame is gone, so that a reference cycle through them is collected, as PySpark collects
-    /// it.
+    /// partitioning and ordering columns, which Python's garbage collector sees: the parts of the
+    /// plan and of the expressions, of the functions of their UDFs and the plans of the Python
+    /// client, are reported (see [`crate::gc`]), whichever other objects share them, so that a
+    /// reference cycle through them is collected, as PySpark collects it.
     fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
         if !self.gc_ready.get() {
             return Ok(());
         }
-        crate::udf_command::visit_pickler_objects(self.inner.exclusive_pickler_objects(), &visit)?;
-        // The plans of the Python client of the relations of its plan, which it alone holds, as
-        // PySpark's table argument holds the plan objects of its DataFrame.
-        crate::udf_command::visit_owners(self.inner.exclusive_owners(), &visit)
+        self.parts.visit(&visit)
     }
 
     /// Break a reference cycle that the garbage collector found unreachable: the table argument
-    /// drops its plan and its expressions, and so the objects that `__traverse__` reported.
+    /// drops its plan and its expressions, and so the parts that `__traverse__` reported.
     fn __clear__(&mut self) {
         if self.gc_ready.get() {
+            self.parts.release();
             self.inner.clear_plan();
         }
     }

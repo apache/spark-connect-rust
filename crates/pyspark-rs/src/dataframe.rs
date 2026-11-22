@@ -9,7 +9,7 @@ use spark_connect::udf::{eval_type, CommonInlineUserDefinedFunctionExpression, P
 use crate::column::PyColumn;
 use crate::errors::{not_expected_type, ResultExt};
 use crate::group::PyGroupedData;
-use crate::interrupt::interruptible;
+use crate::interrupt::{interruptible, interruptible_of};
 use crate::options::{set_option_skip_none, set_options_skip_none, DefaultedOption};
 use crate::row::{FieldConverters, NestedFieldNames};
 use crate::stat_arguments::proto_int;
@@ -36,16 +36,9 @@ pub struct PyDataFrame {
     /// memory is zeroed, so this flag is false and `__traverse__` reads nothing else (see
     /// [`crate::gc::GcReady`]).
     gc_ready: crate::gc::GcReady,
-    /// The holders of the plan of this DataFrame that `__traverse__` answers for: this DataFrame,
-    /// and the grouped data, the writers and the other objects of it that keep it and a clone of
-    /// its plan, each with a share (see [`crate::gc::Holders`]).
-    plan_holders: crate::gc::Holders,
-    /// The DataFrame of the same plan that answers for it, as `DataFrame(df._plan, session)` and
-    /// `copy.copy(df)` are of the plan of `df`, and the share of its holders that this DataFrame
-    /// holds with its clone of the plan: this DataFrame keeps that one alive and reports it, as
-    /// PySpark's DataFrames of one plan object both hold it, so a reference cycle through either
-    /// is freed (see [`PyDataFrame::of_shared_plan`]).
-    plan_of: Option<(Py<PyDataFrame>, crate::gc::Share)>,
+    /// The reference of this DataFrame to the parts of its plan, which `__traverse__` reports, as
+    /// PySpark's DataFrame holds its plan object (see [`crate::gc::Parts`]).
+    parts: crate::gc::Parts,
     /// The answers that PySpark keeps for each DataFrame once it has them, `isStreaming` (a
     /// `cached_property`), `semanticHash`, `isEmpty` and `inputFiles` (`functools.cache`): later
     /// calls do not ask again, also after the session stopped. (`isLocal` is cached in the core.)
@@ -121,7 +114,7 @@ impl PyDataFrame {
         if let Some(schema) = &self.schema_object {
             return Ok(PropertySchema::Object(schema.bind(py).clone()));
         }
-        let schema = interruptible(py, &self.dataframe.spark_session(), || {
+        let schema = interruptible_of(py, &self.dataframe.spark_session(), &[&self.parts], || {
             self.dataframe.schema()
         })?;
         check_python_schema(py, &schema)?;
@@ -193,20 +186,20 @@ impl PyDataFrame {
         struct_handling_mode: Option<Bound<'_, PyAny>>,
     ) -> PyResult<Py<PyAny>> {
         let session = self.dataframe.spark_session();
-        let execution = interruptible(py, &session, || {
+        let execution = interruptible_of(py, &session, &[&self.parts], || {
             let execution = self.dataframe.prepare_execution().map_err(Box::new)?;
             // As PySpark's `to_pandas`, which logs the plan before it reads its settings.
             execution.log_plan_of_conversion().map_err(Box::new)?;
             Ok::<_, Box<spark_connect_core::error::SparkError>>(execution)
         })?;
-        let settings = interruptible(py, &session, || {
+        let settings = crate::interrupt::interruptible_without_parts(py, &session, || {
             session.conf().get_many(&[
                 "spark.sql.session.timeZone",
                 "spark.sql.execution.pandas.structHandlingMode",
                 "spark.sql.execution.arrow.pyspark.selfDestruct.enabled",
             ])
         })?;
-        let (batches, schema, info) = interruptible(py, &session, || {
+        let (batches, schema, info) = interruptible_of(py, &session, &[&self.parts], || {
             execution
                 .collect_record_batches_and_info(check_schema_at_receipt)
                 .map_err(Box::new)
@@ -303,7 +296,7 @@ impl PyDataFrame {
         let n = proto_int::<i32>(&n, "spark.connect.ShowString.num_rows")?;
         let truncate = proto_int::<i32>(&truncate, "spark.connect.ShowString.truncate")?;
         let vertical = vertical.extract::<bool>()?;
-        interruptible(py, &self.dataframe.spark_session(), || {
+        interruptible_of(py, &self.dataframe.spark_session(), &[&self.parts], || {
             self.dataframe
                 .show_string(n, truncate, vertical)
                 .map_err(Box::new)
@@ -312,11 +305,10 @@ impl PyDataFrame {
 
     pub fn new(dataframe: DataFrame) -> Self {
         PyDataFrame {
+            parts: Python::attach(|py| crate::gc::Parts::of(py, dataframe.held_parts())),
             dataframe,
             support_repr_html: std::sync::atomic::AtomicBool::new(false),
             gc_ready: crate::gc::GcReady::new(),
-            plan_holders: crate::gc::Holders::new(),
-            plan_of: None,
             is_streaming: std::sync::OnceLock::new(),
             semantic_hash: std::sync::OnceLock::new(),
             is_empty: std::sync::OnceLock::new(),
@@ -378,52 +370,6 @@ impl PyDataFrame {
         })
     }
 
-    /// A share of the holders of the plan of the DataFrame `frame`, for an object that keeps
-    /// `frame` and a clone of its plan, of which `shares_plan` tells whether it is a clone of that
-    /// plan: else, or when `frame` is borrowed mutably, a share that is not counted, so that
-    /// nothing of the plan is reported (see [`crate::gc::Holders`]). Of a DataFrame of the plan of
-    /// another ([`PyDataFrame::of_shared_plan`]), a share of the holders of that one, which
-    /// answers for the plan, and which `frame` keeps alive.
-    pub(crate) fn plan_share(
-        frame: &Py<PyDataFrame>,
-        shares_plan: impl FnOnce(&DataFrame) -> bool,
-    ) -> crate::gc::Share {
-        Python::attach(|py| match frame.try_borrow(py) {
-            Ok(frame) if shares_plan(&frame.dataframe) => match &frame.plan_of {
-                None => frame.plan_holders.share(),
-                Some((of, _)) => match of.try_borrow(py) {
-                    Ok(of) if of.dataframe.shares_plan_with(&frame.dataframe) => {
-                        of.plan_holders.share()
-                    }
-                    _ => crate::gc::Share::none(),
-                },
-            },
-            _ => crate::gc::Share::none(),
-        })
-    }
-
-    /// The DataFrame of `dataframe`, whose plan is the plan of `of`, as `DataFrame(df._plan,
-    /// session)` and `copy.copy(df)` are of the plan of `df`: it keeps the DataFrame that answers
-    /// for the plan to the garbage collector, `of` or the one that `of` keeps for its plan, and a
-    /// share of its holders, as the other objects that keep a DataFrame and a clone of its plan
-    /// do (see [`crate::gc::Holders`]), so that the functions of the UDFs of the plan, which may
-    /// keep both DataFrames, are reported by that one, as PySpark's DataFrames of one plan object
-    /// both hold the object, which the collector sees through each of them. A `dataframe` of
-    /// another plan is made as any other.
-    fn of_shared_plan(of: &Bound<'_, PyDataFrame>, dataframe: DataFrame) -> PyDataFrame {
-        let py = of.py();
-        let reporter = match &of.borrow().plan_of {
-            Some((reporter, _)) => reporter.clone_ref(py),
-            None => of.clone().unbind(),
-        };
-        let mut frame = PyDataFrame::new(dataframe);
-        let share = PyDataFrame::plan_share(&reporter, |reported| {
-            reported.shares_plan_with(&frame.dataframe)
-        });
-        frame.plan_of = Some((reporter, share));
-        frame
-    }
-
     /// Whether this DataFrame is streaming, of the answer that `isStreaming` keeps, asked once,
     /// as PySpark's `functools.cached_property` of it, which its `Observation._on` reads too. It
     /// waits for the server without the GIL.
@@ -471,7 +417,11 @@ impl PyDataFrame {
             crate::errors::of_request_session(&session, || self.dataframe.to_relation().to_pyerr())
                 .map_err(|err| columns_read_error(py, err))?;
         let fresh = DataFrame::from_sent_relation(session.clone(), relation);
-        let schema = interruptible(py, &session, || fresh.schema())?;
+        // Of the plan of the new DataFrame, of the relation as it was sent.
+        let schema =
+            crate::interrupt::interruptible_of_values(py, &session, fresh.held_parts(), || {
+                fresh.schema()
+            })?;
         // As the read of the columns, which converts the schema (see `check_python_schema`).
         check_python_schema(py, &schema)?;
         Ok(schema)
@@ -481,7 +431,9 @@ impl PyDataFrame {
     /// each setting, if it is enabled.
     fn eager_eval(&self, py: Python<'_>) -> PyResult<Option<(i32, i32)>> {
         let session = self.dataframe.spark_session();
-        let values = interruptible(py, &session, || session.conf().get_many(&EAGER_EVAL))?;
+        let values = crate::interrupt::interruptible_without_parts(py, &session, || {
+            session.conf().get_many(&EAGER_EVAL)
+        })?;
         if values[0].as_deref() != Some("true") {
             return Ok(None);
         }
@@ -1013,7 +965,7 @@ impl PyDataFrame {
                 .borrow()
                 .dataframe
                 .of_plan_in(session.borrow().session.clone());
-            return Ok(PyDataFrame::of_shared_plan(&of, dataframe));
+            return Ok(PyDataFrame::new(dataframe));
         }
         let (dataframe, _) = dataframe_of_python_plan(plan, session)?;
         Ok(PyDataFrame::new(dataframe))
@@ -1046,44 +998,22 @@ impl PyDataFrame {
     }
 
     /// As a DataFrame of PySpark Connect, a Python object whose plan Python's garbage collector
-    /// sees: the Python objects that only this DataFrame keeps alive, the plans of the Python
+    /// sees: the parts of its plan are reported (see [`crate::gc`]), of the plans of the Python
     /// client, such as of `pyspark.ml`, that `DataFrame(plan, session)` keeps, also through the
-    /// subqueries of its expressions, and the plans that the errors of its expressions keep, are
-    /// reported to the collector. So a reference cycle
-    /// through this DataFrame is freed, as PySpark frees it: a `pyspark.ml` model whose summary
-    /// keeps `model.transform(dataset)`, whose plan keeps the model, is released then. So are the
+    /// subqueries of its expressions, of the plans that the errors of its expressions keep, of the
     /// functions of its UDFs, which a request pickles when it builds the plan, as the plan of
-    /// PySpark keeps them: a function may keep the DataFrame, as a bound method of an object that
-    /// keeps it does. So are the Python Observations of its `observe`, which its plan holds, as
-    /// PySpark's plan holds them, and which may keep it too. The objects of the plan that its
-    /// grouped data, its writers and its other
-    /// objects that keep it share are reported here too, as these report this DataFrame, as
-    /// PySpark's report the DataFrame or its plan (see [`crate::gc::Holders`]).
+    /// PySpark keeps them, and of the Python Observations of its `observe`, which its plan holds,
+    /// as PySpark's plan holds them. Each is reported through every object that holds it, as
+    /// PySpark's DataFrames, Columns and the objects that hold them hold their plan objects, so a
+    /// reference cycle through any of them is freed, as PySpark frees it: a `pyspark.ml` model
+    /// whose summary keeps `model.transform(dataset)`, whose plan keeps the model, is released
+    /// then, and so is a bound method of an object that keeps both a DataFrame and one derived
+    /// from it.
     fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
         if !self.gc_ready.get() {
             return Ok(());
         }
-        // The DataFrame whose plan this one shares, which answers for the plan.
-        if let Some((of, _)) = &self.plan_of {
-            visit.call(of)?;
-        }
-        let holders = self.plan_holders.count();
-        for owner in self.dataframe.exclusive_relation_owners(holders) {
-            if let Some(object) = owner.downcast_ref::<Py<PyAny>>() {
-                visit.call(object)?;
-            }
-        }
-        // The Python Observations that the plan holds, as PySpark's plan holds them, which may
-        // keep this DataFrame.
-        for owner in self.dataframe.exclusive_observation_owners(holders) {
-            if let Some(object) = owner.downcast_ref::<Py<PyAny>>() {
-                visit.call(object)?;
-            }
-        }
-        crate::udf_command::visit_pickler_objects(
-            self.dataframe.exclusive_pickler_objects(holders),
-            &visit,
-        )?;
+        self.parts.visit(&visit)?;
         if let Some(schema) = &self.schema_object {
             visit.call(schema)?;
         }
@@ -1098,13 +1028,12 @@ impl PyDataFrame {
     }
 
     /// Break a reference cycle that the garbage collector found unreachable: the DataFrame drops
-    /// its plan, and so the Python objects that `__traverse__` reported. The shares of the plan
-    /// that its objects hold are not counted any more, as their clones are of the dropped plan.
+    /// its plan and its reference to the parts of it, and so the Python objects that
+    /// `__traverse__` reported.
     fn __clear__(&mut self) {
         if self.gc_ready.get() {
-            self.plan_holders = crate::gc::Holders::new();
+            self.parts.release();
             self.dataframe.clear_plan();
-            self.plan_of = None;
             self.schema_object = None;
             let kept = self
                 .execution_info_object
@@ -1275,7 +1204,7 @@ impl PyDataFrame {
         let py = slf.py();
         let this = slf.borrow();
         let requested = this.fresh_schema_request(py)?;
-        let mut copy = PyDataFrame::of_shared_plan(slf, this.dataframe.shallow_copy());
+        let mut copy = PyDataFrame::new(this.dataframe.shallow_copy());
         copy.support_repr_html.store(
             this.support_repr_html
                 .load(std::sync::atomic::Ordering::SeqCst),
@@ -1356,19 +1285,9 @@ impl PyDataFrame {
                 .deep_copy_with_pickler_copies(session, observations, &copies)
         })
         .to_pyerr()?;
-        // Of the plan of this DataFrame, when nothing of it is copied, which this one answers for
-        // to the garbage collector ([`PyDataFrame::of_shared_plan`]).
-        let mut copy = if copy.shares_plan_with(&this.dataframe) {
-            let shared = PyDataFrame::of_shared_plan(slf, copy);
-            shared.support_repr_html.store(
-                this.support_repr_html
-                    .load(std::sync::atomic::Ordering::SeqCst),
-                std::sync::atomic::Ordering::SeqCst,
-            );
-            shared
-        } else {
-            this.copy_of(copy)
-        };
+        // Of the plan of this DataFrame when nothing of it is copied, which both hold, as
+        // PySpark's copies of one plan object.
+        let mut copy = this.copy_of(copy);
         // As PySpark's reconstruction of the copy, which requests its schema, as the copy has none,
         // and keeps it, before it sets the deep copy of the state, of the schema that it keeps as
         // an object too, which the deep copy of the plan shares in `memo`.
@@ -1433,7 +1352,14 @@ impl PyDataFrame {
         .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?
         .to_pyerr()?;
         let requested = if request_schema {
-            let schema = interruptible(py, &dataframe.spark_session(), || dataframe.schema())?;
+            // Of the plan of the unpickled DataFrame, which holds the functions of its holes, and
+            // the Observations of a live DataFrame of its plan ID.
+            let schema = crate::interrupt::interruptible_of_values(
+                py,
+                &dataframe.spark_session(),
+                dataframe.held_parts(),
+                || dataframe.schema(),
+            )?;
             check_python_schema(py, &schema)?;
             Some(schema)
         } else {
@@ -2499,17 +2425,21 @@ impl PyDataFrame {
         if !other.is_instance_of::<PyDataFrame>() {
             return Err(not_expected_type(other, "other", "DataFrame"));
         }
-        let other = self.same_session(other)?.dataframe.clone();
-        interruptible(py, &self.dataframe.spark_session(), || {
-            self.dataframe.same_semantics(&other)
-        })
+        let other_frame = self.same_session(other)?;
+        let other = other_frame.dataframe.clone();
+        interruptible_of(
+            py,
+            &self.dataframe.spark_session(),
+            &[&self.parts, &other_frame.parts],
+            || self.dataframe.same_semantics(&other),
+        )
     }
 
     // The server-side hash of this DataFrame's logical plan, asked once, as PySpark's.
     #[pyo3(name = "semanticHash")]
     fn semantic_hash(&self, py: Python<'_>) -> PyResult<i32> {
         cached(&self.semantic_hash, || {
-            interruptible(py, &self.dataframe.spark_session(), || {
+            interruptible_of(py, &self.dataframe.spark_session(), &[&self.parts], || {
                 self.dataframe.semantic_hash().map_err(Box::new)
             })
         })
@@ -2601,7 +2531,9 @@ impl PyDataFrame {
     fn cache<'py>(slf: PyRef<'py, Self>, py: Python<'py>) -> PyResult<PyRef<'py, Self>> {
         // As PySpark's, which returns the DataFrame itself.
         let df = slf.dataframe.clone();
-        interruptible(py, &df.spark_session(), || df.cache().map_err(Box::new))?;
+        interruptible_of(py, &df.spark_session(), &[&slf.parts], || {
+            df.cache().map_err(Box::new)
+        })?;
         Ok(slf)
     }
 
@@ -2621,7 +2553,7 @@ impl PyDataFrame {
         let blocking = blocking.value_unless_none(py)?;
         // As PySpark's, which returns the DataFrame itself.
         let df = slf.dataframe.clone();
-        interruptible(py, &df.spark_session(), || {
+        interruptible_of(py, &df.spark_session(), &[&slf.parts], || {
             df.unpersist_opt(blocking).map_err(Box::new)
         })?;
         Ok(slf)
@@ -2690,7 +2622,7 @@ impl PyDataFrame {
                 ));
             }
         };
-        interruptible(py, &self.dataframe.spark_session(), || {
+        interruptible_of(py, &self.dataframe.spark_session(), &[&self.parts], || {
             self.dataframe
                 .explain_string(&explain_mode)
                 .map_err(Box::new)
@@ -2703,7 +2635,7 @@ impl PyDataFrame {
     #[doc = connect_doc!(DataFrame.createOrReplaceTempView)]
     fn create_or_replace_temp_view(&self, py: Python<'_>, name: &Bound<'_, PyAny>) -> PyResult<()> {
         let name = crate::str_argument(name)?;
-        interruptible(py, &self.dataframe.spark_session(), || {
+        interruptible_of(py, &self.dataframe.spark_session(), &[&self.parts], || {
             self.dataframe
                 .create_or_replace_temp_view(&name)
                 .map_err(Box::new)
@@ -2859,7 +2791,7 @@ impl PyDataFrame {
     #[doc = connect_doc!(DataFrame.createTempView)]
     fn create_temp_view(&self, py: Python<'_>, name: &Bound<'_, PyAny>) -> PyResult<()> {
         let name = crate::str_argument(name)?;
-        interruptible(py, &self.dataframe.spark_session(), || {
+        interruptible_of(py, &self.dataframe.spark_session(), &[&self.parts], || {
             self.dataframe.create_temp_view(&name).map_err(Box::new)
         })
     }
@@ -2869,7 +2801,7 @@ impl PyDataFrame {
     #[doc = connect_doc!(DataFrame.createGlobalTempView)]
     fn create_global_temp_view(&self, py: Python<'_>, name: &Bound<'_, PyAny>) -> PyResult<()> {
         let name = crate::str_argument(name)?;
-        interruptible(py, &self.dataframe.spark_session(), || {
+        interruptible_of(py, &self.dataframe.spark_session(), &[&self.parts], || {
             self.dataframe
                 .create_global_temp_view(&name)
                 .map_err(Box::new)
@@ -2885,7 +2817,7 @@ impl PyDataFrame {
         name: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
         let name = crate::str_argument(name)?;
-        interruptible(py, &self.dataframe.spark_session(), || {
+        interruptible_of(py, &self.dataframe.spark_session(), &[&self.parts], || {
             self.dataframe
                 .create_or_replace_global_temp_view(&name)
                 .map_err(Box::new)
@@ -2913,9 +2845,10 @@ impl PyDataFrame {
     #[doc = connect_doc!(DataFrame.checkpoint)]
     fn checkpoint(&self, py: Python<'_>, eager: DefaultedOption) -> PyResult<PyDataFrame> {
         let eager = checkpoint_eager(py, &eager)?;
-        Ok(PyDataFrame::new(interruptible(
+        Ok(PyDataFrame::new(interruptible_of(
             py,
             &self.dataframe.spark_session(),
+            &[&self.parts],
             || self.dataframe.checkpoint_with(eager).map_err(Box::new),
         )?))
     }
@@ -2939,9 +2872,10 @@ impl PyDataFrame {
             .filter(|level| !level.is_none())
             .map(|level| crate::storagelevel::storage_level_proto(&level))
             .transpose()?;
-        Ok(PyDataFrame::new(interruptible(
+        Ok(PyDataFrame::new(interruptible_of(
             py,
             &self.dataframe.spark_session(),
+            &[&self.parts],
             || {
                 self.dataframe
                     .local_checkpoint_with(eager, level)
@@ -3218,7 +3152,7 @@ impl PyDataFrame {
     #[pyo3(name = "inputFiles")]
     fn input_files(&self, py: Python<'_>) -> PyResult<Vec<String>> {
         cached(&self.input_files, || {
-            interruptible(py, &self.dataframe.spark_session(), || {
+            interruptible_of(py, &self.dataframe.spark_session(), &[&self.parts], || {
                 self.dataframe.input_files().map_err(Box::new)
             })
         })
@@ -3227,7 +3161,7 @@ impl PyDataFrame {
     // Whether the server answers that this DataFrame is local (a local relation).
     #[pyo3(name = "isLocal")]
     fn is_local(&self, py: Python<'_>) -> PyResult<bool> {
-        interruptible(py, &self.dataframe.spark_session(), || {
+        interruptible_of(py, &self.dataframe.spark_session(), &[&self.parts], || {
             self.dataframe.is_local_on_server().map_err(Box::new)
         })
     }
@@ -3236,7 +3170,7 @@ impl PyDataFrame {
     #[pyo3(name = "is_cached")]
     #[getter]
     fn is_cached(&self, py: Python<'_>) -> PyResult<bool> {
-        interruptible(py, &self.dataframe.spark_session(), || {
+        interruptible_of(py, &self.dataframe.spark_session(), &[&self.parts], || {
             self.dataframe.is_cached().map_err(Box::new)
         })
     }
@@ -3249,7 +3183,7 @@ impl PyDataFrame {
         cached(&self.is_streaming, || {
             // A `functools.cached_property` of PySpark's.
             crate::client_log::of_cached_property("isStreaming", || {
-                interruptible(py, &self.dataframe.spark_session(), || {
+                interruptible_of(py, &self.dataframe.spark_session(), &[&self.parts], || {
                     self.dataframe.is_streaming().map_err(Box::new)
                 })
             })
@@ -3261,7 +3195,7 @@ impl PyDataFrame {
     #[getter]
     #[doc = connect_doc!(DataFrame.storageLevel)]
     fn storage_level(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let sl = interruptible(py, &self.dataframe.spark_session(), || {
+        let sl = interruptible_of(py, &self.dataframe.spark_session(), &[&self.parts], || {
             self.dataframe.storage_level().map_err(Box::new)
         })?;
         let cls = py.import("pyspark.storagelevel")?.getattr("StorageLevel")?;
@@ -3415,7 +3349,7 @@ impl PyDataFrame {
         let level = storageLevel.proto(py)?;
         // As PySpark's, which returns the DataFrame itself.
         let df = slf.dataframe.clone();
-        interruptible(py, &df.spark_session(), || {
+        interruptible_of(py, &df.spark_session(), &[&slf.parts], || {
             df.persist(level).map_err(Box::new)
         })?;
         Ok(slf)
@@ -3551,11 +3485,12 @@ impl PyDataFrame {
     #[doc = connect_doc!(DataFrame.collect)]
     fn collect(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
         // Release the GIL across the blocking RPC so other Python threads run.
-        let (rows, schema) = interruptible(py, &self.dataframe.spark_session(), || {
-            self.dataframe
-                .collect_with_schema_checked(check_schema_at_receipt)
-                .map_err(Box::new)
-        })?;
+        let (rows, schema) =
+            interruptible_of(py, &self.dataframe.spark_session(), &[&self.parts], || {
+                self.dataframe
+                    .collect_with_schema_checked(check_schema_at_receipt)
+                    .map_err(Box::new)
+            })?;
         rows_to_py(py, &self.dataframe, rows, schema.as_ref())
     }
 
@@ -3593,11 +3528,12 @@ impl PyDataFrame {
     /// schema and of the fields of the table are those that PySpark reads of the server's stream
     /// (`pyspark.sql.connect.client.core._table_as_received`).
     fn _to_table(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, Py<PyAny>)> {
-        let (batches, schema) = interruptible(py, &self.dataframe.spark_session(), || {
-            self.dataframe
-                .collect_record_batches_with_schema_checked(check_schema_at_receipt)
-                .map_err(Box::new)
-        })?;
+        let (batches, schema) =
+            interruptible_of(py, &self.dataframe.spark_session(), &[&self.parts], || {
+                self.dataframe
+                    .collect_record_batches_with_schema_checked(check_schema_at_receipt)
+                    .map_err(Box::new)
+            })?;
         if batches.is_empty() {
             return Err(pyo3::exceptions::PyAssertionError::new_err(()));
         }
@@ -3639,11 +3575,12 @@ impl PyDataFrame {
             .call((slf.getattr(pyo3::intern!(py, "schema"))?,), Some(&kwargs))?;
         let this = slf.borrow();
         let dataframe = &this.dataframe;
-        let (batches, _) = interruptible(py, &dataframe.spark_session(), || {
-            dataframe
-                .collect_record_batches_with_schema_checked(check_schema_at_receipt)
-                .map_err(Box::new)
-        })?;
+        let (batches, _) =
+            interruptible_of(py, &dataframe.spark_session(), &[&this.parts], || {
+                dataframe
+                    .collect_record_batches_with_schema_checked(check_schema_at_receipt)
+                    .map_err(Box::new)
+            })?;
         let table = crate::pyarrow_export::record_batches_to_pyarrow(py, batches)?;
         let table = table.bind(py);
         // A result without batches has no columns: the empty table of the schema.
@@ -3701,7 +3638,7 @@ impl PyDataFrame {
     // Get the count of rows.
     #[doc = connect_doc!(DataFrame.count)]
     fn count(&self, py: Python<'_>) -> PyResult<i64> {
-        interruptible(py, &self.dataframe.spark_session(), || {
+        interruptible_of(py, &self.dataframe.spark_session(), &[&self.parts], || {
             self.dataframe.count().map_err(Box::new)
         })
     }
@@ -3845,11 +3782,12 @@ impl PyDataFrame {
     // Get the first row.
     #[doc = connect_doc!(DataFrame.first)]
     fn first(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
-        let (row, schema) = interruptible(py, &self.dataframe.spark_session(), || {
-            self.dataframe
-                .first_with_schema_checked(check_schema_at_receipt)
-                .map_err(Box::new)
-        })?;
+        let (row, schema) =
+            interruptible_of(py, &self.dataframe.spark_session(), &[&self.parts], || {
+                self.dataframe
+                    .first_with_schema_checked(check_schema_at_receipt)
+                    .map_err(Box::new)
+            })?;
         Ok(rows_to_py(
             py,
             &self.dataframe,
@@ -3876,12 +3814,13 @@ impl PyDataFrame {
     #[doc = connect_doc!(DataFrame.take)]
     fn take(&self, py: Python<'_>, num: &Bound<'_, PyAny>) -> PyResult<Vec<Py<PyAny>>> {
         let num = proto_int(num, "spark.connect.Limit.limit")?;
-        let (rows, schema) = interruptible(py, &self.dataframe.spark_session(), || {
-            self.dataframe
-                .limit(num)
-                .collect_with_schema_checked(check_schema_at_receipt)
-                .map_err(Box::new)
-        })?;
+        let (rows, schema) =
+            interruptible_of(py, &self.dataframe.spark_session(), &[&self.parts], || {
+                self.dataframe
+                    .limit(num)
+                    .collect_with_schema_checked(check_schema_at_receipt)
+                    .map_err(Box::new)
+            })?;
         rows_to_py(py, &self.dataframe, rows, schema.as_ref())
     }
 
@@ -3902,12 +3841,13 @@ impl PyDataFrame {
     #[doc = connect_doc!(DataFrame.tail)]
     fn tail(&self, py: Python<'_>, num: &Bound<'_, PyAny>) -> PyResult<Vec<Py<PyAny>>> {
         let num = proto_int(num, "spark.connect.Tail.limit")?;
-        let (rows, schema) = interruptible(py, &self.dataframe.spark_session(), || {
-            self.dataframe
-                .tail(num)
-                .collect_with_schema_checked(check_schema_at_receipt)
-                .map_err(Box::new)
-        })?;
+        let (rows, schema) =
+            interruptible_of(py, &self.dataframe.spark_session(), &[&self.parts], || {
+                self.dataframe
+                    .tail(num)
+                    .collect_with_schema_checked(check_schema_at_receipt)
+                    .map_err(Box::new)
+            })?;
         rows_to_py(py, &self.dataframe, rows, schema.as_ref())
     }
 
@@ -3987,9 +3927,10 @@ impl PyDataFrame {
     // Check if the DataFrame is empty, asked once, as PySpark's.
     fn isEmpty(&self, py: Python<'_>) -> PyResult<bool> {
         cached(&self.is_empty, || {
-            let empty = interruptible(py, &self.dataframe.spark_session(), || {
-                self.dataframe.is_empty().map_err(Box::new)
-            })?;
+            let empty =
+                interruptible_of(py, &self.dataframe.spark_session(), &[&self.parts], || {
+                    self.dataframe.is_empty().map_err(Box::new)
+                })?;
             // As PySpark's `select().take(1)`, whose `collect` reads the binary setting once the
             // rows are fetched, though they have no columns.
             read_binary_as_bytes(py, &self.dataframe)?;
@@ -4076,12 +4017,13 @@ impl PyDataFrame {
     fn write_to(slf: &Bound<'_, Self>, table: &Bound<'_, PyAny>) -> PyDataFrameWriterV2 {
         let (name, unsent_table) = written_table(table);
         let frame = slf.clone().unbind();
+        let inner = std::sync::Arc::new(WriterState::of_parts(
+            slf.borrow().dataframe.write_to(&name),
+            spark_connect::readwriter::DataFrameWriterV2::held_parts,
+        ));
         let mut writer = PyDataFrameWriterV2 {
-            inner: std::sync::Arc::new(WriterState::of_frame(
-                slf.borrow().dataframe.write_to(&name),
-                &frame,
-                spark_connect::readwriter::DataFrameWriterV2::shares_plan_with,
-            )),
+            parts: writer_parts(&inner),
+            inner,
             unsent_table,
             frame,
             unsent_provider: std::sync::Arc::new(std::sync::Mutex::new(None)),
@@ -4102,7 +4044,7 @@ impl PyDataFrame {
     #[doc = connect_doc!(DataFrame.writeStream)]
     fn write_stream(slf: &Bound<'_, Self>) -> PyDataStreamWriter {
         let writer = slf.borrow().dataframe.write_stream();
-        PyDataStreamWriter::new(writer, slf.clone().unbind())
+        PyDataStreamWriter::new(writer)
     }
 
     // Null-handling functions (`df.na.drop()/fill()/replace()`), of this DataFrame, their
@@ -4126,14 +4068,15 @@ impl PyDataFrame {
     ) -> PyResult<PyMergeIntoWriter> {
         let (name, unsent_table) = written_table(table);
         let frame = slf.clone().unbind();
+        let inner = std::sync::Arc::new(WriterState::of_parts(
+            slf.borrow()
+                .dataframe
+                .merge_into(&name, merge_condition(condition)?),
+            spark_connect::MergeIntoWriter::held_parts,
+        ));
         Ok(PyMergeIntoWriter {
-            inner: std::sync::Arc::new(WriterState::of_frame(
-                slf.borrow()
-                    .dataframe
-                    .merge_into(&name, merge_condition(condition)?),
-                &frame,
-                spark_connect::MergeIntoWriter::shares_plan_with,
-            )),
+            parts: writer_parts(&inner),
+            inner,
             schema_evolution: std::sync::atomic::AtomicBool::new(false),
 
             unsent_table,
@@ -4242,9 +4185,12 @@ impl PyDataFrame {
             {
                 if let Some((n, truncate)) = this.eager_eval(py)? {
                     let dataframe = &this.dataframe;
-                    return interruptible(py, &dataframe.spark_session(), || {
-                        dataframe.show_string(n, truncate, false).map_err(Box::new)
-                    });
+                    return interruptible_of(
+                        py,
+                        &dataframe.spark_session(),
+                        &[&this.parts],
+                        || dataframe.show_string(n, truncate, false).map_err(Box::new),
+                    );
                 }
             }
         }
@@ -4269,10 +4215,12 @@ impl PyDataFrame {
         self.support_repr_html
             .store(true, std::sync::atomic::Ordering::Relaxed);
         match self.eager_eval(py)? {
-            Some((n, truncate)) => interruptible(py, &self.dataframe.spark_session(), || {
-                self.dataframe.html_string(n, truncate).map_err(Box::new)
-            })
-            .map(Some),
+            Some((n, truncate)) => {
+                interruptible_of(py, &self.dataframe.spark_session(), &[&self.parts], || {
+                    self.dataframe.html_string(n, truncate).map_err(Box::new)
+                })
+                .map(Some)
+            }
             None => Ok(None),
         }
     }
@@ -4496,9 +4444,9 @@ impl PyDataFrame {
     dict
 )]
 pub struct PyDataFrameNaFunctions {
-    /// The share of the holders of the plan of `frame`, of which `df` is a clone, dropped before
-    /// it (see [`crate::gc::Holders`]).
-    frame_share: crate::gc::Share,
+    /// The reference of the null functions to the parts of the plan of `frame`, of which `df` is
+    /// a clone, which `__traverse__` reports (see [`crate::gc::Parts`]).
+    parts: crate::gc::Parts,
     df: spark_connect::dataframe::DataFrame,
     /// The DataFrame of `df.na`, as PySpark's `DataFrameNaFunctions.df`.
     frame: Py<PyDataFrame>,
@@ -4509,10 +4457,8 @@ pub struct PyDataFrameNaFunctions {
 
 impl PyDataFrameNaFunctions {
     fn new(df: spark_connect::dataframe::DataFrame, frame: Py<PyDataFrame>) -> Self {
-        let frame_share =
-            PyDataFrame::plan_share(&frame, |dataframe| df.shares_plan_with(dataframe));
         PyDataFrameNaFunctions {
-            frame_share,
+            parts: Python::attach(|py| crate::gc::Parts::of(py, df.held_parts())),
             df,
             frame,
             gc_ready: crate::gc::GcReady::new(),
@@ -4536,20 +4482,21 @@ impl PyDataFrameNaFunctions {
     }
 
     /// As PySpark's null functions, a Python object that holds its DataFrame, which Python's
-    /// garbage collector sees: the DataFrame is reported, which reports the objects of the plan
-    /// that the two share (see [`crate::gc::Holders`]).
+    /// garbage collector sees: the DataFrame is reported, and the parts of the plan of which
+    /// these functions hold a clone (see [`crate::gc`]).
     fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
         if !self.gc_ready.get() {
             return Ok(());
         }
-        visit.call(&self.frame)
+        visit.call(&self.frame)?;
+        self.parts.visit(&visit)
     }
 
     /// Break a reference cycle that the garbage collector found unreachable: the null functions
-    /// drop their clone of the plan, after their share of it.
+    /// drop their clone of the plan, and their reference to its parts.
     fn __clear__(&mut self) {
         if self.gc_ready.get() {
-            self.frame_share = crate::gc::Share::none();
+            self.parts.release();
             self.df.clear_plan();
         }
     }
@@ -4872,6 +4819,9 @@ fn check_written_table(py: Python<'_>, unsent_table: &Option<Py<PyAny>>) -> PyRe
 )]
 pub struct PyMergeIntoWriter {
     inner: std::sync::Arc<WriterState<spark_connect::MergeIntoWriter>>,
+    /// The object of the parts of the state, which the shallow copies of this writer share and
+    /// report, which reports them (see [`WriterParts`]).
+    parts: Option<Py<WriterParts>>,
     /// Whether `withSchemaEvolution` was called on this builder, as PySpark's
     /// `_schema_evolution_enabled` attribute, which a shallow copy takes by value and then
     /// keeps apart from the copied builder.
@@ -4942,10 +4892,11 @@ fn not_column(value: &Bound<'_, PyAny>, name: &str) -> PyErr {
 }
 
 /// The condition of a merge clause, which PySpark's clause keeps as it is given and builds with its
-/// `to_plan` when an action adds the clause: none, a Column, or another object.
+/// `to_plan` when an action adds the clause: none, a Column, of the reference of the clause to the
+/// parts of its expression (see [`crate::gc::Parts`]), or another object.
 enum ClauseCondition {
     None,
-    Column(spark_connect::column::Column),
+    Column(spark_connect::column::Column, crate::gc::Parts),
     Object(Py<PyAny>),
 }
 
@@ -4954,33 +4905,35 @@ impl ClauseCondition {
         match condition.filter(|condition| !condition.is_none()) {
             None => ClauseCondition::None,
             Some(condition) => match condition.extract::<PyRef<'_, PyColumn>>() {
-                Ok(column) => ClauseCondition::Column(column.column.clone()),
+                Ok(column) => ClauseCondition::of_column(condition.py(), column.column.clone()),
                 Err(_) => ClauseCondition::Object(condition.clone().unbind()),
             },
         }
     }
 
+    /// The condition `column`, of its parts.
+    fn of_column(py: Python<'_>, column: spark_connect::column::Column) -> Self {
+        let parts = crate::gc::Parts::of(
+            py,
+            [spark_connect::gc::PartRef::Expression(column.expression())],
+        );
+        ClauseCondition::Column(column, parts)
+    }
+
     fn clone_ref(&self, py: Python<'_>) -> Self {
         match self {
             ClauseCondition::None => ClauseCondition::None,
-            ClauseCondition::Column(column) => ClauseCondition::Column(column.clone()),
+            ClauseCondition::Column(column, _) => ClauseCondition::of_column(py, column.clone()),
             ClauseCondition::Object(object) => ClauseCondition::Object(object.clone_ref(py)),
         }
     }
 
     /// Report the condition to Python's garbage collector, as PySpark's clause holds it: an
-    /// object as it is, and the functions of the UDFs and the plans of the Python client that a
-    /// Column alone keeps alive, as the Column reports them.
+    /// object as it is, and the parts of the expression of a Column, as the Column reports them.
     fn visit(&self, visit: &pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
         match self {
             ClauseCondition::None => Ok(()),
-            ClauseCondition::Column(column) => {
-                crate::udf_command::visit_pickler_objects(
-                    column.expression().exclusive_pickler_objects(),
-                    visit,
-                )?;
-                crate::udf_command::visit_owners(column.expression().exclusive_owners(), visit)
-            }
+            ClauseCondition::Column(_, parts) => parts.visit(visit),
             ClauseCondition::Object(object) => visit.call(object),
         }
     }
@@ -5028,7 +4981,7 @@ fn merge_clause(
     }
     let condition = match condition {
         ClauseCondition::None => None,
-        ClauseCondition::Column(column) => Some(built_column(column)?),
+        ClauseCondition::Column(column, _) => Some(built_column(column)?),
         ClauseCondition::Object(object) => {
             let object = object.bind(py);
             object.getattr("to_plan")?;
@@ -5059,6 +5012,7 @@ impl PyMergeIntoWriter {
             py,
             PyMergeIntoWriter {
                 inner: std::sync::Arc::clone(&this.inner),
+                parts: this.parts.as_ref().map(|parts| parts.clone_ref(py)),
                 schema_evolution: std::sync::atomic::AtomicBool::new(
                     this.schema_evolution
                         .load(std::sync::atomic::Ordering::SeqCst),
@@ -5144,18 +5098,20 @@ impl PyMergeIntoWriter {
         {
             writer = writer.with_schema_evolution();
         }
+        // Of the parts of the copy of the state, of the source, the condition and the clauses,
+        // which the command is built of.
+        let _in_use = crate::gc::in_use_of_values(py, writer.held_parts());
         interruptible(py, &writer.spark_session(), || {
             writer.merge().map_err(Box::new)
         })
     }
 
     /// The DataFrame and the table that the merge keeps, Python objects, which Python's garbage
-    /// collector sees, and the functions of the UDFs of its condition and its clauses that it
-    /// alone keeps alive, as PySpark's merge builder, a Python object, holds the DataFrame and the
-    /// Columns: so a reference cycle through them is collected, as PySpark collects it. The
-    /// DataFrame reports the objects of the plan that the two share (see [`crate::gc::Holders`]).
-    /// A state that a copy shares, or that another thread holds, is not visited, so that nothing
-    /// is counted twice.
+    /// collector sees, and the parts of its source plan, its condition and its clauses (see
+    /// [`crate::gc`]), as PySpark's merge builder, a Python object, holds the DataFrame and the
+    /// Columns: so a reference cycle through them is collected, as PySpark collects it. The parts
+    /// of a state that a copy shares, or that another thread holds, are not visited, so that
+    /// nothing is counted twice.
     fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
         if !self.gc_ready.get() {
             return Ok(());
@@ -5164,14 +5120,8 @@ impl PyMergeIntoWriter {
         if let Some(table) = &self.unsent_table {
             visit.call(table)?;
         }
-        if std::sync::Arc::strong_count(&self.inner) == 1 {
-            if let Some(writer) = self.inner.try_lock() {
-                crate::udf_command::visit_pickler_objects(
-                    writer.exclusive_pickler_objects(),
-                    &visit,
-                )?;
-                crate::udf_command::visit_owners(writer.exclusive_owners(), &visit)?;
-            }
+        if let Some(parts) = &self.parts {
+            visit.call(parts)?;
         }
         Ok(())
     }
@@ -5181,6 +5131,7 @@ impl PyMergeIntoWriter {
     fn __clear__(&mut self) {
         if self.gc_ready.get() {
             self.unsent_table = None;
+            self.parts = None;
             self.inner = std::sync::Arc::new(
                 self.inner
                     .cleared(spark_connect::MergeIntoWriter::clear_plan),
@@ -5490,6 +5441,9 @@ impl PyWhenNotMatchedBySource {
 )]
 pub struct PyDataFrameWriter {
     inner: std::sync::Arc<WriterState<spark_connect::readwriter::DataFrameWriter>>,
+    /// The object of the parts of the state, which the shallow copies of this writer share and
+    /// report, which reports them (see [`WriterParts`]).
+    parts: Option<Py<WriterParts>>,
     /// The DataFrame that is written, as the Python object of `df.write`, as PySpark's `_df`.
     frame: Py<PyDataFrame>,
 
@@ -5658,12 +5612,13 @@ impl PyDataFrameWriter {
     ) -> Self {
         let refused_bucket_count = std::sync::Arc::new(std::sync::Mutex::new(None));
         let unsent = std::sync::Arc::new(std::sync::Mutex::new(UnsentArgs::default()));
+        let inner = std::sync::Arc::new(WriterState::of_parts(
+            writer,
+            spark_connect::readwriter::DataFrameWriter::held_parts,
+        ));
         PyDataFrameWriter {
-            inner: std::sync::Arc::new(WriterState::of_frame(
-                writer,
-                &frame,
-                spark_connect::readwriter::DataFrameWriter::shares_plan_with,
-            )),
+            parts: writer_parts(&inner),
+            inner,
             refused_bucket_count: refused_bucket_count.clone(),
             refused_bucket_cols: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             shared: crate::options::PySharedObjects::of(std::sync::Arc::new(WriterKeptArgs {
@@ -5882,6 +5837,7 @@ impl PyDataFrameWriter {
             py,
             PyDataFrameWriter {
                 inner: std::sync::Arc::clone(&this.inner),
+                parts: this.parts.as_ref().map(|parts| parts.clone_ref(py)),
                 refused_bucket_count: std::sync::Arc::clone(&this.refused_bucket_count),
                 refused_bucket_cols: std::sync::Arc::clone(&this.refused_bucket_cols),
                 unsent: std::sync::Arc::clone(&this.unsent),
@@ -6263,7 +6219,12 @@ impl PyDataFrameWriter {
         let w = self.check_unsent_source_and_partition(py, w)?;
         self.check_bucket_count(py)?;
         let w = self.check_unsent_mode(py, w)?;
-        interruptible(py, &w.spark_session(), || w.save(None).map_err(Box::new))
+        interruptible_of(
+            py,
+            &w.spark_session(),
+            &[&self.frame.borrow(py).parts],
+            || w.save(None).map_err(Box::new),
+        )
     }
 
     #[pyo3(signature = (path=None, format=None, mode=None, partitionBy=None, **options))]
@@ -6287,9 +6248,12 @@ impl PyDataFrameWriter {
         self.check_bucket_count(py)?;
         let path = path.map(crate::readwriter::writer_path).transpose()?;
         let w = self.check_unsent_mode(py, w)?;
-        interruptible(py, &w.spark_session(), || {
-            w.save(path.as_deref()).map_err(Box::new)
-        })
+        interruptible_of(
+            py,
+            &w.spark_session(),
+            &[&self.frame.borrow(py).parts],
+            || w.save(path.as_deref()).map_err(Box::new),
+        )
     }
 
     #[pyo3(name = "saveAsTable", signature = (name, format=None, mode=None, partitionBy=None, **options))]
@@ -6310,13 +6274,18 @@ impl PyDataFrameWriter {
         self.check_bucket_count(py)?;
         let name = crate::readwriter::writer_table_name(name)?;
         let w = self.check_unsent_mode(py, w)?;
-        interruptible(py, &w.spark_session(), || {
-            match &name {
-                Some(name) => w.save_as_table(name),
-                None => w.save(None),
-            }
-            .map_err(Box::new)
-        })
+        interruptible_of(
+            py,
+            &w.spark_session(),
+            &[&self.frame.borrow(py).parts],
+            || {
+                match &name {
+                    Some(name) => w.save_as_table(name),
+                    None => w.save(None),
+                }
+                .map_err(Box::new)
+            },
+        )
     }
 
     // Insert into an existing table. `overwrite` maps to overwrite/append mode,
@@ -6342,13 +6311,18 @@ impl PyDataFrameWriter {
         self.check_bucket_count(py)?;
         let tableName = crate::readwriter::writer_table_name(tableName)?;
         let w = self.check_unsent_mode(py, w)?;
-        interruptible(py, &w.spark_session(), || {
-            match &tableName {
-                Some(name) => w.insert_into(name),
-                None => w.save(None),
-            }
-            .map_err(Box::new)
-        })
+        interruptible_of(
+            py,
+            &w.spark_session(),
+            &[&self.frame.borrow(py).parts],
+            || {
+                match &tableName {
+                    Some(name) => w.insert_into(name),
+                    None => w.save(None),
+                }
+                .map_err(Box::new)
+            },
+        )
     }
 
     // Write as PARQUET - full pyspark signature; each named option is
@@ -6378,9 +6352,12 @@ impl PyDataFrameWriter {
         self.check_bucket_count(py)?;
         let path = crate::readwriter::writer_path(path)?;
         let w = self.check_unsent_mode(py, w)?;
-        interruptible(py, &w.spark_session(), || {
-            w.parquet(&path).map_err(Box::new)
-        })
+        interruptible_of(
+            py,
+            &w.spark_session(),
+            &[&self.frame.borrow(py).parts],
+            || w.parquet(&path).map_err(Box::new),
+        )
     }
 
     // Write as JSON - full pyspark signature; each named option is
@@ -6421,7 +6398,12 @@ impl PyDataFrameWriter {
         self.check_bucket_count(py)?;
         let path = crate::readwriter::writer_path(path)?;
         let w = self.check_unsent_mode(py, w)?;
-        interruptible(py, &w.spark_session(), || w.json(&path).map_err(Box::new))
+        interruptible_of(
+            py,
+            &w.spark_session(),
+            &[&self.frame.borrow(py).parts],
+            || w.json(&path).map_err(Box::new),
+        )
     }
 
     // Write as CSV - full pyspark signature; each named option is
@@ -6482,7 +6464,12 @@ impl PyDataFrameWriter {
         self.check_bucket_count(py)?;
         let path = crate::readwriter::writer_path(path)?;
         let w = self.check_unsent_mode(py, w)?;
-        interruptible(py, &w.spark_session(), || w.csv(&path).map_err(Box::new))
+        interruptible_of(
+            py,
+            &w.spark_session(),
+            &[&self.frame.borrow(py).parts],
+            || w.csv(&path).map_err(Box::new),
+        )
     }
 
     // Write as ORC - full pyspark signature; each named option is
@@ -6512,7 +6499,12 @@ impl PyDataFrameWriter {
         self.check_bucket_count(py)?;
         let path = crate::readwriter::writer_path(path)?;
         let w = self.check_unsent_mode(py, w)?;
-        interruptible(py, &w.spark_session(), || w.orc(&path).map_err(Box::new))
+        interruptible_of(
+            py,
+            &w.spark_session(),
+            &[&self.frame.borrow(py).parts],
+            || w.orc(&path).map_err(Box::new),
+        )
     }
 
     // Write as TEXT - full pyspark signature; each named option is
@@ -6537,7 +6529,12 @@ impl PyDataFrameWriter {
         self.check_bucket_count(py)?;
         let path = crate::readwriter::writer_path(path)?;
         let w = self.check_unsent_mode(py, w)?;
-        interruptible(py, &w.spark_session(), || w.text(&path).map_err(Box::new))
+        interruptible_of(
+            py,
+            &w.spark_session(),
+            &[&self.frame.borrow(py).parts],
+            || w.text(&path).map_err(Box::new),
+        )
     }
 
     // Write as XML - full pyspark signature; each named option is
@@ -6590,18 +6587,26 @@ impl PyDataFrameWriter {
         self.check_bucket_count(py)?;
         let path = crate::readwriter::writer_path(path)?;
         let w = self.check_unsent_mode(py, w)?;
-        interruptible(py, &w.spark_session(), || w.xml(&path).map_err(Box::new))
+        interruptible_of(
+            py,
+            &w.spark_session(),
+            &[&self.frame.borrow(py).parts],
+            || w.xml(&path).map_err(Box::new),
+        )
     }
 
     fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
-        // The DataFrame, which reports the objects of the plan that the writer shares with it, as
-        // PySpark's writer holds the plan (see `crate::gc::Holders`), and the Python object of the
-        // kept arguments, which the copies of the writer share and which reports them (see
-        // [`WriterKeptArgs`]). Nothing of a writer object that is being created.
+        // The DataFrame, the parts of the plan of which the state holds a clone, as PySpark's
+        // writer holds the plan (see [`crate::gc`]), and the Python object of the kept arguments,
+        // which the copies of the writer share and which reports them (see [`WriterKeptArgs`]).
+        // Nothing of a writer object that is being created.
         if !self.gc_ready.get() {
             return Ok(());
         }
         visit.call(&self.frame)?;
+        if let Some(parts) = &self.parts {
+            visit.call(parts)?;
+        }
         if let Some(shared) = &self.shared {
             visit.call(shared)?;
         }
@@ -6612,6 +6617,7 @@ impl PyDataFrameWriter {
     /// cleared copy; a copy's are kept.
     fn __clear__(&mut self) {
         self.shared = None;
+        self.parts = None;
         self.unsent = std::sync::Arc::new(std::sync::Mutex::new(UnsentArgs::default()));
         self.inner = std::sync::Arc::new(
             self.inner
@@ -6629,6 +6635,9 @@ impl PyDataFrameWriter {
 )]
 pub struct PyDataFrameWriterV2 {
     inner: std::sync::Arc<WriterState<spark_connect::readwriter::DataFrameWriterV2>>,
+    /// The object of the parts of the state, which the shallow copies of this writer share and
+    /// report, which reports them (see [`WriterParts`]).
+    parts: Option<Py<WriterParts>>,
     /// The DataFrame that is written, as the Python object of `df.writeTo`, as PySpark's `_df`.
     frame: Py<PyDataFrame>,
 
@@ -6790,6 +6799,7 @@ impl PyDataFrameWriterV2 {
             py,
             PyDataFrameWriterV2 {
                 inner: std::sync::Arc::clone(&this.inner),
+                parts: this.parts.as_ref().map(|parts| parts.clone_ref(py)),
                 unsent_table: this.unsent_table.as_ref().map(|table| table.clone_ref(py)),
                 unsent_provider: std::sync::Arc::clone(&this.unsent_provider),
                 unsent_clustering: std::sync::Arc::clone(&this.unsent_clustering),
@@ -6894,12 +6904,13 @@ impl PyDataFrameWriterV2 {
         if !cluster_cols.is_empty() {
             writer = writer.cluster_by(cluster_cols);
         }
+        let inner = std::sync::Arc::new(WriterState::of_parts(
+            writer,
+            spark_connect::readwriter::DataFrameWriterV2::held_parts,
+        ));
         let mut restored = PyDataFrameWriterV2 {
-            inner: std::sync::Arc::new(WriterState::of_frame(
-                writer,
-                &frame,
-                spark_connect::readwriter::DataFrameWriterV2::shares_plan_with,
-            )),
+            parts: writer_parts(&inner),
+            inner,
             unsent_table,
             unsent_provider: std::sync::Arc::new(std::sync::Mutex::new(kept_provider)),
             unsent_clustering: std::sync::Arc::new(std::sync::Mutex::new(kept_clustering)),
@@ -7070,6 +7081,9 @@ impl PyDataFrameWriterV2 {
         check_written_table(py, &self.unsent_table)?;
         self.check_unsent_all(py)?;
         let writer = self.inner.get();
+        // Of the parts of the copy of the state, of the plan and the partitioning, which the
+        // command is built of.
+        let _in_use = crate::gc::in_use_of_values(py, writer.held_parts());
         interruptible(py, &writer.spark_session(), || {
             writer.create().map_err(Box::new)
         })
@@ -7080,6 +7094,9 @@ impl PyDataFrameWriterV2 {
         check_written_table(py, &self.unsent_table)?;
         self.check_unsent_all(py)?;
         let writer = self.inner.get();
+        // Of the parts of the copy of the state, of the plan and the partitioning, which the
+        // command is built of.
+        let _in_use = crate::gc::in_use_of_values(py, writer.held_parts());
         interruptible(py, &writer.spark_session(), || {
             writer.replace().map_err(Box::new)
         })
@@ -7091,6 +7108,9 @@ impl PyDataFrameWriterV2 {
         check_written_table(py, &self.unsent_table)?;
         self.check_unsent_all(py)?;
         let writer = self.inner.get();
+        // Of the parts of the copy of the state, of the plan and the partitioning, which the
+        // command is built of.
+        let _in_use = crate::gc::in_use_of_values(py, writer.held_parts());
         interruptible(py, &writer.spark_session(), || {
             writer.create_or_replace().map_err(Box::new)
         })
@@ -7101,6 +7121,9 @@ impl PyDataFrameWriterV2 {
         check_written_table(py, &self.unsent_table)?;
         self.check_unsent_all(py)?;
         let writer = self.inner.get();
+        // Of the parts of the copy of the state, of the plan and the partitioning, which the
+        // command is built of.
+        let _in_use = crate::gc::in_use_of_values(py, writer.held_parts());
         interruptible(py, &writer.spark_session(), || {
             writer.append().map_err(Box::new)
         })
@@ -7113,6 +7136,15 @@ impl PyDataFrameWriterV2 {
         let (writer, condition) = (self.inner.get(), column_or_name(condition)?);
         check_written_table(py, &self.unsent_table)?;
         self.check_unsent_all(py)?;
+        // Of the parts of the copy of the state and of the condition.
+        let parts =
+            writer
+                .held_parts()
+                .into_iter()
+                .chain([spark_connect::gc::PartRef::Expression(
+                    condition.expression(),
+                )]);
+        let _in_use = crate::gc::in_use_of_values(py, parts);
         interruptible(py, &writer.spark_session(), || {
             writer.overwrite(condition).map_err(Box::new)
         })
@@ -7124,6 +7156,9 @@ impl PyDataFrameWriterV2 {
         check_written_table(py, &self.unsent_table)?;
         self.check_unsent_all(py)?;
         let writer = self.inner.get();
+        // Of the parts of the copy of the state, of the plan and the partitioning, which the
+        // command is built of.
+        let _in_use = crate::gc::in_use_of_values(py, writer.held_parts());
         interruptible(py, &writer.spark_session(), || {
             writer.overwrite_partitions().map_err(Box::new)
         })
@@ -7134,27 +7169,20 @@ impl PyDataFrameWriterV2 {
         if !self.gc_ready.get() {
             return Ok(());
         }
-        // The DataFrame, which reports the objects of the plan that the writer shares with it, as
-        // PySpark's writer holds the plan (see `crate::gc::Holders`).
+        // The DataFrame, as PySpark's writer holds it as its `_df`.
         visit.call(&self.frame)?;
         if let Some(table) = &self.unsent_table {
             visit.call(table)?;
         }
         // The Python object of the kept arguments, which the copies of the writer share and which
-        // reports them (see [`WriterV2KeptArgs`]). The state that a copy shares is reported by no
-        // owner, and a lock held elsewhere is skipped: of the state, the functions of the UDFs of
-        // the partitioning columns that it alone keeps alive.
+        // reports them (see [`WriterV2KeptArgs`]). The parts of the state, of the plan of which it
+        // holds a clone and of the partitioning columns (see [`crate::gc`]), which the state that
+        // a copy shares reports to no owner, and which a lock held elsewhere skips.
         if let Some(shared) = &self.shared {
             visit.call(shared)?;
         }
-        if std::sync::Arc::strong_count(&self.inner) == 1 {
-            if let Some(writer) = self.inner.try_lock() {
-                crate::udf_command::visit_pickler_objects(
-                    writer.exclusive_pickler_objects(),
-                    &visit,
-                )?;
-                crate::udf_command::visit_owners(writer.exclusive_owners(), &visit)?;
-            }
+        if let Some(parts) = &self.parts {
+            visit.call(parts)?;
         }
         Ok(())
     }
@@ -7164,6 +7192,7 @@ impl PyDataFrameWriterV2 {
     fn __clear__(&mut self) {
         self.unsent_table = None;
         self.shared = None;
+        self.parts = None;
         self.unsent_provider = std::sync::Arc::new(std::sync::Mutex::new(None));
         self.unsent_clustering = std::sync::Arc::new(std::sync::Mutex::new(None));
         self.inner = std::sync::Arc::new(
@@ -7173,47 +7202,151 @@ impl PyDataFrameWriterV2 {
     }
 }
 
+/// The parts of the state of a writer, as Python's garbage collector sees them: a Python object
+/// that each writer that holds the state, and each shallow copy of it, which shares the state,
+/// holds a reference to and reports, and which reports the parts of the state once, as PySpark's
+/// copies of a writer share the plan object of its DataFrame (see [`WriterState::try_parts`]).
+#[pyclass(frozen, name = "WriterParts", module = "pyspark._pyspark")]
+pub(crate) struct WriterParts {
+    state: std::sync::Arc<dyn VisitParts>,
+}
+
+/// A state whose parts a [`WriterParts`] reports.
+trait VisitParts: Send + Sync {
+    fn visit_parts(&self, visit: &pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError>;
+}
+
+impl<T: Clone + Send> VisitParts for WriterState<T> {
+    /// Report the parts of the state, unless another thread holds their lock, or they are of an
+    /// earlier state than the state's, until its change gives the state its own (see
+    /// [`WriterState::refresh_parts`]).
+    fn visit_parts(&self, visit: &pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
+        match self.try_parts() {
+            Some(parts) if parts.0 == self.generation.load(std::sync::atomic::Ordering::SeqCst) => {
+                parts.1.visit(visit)
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+#[pymethods]
+impl WriterParts {
+    /// The parts of the state, which the writers that share it reach through this object.
+    fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
+        self.state.visit_parts(&visit)
+    }
+}
+
+/// The [`WriterParts`] of `state`, for a writer that holds it, which its shallow copies share;
+/// None if the object is not made, as on an error of memory, of which the parts are not reported.
+pub(crate) fn writer_parts<T: Clone + Send + 'static>(
+    state: &std::sync::Arc<WriterState<T>>,
+) -> Option<Py<WriterParts>> {
+    let state: std::sync::Arc<dyn VisitParts> = state.clone();
+    Python::attach(|py| Py::new(py, WriterParts { state }).ok())
+}
+
 /// The state of a Python writer (`df.write`, `df.writeTo`, `df.mergeInto`, `df.writeStream`).
 /// PySpark's writers are plain Python objects, so their methods may run on several threads at
 /// once; a method that releases the GIL for its request must not hold a Rust borrow of the
 /// object (that would make the calls of the other threads fail with "Already borrowed"). So
 /// the lock is held only to copy or replace the state, and a request runs on its own copy.
 pub(crate) struct WriterState<T> {
-    /// The share of the holders of the plan of the DataFrame of the writers that hold this
-    /// state, which keep the DataFrame, of which the state holds a clone, dropped before it: the
-    /// builder steps keep the plan of the state (see [`crate::gc::Holders`]). It is only held.
-    _share: crate::gc::Share,
     state: std::sync::Mutex<T>,
+    /// The number of the changes of the state, which a change counts under the lock of the
+    /// state, so that the parts are known to be of the state as it is (see `refresh_parts`).
+    generation: std::sync::atomic::AtomicU64,
+    /// The parts of the values of the core that the state holds (see [`crate::gc::Parts`]), of a
+    /// state of a writer of a plan, which gives them (`held`), and the generation of the state
+    /// that they are of: the writer that alone holds the state reports them, while they are of
+    /// the state as it is, as PySpark's writer holds the plan of its DataFrame and its Columns.
+    /// The lock is held only to replace them or to report them.
+    parts: std::sync::Mutex<(u64, crate::gc::Parts)>,
+    held: Option<HeldParts<T>>,
 }
+
+/// The references of a state of a writer to the parts of the values of the core that it holds.
+type HeldParts<T> = for<'a> fn(&'a T) -> Vec<spark_connect::gc::PartRef<'a>>;
 
 impl<T: Clone> WriterState<T> {
     pub(crate) fn new(state: T) -> Self {
         WriterState {
-            _share: crate::gc::Share::none(),
             state: std::sync::Mutex::new(state),
+            generation: std::sync::atomic::AtomicU64::new(0),
+            parts: std::sync::Mutex::new((0, crate::gc::Parts::none())),
+            held: None,
         }
     }
 
-    /// The state of a writer that keeps the DataFrame `frame`, of which `shares_plan` tells
-    /// whether the state holds a clone of the plan, with a share of the holders of the plan.
-    pub(crate) fn of_frame(
-        state: T,
-        frame: &Py<PyDataFrame>,
-        shares_plan: impl FnOnce(&T, &DataFrame) -> bool,
-    ) -> Self {
-        let share = PyDataFrame::plan_share(frame, |dataframe| shares_plan(&state, dataframe));
+    /// The state of a writer of a plan, of the parts that `held` gives of it.
+    pub(crate) fn of_parts(state: T, held: HeldParts<T>) -> Self {
+        let parts = Python::attach(|py| crate::gc::Parts::of(py, held(&state)));
         WriterState {
-            _share: share,
             state: std::sync::Mutex::new(state),
+            generation: std::sync::atomic::AtomicU64::new(0),
+            parts: std::sync::Mutex::new((0, parts)),
+            held: Some(held),
         }
     }
 
-    /// A state of no share, of a copy of this one that `clear` cleared, for the `__clear__` of a
-    /// writer, whose copies keep this one.
+    /// A state of a copy of this one that `clear` cleared, for the `__clear__` of a writer, whose
+    /// copies keep this one, of no parts.
     pub(crate) fn cleared(&self, clear: impl FnOnce(&mut T)) -> Self {
         let mut state = self.get();
         clear(&mut state);
-        WriterState::new(state)
+        WriterState {
+            state: std::sync::Mutex::new(state),
+            generation: std::sync::atomic::AtomicU64::new(0),
+            parts: std::sync::Mutex::new((0, crate::gc::Parts::none())),
+            held: self.held,
+        }
+    }
+
+    /// The parts of the state and their generation, unless another thread holds their lock, for
+    /// the `__traverse__` of the writer that alone holds this state, which must not wait for it.
+    fn try_parts(&self) -> Option<std::sync::MutexGuard<'_, (u64, crate::gc::Parts)>> {
+        self.parts.try_lock().ok()
+    }
+
+    /// Give the state the parts of the values that it holds now, after it was replaced: they are
+    /// those of a copy of it, which holds the same references, made with no lock held, as the
+    /// [`crate::gc::SharedPart`]s that they make are Python objects, of which a collection may
+    /// clear a copy of a writer of this state, which reads it. They take the place of parts of
+    /// an earlier generation of the state only, as another thread may have changed the state and
+    /// given it its parts meanwhile, which Python code that `Parts::of` runs lets it do; until
+    /// then, those of an earlier generation are not reported (see `visit_parts`).
+    fn refresh_parts(&self) {
+        let Some(held) = self.held else {
+            return;
+        };
+        let (generation, state) = {
+            let state = self.lock();
+            (
+                self.generation.load(std::sync::atomic::Ordering::SeqCst),
+                state.clone(),
+            )
+        };
+        let parts = Python::attach(|py| crate::gc::Parts::of(py, held(&state)));
+        drop(state);
+        self.give_parts(generation, parts);
+    }
+
+    /// Give the state `parts`, of its generation `generation`, unless it has those of a later
+    /// one; the parts that are left are dropped once the lock is released.
+    fn give_parts(&self, generation: u64, parts: crate::gc::Parts) {
+        let left = {
+            let mut slot = self
+                .parts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if generation > slot.0 {
+                std::mem::replace(&mut *slot, (generation, parts)).1
+            } else {
+                parts
+            }
+        };
+        drop(left);
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, T> {
@@ -7234,13 +7367,27 @@ impl<T: Clone> WriterState<T> {
     }
 
     pub(crate) fn set(&self, state: T) {
-        *self.lock() = state;
+        let replaced = {
+            let mut current = self.lock();
+            self.generation
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            std::mem::replace(&mut *current, state)
+        };
+        drop(replaced);
+        self.refresh_parts();
     }
 
     /// Replace the state by `f` of it, as the builder methods do (`f` only builds, no Python).
     pub(crate) fn update(&self, f: impl FnOnce(T) -> T) {
-        let mut state = self.lock();
-        *state = f(state.clone());
+        let replaced = {
+            let mut state = self.lock();
+            let updated = f(state.clone());
+            self.generation
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            std::mem::replace(&mut *state, updated)
+        };
+        drop(replaced);
+        self.refresh_parts();
     }
 }
 
@@ -8197,7 +8344,7 @@ fn check_collectable(
 /// the execution starts.
 fn read_binary_as_bytes(py: Python<'_>, dataframe: &DataFrame) -> PyResult<bool> {
     let session = dataframe.spark_session();
-    let value = interruptible(py, &session, || {
+    let value = crate::interrupt::interruptible_without_parts(py, &session, || {
         session
             .conf()
             .get_with_default("spark.sql.execution.pyspark.binaryAsBytes", Some("true"))
@@ -8255,9 +8402,11 @@ fn rows_to_py(
 /// of `toLocalIterator` yields from. Implements `__iter__`, `__next__` and `close`.
 #[pyclass(name = "LocalRowIterator", module = "pyspark.sql.dataframe")]
 pub struct PyLocalRowIterator {
-    /// The share of the holders of the plan of `frame`, of which `dataframe` is a clone, dropped
-    /// before it (see [`crate::gc::Holders`]).
-    frame_share: crate::gc::Share,
+    /// The reference of the rows to the parts of the plan of `frame`, of which `dataframe` is a
+    /// clone, which `__traverse__` reports (see [`crate::gc::Parts`]). The clone that the
+    /// execution holds while it is prepared is not covered by it, which keeps the parts alive
+    /// meanwhile.
+    parts: crate::gc::Parts,
     dataframe: DataFrame,
     /// The DataFrame of `toLocalIterator`, as the generator of PySpark's holds `self` until it
     /// ends: the generator of the drop-in holds this iterator until then.
@@ -8287,11 +8436,10 @@ impl PyLocalRowIterator {
     /// The rows of the DataFrame `frame`, of a clone of its plan.
     pub fn new(frame: &Bound<'_, PyDataFrame>) -> Self {
         let dataframe = frame.borrow().dataframe.clone();
+        let parts = crate::gc::Parts::of(frame.py(), dataframe.held_parts());
         let frame = frame.clone().unbind();
-        let frame_share =
-            PyDataFrame::plan_share(&frame, |of_frame| dataframe.shares_plan_with(of_frame));
         PyLocalRowIterator {
-            frame_share,
+            parts,
             dataframe,
             frame,
             prepared: None,
@@ -8326,7 +8474,7 @@ impl PyLocalRowIterator {
                 // As the body of PySpark's generator: the plan is built first (`to_proto`), so a
                 // plan that does not build raises before any request, then the binary setting is
                 // read, and then the execution starts.
-                let prepared = interruptible(py, &session, || {
+                let prepared = interruptible_of(py, &session, &[&self.parts], || {
                     self.dataframe.prepare_execution().map_err(Box::new)
                 })?;
                 let value = read_binary_as_bytes(py, &self.dataframe)?;
@@ -8346,11 +8494,15 @@ impl PyLocalRowIterator {
             // The first fetch sends the execution, of the request context of the client; the
             // others continue it, as PySpark's generator reads nothing of the client again.
             None if self.prepared.is_some() => {
+                let _in_use = crate::gc::in_use(py, &[&self.parts]);
                 interruptible(py, &session, || out_of_the_wait(self.next_row()))?
             }
-            None => crate::interrupt::interruptible_continuation(py, &session, || {
-                out_of_the_wait(self.next_row())
-            })?,
+            None => {
+                let _in_use = crate::gc::in_use(py, &[&self.parts]);
+                crate::interrupt::interruptible_continuation(py, &session, || {
+                    out_of_the_wait(self.next_row())
+                })?
+            }
         };
         if let Some(iterator) = self.iterator.as_ref() {
             if self.converters.is_none() {
@@ -8447,7 +8599,7 @@ impl PyLocalRowIterator {
         self.finished = true;
         self.fields = None;
         self.nested_fields.clear();
-        py.detach(move || drop(iterator));
+        crate::gc::detach_without_parts(py, move || drop(iterator));
     }
 }
 
@@ -8486,20 +8638,21 @@ impl PyLocalRowIterator {
     }
 
     /// As the generator of PySpark's `toLocalIterator`, which holds its DataFrame, a Python object
-    /// that Python's garbage collector sees: the DataFrame is reported, which reports the objects
-    /// of the plan that the two share, such as the functions of its UDFs (see
-    /// [`crate::gc::Holders`]). So a reference cycle through the rows and a function of the plan,
-    /// such as a bound method of an object that keeps the rows, is freed. The iterator has no
-    /// `__dict__`: it is tracked when it is allocated, and its value is written before any
-    /// allocation that could start a collection, so no [`crate::gc::GcReady`] is needed.
+    /// that Python's garbage collector sees: the DataFrame is reported, and the parts of the plan
+    /// of which the rows hold a clone, such as the functions of its UDFs (see [`crate::gc`]). So a
+    /// reference cycle through the rows and a function of the plan, such as a bound method of an
+    /// object that keeps the rows, is freed. The iterator has no `__dict__`: it is tracked when it
+    /// is allocated, and its value is written before any allocation that could start a
+    /// collection, so no [`crate::gc::GcReady`] is needed.
     fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
-        visit.call(&self.frame)
+        visit.call(&self.frame)?;
+        self.parts.visit(&visit)
     }
 
     /// Break a reference cycle that the garbage collector found unreachable: the iterator drops
-    /// its clone of the plan, after its share of it.
+    /// its clone of the plan, and its reference to its parts.
     fn __clear__(&mut self) {
-        self.frame_share = crate::gc::Share::none();
+        self.parts.release();
         self.prepared = None;
         self.dataframe.clear_plan();
     }
@@ -8841,5 +8994,80 @@ mod execution_info_tests {
         let mut without_metrics = info("a", 1.0);
         without_metrics.metrics = None;
         assert!(!same_execution(&info("a", 1.0), &without_metrics));
+    }
+}
+
+#[cfg(test)]
+mod writer_state_tests {
+    use super::{writer_parts, WriterState};
+    use pyo3::prelude::*;
+    use pyo3::types::{PyList, PyTuple};
+    use spark_connect::expression::{Expression, ExpressionNode};
+    use spark_connect::gc::PartRef;
+    use spark_connect::udf::{CommonInlineUserDefinedFunctionExpression, PythonUDFPayload};
+    use std::sync::atomic::Ordering;
+
+    /// The expression of a UDF of `object`, as the binding makes it.
+    fn udf_of(object: Py<PyAny>) -> Expression {
+        let pickler = crate::udf_command::udf_pickler(object);
+        ExpressionNode::CommonInlineUserDefinedFunction(Box::new(
+            CommonInlineUserDefinedFunctionExpression::new(
+                "f".to_string(),
+                true,
+                vec![Expression::column("x")],
+                PythonUDFPayload::pickled_at_build(
+                    spark_connect::types::DataType::Long,
+                    100,
+                    pickler,
+                    "3.11".to_string(),
+                ),
+            ),
+        ))
+        .into()
+    }
+
+    fn held(state: &Option<Expression>) -> Vec<PartRef<'_>> {
+        state.iter().map(PartRef::Expression).collect()
+    }
+
+    /// The number of the referents of `parts` that the collector sees, once no call without the
+    /// GIL is counted.
+    fn referents(py: Python<'_>, parts: &Py<super::WriterParts>) -> usize {
+        crate::gc::wait_for_no_counted_call(py);
+        let referents = py
+            .import("gc")
+            .unwrap()
+            .call_method1("get_referents", (parts,))
+            .unwrap();
+        referents.cast::<PyList>().unwrap().len()
+    }
+
+    #[test]
+    fn the_parts_of_an_earlier_state_take_no_place_of_those_of_a_later_one() {
+        Python::initialize();
+        Python::attach(|py| {
+            let object = |py| PyTuple::new(py, [py.None()]).unwrap().into_any().unbind();
+            let state = std::sync::Arc::new(WriterState::of_parts(Some(udf_of(object(py))), held));
+            let parts = writer_parts(&state).unwrap();
+            assert_eq!(referents(py, &parts), 1);
+            // The refresh of a shallow copy on another thread, which copied the state before a
+            // change of this thread, and gives its parts after the change gave its own: those of
+            // the later state stay.
+            let (generation, copy) = (state.generation.load(Ordering::SeqCst), state.get());
+            let stale = crate::gc::Parts::of(py, held(&copy));
+            drop(copy);
+            state.set(Some(udf_of(object(py))));
+            assert_eq!(state.generation.load(Ordering::SeqCst), generation + 1);
+            assert_eq!(state.parts.lock().unwrap().0, generation + 1);
+            state.give_parts(generation, stale);
+            assert_eq!(state.parts.lock().unwrap().0, generation + 1);
+            assert_eq!(referents(py, &parts), 1);
+            // While a change has not given the state its parts yet, those of the earlier state are
+            // not reported.
+            state.generation.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(referents(py, &parts), 0);
+            state.refresh_parts();
+            assert_eq!(referents(py, &parts), 1);
+        });
     }
 }

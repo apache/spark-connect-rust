@@ -815,8 +815,12 @@ The core also adds doc-hidden items that the Python client uses, which are not a
 the `plan_build` module of a `PlanBuildListener` of the process, `WeakSparkSession`,
 `TableArg::relation_with_levels`, `SparkSession::add_unencodable_tag`, of a tag that UTF-8 cannot
 encode, and `StreamingQuery::await_termination_ms` and
-`StreamingQueryManager::await_any_termination_ms`; and doc-hidden methods of v4.3.0 change their
-arguments, such as `DataFrame::exclusive_relation_owners`.
+`StreamingQueryManager::await_any_termination_ms`; doc-hidden methods of v4.3.0 change their
+arguments; and the doc-hidden `DataFrame::exclusive_relation_owners` of v4.3.0 is replaced by the
+doc-hidden `gc` module, of the references to the parts of plans and expressions that values share
+(`gc::PartRef`), which the doc-hidden `held_parts` of DataFrames, grouped data and cogroups,
+statistics, table arguments, window specifications and writers give, as a binding shows them to its
+garbage collector.
 
 `LogicalPlan::Raw` and `SentExpression` add a doc-hidden `holes` field (`udf::SentHoles`), which is
 not a stable API: the holes of the commands of the UDFs of a relation or an expression of a pickle
@@ -3266,6 +3270,16 @@ after its first response and sends no `ReleaseExecute`, as in PySpark. The exit'
 ends the same way, and its error is ignored. Requests that are not executions, such as the
 `AnalyzePlan` of a schema, still work then.
 
+Once the exit has run the `atexit` hook of the drop-in's extension, after the threads that are
+not daemons have ended, a call that fails on another thread, a daemon thread, as the calls of a
+session that an earlier hook closed fail, raises nothing: the thread waits until the process
+ends, as CPython 3.14 holds such a thread once the interpreter finalizes, and the hook waits for
+the exceptions that such threads are building, for up to 5 seconds. Before 3.14, the finalization
+ends a thread that waits for the GIL with `pthread_exit`, which aborts the process when the thread
+runs the Python code of an exception, such as its first import of the exception classes, below
+the frames of the extension. PySpark's daemon thread raises its exception, until the finalization
+ends it.
+
 The `TypeError` for too many positional arguments counts them without `self`: where CPython says
 "takes from 2 to 4 positional arguments but 5 were given", the drop-in says "takes from 1 to 3
 positional arguments but 4 were given". A method that takes no arguments gets "takes no arguments
@@ -3530,57 +3544,71 @@ whether the capture of origins is on or not (`is_debugging_enabled`): so does a 
 CASE WHEN, which the unpickle makes again of its parts, and the sort orders of a window
 specification or of a table argument.
 
-A DataFrame or a Column reports the functions of its UDFs to Python's garbage collector, as
-PySpark's plan of Python objects is seen by it, so a reference cycle through a function and the
-DataFrame or the Column that holds it, such as through a bound method of an object that keeps the
-DataFrame, is collected. It also reports the plans of the Python client that it holds, as PySpark's
-DataFrame and Column hold their plan objects: the plan of a `DataFrame(plan, session)`, which its
-relation keeps, also through the subqueries of the expressions of a plan, and the plan that an
-unpickled Column of the subquery of a DataFrame of a plan that did not build keeps, to build it at
-its requests. So a cycle through such a plan and a DataFrame of it, a DataFrame over a subquery of
-it, a Column of its subquery or a table argument of it, such as through an attribute of the plan
-that keeps the object, is collected. So do the objects that hold such Columns, or the plan of a
-DataFrame, as PySpark's do: grouped data and their cogroups, a table argument, a window
-specification, the writers of `write`, `writeTo` and `writeStream`, `na` and `stat`, a merge builder
-and its clauses, the generator of `toLocalIterator`, which holds its DataFrame until it ends, as
+A DataFrame or a Column holds the functions of its UDFs and the plans of the Python client as
+Python's garbage collector sees them, as it sees PySpark's plan objects: each part of a plan or of
+an expression that holds such an object, directly or below it, has a Python object, a
+`SharedPart`, which holds a reference to the `SharedPart`s of the parts that it holds, one for each
+of its references to them, and reports the object of its part. The objects are the function of a
+UDF, a UDTF or a map or group-map function, the plan of a `DataFrame(plan, session)`, which its
+relation keeps, also through the subqueries of the expressions of a plan, the plan that an unpickled
+Column of the subquery of a DataFrame of a plan that did not build keeps, to build it at its
+requests, the plan and the exception of a build that failed, which a plan keeps, and the Python
+Observations of `observe`. Each object that holds a reference to such a part holds a reference to
+its `SharedPart` and reports it, as each of PySpark's objects holds its plan objects: a DataFrame, a
+Column, grouped data and their cogroups, a table argument, a window specification, `na` and `stat`,
+a merge clause, the generator of `toLocalIterator`, which holds its DataFrame until it ends, as
 PySpark's generator holds `self`, and the expression of a Column (`Column._expr`) and of a table
 argument (`TableArg._subquery_expr`), which `copy.copy` and `copy.deepcopy` copy as they copy a
-Column. Those that hold their DataFrame report it, and the DataFrame reports the functions of the
-plan that they share, so a cycle through the DataFrame alone, such as `df.back = df.groupBy("id")`,
-is collected too. So do the DataFrames of the plan of another, `DataFrame(df._plan, session)`,
-`copy.copy(df)` and a `copy.deepcopy(df)` that copies no function or Observation of the plan, which
-keep `df` and report it, as PySpark's DataFrames of one plan object both hold the object: a cycle
-through the functions of the plan and either of them, or both, is collected. Such a DataFrame keeps
-the whole of `df` alive, its attributes, the schema that it cached and its `executionInfo` with its
-plan, where PySpark's keeps the plan object alone, until the DataFrame is freed. An `ArrayType`, a
-`MapType`, a `StructField` and a `StructType` report the type objects, the flags and the metadata
-dict that they hold, and the lists of a struct, as PySpark's `__dict__` holds them, so a cycle
-through a type that one holds, such as a `DecimalType` with an attribute that keeps the struct, is
-collected. A function or a plan of the Python client that two of these objects share, through one
-Rust value of a plan or of an expression that both hold, is reported by neither: a Column and a
-DataFrame of it; a Column and its expression (`Column._expr`), its `copy.copy` or its
-`copy.deepcopy`, which share its expression, but for the UDFs that a deep copy copies and the nodes
-above them; two DataFrames of plans of their own, such as a DataFrame and one derived from it; and a
-DataFrame and a Column of its subquery, or a table argument of it, which holds its plan and not the
-DataFrame, as PySpark's does. They share one reference to it, which the collector would count as
-that of the one that reports it, so it could free the object with that one while the other lives and
-reaches it. A cycle that keeps both, such as through a plan of the Python client whose attribute
-keeps both its DataFrame and a Column of its subquery, is freed only when it is broken, where
-PySpark collects it. A stream writer holds its DataFrame, where PySpark's holds the plan, so a
-DataFrame that keeps its stream writer is freed by the collector, where PySpark frees it with its
-last reference. The functions of `foreachBatch` and `foreach` are kept as their pickles, as
-PySpark's stream writer keeps them, so a function that keeps its writer is freed with its last
-reference, and a copy or a pickle of the writer carries the pickle of the call. The registration of
-`dataSource` reports its session, and the builder of `pyspark.sql.connect.session.SparkSession` its
-channel builder and the list of its hook factories, which its shallow copies share, as PySpark's
-plain objects hold them, so a session that keeps its `dataSource`, or a channel builder or a hook
-factory that keeps its builder or a copy of it, is collected. The readers, the writers and the
-builder report the keys and the values of their options that are objects, which PySpark's dicts of
-options keep as they are, such as a key that is not a str, and the format, the save mode, the
-partitioning and clustering columns and the provider that the writers keep as they are, through one
-object of them that their shallow copies share, as PySpark's copies share the dict of their options
-and the `_write` of a writer: so a cycle through one, such as a key of an option that keeps its
-reader, is collected, also with a copy of the reader, and freed with the last of the copies.
+Column; the writers of `write`, `writeTo`, `writeStream` and `mergeInto` and their shallow copies,
+which share their state, as PySpark's share the objects of their writes, hold a reference to the
+`WriterParts` of the state, which reports its parts. So a reference cycle through such an object and
+any of the objects that hold it, one or several, is collected, as PySpark collects it: through a
+bound method of an object that keeps a Column and a DataFrame of it, a DataFrame and one derived
+from it, or two shallow copies of a writer; through a plan of the Python client whose attribute
+keeps both its DataFrame and a Column of its subquery, or a table argument of it. A function or a
+plan that a live object reaches is kept as it is, and pickled at the requests of that object. Those
+that hold their DataFrame report it too, so a cycle through the DataFrame alone, such as
+`df.back = df.groupBy("id")`, is collected. The DataFrames of the plan of another,
+`DataFrame(df._plan, session)`, `copy.copy(df)` and a `copy.deepcopy(df)` that copies no function or
+Observation of the plan, and the stream writer of `df.writeStream`, hold the plan of `df` and not
+`df`, as PySpark's hold its plan object, so `df` is freed at its last reference, its attributes with
+it, and a DataFrame that keeps its stream writer too. A `SharedPart` reports nothing while a
+reference to its part is of a holder that the collector does not see, such as the dataset that a
+native model of `pyspark.ml.connect` keeps for its summary: so the collector frees no object that
+such a holder reaches, and a cycle through it is collected once the holder is gone. A cycle through
+the holder itself never is: the native classes of `pyspark.ml.connect`, but for its reader and
+writer, report none of the Python objects that they hold, so a model in a cycle with its summary
+(`model.summary.model = model`) or with a function of a UDF of its summary's dataset is never freed,
+nor its object in the server's ML cache, where PySpark's model is (see
+`dev/parity/known-differences.md`). Nor does a `SharedPart` report anything while a call of the
+binding that may clone or drop its part runs without the GIL, on any thread: a call that builds a
+request of the plans of the objects that it is given, such as an action of a DataFrame, a write, a
+stream's start or a fit of `pyspark.ml.connect`, clones and drops the parts of those plans, of what
+the call keeps alive anyway; the other calls, such as the waits of streaming queries, the calls of
+the configuration, the catalog and the session, and the messages that the Python client builds,
+whose DataFrames the binding replaces in them before the call, clone none. So the collector gets the
+same references of each object in each of its passes, and a cycle through parts that no call clones
+is collected whenever the collector runs, as PySpark's is, except while a listener of the Rust API
+of the session gets an event, which may clone any part. On a free-threaded build of CPython, the
+parts have no `SharedPart`, and a cycle through them is not collected (see "Garbage collection" in
+`dev/parity/known-differences.md`).
+An `ArrayType`, a `MapType`, a
+`StructField` and a `StructType` report the type objects, the flags and the metadata dict that they
+hold, and the lists of a struct, as PySpark's `__dict__` holds them, so a cycle through a type that
+one holds, such as a `DecimalType` with an attribute that keeps the struct, is collected. The
+functions of `foreachBatch` and `foreach` are kept as their pickles, as PySpark's stream writer
+keeps them, so a function that keeps its writer is freed with its last reference, and a copy or a
+pickle of the writer carries the pickle of the call. The registration of `dataSource` reports its
+session, and the builder of `pyspark.sql.connect.session.SparkSession` its channel builder and the
+list of its hook factories, which its shallow copies share, as PySpark's plain objects hold them, so
+a session that keeps its `dataSource`, or a channel builder or a hook factory that keeps its builder
+or a copy of it, is collected. The readers, the writers and the builder report the keys and the
+values of their options that are objects, which PySpark's dicts of options keep as they are, such as
+a key that is not a str, and the format, the save mode, the partitioning and clustering columns and
+the provider that the writers keep as they are, through one object of them that their shallow copies
+share, as PySpark's copies share the dict of their options and the `_write` of a writer: so a cycle
+through one, such as a key of an option that keeps its reader, is collected, also with a copy of the
+reader, and freed with the last of the copies.
 
 The condition and the assignments of a clause of `mergeInto` are built, and the functions of their
 UDFs pickled, when the clause is added, which raises there, and the merge sends them as they were

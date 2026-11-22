@@ -18,10 +18,11 @@ where
     check_params(params)?;
     let input = dataset_of(dataset, "transform")?;
     let mut transformer = snapshot(slf)?;
-    let output = slf
-        .py()
-        .detach(|| transformer.transform(&input).map_err(Box::new))
-        .to_pyerr()?;
+    // Of the plan of the input, which the transform is built over.
+    let output = crate::gc::detach_of_values(slf.py(), input.held_parts(), || {
+        transformer.transform(&input).map_err(Box::new)
+    })
+    .to_pyerr()?;
     Ok(PyDataFrame::new(output))
 }
 // inspect cannot parse a textual NaN default; construct a Signature with the real float. A method's
@@ -761,9 +762,12 @@ feature_estimator!(PyQuantileDiscretizer, QuantileDiscretizer, "QuantileDiscreti
             let df = dataset_of(dataset, "fit")?;
             let mut estimator = snapshot(slf)?;
             let session = df.spark_session();
-            let bucketizer = interruptible(py, &session, || {
-                estimator.fit_bucketizer(&df).map_err(Box::new)
-            })?;
+            let bucketizer = crate::interrupt::interruptible_of_values(
+                py,
+                &session,
+                df.held_parts(),
+                || estimator.fit_bucketizer(&df).map_err(Box::new),
+            )?;
             let names = if bucketizer.params().get_param("splits").is_some() {
                 ["splits", "inputCol", "outputCol", "handleInvalid"]
             } else {
@@ -935,7 +939,8 @@ StopWordsRemover,
             };
             literal.to_literal_proto()
         };
-        interruptible(py, &session, || {
+        // A fetch of the ML helper, of a literal.
+        crate::interrupt::interruptible_without_parts(py, &session, || {
             core::ml_helper_attribute(
                 &session,
                 "stopWordsRemoverLoadDefaultStopWords",

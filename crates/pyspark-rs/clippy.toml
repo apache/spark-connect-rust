@@ -1,0 +1,12 @@
+# Every release of the GIL in the binding goes through `crate::gc::detach`, which counts the calls
+# that run without the GIL: no reference of the parts of plans and expressions is reported to
+# Python's garbage collector while one runs, as such a call may change them (see `src/gc.rs`). So
+# do the functions of the C API that release it, of which pyo3's own calls are not of the binding.
+disallowed-methods = [
+    { path = "pyo3::marker::Python::detach", reason = "release the GIL with `crate::gc::detach`, which counts the calls of the binding that run without it" },
+    { path = "pyo3::ffi::PyEval_SaveThread", reason = "release the GIL with `crate::gc::detach`, which counts the calls of the binding that run without it" },
+    { path = "pyo3::ffi::PyEval_RestoreThread", reason = "release the GIL with `crate::gc::detach`, which counts the calls of the binding that run without it" },
+    { path = "pyo3::ffi::PyEval_ReleaseThread", reason = "release the GIL with `crate::gc::detach`, which counts the calls of the binding that run without it" },
+    { path = "pyo3::ffi::PyEval_AcquireThread", reason = "release the GIL with `crate::gc::detach`, which counts the calls of the binding that run without it" },
+    { path = "pyo3::ffi::PyGILState_Release", reason = "take the GIL with `Python::attach`: a thread that releases the GIL in a call of the binding runs without it, uncounted" },
+]

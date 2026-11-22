@@ -275,9 +275,24 @@ pub(super) fn fetch_py(
         .iter()
         .map(fetch_arg_of)
         .collect::<PyResult<Vec<_>>>()?;
+    // Of the plans of the summary dataset of the target and of the DataFrames of the arguments,
+    // which the fetch, and the summary that it makes again, are built over.
+    let _in_use = crate::gc::in_use_of_values(py, fetch_parts(target, &args));
     interruptible(py, target.session(), || {
         spark_connect::ml::fetch(target, method, args).map_err(Box::new)
     })
+}
+
+/// The references to the parts of plans of a fetch of `target`, of the arguments `args`.
+fn fetch_parts<'a>(
+    target: &'a MlTarget,
+    args: &'a [FetchArg],
+) -> impl Iterator<Item = spark_connect::gc::PartRef<'a>> {
+    let arguments = args.iter().flat_map(|arg| match arg {
+        FetchArg::Input(df) => df.held_parts(),
+        _ => Vec::new(),
+    });
+    target.held_parts().into_iter().chain(arguments)
 }
 
 /// The DataFrame of the method `method` of `target`, of the Python arguments `args`.
@@ -851,7 +866,8 @@ impl PyMLWriter {
                 let should_overwrite = proto_bool(&should_overwrite)?;
                 let options = proto_options(&option_map)?;
                 let session = object.session().clone();
-                interruptible(py, &session, || {
+                // Of the object and its params.
+                crate::interrupt::interruptible_without_parts(py, &session, || {
                     spark_connect::ml::write_object_opt(
                         &object,
                         &params,
@@ -866,7 +882,7 @@ impl PyMLWriter {
                 let path = proto_path(path)?;
                 let should_overwrite = proto_bool(&should_overwrite)?;
                 let options = proto_options(&option_map)?;
-                interruptible(py, &session, || {
+                crate::interrupt::interruptible_without_parts(py, &session, || {
                     spark_connect::ml::write_operator_opt(
                         &session,
                         &operator,
@@ -886,7 +902,8 @@ impl PyMLWriter {
                 let spark = active_spark(py)?;
                 if should_overwrite.is_truthy()? {
                     let args = vec![fetch_arg_of(path)?, fetch_arg_of(&should_overwrite)?];
-                    interruptible(py, &session, || {
+                    // A fetch of the ML helper, of a path and a bool.
+                    crate::interrupt::interruptible_without_parts(py, &session, || {
                         spark_connect::ml::fetch(
                             &spark_connect::ml::MlTarget::helper(&session),
                             "handleOverwrite",
@@ -1113,7 +1130,7 @@ impl PyMLReader {
         match kind {
             Some(ReaderKind::Jvm(jvm_class, op_type, from_read)) => {
                 let path = proto_path(path)?;
-                let read = interruptible(py, &session, || {
+                let read = crate::interrupt::interruptible_without_parts(py, &session, || {
                     spark_connect::ml::read(&session, jvm_class.as_ref(), op_type, &path)
                         .map_err(Box::new)
                 })?;
@@ -1256,9 +1273,11 @@ impl ModelCore {
                 Some(spark_connect::ml::training_summary(object, df))
             }
             (SummaryDataset::Transformed, Some(object)) => {
-                let dataset = py
-                    .detach(|| spark_connect::ml::summary_transform(object, df).map_err(Box::new))
-                    .to_pyerr()?;
+                // Of the plan of the training dataset, which the transform is built over.
+                let dataset = crate::gc::detach_of_values(py, df.held_parts(), || {
+                    spark_connect::ml::summary_transform(object, df).map_err(Box::new)
+                })
+                .to_pyerr()?;
                 Some(spark_connect::ml::training_summary(object, &dataset))
             }
         };
@@ -1531,7 +1550,14 @@ impl ModelCore {
             };
             DataFrame::from_relation(session, relation, None).to_pyerr()
         } else {
-            py.detach(|| model.transform(df).map_err(Box::new))
+            // Of the plans of `df`, which the transform is built over, and of the summary of the
+            // model, which a model may read.
+            let parts = df.held_parts().into_iter().chain(
+                self.summary
+                    .iter()
+                    .flat_map(spark_connect::ml::MlTarget::held_parts),
+            );
+            crate::gc::detach_of_values(py, parts, || model.transform(df).map_err(Box::new))
                 .to_pyerr()
         }
     }

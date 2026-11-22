@@ -393,11 +393,28 @@ impl DataStreamWriter {
         self.foreach_payload.as_ref()
     }
 
-    /// Whether this writer streams the plan of `dataframe`, which it shares (see
-    /// [`DataFrame::shares_plan_with`]). Not a stable API.
+    /// The references of this writer to the shared parts of the plan that it streams and of the
+    /// picklers of its functions, if any (see [`crate::gc`]). Not a stable API.
     #[doc(hidden)]
-    pub fn shares_plan_with(&self, dataframe: &DataFrame) -> bool {
-        Arc::ptr_eq(&self.plan, &dataframe.plan)
+    pub fn held_parts(&self) -> Vec<crate::gc::PartRef<'_>> {
+        let mut held = vec![crate::gc::PartRef::Plan(&self.plan)];
+        let payloads = self
+            .foreach_batch_payload
+            .iter()
+            .chain(&self.foreach_payload);
+        held.extend(
+            payloads
+                .filter_map(|payload| payload.pickler.as_ref())
+                .map(crate::gc::PartRef::Pickler),
+        );
+        held
+    }
+
+    /// A DataFrame of the plan that this writer streams, of its session, as PySpark's stream
+    /// writer holds the plan of its DataFrame, of no schema cached. Not a stable API.
+    #[doc(hidden)]
+    pub fn dataframe(&self) -> DataFrame {
+        DataFrame::of_shared_plan(self.session.clone(), Arc::clone(&self.plan))
     }
 
     /// Drop the plan that this writer streams, as [`DataFrame::clear_plan`] drops the plan of a

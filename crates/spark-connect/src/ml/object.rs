@@ -518,6 +518,21 @@ impl MlTarget {
         self.summary_dataset.as_ref()
     }
 
+    /// The references of this target to the parts of plans, of the plans of its summary dataset
+    /// and of those of the targets that it keeps alive (see [`crate::gc`]). Not a stable API.
+    #[doc(hidden)]
+    pub fn held_parts(&self) -> Vec<crate::gc::PartRef<'_>> {
+        let mut held = Vec::new();
+        let mut target = Some(self);
+        while let Some(of) = target {
+            if let Some(dataset) = &of.summary_dataset {
+                held.extend(dataset.held_parts());
+            }
+            target = of.keep_alive.as_deref();
+        }
+        held
+    }
+
     /// What PySpark's pickle of the object of this target, the `__source_instance__` of the plan
     /// of a DataFrame of one of its methods, reaches first that does not pickle, after the child of
     /// the plan, its summary dataset (see [`pickle_block`]): of a model, the lock of its

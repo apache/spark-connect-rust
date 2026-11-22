@@ -668,7 +668,10 @@ where
     // The defaults of the estimator, which `_copyValues` gives the model of the fit.
     let defaults = params_api::fit_defaults(slf)?;
     let session = df.spark_session();
-    let fitted = interruptible(py, &session, || estimator.fit(&df).map_err(Box::new))?;
+    // Of the plan of the dataset, which the fit is built over; the estimator holds params alone.
+    let fitted = crate::interrupt::interruptible_of_values(py, &session, df.held_parts(), || {
+        estimator.fit(&df).map_err(Box::new)
+    })?;
     let mut model = model(py, fitted, &df)?;
     params_api::copy_defaults(py, defaults, &mut model)?;
     // The object of the model's class, as `Fitted` returns it.
@@ -724,8 +727,11 @@ impl PyMLModel {
             };
             DataFrame::from_relation(session, relation, None).to_pyerr()
         } else {
-            py.detach(|| model.transform(df).map_err(Box::new))
-                .to_pyerr()
+            // Of the plan of `df`, which the transform is built over.
+            crate::gc::detach_of_values(py, df.held_parts(), || {
+                model.transform(df).map_err(Box::new)
+            })
+            .to_pyerr()
         }
     }
 }
@@ -2257,10 +2263,12 @@ fn fit_one_vs_rest(
             .clone();
         let weight = weight.map(|name| name.extract::<String>()).transpose()?;
         let session = training.spark_session();
-        let (model, datasets) = interruptible(py, &session, || {
-            core.fit_classes(&training, num_classes, threads, weight.as_deref())
-                .map_err(Box::new)
-        })?;
+        // Of the plan of the training dataset, of which the fits of the classes are built.
+        let (model, datasets) =
+            crate::interrupt::interruptible_of_values(py, &session, training.held_parts(), || {
+                core.fit_classes(&training, num_classes, threads, weight.as_deref())
+                    .map_err(Box::new)
+            })?;
         // The typed models of the classes, of their binary training sets, which the fits of
         // PySpark's classifier make in the pool, before the cache is released.
         let fit = classification_api::OneVsRestFit {

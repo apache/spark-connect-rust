@@ -15185,8 +15185,8 @@ def test_cycles_through_the_functions_of_udfs_are_collected_as_pyspark(mock_conn
     # The function of the plan of a live DataFrame is reachable through it, whichever of its
     # objects the cycle runs through: it is kept, untouched by the collector, until the
     # DataFrame goes, and then collected. So is a cycle through both the DataFrame and an object
-    # that holds it; a table argument holds the plan and not the DataFrame, as PySpark's does,
-    # so it is not of those (see "Garbage collection" in known-differences.md).
+    # of it, also a table argument, which holds the plan and not the DataFrame, as PySpark's
+    # does.
     objects = [
         lambda frame: frame.groupBy("v"),
         lambda frame: copy.copy(frame.groupBy("v")),
@@ -15212,7 +15212,7 @@ def test_cycles_through_the_functions_of_udfs_are_collected_as_pyspark(mock_conn
         del frame
         gc.collect()
         assert freed() is None
-    for of_frame in objects[:-1]:
+    for of_frame in objects:
         job = Job()
         frame = udf_frame(job)
         job.held = (frame, of_frame(frame))
@@ -15290,6 +15290,798 @@ def test_cycles_through_the_dataframes_of_their_objects_are_collected_as_pyspark
     rows.close()
     gc.collect()
     assert freed() is None
+
+
+def test_cycles_through_holders_that_share_a_plan_are_collected_as_pyspark(mock_connect):
+    # As PySpark's DataFrames, Columns and the objects that hold them, Python objects that each
+    # hold a reference to their plan objects: a reference cycle through a function of a UDF or a
+    # plan of the Python client and several holders of one Rust plan or expression, such as a
+    # bound method of an object that keeps a Column and a DataFrame of it, or a plan that keeps
+    # its DataFrame and a Column of its subquery, is collected, as PySpark collects it.
+    import copy
+    import gc
+    import weakref
+
+    from pyspark.sql import Window
+    from pyspark.sql import functions as F
+    from pyspark.sql.connect.dataframe import DataFrame
+    from pyspark.sql.connect.plan import Range
+
+    spark, _ = mock_connect
+    base = spark.range(3)
+
+    class Job:
+        def f(self, x):
+            return x
+
+    def shapes(c, df):
+        derived = df.filter("v > 0")
+        scalar = df.select(F.max("v")).scalar()
+        window = Window.partitionBy(c).orderBy(c)
+        return {
+            "a Column and a DataFrame of it": (c, base.select(c)),
+            "a DataFrame and one derived from it": (df, derived),
+            "two DataFrames derived from one": (derived, df.select("v"), df.join(df, "id")),
+            "a DataFrame and a Column of its subquery": (df, scalar),
+            "a DataFrame and a table argument of it": (df, df.asTable()),
+            "a Column, its expression and their copies": (
+                c, c._expr, copy.copy(c), copy.copy(c._expr), c + 1),
+            "a window specification and a Column over it": (window, F.sum(c).over(window)),
+            "grouped data and a DataFrame of the plan": (df.groupBy(c), df, derived),
+            "a writer of a Column and a DataFrame of it": (
+                base.writeTo("t").partitionedBy(c), base.select(c)),
+            "a merge clause and the DataFrame": (
+                df.mergeInto("t", c == F.col("id")).whenMatched(c > 0), df),
+            "the copies of a DataFrame": (copy.copy(df), DataFrame(df._plan, spark), df),
+            "the cogroups and their DataFrames": (
+                df.groupBy("id").cogroup(derived.groupBy("id")), df, derived),
+            "na, stat, the writers and the rows of a DataFrame": (
+                df.na, df.stat, df.write, df.writeStream, df.toLocalIterator(), derived),
+        }
+
+    names = list(shapes(F.lit(1), base.select(F.lit(1).alias("v"), "id")))
+    for name in names + ["all of them"]:
+        job = Job()
+        c = F.udf(job.f, "long")("id")
+        made = shapes(c, base.select(c.alias("v"), "id"))
+        job.held = list(made.values()) if name == "all of them" else made[name]
+        freed = weakref.ref(job)
+        del job, c, made
+        gc.collect()
+        assert freed() is None, name
+
+    # A plan of the Python client that keeps holders of the plan of its DataFrame.
+    class Sentinel:
+        pass
+
+    class Kept(Range):
+        def __init__(self, box):
+            super().__init__(0, 3, 1)
+            self.box = box
+
+    holders = {
+        "its DataFrame and a Column of its subquery":
+            lambda df: (df, df.select(F.max("id")).scalar()),
+        "its DataFrame and one derived from it": lambda df: (df, df.filter("id > 0")),
+        "a Column of its subquery and a table argument of it":
+            lambda df: (df.select(F.max("id")).scalar(), df.asTable()),
+        "its DataFrame and its copies":
+            lambda df: (df, copy.copy(df), DataFrame(df._plan, spark)),
+        "a DataFrame over a subquery of it and the Column":
+            lambda df: (lambda s: (s, base.select(s)))(df.select(F.max("id")).scalar()),
+    }
+    for name, make in holders.items():
+        box = [Sentinel()]
+        box.append(make(DataFrame(Kept(box), spark)))
+        freed = weakref.ref(box[0])
+        del box
+        gc.collect()
+        assert freed() is None, name
+
+
+def test_holders_that_share_a_plan_keep_its_objects_alive_while_one_lives(mock_connect):
+    # The collector frees the objects that a plan holds only with the last holder that reaches
+    # them, as PySpark's: a function of a UDF or a plan of the Python client in a cycle through
+    # holders of the plan is kept as it is, with its attributes, while any holder outside the
+    # cycle lives, of the plan or of a part of it, and the requests of that holder pickle the
+    # function then. Once it goes, the cycle is collected.
+    import copy
+    import gc
+    import weakref
+
+    from pyspark.sql import functions as F
+    from pyspark.sql.connect.dataframe import DataFrame
+    from pyspark.sql.connect.plan import Range
+    from pyspark.sql.connect.proto import base_pb2
+
+    spark, service = mock_connect
+    base = spark.range(3)
+
+    class Job:
+        def __init__(self, state="<live>"):
+            self.state = state
+
+        # Pickled of its state alone, so that the command of its UDF holds no holder.
+        def __reduce__(self):
+            return (Job, (self.state,))
+
+        def f(self, x):
+            return x
+
+    def explained(frame):
+        frame.explain()
+        request = base_pb2.AnalyzePlanRequest.FromString(service.analyze_requests[-1])
+        return request.explain.plan.SerializeToString()
+
+    outside = {
+        "a DataFrame of the Column": (lambda c, df: base.select(c), explained),
+        "a DataFrame derived from the DataFrame": (lambda c, df: df.filter("v > 0"), explained),
+        "a copy of the Column": (lambda c, df: copy.copy(c), lambda c: explained(base.select(c))),
+        "the expression of the Column": (
+            lambda c, df: c._expr, lambda e: e.to_plan(spark.client).SerializeToString()),
+        "grouped data of the DataFrame": (
+            lambda c, df: df.groupBy("v"), lambda g: explained(g.count())),
+        "a table argument of the DataFrame": (lambda c, df: df.asTable(), None),
+        "a Column of a subquery of the DataFrame": (
+            lambda c, df: df.select(F.max("v")).scalar(), lambda s: explained(base.select(s))),
+        "a writer of the Column": (lambda c, df: base.writeTo("t").partitionedBy(c), None),
+        "a copy of the DataFrame": (lambda c, df: copy.copy(df), explained),
+    }
+    for name, (make, request) in outside.items():
+        job = Job()
+        c = F.udf(job.f, "long")("id")
+        df = base.select(c.alias("v"), "id")
+        kept = make(c, df)
+        job.held = (c, df, df.select("v"))
+        freed = weakref.ref(job)
+        del job, c, df
+        for _ in range(3):
+            gc.collect()
+        assert freed() is not None and vars(freed())["state"] == "<live>", name
+        assert all(holder is not None for holder in freed().held), name
+        if request is not None:
+            # The requests of the holder outside the cycle pickle the function, as it is.
+            assert b"<live>" in request(kept), name
+        del kept
+        gc.collect()
+        assert freed() is None, name
+
+    class Sentinel:
+        pass
+
+    class Kept(Range):
+        def __init__(self, box):
+            super().__init__(0, 3, 1)
+            self.box = box
+
+    box = [Sentinel()]
+    df = DataFrame(Kept(box), spark)
+    box.extend([df, df.select(F.max("id")).scalar()])
+    derived = df.filter("id > 0")
+    freed = weakref.ref(box[0])
+    del box, df
+    gc.collect()
+    assert freed() is not None
+    # The plan of the derived DataFrame builds, of the plan of the Python client.
+    plan = derived._plan.plan(spark.client)
+    assert plan.HasField("extension")
+    del derived, plan
+    gc.collect()
+    assert freed() is None
+
+
+def test_holders_that_share_a_plan_report_each_reference_once(mock_connect):
+    # As PySpark's objects, each of which reports the references that it holds: the collector
+    # never sees more references to a function of a UDF or to a plan of the Python client than
+    # there are, whichever holders share the plan or the expression that holds it, so it frees
+    # none that is reachable. Of each object that the collector tracks, its referents name the
+    # object as many times as it holds it.
+    import copy
+    import gc
+    import pickle
+    import sys
+
+    from pyspark import cloudpickle
+    from pyspark.sql import Window
+    from pyspark.sql import functions as F
+    from pyspark.sql.connect.dataframe import DataFrame
+    from pyspark.sql.connect.plan import Range
+
+    spark, _ = mock_connect
+    base = spark.range(3)
+
+    def check(label, target, skipped):
+        # The references to `target` but those of this call (the argument and getrefcount's),
+        # and the visits of the objects that the collector tracks, but frames, whose locals hold
+        # references that it does not visit.
+        others = sys.getrefcount(target) - 2
+        seen = 0
+        for obj in gc.get_objects():
+            if id(obj) not in skipped and type(obj).__name__ != "frame":
+                seen += sum(1 for referent in gc.get_referents(obj) if referent is target)
+        assert seen <= others, (label, type(target).__name__, seen, others)
+
+    def function():
+        def f(x):
+            return x
+
+        return f
+
+    def scenarios(c, df):
+        derived = df.filter("v > 0")
+        window = Window.partitionBy(c)
+        return [
+            [c],
+            [c, base.select(c)],
+            [df, derived, df.join(df, "id")],
+            [df, df.select(F.max("v")).scalar(), df.asTable(), df.asTable().partitionBy(c)],
+            [c, c._expr, copy.copy(c), copy.copy(c._expr), copy.deepcopy(c._expr)],
+            [window, F.sum(c).over(window), Window.orderBy(c)],
+            [df.groupBy(c), df.groupBy("v").cogroup(derived.groupBy("v")), df.na, df.stat],
+            [base.writeTo("t").partitionedBy(c), df.write, df.writeStream, df.toLocalIterator()],
+            [df.mergeInto("t", c == F.col("id")).whenMatched(c > 0), copy.copy(df),
+             DataFrame(df._plan, spark)],
+        ]
+
+    for index in range(9):
+        f = function()
+        c = F.udf(f, "long")("id")
+        df = base.select(c.alias("v"), "id")
+        holders = scenarios(c, df)[index]
+        del c, df
+        gc.collect()
+        # The function's references, but those of this test: of `f` and of the argument of
+        # getrefcount. The UDF holds the tuple of the function and the output type.
+        tuples = [o for o in gc.get_referrers(f) if type(o) is tuple and len(o) == 2]
+        assert tuples, index
+        for target in [f] + tuples:
+            check(index, target, {id(holders)})
+        del holders, tuples, f, target
+
+    class Kept(Range):
+        pass
+
+    for index in range(9):
+        plan = Kept(0, 3, 1)
+        df = DataFrame(plan, spark)
+        holders = scenarios(F.lit(1), df.select(F.col("id").alias("v"), "id"))
+        holders = holders[index] + [df]
+        del df
+        gc.collect()
+        check(index, plan, {id(holders)})
+        del holders, plan
+
+    # The unpickled Columns and table arguments of a plan whose build fails, which keep a copy of
+    # the plan to build it at their requests, shared and copied.
+    class Failing(Range):
+        def plan(self, session):
+            raise ValueError("fails")
+
+    def unpickled(make):
+        df = DataFrame(Failing(0, 3, 1), spark)
+        return pickle.loads(cloudpickle.dumps(make(df)))
+
+    for name, make in {
+        "Column": lambda: [unpickled(lambda df: df.select(F.max("id")).scalar())],
+        "Column shared": lambda: (lambda c: [c, base.select(c), copy.copy(c),
+                                             Window.partitionBy(c)])(
+            unpickled(lambda df: df.select(F.max("id")).scalar())),
+        "table argument shared": lambda: (lambda t: [t, t.partitionBy("id"), copy.copy(t)])(
+            unpickled(lambda df: df.asTable())),
+    }.items():
+        holders = make()
+        gc.collect()
+        copies = [o for o in gc.get_objects() if type(o) is Failing]
+        assert copies, name
+        for target in copies:
+            check(name, target, {id(holders), id(copies)})
+        del holders, copies, target
+
+
+def test_holders_that_share_a_plan_are_made_and_freed_on_threads_as_the_collector_runs(
+        mock_connect):
+    # Threads that make and drop holders that share plans of the functions of UDFs and of plans
+    # of the Python client, in reference cycles, while another thread runs the collector: no
+    # object that a live holder reaches is freed or cleared, and every cycle is collected at the
+    # end, as PySpark's.
+    import copy
+    import gc
+    import threading
+    import time
+    import weakref
+
+    from pyspark.sql import Window
+    from pyspark.sql import functions as F
+    from pyspark.sql.connect.dataframe import DataFrame
+    from pyspark.sql.connect.plan import Range
+
+    spark, _ = mock_connect
+
+    class Job:
+        def __init__(self):
+            self.alive = True
+
+        def f(self, x):
+            return x
+
+    class Kept(Range):
+        def __init__(self, box):
+            super().__init__(0, 3, 1)
+            self.box = box
+
+    stop = time.monotonic() + 3
+    problems = []
+    jobs = []
+
+    def worker():
+        kept = []
+        while time.monotonic() < stop:
+            job = Job()
+            c = F.udf(job.f, "long")("id")
+            df = DataFrame(Kept([job]), spark).select(c.alias("v"), "id")
+            made = [c, df, df.filter("v > 0"), copy.copy(c), c._expr, df.groupBy("v"),
+                    df.asTable(), Window.partitionBy(c), df.write, copy.copy(df.writeTo("t")),
+                    df.writeStream, df.na, DataFrame(df._plan, spark), df.join(df, "id")]
+            job.held = made
+            kept.append((made[len(kept) % len(made)], weakref.ref(job)))
+            if len(kept) > 8:
+                holder, freed = kept.pop(0)
+                job_of = freed()
+                if job_of is None or not vars(job_of).get("alive"):
+                    problems.append(type(holder).__name__)
+                del holder, job_of
+            jobs.append(weakref.ref(job))
+            del job, c, df, made
+
+    def collector():
+        while time.monotonic() < stop:
+            gc.collect()
+            time.sleep(0.001)
+
+    threads = [threading.Thread(target=worker) for _ in range(3)]
+    threads.append(threading.Thread(target=collector))
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert not problems
+    gc.collect()
+    assert jobs and all(job() is None for job in jobs)
+
+
+def test_requests_that_build_plans_without_the_gil_keep_their_functions_as_the_collector_runs(
+        mock_connect):
+    # Requests of several threads build the plans of live DataFrames without the GIL, and clone
+    # and drop the picklers of their UDFs and the nodes of their plans meanwhile, while another
+    # thread runs the collector over many objects, so that a build changes the counts of the
+    # parts between the passes of a collection. The function of each UDF is reached by the live
+    # DataFrames, of a plan that two of them share and of one that one holds alone: the collector
+    # never takes it for unreachable, so no weak reference to it is cleared and no finalizer of
+    # the object of its closure runs, as with PySpark's, whose plan objects hold the functions.
+    import gc
+    import random
+    import threading
+    import time
+    import weakref
+
+    from pyspark import cloudpickle
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+    # The server answers these requests without keeping them.
+    service.forget_session(spark.session_id)
+
+    class Kept:
+        finalized = []
+
+        def __init__(self, tag):
+            self.tag = tag
+
+        def __del__(self):
+            Kept.finalized.append(self.tag)
+
+    def udf_of(tag):
+        kept = Kept(tag)
+
+        def f(x):
+            return x if kept is not None else x
+
+        return F.udf(f, "long"), weakref.ref(f), weakref.ref(kept)
+
+    # The objects of the test come first in each collection, which goes over the ballast after
+    # them, so that a build that starts before a collection clones a pickler between its passes.
+    gc.collect()
+    gc.freeze()
+    try:
+        shared_udf, shared_function, shared_kept = udf_of("shared")
+        alone_udf, alone_function, alone_kept = udf_of("alone")
+        # The UDF after many columns, so that a build meets its pickler some time after it starts.
+        columns = [F.lit(i).alias(f"c{i}") for i in range(20000)]
+        shared = spark.range(1).select(*columns, shared_udf("id").alias("u"))
+        frames = [shared, shared.filter("u >= 0"),
+                  spark.range(1).select(*columns, alone_udf("id"))]
+        del shared, shared_udf, alone_udf, columns
+        actions = [
+            lambda df: df.collect(),
+            lambda df: df.toPandas(),
+            lambda df: df.schema,
+            lambda df: df.explain(),
+            lambda df: cloudpickle.dumps(df),
+        ]
+
+        def alive():
+            return (shared_function() is not None and alone_function() is not None
+                    and shared_kept() is not None and alone_kept() is not None
+                    and not Kept.finalized)
+
+        stop = threading.Event()
+        done = []
+
+        def worker(index):
+            n = index
+            while not stop.is_set():
+                try:
+                    actions[n % len(actions)](frames[n % len(frames)])
+                except Exception:
+                    pass
+                n += 1
+            done.append(n - index)
+
+        ballast = [[] for _ in range(600_000)]
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(4)]
+        for thread in threads:
+            thread.start()
+        collections = 0
+        corrupted = None
+        deadline = time.monotonic() + 4
+        try:
+            while time.monotonic() < deadline and corrupted is None:
+                gc.collect()
+                collections += 1
+                if not alive():
+                    corrupted = collections
+                time.sleep(random.random() * 0.004)
+        finally:
+            stop.set()
+            for thread in threads:
+                thread.join()
+        del ballast
+    finally:
+        gc.unfreeze()
+    assert corrupted is None, (corrupted, Kept.finalized, shared_function(), alone_function())
+    assert collections > 1 and sum(done) > len(actions) * len(frames)
+    assert service.forgotten_count(spark.session_id, "execute") > 0
+    assert service.forgotten_count(spark.session_id, "analyze") > 0
+    # The functions are as they were: each DataFrame pickles of them, and they run; the objects
+    # of their closures go with the DataFrames.
+    for df in frames:
+        assert cloudpickle.loads(cloudpickle.dumps(df)) is not None
+    del df
+    assert shared_function()(1) == 1 and alone_function()(2) == 2
+    frames.clear()
+    gc.collect()
+    assert shared_kept() is None and alone_kept() is None
+
+
+def test_cycles_are_collected_while_calls_run_that_clone_no_part_of_them(mock_connect):
+    # Without the GIL, a request of a DataFrame clones and drops only the parts of its plan, which
+    # the DataFrame keeps alive anyway, a write of writeTo only those of the copy of the writer's
+    # state that it runs on, and a call of the configuration clones none: while any of them waits
+    # for the server, a collection frees the cycles through the UDFs of other DataFrames, of one
+    # holder and of two, as PySpark's collector does. The parts of the write itself are busy
+    # meanwhile: the collector does not see them through the writer's DataFrame until it ends.
+    import gc
+    import threading
+    import time
+    import weakref
+
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+
+    class Job:
+        def f(self, x):
+            return x
+
+    def cycles():
+        refs = []
+        for i in range(10):
+            job = Job()
+            job.df = spark.range(3).select(F.udf(job.f, "long")("id").alias("v"))
+            if i % 2:
+                job.derived = job.df.filter("v > 0")
+            refs.append(weakref.ref(job))
+        return refs
+
+    def alive(refs):
+        gc.collect()
+        return sum(ref() is not None for ref in refs)
+
+    def in_flight(call, started):
+        failures = []
+
+        def run():
+            try:
+                call()
+            except Exception as e:
+                failures.append(e)
+
+        thread = threading.Thread(target=run)
+        thread.start()
+        deadline = time.monotonic() + 10
+        while not started():
+            assert time.monotonic() < deadline, "the call never reached the server"
+            time.sleep(0.01)
+        return thread
+
+    # The cycles are made before each call: a UDF reads a configuration, which the server holds.
+    busy = spark.range(1).select(F.udf(lambda x: x, "long")("id"))
+    kept = cycles()
+    service.block_execute = True
+    started = service.execute_started
+    try:
+        request = in_flight(busy.collect, lambda: service.execute_started > started)
+        assert alive(kept) == 0
+    finally:
+        service.release_response()
+    request.join(10)
+    # A gate of its own for each call that the server holds.
+    service.reset()
+
+    kept = cycles()
+    service.block_config = True
+    configured = len(service.config_requests)
+    try:
+        configuration = in_flight(
+            lambda: spark.conf.get("spark.gc.test.unset", "default"),
+            lambda: len(service.config_requests) > configured,
+        )
+        assert alive(kept) == 0
+    finally:
+        service.release_response()
+    configuration.join(10)
+    service.reset()
+
+    def shared_parts(of):
+        return [r for r in gc.get_referents(of) if type(r).__name__ == "SharedPart"]
+
+    frame = spark.range(1).select(F.udf(lambda x: x, "long")("id"))
+    writer = frame.writeTo("gc_of_the_write")
+    assert shared_parts(frame)
+    kept = cycles()
+    service.block_execute = True
+    started = service.execute_started
+    try:
+        write = in_flight(writer.append, lambda: service.execute_started > started)
+        assert alive(kept) == 0
+        assert not shared_parts(frame)
+    finally:
+        service.release_response()
+    write.join(10)
+    assert shared_parts(frame)
+
+
+def test_no_part_that_the_collector_sees_is_cloned_without_the_gil_by_a_call(mock_connect):
+    # The extension reports a part of a plan or of an expression to Python's garbage collector
+    # only while no call that runs without the GIL may clone it (see `gc` of crates/pyspark-rs).
+    # Its watch of those parts depends on nothing that the core tells of its clones: it holds the
+    # GIL, so that no collection runs, and reads the strong counts of the parts that are reported
+    # again and again, so that a change is a clone, without the GIL, of a part that a collection
+    # would see in one pass and not in the next. Calls of the main APIs, of values that hold the
+    # function of a UDF, run on threads while the watch and a collector run: it sees none.
+    import copy
+    import gc
+    import pickle
+    import random
+    import threading
+    import time
+
+    from pyspark import cloudpickle
+    from pyspark._pyspark import _watch_reported_parts
+    from pyspark.ml.feature import VectorAssembler
+    from pyspark.ml.regression import LinearRegression
+    from pyspark.sql import Observation
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+    u = F.udf(lambda x: x, "long")
+    base = spark.range(10).select("id", u(F.col("id")).alias("u"))
+    derived = base.filter("u >= 0")
+    features = VectorAssembler(inputCols=["id", "u"], outputCol="features").transform(base)
+    # Calls of a few milliseconds each, as of a server of a network, so that the parts that a call
+    # clones are held while the watch reads them; the first plan of a session waits for the lookup
+    # of its compression before it is built, so that its clones are made once the watch reads.
+    service.response_delay = 0.003
+    service.plan_compression_lookup_delay = 0.003
+
+    def first_plan_of_a_session():
+        session = spark.newSession()
+        try:
+            f = F.udf(lambda x: x, "long")
+            session.range(3).select(f(F.col("id"))).collect()
+        finally:
+            session.stop()
+
+    def write_v2():
+        base.writeTo("gc_watch").append()
+
+    def overwrite():
+        base.writeTo("gc_watch").overwrite(u(F.col("id")) >= 0)
+
+    def merge():
+        (
+            base.mergeInto("gc_watch", F.col("id") == u(F.col("id")))
+            .whenMatched(u(F.col("id")) >= 0)
+            .update({"u": u(F.col("id"))})
+            .whenNotMatched()
+            .insertAll()
+            .merge()
+        )
+
+    def observe():
+        # Of a DataFrame of its own, whose `isStreaming`, which `observe` asks of the server once,
+        # comes before the clone of its plan.
+        observation = Observation(f"o{random.randrange(10**9)}")
+        frame = base.select("*", F.lit(random.random()).alias("r"))
+        frame.observe(observation, F.count(F.lit(1)).alias("n")).collect()
+
+    calls = [
+        base.collect,
+        derived.count,
+        lambda: base.select("*", F.lit(random.random())).schema,
+        lambda: derived.select("u").columns,
+        base.isLocal,
+        lambda: base.isStreaming,
+        base.inputFiles,
+        base.semanticHash,
+        lambda: base.sameSemantics(derived),
+        lambda: derived._explain_string(),
+        lambda: derived.storageLevel,
+        base.toArrow,
+        lambda: derived.head(2),
+        derived.isEmpty,
+        lambda: list(base.toLocalIterator()),
+        lambda: base.createOrReplaceTempView("gc_watch_view"),
+        lambda: base.write.mode("overwrite").format("noop").save(),
+        write_v2,
+        overwrite,
+        merge,
+        lambda: base.stat.cov("id", "u"),
+        lambda: base.approxQuantile("u", [0.5], 0.1),
+        lambda: spark.sql("SELECT :x AS x", args={"x": u(F.lit(1))}).collect(),
+        lambda: spark.sql("SELECT * FROM {t}", t=base).collect(),
+        observe,
+        observe,
+        lambda: base.groupBy(u(F.col("id"))).count().collect(),
+        lambda: pickle.loads(cloudpickle.dumps(derived)).schema,
+        lambda: copy.copy(derived).collect(),
+        lambda: base.localCheckpoint(),
+        lambda: LinearRegression(featuresCol="features", labelCol="id", maxIter=1).fit(features),
+        lambda: base.cache().unpersist(),
+        first_plan_of_a_session,
+    ]
+    stop = threading.Event()
+    ran = []
+    watch = {"calls": 0, "watched": 0, "changes": 0, "logs": []}
+
+    def run_calls(seed):
+        chosen = random.Random(seed)
+        while not stop.is_set():
+            try:
+                chosen.choice(calls)()
+            except Exception:  # noqa: BLE001 - of what the mock server does not answer
+                pass
+            ran.append(1)
+
+    def run_watch():
+        while not stop.is_set():
+            watched, _, changes, logs = _watch_reported_parts(300)
+            watch["calls"] += 1
+            watch["watched"] += watched
+            watch["changes"] += changes
+            watch["logs"].extend(logs)
+            time.sleep(0.0002)
+
+    def run_collections():
+        while not stop.is_set():
+            gc.collect()
+            time.sleep(0.01)
+
+    threads = [threading.Thread(target=run_calls, args=(seed,)) for seed in range(4)]
+    threads += [threading.Thread(target=run_watch), threading.Thread(target=run_collections)]
+    for thread in threads:
+        thread.start()
+    time.sleep(6)
+    stop.set()
+    for thread in threads:
+        thread.join(60)
+    assert len(ran) > 100 and watch["calls"] > 100 and watch["watched"] > 0, (len(ran), watch)
+    assert watch["changes"] == 0, "\n".join(watch["logs"][:20])
+
+
+def test_cycles_through_the_shallow_copies_of_a_writer_are_collected_as_pyspark(mock_connect):
+    # As PySpark's shallow copies of a writer, which share the objects of its state: a cycle
+    # through two copies of a writer whose state holds the expression of a UDF, as the partitions
+    # of writeTo and the condition of mergeInto do, and the UDF's function, is collected, and a
+    # copy outside the cycle keeps it alive, as it is. (A cycle through one copy, or through the
+    # plan of the DataFrame of the writer, was collected before too.)
+    import copy
+    import gc
+    import weakref
+
+    from pyspark.sql import functions as F
+
+    spark, _ = mock_connect
+
+    class Job:
+        def f(self, x):
+            return x
+
+    makers = {
+        "writeTo": lambda job: spark.range(3).writeTo("t").partitionedBy(
+            F.udf(job.f, "long")("id")
+        ),
+        "mergeInto": lambda job: spark.range(3).mergeInto("t", F.udf(job.f, "boolean")("id")),
+    }
+    for name, make in makers.items():
+        job = Job()
+        writer = make(job)
+        job.held = (writer, copy.copy(writer))
+        freed = weakref.ref(job)
+        del job, writer
+        gc.collect()
+        assert freed() is None, name
+        job = Job()
+        writer = make(job)
+        copied = copy.copy(writer)
+        job.held = writer
+        freed = weakref.ref(job)
+        del job, writer
+        gc.collect()
+        assert freed() is not None and "held" in vars(freed()), name
+        del copied
+        gc.collect()
+        assert freed() is None, name
+
+
+def test_a_dataframe_of_the_plan_of_another_does_not_keep_it_as_pyspark(mock_connect):
+    # As PySpark's DataFrame(df._plan, session), copy.copy(df) and its stream writer, which hold
+    # the plan object of `df` and not `df`: `df` is freed at its last reference, its attributes
+    # with it, while they live, and they send its plan.
+    import copy
+    import gc
+    import weakref
+
+    from pyspark.sql import functions as F
+    from pyspark.sql.connect.dataframe import DataFrame
+
+    spark, _ = mock_connect
+    makers = {
+        "DataFrame(df._plan, session)": lambda df: DataFrame(df._plan, spark),
+        "copy.copy": copy.copy,
+        "a deep copy of nothing to copy": copy.deepcopy,
+        "writeStream": lambda df: df.writeStream,
+    }
+    gc.disable()
+    try:
+        for name, make in makers.items():
+            df = spark.range(3).select(F.col("id").alias("v"))
+            df.attribute = type("Attribute", (), {})()
+            made = make(df)
+            freed = weakref.ref(df.attribute)
+            del df
+            assert freed() is None, name
+            if name != "writeStream":
+                assert made._plan.plan(spark.client).HasField("extension"), name
+            del made
+        # A DataFrame that keeps its stream writer is freed at its last reference too.
+        df = spark.range(3)
+        df.back = df.writeStream
+        freed = weakref.ref(df.back)
+        del df
+        assert freed() is None
+    finally:
+        gc.enable()
 
 
 def test_cycles_through_the_sessions_and_builders_of_their_objects_are_collected_as_pyspark(
@@ -25248,6 +26040,19 @@ def test_objects_traversed_while_they_are_created_do_not_crash(mock_connect):
         lambda: DataSourceRegistration.__new__(DataSourceRegistration),
         lambda: type(reader).__new__(type(reader)),
         lambda: type(stream_reader).__new__(type(stream_reader)),
+    ]
+    # The objects whose parts hold the function of a UDF, which make the Python objects of the
+    # parts that they share as they are created (see `crate::gc`).
+    udf = F.udf(lambda x: x, "long")("id")
+    of_udf = df.select(udf.alias("v"), "id")
+    makers += [
+        lambda: F.udf(lambda x: x, "long")("id"), lambda: df.select(udf), lambda: udf + 1,
+        lambda: of_udf.filter("v > 0"), lambda: of_udf.groupBy("v"), lambda: of_udf.asTable(),
+        lambda: Window.partitionBy(udf), lambda: of_udf.write, lambda: of_udf.writeStream,
+        lambda: of_udf.writeTo("t").partitionedBy(udf), lambda: of_udf.na, lambda: of_udf.stat,
+        lambda: of_udf.mergeInto("t", udf > 0).whenMatched(udf > 1), lambda: udf._expr,
+        lambda: copy.copy(of_udf), lambda: of_udf.toLocalIterator(),
+        lambda: of_udf.groupBy("v").cogroup(of_udf.groupBy("id")),
     ]
     thresholds = gc.get_threshold()
     gc.collect()

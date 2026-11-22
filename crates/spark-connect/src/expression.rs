@@ -191,7 +191,7 @@ fn pickle_in_turn(
 
 impl ExpressionNode {
     /// The expressions, the UDFs and the plans right below this node, whose picklers
-    /// [`crate::udf::exclusive_pickler_objects`] visits.
+    /// [`crate::udf::all_picklers`] visits.
     pub(crate) fn push_pickler_holders<'a>(
         &'a self,
         pending: &mut Vec<crate::udf::PicklerHolder<'a>>,
@@ -517,10 +517,21 @@ fn with_expression_levels_and_unbuildable<T>(
 /// and [`Expression::function`], or use [`Expression::new`] for other node types.
 /// Inspect expressions with [`Expression::node`]. An expression keeps the origin in user code
 /// of its construction, if any, as PySpark's does (see [`crate::origin`]).
-#[derive(Clone)]
 pub struct Expression {
     node: Arc<ExpressionNode>,
     origin: Option<Arc<crate::origin::Origin>>,
+}
+
+/// A handle of the same node, of which the check of the clones of a binding is told (see
+/// [`crate::gc::check_clones_with`]).
+impl Clone for Expression {
+    fn clone(&self) -> Self {
+        crate::gc::cloned(self.node_address());
+        Expression {
+            node: Arc::clone(&self.node),
+            origin: self.origin.clone(),
+        }
+    }
 }
 
 impl std::fmt::Debug for Expression {
@@ -896,17 +907,13 @@ impl SubqueryExpression {
         }
     }
 
-    /// The holders of the picklers of this subquery: its plan, which a walk that visits only
-    /// what it alone holds visits when nothing else shares it, and its expressions.
+    /// The holders of the picklers of this subquery: its plan and its expressions.
     pub(crate) fn push_pickler_holders<'a>(
         &'a self,
         pending: &mut Vec<crate::udf::PicklerHolder<'a>>,
-        exclusive: bool,
     ) {
         use crate::udf::PicklerHolder::{Expression as Of, Plan};
-        if !exclusive || Arc::strong_count(&self.plan) == 1 {
-            pending.push(Plan(&self.plan));
-        }
+        pending.push(Plan(&self.plan));
         pending.extend(self.partition_spec.iter().map(Of));
         pending.extend(self.order_spec.iter().map(Of));
         pending.extend(self.in_subquery_values.iter().map(Of));
@@ -1043,6 +1050,7 @@ impl Expression {
     /// again of its parts (see [`crate::origin::origin_of_encoded`]). Not a stable API.
     #[doc(hidden)]
     pub fn with_origin(&self, origin: Option<crate::origin::Origin>) -> Expression {
+        crate::gc::cloned(self.node_address());
         Expression {
             node: Arc::clone(&self.node),
             origin: origin.map(Arc::new),
@@ -1071,19 +1079,15 @@ impl Expression {
         self.node.as_ref()
     }
 
-    /// Whether no other expression shares the node of this one.
-    pub(crate) fn is_exclusive(&self) -> bool {
-        self.is_held_by(1)
-    }
-
-    /// Whether `holders` expressions, this one and its clones, hold the node of this one.
-    pub(crate) fn is_held_by(&self, holders: usize) -> bool {
-        Arc::strong_count(&self.node) == holders
-    }
-
     /// The address of the node of this expression, which the expressions that share it have too.
     pub(crate) fn node_address(&self) -> usize {
         Arc::as_ptr(&self.node) as usize
+    }
+
+    /// The number of the references to the node of this expression: of this expression, of the
+    /// expressions that share its node and of any other holder of it.
+    pub(crate) fn node_strong_count(&self) -> usize {
+        Arc::strong_count(&self.node)
     }
 
     /// The expression of `node`, of the origin of this one.
@@ -1109,23 +1113,6 @@ impl Expression {
         crate::udf::PicklerRebuild::new(copies, &[])
             .expression(self)
             .unwrap_or_else(|| self.clone())
-    }
-
-    /// The objects of the picklers of the UDFs of this expression that it alone holds, which a
-    /// Python Column tells its garbage collector of (see
-    /// [`crate::udf::exclusive_pickler_objects`]). Not a stable API.
-    #[doc(hidden)]
-    pub fn exclusive_pickler_objects(&self) -> Vec<&(dyn std::any::Any + Send + Sync)> {
-        crate::udf::exclusive_pickler_objects(vec![crate::udf::PicklerHolder::Expression(self)])
-    }
-
-    /// The owners of the relations built outside the core of the plans of the subqueries of this
-    /// expression, and of the errors of its parts that a request fails to build, that it alone
-    /// holds, which a Python Column tells its garbage collector of, as PySpark's Column holds the
-    /// plan objects of its subqueries (see [`crate::udf::exclusive_owners`]). Not a stable API.
-    #[doc(hidden)]
-    pub fn exclusive_owners(&self) -> Vec<&(dyn std::any::Any + Send + Sync)> {
-        crate::udf::exclusive_owners(vec![crate::udf::PicklerHolder::Expression(self)])
     }
 
     /// Render this expression to a human-readable string, mirroring the
@@ -3251,9 +3238,17 @@ mod tests {
             *calls.lock().unwrap(),
             ["of the expression", "of the expression", "of the subquery"]
         );
-        // Its picklers, those of the plans of its subqueries too, which it alone holds, and which
+        // Its picklers, those of the plans of its subqueries too, which are parts of it, and which
         // a deep copy replaces.
-        assert_eq!(sent.exclusive_pickler_objects().len(), 2);
+        let picklers_of = |expression: &Expression| {
+            let roots = [crate::gc::PartRef::Expression(expression)];
+            crate::gc::tests::assert_exact(&roots);
+            crate::gc::tests::references(&roots)
+                .values()
+                .filter(|(_, part)| matches!(part, crate::gc::Part::Pickler(_)))
+                .count()
+        };
+        assert_eq!(picklers_of(&sent), 2);
         let picklers = sent.picklers();
         assert_eq!(picklers.len(), 2);
         let mut copies = PicklerCopies::new();
@@ -3277,7 +3272,7 @@ mod tests {
             &of_copy.subqueries.0[0].0,
             &original.subqueries.0[0].0
         ));
-        assert_eq!(copy.exclusive_pickler_objects().len(), 2);
+        assert_eq!(picklers_of(&copy), 2);
     }
 
     // Additional tests for expression render() methods and uncovered branches

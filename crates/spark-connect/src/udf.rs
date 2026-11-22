@@ -85,8 +85,16 @@ pub mod eval_type {
 /// Rust API carries the bytes of its command, which are sent as they are. Copies share it. Not a
 /// stable API.
 #[doc(hidden)]
-#[derive(Clone)]
 pub struct CommandPickler(Arc<dyn Pickling>);
+
+/// A handle of the same pickling, of which the check of the clones of a binding is told (see
+/// [`crate::gc::check_clones_with`]).
+impl Clone for CommandPickler {
+    fn clone(&self) -> Self {
+        crate::gc::cloned(self.address());
+        CommandPickler(Arc::clone(&self.0))
+    }
+}
 
 /// The object of a [`CommandPickler`] and its pickling.
 trait Pickling: Send + Sync {
@@ -178,15 +186,14 @@ impl CommandPickler {
     }
 
     /// The address of the pickling of this pickler, which its copies share.
-    fn address(&self) -> usize {
+    pub(crate) fn address(&self) -> usize {
         Arc::as_ptr(&self.0) as *const () as usize
     }
 
-    /// The object of this pickler, if no copy of it shares it: so the plan or the expression that
-    /// holds this pickler alone holds the object, which the garbage collector of a Python client
-    /// is told of (see [`exclusive_pickler_objects`]).
-    fn exclusive_object(&self) -> Option<&(dyn std::any::Any + Send + Sync)> {
-        (Arc::strong_count(&self.0) == 1).then(|| self.0.object())
+    /// The number of the references to the pickling of this pickler: of this pickler, of its
+    /// copies and of any other holder of it.
+    pub(crate) fn strong_count(&self) -> usize {
+        Arc::strong_count(&self.0)
     }
 }
 
@@ -204,8 +211,7 @@ impl PartialEq for CommandPickler {
 }
 
 /// A plan, an expression, a subquery, a UDF, the pickler of a UDTF, or the plans of the
-/// subqueries of an expression as it was sent, of which [`exclusive_pickler_objects`] and
-/// [`all_picklers`] visit the picklers.
+/// subqueries of an expression as it was sent, of which [`all_picklers`] visits the picklers.
 pub(crate) enum PicklerHolder<'a> {
     Plan(&'a crate::plan::LogicalPlan),
     Expression(&'a Expression),
@@ -213,144 +219,6 @@ pub(crate) enum PicklerHolder<'a> {
     Udf(&'a CommonInlineUserDefinedFunctionExpression),
     Pickler(&'a CommandPickler),
     SentPlans(&'a crate::expression::SentSubqueries),
-}
-
-/// The objects of the picklers of `holders`, of their UDFs and UDTFs, that they alone hold: those
-/// below the plans and the expressions that no other plan, expression or DataFrame shares, and
-/// of which no copy of the pickler shares the object. A Python client tells its garbage collector
-/// of these, so that a reference cycle through the function of a UDF and the DataFrame or the
-/// Column that holds it is freed, as PySpark's plan, of Python objects, is: an object reachable
-/// from two of them, or from elsewhere too, is not told of, which keeps it alive, rather than
-/// counting one reference twice. Computed without recursing.
-pub(crate) fn exclusive_pickler_objects<'a>(
-    holders: Vec<PicklerHolder<'a>>,
-) -> Vec<&'a (dyn std::any::Any + Send + Sync)> {
-    exclusive_objects(holders, false)
-}
-
-/// The owners that `holders` alone hold, as [`exclusive_pickler_objects`] gives the objects of
-/// their picklers, of the same walk: the owner of each relation built outside the core
-/// (`LogicalPlan::Raw`) and of the errors of each expression that a request fails to build
-/// (`UnbuildableExpression::owner`), of an owner held once, below the plans and the expressions
-/// that no other plan, expression or DataFrame shares. A Python DataFrame, Column or table
-/// argument, and an object that holds Columns, tells its garbage collector of these, as PySpark's
-/// holds the plan objects of its plan and of its subqueries, so a reference cycle through the
-/// Python plan of such a relation and the object is freed, as PySpark frees it.
-pub(crate) fn exclusive_owners<'a>(
-    holders: Vec<PicklerHolder<'a>>,
-) -> Vec<&'a (dyn std::any::Any + Send + Sync)> {
-    exclusive_objects(holders, true)
-}
-
-/// The objects of the picklers that `holders` alone hold, or, of `owners`, the owners (see
-/// [`exclusive_owners`]).
-fn exclusive_objects<'a>(
-    holders: Vec<PicklerHolder<'a>>,
-    owners: bool,
-) -> Vec<&'a (dyn std::any::Any + Send + Sync)> {
-    let mut objects = Vec::new();
-    let mut pending = holders;
-    while let Some(holder) = pending.pop() {
-        match holder {
-            PicklerHolder::Plan(plan) => {
-                if let (
-                    true,
-                    crate::plan::LogicalPlan::Raw {
-                        owner: Some(owner), ..
-                    },
-                ) = (owners, plan)
-                {
-                    if Arc::strong_count(&owner.0) == 1 {
-                        objects.push(owner.0.as_ref());
-                    }
-                }
-                plan.push_own_pickler_holders(&mut pending);
-                pending.extend(
-                    plan.inputs()
-                        .into_iter()
-                        .filter(|input| Arc::strong_count(input) == 1)
-                        .map(|input| PicklerHolder::Plan(input)),
-                );
-            }
-            PicklerHolder::Expression(expression) => {
-                if expression.is_exclusive() {
-                    if owners {
-                        objects.extend(exclusive_error_owner(expression.node()));
-                    }
-                    expression.node().push_pickler_holders(&mut pending);
-                }
-            }
-            PicklerHolder::Subquery(subquery) => subquery.push_pickler_holders(&mut pending, true),
-            PicklerHolder::Udf(udf) => {
-                pending.extend(udf.arguments.iter().map(PicklerHolder::Expression));
-                pending.extend(udf.python_udf.pickler.as_ref().map(PicklerHolder::Pickler));
-            }
-            PicklerHolder::Pickler(pickler) => {
-                if !owners {
-                    objects.extend(pickler.exclusive_object());
-                }
-            }
-            PicklerHolder::SentPlans(plans) => pending.extend(
-                plans
-                    .plans()
-                    .filter(|plan| Arc::strong_count(plan) == 1)
-                    .map(|plan| PicklerHolder::Plan(plan)),
-            ),
-        }
-    }
-    objects
-}
-
-/// The owner of the errors of `node`, of an expression that a request fails to build
-/// (`UnbuildableExpression::owner`), if it is held once, for [`exclusive_owners`].
-fn exclusive_error_owner(
-    node: &crate::expression::ExpressionNode,
-) -> Option<&(dyn std::any::Any + Send + Sync)> {
-    match node {
-        crate::expression::ExpressionNode::Unbuildable(unbuildable) => unbuildable
-            .owner
-            .as_ref()
-            .filter(|owner| Arc::strong_count(&owner.0) == 1)
-            .map(|owner| owner.0.as_ref()),
-        _ => None,
-    }
-}
-
-/// The objects of the picklers below `expressions`, as [`exclusive_pickler_objects`] gives those
-/// of an expression that it alone holds, of the expressions whose nodes `holders` hold: the
-/// holder of the expressions and the clones of it that its caller answers for, as the clones of
-/// grouped data that its cogroups hold (see `GroupedData::exclusive_pickler_objects`).
-pub(crate) fn exclusive_pickler_objects_held_by<'a>(
-    expressions: impl IntoIterator<Item = &'a Expression>,
-    holders: usize,
-) -> Vec<&'a (dyn std::any::Any + Send + Sync)> {
-    let mut pending = Vec::new();
-    for expression in expressions {
-        if expression.is_held_by(holders) {
-            expression.node().push_pickler_holders(&mut pending);
-        }
-    }
-    exclusive_pickler_objects(pending)
-}
-
-/// The owners below `expressions` and of their errors, as [`exclusive_owners`] gives those of an
-/// expression that it alone holds, of the expressions whose nodes `holders` hold, as
-/// [`exclusive_pickler_objects_held_by`] gives the objects of their picklers (see
-/// `GroupedData::exclusive_owners`).
-pub(crate) fn exclusive_owners_held_by<'a>(
-    expressions: impl IntoIterator<Item = &'a Expression>,
-    holders: usize,
-) -> Vec<&'a (dyn std::any::Any + Send + Sync)> {
-    let mut owners = Vec::new();
-    let mut pending = Vec::new();
-    for expression in expressions {
-        if expression.is_held_by(holders) {
-            owners.extend(exclusive_error_owner(expression.node()));
-            expression.node().push_pickler_holders(&mut pending);
-        }
-    }
-    owners.extend(exclusive_owners(pending));
-    owners
 }
 
 /// The picklers of `holders`, of their UDFs and UDTFs, below them and in the plans of their
@@ -381,7 +249,7 @@ pub(crate) fn all_picklers(holders: Vec<PicklerHolder<'_>>) -> Vec<CommandPickle
                 }
                 expression.node().push_pickler_holders(&mut below);
             }
-            PicklerHolder::Subquery(subquery) => subquery.push_pickler_holders(&mut below, false),
+            PicklerHolder::Subquery(subquery) => subquery.push_pickler_holders(&mut below),
             PicklerHolder::Udf(udf) => {
                 below.extend(udf.arguments.iter().map(PicklerHolder::Expression));
                 below.extend(udf.python_udf.pickler.as_ref().map(PicklerHolder::Pickler));
@@ -1531,55 +1399,69 @@ mod tests {
             .into()
     }
 
-    /// The tags of `objects`, of picklers of `udf_of`, sorted.
-    fn tags(objects: Vec<&(dyn std::any::Any + Send + Sync)>) -> Vec<&'static str> {
-        let mut tags: Vec<&'static str> = objects
-            .into_iter()
-            .map(|object| *object.downcast_ref::<&'static str>().unwrap())
+    /// The tags of the objects of the picklers of `udf_of` among the parts that `roots` reach,
+    /// sorted, once `roots` are checked to give every reference to those parts (see `crate::gc`).
+    #[track_caller]
+    fn tags(roots: &[crate::gc::PartRef<'_>]) -> Vec<&'static str> {
+        crate::gc::tests::assert_exact(roots);
+        tags_below(roots)
+    }
+
+    /// The tags of the objects of the picklers of `udf_of` among the parts that `roots` reach,
+    /// sorted.
+    fn tags_below(roots: &[crate::gc::PartRef<'_>]) -> Vec<&'static str> {
+        let mut tags: Vec<&'static str> = crate::gc::tests::references(roots)
+            .values()
+            .filter_map(|(_, part)| match part {
+                crate::gc::Part::Pickler(pickler) => {
+                    pickler.object().downcast_ref::<&'static str>().copied()
+                }
+                _ => None,
+            })
             .collect();
         tags.sort();
         tags
     }
 
     #[test]
-    fn test_the_pickler_objects_of_a_holder_are_those_that_it_alone_holds() {
+    fn test_the_parts_of_a_holder_reach_the_picklers_below_it() {
+        use crate::gc::PartRef::{Expression as Of, Plan};
         use crate::plan::LogicalPlan;
-        // Of an expression, below a function too; a node that a clone shares is not walked, so
-        // that no object is counted twice.
+        // Of an expression, below a function too, and of an expression that a clone shares.
         let a = udf_expression("a");
-        assert_eq!(tags(a.exclusive_pickler_objects()), ["a"]);
+        assert_eq!(tags(&[Of(&a)]), ["a"]);
         let shared = a.clone();
-        assert!(a.exclusive_pickler_objects().is_empty());
+        assert_eq!(tags(&[Of(&a), Of(&shared)]), ["a"]);
         drop(shared);
         let both = Expression::function("struct", vec![udf_expression("b"), a]);
-        assert_eq!(tags(both.exclusive_pickler_objects()), ["a", "b"]);
-        // A pickler that a copy of the UDF shares is not either.
+        assert_eq!(tags(&[Of(&both)]), ["a", "b"]);
+        // A pickler that a copy of the UDF shares, which another expression holds.
         let copied = udf_of("c");
-        let copy = copied.clone();
-        let holders = vec![PicklerHolder::Udf(&copied)];
-        assert!(exclusive_pickler_objects(holders).is_empty());
-        drop(copy);
-        // Of a plan: of the expressions and functions of its nodes, below the inputs that it
-        // alone holds, and of a UDTF.
+        let of_udf = |udf: CommonInlineUserDefinedFunctionExpression| -> Expression {
+            crate::expression::ExpressionNode::CommonInlineUserDefinedFunction(Box::new(udf)).into()
+        };
+        let (first, second) = (of_udf(copied.clone()), of_udf(copied));
+        assert_eq!(tags(&[Of(&first), Of(&second)]), ["c"]);
+        // Of a plan: of the expressions and functions of its nodes, of the inputs that it shares
+        // with another holder too, and of a UDTF.
         let input = Arc::new(LogicalPlan::Project {
             input: Arc::new(crate::plan::range(0, 1, 1)),
             columns: vec![crate::column::Column::new(udf_expression("project"))],
         });
-        let mapped = LogicalPlan::MapPartitions {
+        let mapped = Arc::new(LogicalPlan::MapPartitions {
             input: Arc::clone(&input),
             func: udf_of("map"),
             is_barrier: false,
             profile_id: None,
-            profile_id_reader: None,
-        };
-        let holders = || vec![PicklerHolder::Plan(&mapped)];
-        assert_eq!(tags(exclusive_pickler_objects(holders())), ["map"]);
-        drop(input);
+            profile_id_reader: Some(CommandPickler::new("profile", |_| Ok(Vec::new()))),
+        });
         assert_eq!(
-            tags(exclusive_pickler_objects(holders())),
-            ["map", "project"]
+            tags(&[Plan(&mapped), Plan(&input)]),
+            ["map", "profile", "project"]
         );
-        let udtf = LogicalPlan::CommonInlineUdtf {
+        drop(input);
+        assert_eq!(tags(&[Plan(&mapped)]), ["map", "profile", "project"]);
+        let udtf = Arc::new(LogicalPlan::CommonInlineUdtf {
             function_name: "t".to_string(),
             deterministic: false,
             arguments: vec![udf_expression("argument")],
@@ -1588,97 +1470,81 @@ mod tests {
             command: Vec::new(),
             python_ver: "3.11".to_string(),
             pickler: Some(CommandPickler::new("handler", |_| Ok(Vec::new()))),
-        };
-        let holders = vec![PicklerHolder::Plan(&udtf)];
-        assert_eq!(
-            tags(exclusive_pickler_objects(holders)),
-            ["argument", "handler"]
-        );
+        });
+        assert_eq!(tags(&[Plan(&udtf)]), ["argument", "handler"]);
     }
 
     #[test]
-    fn test_the_pickler_objects_of_the_objects_of_a_dataframe_are_those_that_they_alone_hold() {
+    fn test_the_parts_of_the_objects_of_a_dataframe_are_every_reference_to_them() {
         use crate::column::Column;
         let spark = crate::session::SparkSession::builder()
             .remote("sc://localhost:15002")
             .get_or_create()
             .unwrap();
         let column = |tag| Column::new(udf_expression(tag));
-        // A DataFrame, of the clones of it that its caller answers for: none other may hold its
-        // plan.
+        // A DataFrame, its grouped data and cogroups, its writers, its statistics, a table
+        // argument, a merge builder and a window specification of Columns of UDFs, which share
+        // the plan and each other's expressions.
         let df = spark.range(3).unwrap().select(vec![column("plan")]);
-        assert_eq!(tags(df.exclusive_pickler_objects(1)), ["plan"]);
-        let grouped = df.group_by(vec![column("grouping")]);
-        assert!(grouped.dataframe().shares_plan_with(&df));
-        assert!(df.exclusive_pickler_objects(1).is_empty());
-        assert_eq!(tags(df.exclusive_pickler_objects(2)), ["plan"]);
-        let derived = df.filter(crate::column::lit(1));
-        assert!(df.exclusive_pickler_objects(2).is_empty());
-        drop(derived);
-        // Grouped data, of their grouping and not of the plan, which the DataFrame reports; the
-        // clones of their cogroups are holders of the grouping too.
-        assert_eq!(tags(grouped.exclusive_pickler_objects(1)), ["grouping"]);
-        let mut cogrouped = grouped.cogroup(&grouped);
-        assert!(grouped.exclusive_pickler_objects(1).is_empty());
-        assert!(grouped.exclusive_pickler_objects(2).is_empty());
-        assert_eq!(tags(grouped.exclusive_pickler_objects(3)), ["grouping"]);
-        assert_eq!(tags(df.exclusive_pickler_objects(4)), ["plan"]);
-        cogrouped.clear_plan();
-        assert_eq!(tags(grouped.exclusive_pickler_objects(1)), ["grouping"]);
-        let mut cleared = grouped.clone();
-        cleared.clear_plan();
-        assert!(cleared.exclusive_pickler_objects(1).is_empty());
-        assert!(!cleared.dataframe().shares_plan_with(&df));
-        drop((grouped, cleared, cogrouped));
-        // The writers share the plan, of which the V2 writer reports its partitioning only.
+        assert_eq!(tags(&df.held_parts()), ["plan"]);
+        let grouping = column("grouping");
+        let grouped = df.group_by(vec![grouping.clone()]);
+        let cogrouped = grouped.cogroup(&grouped);
         let writer = df.write();
-        assert!(writer.shares_plan_with(&df));
-        let mut v2 = df.write_to("t").partition_by(vec![column("partition")]);
-        assert!(v2.shares_plan_with(&df));
-        assert_eq!(tags(v2.exclusive_pickler_objects()), ["partition"]);
-        v2.clear_plan();
-        assert!(!v2.shares_plan_with(&df) && v2.exclusive_pickler_objects().is_empty());
-        let mut stream = df.write_stream();
-        assert!(stream.shares_plan_with(&df));
-        stream.clear_plan();
-        assert!(!stream.shares_plan_with(&df));
-        let mut stat = df.stat();
-        assert!(stat.shares_plan_with(&df));
-        stat.clear_plan();
-        assert!(!stat.shares_plan_with(&df));
-        drop(writer);
-        // A table argument and a merge builder hold the plan, which they report once the
-        // DataFrame is gone, and their expressions.
+        let v2 = df.write_to("t").partition_by(vec![column("partition")]);
+        let stream = df.write_stream();
+        let stat = df.stat();
         let table = crate::table_arg::TableArg::new(df.clone())
             .partition_by(vec![column("table")])
             .unwrap();
-        assert_eq!(tags(table.exclusive_pickler_objects()), ["table"]);
-        let mut merge = df
+        let merge = df
             .merge_into("t", column("condition"))
             .when_matched(Some(column("matched")))
-            .update(vec![("v", column("assignment"))]);
-        assert!(merge.shares_plan_with(&df));
-        assert_eq!(
-            tags(merge.exclusive_pickler_objects()),
-            ["assignment", "condition", "matched"]
-        );
-        drop(df);
-        assert_eq!(tags(table.exclusive_pickler_objects()), ["table"]);
-        drop(table);
-        assert_eq!(
-            tags(merge.exclusive_pickler_objects()),
-            ["assignment", "condition", "matched", "plan"]
-        );
-        merge.clear_plan();
-        assert!(merge.exclusive_pickler_objects().is_empty());
-        // A window specification, of its partitioning and its ordering.
+            .update(vec![("v", grouping.clone())]);
         let window = crate::window::WindowSpec::new()
-            .partition_by(vec![column("by")])
+            .partition_by(vec![grouping.clone()])
             .order_by(vec![column("order").desc()]);
-        assert_eq!(tags(window.exclusive_pickler_objects()), ["by", "order"]);
-        let shared = window.clone();
-        assert!(window.exclusive_pickler_objects().is_empty());
-        drop(shared);
+        let all = [
+            df.held_parts(),
+            vec![crate::gc::PartRef::Expression(grouping.expression())],
+            grouped.held_parts(),
+            cogrouped.held_parts(),
+            writer.held_parts(),
+            v2.held_parts(),
+            stream.held_parts(),
+            stat.held_parts(),
+            table.held_parts(),
+            merge.held_parts(),
+            window.held_parts(),
+        ]
+        .concat();
+        assert_eq!(
+            tags(&all),
+            [
+                "condition",
+                "grouping",
+                "matched",
+                "order",
+                "partition",
+                "plan",
+                "table"
+            ]
+        );
+        drop(all);
+        assert_eq!(tags_below(&stream.held_parts()), ["plan"]);
+        assert_eq!(tags_below(&stream.dataframe().held_parts()), ["plan"]);
+        assert_eq!(
+            tags_below(&merge.held_parts()),
+            ["condition", "grouping", "matched", "plan"]
+        );
+        // The parts that clearing drops are gone.
+        let (mut v2, mut merge, mut grouped) = (v2, merge, grouped);
+        v2.clear_plan();
+        merge.clear_plan();
+        grouped.clear_plan();
+        assert!(tags_below(&v2.held_parts()).is_empty());
+        assert!(tags_below(&merge.held_parts()).is_empty());
+        assert!(tags_below(&grouped.held_parts()).is_empty());
     }
 
     /// The tag of the object of the pickler of the UDF `expression`.

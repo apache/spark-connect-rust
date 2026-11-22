@@ -85,9 +85,13 @@ where
     // it does for standard pyspark.ml.evaluation.
     let dataset = dataset_of(dataset, "evaluate")?;
     let evaluator = snapshot(slf)?;
-    interruptible(slf.py(), &dataset.spark_session(), || {
-        evaluator.evaluate(&dataset).map_err(Box::new)
-    })
+    // Of the plan of the dataset, which the evaluation is built over.
+    crate::interrupt::interruptible_of_values(
+        slf.py(),
+        &dataset.spark_session(),
+        dataset.held_parts(),
+        || evaluator.evaluate(&dataset).map_err(Box::new),
+    )
 }
 
 evaluator_struct!(

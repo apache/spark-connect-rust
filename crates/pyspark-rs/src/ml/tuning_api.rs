@@ -21,8 +21,6 @@ use spark_connect::ml::{join_path, k_fold, save_metadata, train_validation_split
 use spark_connect::SparkSession;
 use spark_connect_core::error::{SparkError, SparkErrorKind};
 
-use crate::interrupt::interruptible_outcome;
-
 /// The classes of the metadata of the validators, PySpark's, of which PySpark loads what this
 /// client saves.
 const CROSS_VALIDATOR_CLASS: &str = "pyspark.ml.tuning.CrossValidator";
@@ -605,9 +603,13 @@ fn cross_validator_folds<'py>(
     let df = split_dataframe(dataset)?;
     let uid = slf.try_borrow()?.uid.clone();
     let session = df.spark_session();
-    let folds = split_result(interruptible_outcome(py, &session, || {
-        k_fold(&df, n_folds, &fold_col, seed, &uid).map_err(Box::new)
-    })?)?;
+    // Of the plan of the dataset, which the folds are built over.
+    let folds = split_result(crate::interrupt::interruptible_outcome_of_values(
+        py,
+        &session,
+        df.held_parts(),
+        || k_fold(&df, n_folds, &fold_col, seed, &uid).map_err(Box::new),
+    )?)?;
     folds
         .into_iter()
         .map(|(train, validation)| Ok((py_dataframe(py, train)?, py_dataframe(py, validation)?)))
@@ -1668,7 +1670,8 @@ fn save_impl<T: Validator>(
         .collect::<PyResult<Vec<_>>>()?;
     let uid: String = instance.as_any().getattr("uid")?.extract()?;
     let class = super::pipeline_api::metadata_class::<T>(instance.as_any(), T::METADATA_CLASS)?;
-    interruptible(py, session, || {
+    // Of strings.
+    crate::interrupt::interruptible_without_parts(py, session, || {
         let version = session.version()?;
         let mut metadata = Metadata::new(&class, &uid, &version, param_map, default_param_map);
         metadata.extra = extra;

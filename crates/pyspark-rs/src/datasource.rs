@@ -6,7 +6,6 @@ use spark_connect::datasource::{
 };
 
 use crate::dataframe::{py_cloudpickle, py_version};
-use crate::interrupt::interruptible;
 use crate::session::PySparkSession;
 
 // Python accessor for data source registration.
@@ -168,7 +167,8 @@ impl PyDataSourceRegistration {
         let expr = CommonInlineUserDefinedDataSourceExpression::new(name, payload);
 
         // Register with the session (release GIL during the RPC)
-        interruptible(py, &session, || {
+        // Of the bytes of the pickled class, of no part.
+        crate::interrupt::interruptible_without_parts(py, &session, || {
             session.register_data_source(expr).map_err(Box::new)
         })?;
 

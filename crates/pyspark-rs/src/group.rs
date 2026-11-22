@@ -13,7 +13,7 @@ use crate::dataframe::{
 };
 use crate::errors::ResultExt;
 
-use crate::interrupt::interruptible;
+use crate::interrupt::interruptible_of;
 use crate::options::DefaultedOption;
 
 /// A schema of `applyInPandasWithState` as PySpark sends it: a `StructType` as its `json()`, of
@@ -137,12 +137,10 @@ pub(crate) fn reduce_with_state<'py>(
     dict
 )]
 pub struct PyGroupedData {
-    /// The share of the holders of the plan of `frame`, of which `grouped_data` holds a clone,
-    /// dropped before it (see [`crate::gc::Holders`]).
-    frame_share: crate::gc::Share,
-    /// The holders of the grouping of `grouped_data`: these grouped data and the cogroups of them,
-    /// which hold a clone of it, each with a share.
-    holders: crate::gc::Holders,
+    /// The references of the grouped data to the parts of the plan of which `grouped_data`
+    /// holds a clone and of their grouping, which `__traverse__` reports (see
+    /// [`crate::gc::Parts`]).
+    parts: crate::gc::Parts,
     pub(crate) grouped_data: RustGroupedData,
     /// The DataFrame that is grouped, as the Python object that `groupBy` was called on, as
     /// PySpark's `GroupedData._df` is.
@@ -154,12 +152,8 @@ pub struct PyGroupedData {
 
 impl PyGroupedData {
     pub fn new(grouped_data: RustGroupedData, frame: Py<PyDataFrame>) -> Self {
-        let frame_share = PyDataFrame::plan_share(&frame, |dataframe| {
-            grouped_data.dataframe().shares_plan_with(dataframe)
-        });
         PyGroupedData {
-            frame_share,
-            holders: crate::gc::Holders::new(),
+            parts: Python::attach(|py| crate::gc::Parts::of(py, grouped_data.held_parts())),
             grouped_data,
             frame,
             gc_ready: crate::gc::GcReady::new(),
@@ -257,10 +251,14 @@ impl PyGroupedData {
             for (col, name) in cols.iter().zip(&names) {
                 let numeric = match name {
                     None => {
-                        interruptible(py, &session, || grouped.dataframe().schema())?;
+                        interruptible_of(py, &session, &[&self.parts], || {
+                            grouped.dataframe().schema()
+                        })?;
                         false
                     }
-                    Some(name) => interruptible(py, &session, || grouped.is_numeric_column(name))?,
+                    Some(name) => interruptible_of(py, &session, &[&self.parts], || {
+                        grouped.is_numeric_column(name)
+                    })?,
                 };
                 if !numeric {
                     invalid.push(col.clone());
@@ -274,7 +272,7 @@ impl PyGroupedData {
                 &[("invalid_columns", invalid.as_any())],
             ));
         }
-        let names = interruptible(py, &grouped.spark_session(), || {
+        let names = interruptible_of(py, &grouped.spark_session(), &[&self.parts], || {
             grouped.numeric_agg_columns(names.into_iter().flatten())
         })?;
         // As PySpark's `F._invoke_function(function, F.col(c))` of each column: the column is of
@@ -327,32 +325,24 @@ impl PyGroupedData {
     }
 
     /// As PySpark's grouped data, a Python object that holds its DataFrame and its grouping
-    /// columns, which Python's garbage collector sees: the DataFrame is reported, which reports
-    /// the objects of the plan that the two share, and so are the functions of the UDFs of the
-    /// grouping that these grouped data and their cogroups alone keep alive (see
-    /// [`crate::gc::Holders`]), and the plans of the Python client that the subqueries and the
-    /// errors of the grouping keep. So a reference cycle through these grouped data and the
+    /// columns, which Python's garbage collector sees: the DataFrame is reported, and the parts of
+    /// the plan of which these grouped data hold a clone and of their grouping (see
+    /// [`crate::gc`]), of the functions of their UDFs and the plans of the Python client that
+    /// their subqueries and errors keep. So a reference cycle through these grouped data and the
     /// function of a UDF, such a plan, or the DataFrame, is collected, as PySpark collects it.
     fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
         if !self.gc_ready.get() {
             return Ok(());
         }
         visit.call(&self.frame)?;
-        let holders = self.holders.count();
-        crate::udf_command::visit_pickler_objects(
-            self.grouped_data.exclusive_pickler_objects(holders),
-            &visit,
-        )?;
-        crate::udf_command::visit_owners(self.grouped_data.exclusive_owners(holders), &visit)
+        self.parts.visit(&visit)
     }
 
     /// Break a reference cycle that the garbage collector found unreachable: the grouped data
-    /// drop their clone of the plan and their grouping, and so the objects that `__traverse__`
-    /// reported, after their share of the plan.
+    /// drop their clone of the plan and their grouping, and their references to their parts.
     fn __clear__(&mut self) {
         if self.gc_ready.get() {
-            self.frame_share = crate::gc::Share::none();
-            self.holders = crate::gc::Holders::new();
+            self.parts.release();
             self.grouped_data.clear_plan();
         }
     }
@@ -441,7 +431,9 @@ impl PyGroupedData {
             .map(|column| column.expression().render())
             .collect();
         let dataframe = self.grouped_data.dataframe().clone();
-        let dtypes = interruptible(py, &dataframe.spark_session(), || dataframe.dtypes())?;
+        let dtypes = interruptible_of(py, &dataframe.spark_session(), &[&self.parts], || {
+            dataframe.dtypes()
+        })?;
         let values: Vec<String> = dtypes
             .iter()
             .map(|(name, data_type)| format!("{name}: {data_type}"))
@@ -1028,10 +1020,9 @@ fn twus_func<'py>(
     dict
 )]
 pub struct PyCoGroupedData {
-    /// The shares of the holders of what `inner` holds clones of, dropped before it: the
-    /// groupings of `left` and `right`, and the plans of their DataFrames, which they keep (see
-    /// [`crate::gc::Holders`]).
-    shares: [crate::gc::Share; 4],
+    /// The references of the cogrouped ops to the parts of the clones of the two grouped data
+    /// that `inner` holds, which `__traverse__` reports (see [`crate::gc::Parts`]).
+    parts: crate::gc::Parts,
     pub(crate) inner: RustCoGroupedData,
     /// The grouped data on the left and on the right, as the Python objects of `cogroup`.
     left: Py<PyGroupedData>,
@@ -1042,22 +1033,15 @@ pub struct PyCoGroupedData {
 }
 
 impl PyCoGroupedData {
-    /// The cogrouped ops of the grouped data `left` and `right`, of clones of them, with the
-    /// shares of what the clones hold.
+    /// The cogrouped ops of the grouped data `left` and `right`, of clones of them.
     fn new(py: Python<'_>, left: Py<PyGroupedData>, right: Py<PyGroupedData>) -> Self {
-        let (inner, shares) = {
+        let inner = {
             let this = left.borrow(py);
             let that = right.borrow(py);
-            let shares = [
-                this.holders.share(),
-                this.frame_share.again(),
-                that.holders.share(),
-                that.frame_share.again(),
-            ];
-            (this.grouped_data.cogroup(&that.grouped_data), shares)
+            this.grouped_data.cogroup(&that.grouped_data)
         };
         PyCoGroupedData {
-            shares,
+            parts: crate::gc::Parts::of(py, inner.held_parts()),
             inner,
             left,
             right,
@@ -1082,21 +1066,22 @@ impl PyCoGroupedData {
     }
 
     /// As PySpark's cogrouped ops, a Python object that holds its two grouped data, which
-    /// Python's garbage collector sees: they report what the cogrouped ops share with them (see
-    /// [`crate::gc::Holders`]).
+    /// Python's garbage collector sees: they are reported, and the parts of the clones of them
+    /// that the cogrouped ops hold (see [`crate::gc`]).
     fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
         if !self.gc_ready.get() {
             return Ok(());
         }
         visit.call(&self.left)?;
-        visit.call(&self.right)
+        visit.call(&self.right)?;
+        self.parts.visit(&visit)
     }
 
     /// Break a reference cycle that the garbage collector found unreachable: the cogrouped ops
-    /// drop their clones of the grouped data, after their shares.
+    /// drop their clones of the grouped data, and their references to their parts.
     fn __clear__(&mut self) {
         if self.gc_ready.get() {
-            self.shares = std::array::from_fn(|_| crate::gc::Share::none());
+            self.parts.release();
             self.inner.clear_plan();
         }
     }

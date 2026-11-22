@@ -379,6 +379,7 @@ def serve(connection):
             # Back to the state of a new server: the tests of a module share one.
             self.calls = 0
             self.execute_calls = 0
+            self.response_delay = 0
             self.data_type = struct_schema()
             self.failure = None
             self.block_response = False
@@ -504,9 +505,15 @@ def serve(connection):
             self.release_session_gate = Event()
             self.add_artifacts_gate = Event()
 
+        # With `response_delay` set, AnalyzePlan and ExecutePlan answer after that many seconds,
+        # as a server of a remote network does.
+        response_delay = 0
+
         def analyze(self, request, context):
             # AnalyzePlanRequest.session_id=1, echoed as AnalyzePlanResponse.session_id=1, as the
             # server does: the client checks it.
+            if self.response_delay:
+                time.sleep(self.response_delay)
             session_id = parse_message(request).get(1, [b""])[0]
             return message_field(1, session_id) + self._analyze(request, context) + (
                 self.analyze_extra)
@@ -758,6 +765,8 @@ def serve(connection):
                 return reached and epoch == self.listener_epoch and self.execute_started >= count
 
         def execute(self, request, context):
+            if self.response_delay:
+                time.sleep(self.response_delay)
             fields = parse_message(request)
             with self.listener_condition:
                 # Capture these before yielding: an earlier call can resume after reset.

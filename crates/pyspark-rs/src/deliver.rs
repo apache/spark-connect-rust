@@ -26,8 +26,15 @@
 //! transport, and the methods of a retry policy, runs on the delivery thread instead, a thread of
 //! its own that waits for the GIL, in the order it was given. From the exit of the interpreter on
 //! (the `atexit` hook of the extension), nothing more runs there.
+//!
+//! From then on too, the exception of a failed call is not built on a thread other than the one
+//! that exits, a daemon thread, which waits until the process ends instead (see [`python_work`]):
+//! before 3.14, CPython's finalization ends a thread that waits for the GIL with `pthread_exit`,
+//! whose unwind cannot pass the frames of the binding below the Python code that the binding runs,
+//! and so aborts the process.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::cell::Cell;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::OnceLock;
 
@@ -58,7 +65,9 @@ pub(crate) fn on_python_thread() -> bool {
 /// thread kept (see [`preserving_pending_exception`]), else on the delivery thread, later.
 pub(crate) fn run(job: impl FnOnce(Python<'_>) + Send + 'static) {
     if on_python_thread() {
-        Python::attach(|py| preserving_pending_exception(py, job));
+        // Not of an interpreter that finalizes (`try_attach`), as the other jobs of a thread of
+        // Python: one there is not run.
+        let _ = Python::try_attach(|py| preserving_pending_exception(py, job));
     } else {
         deliver(Box::new(job));
     }
@@ -203,7 +212,8 @@ fn on_main_thread(py: Python<'_>) -> bool {
 /// the delivery thread.
 pub(crate) fn run_apart(job: impl FnOnce(Python<'_>) + Send + 'static) {
     if on_python_thread() {
-        Python::attach(|py| preserving_pending_exception(py, job));
+        // Not of an interpreter that finalizes, as `run`.
+        let _ = Python::try_attach(|py| preserving_pending_exception(py, job));
         return;
     }
     if EXITING.load(Ordering::SeqCst) {
@@ -281,10 +291,85 @@ fn deliver(job: Job) {
     let _ = queue.send(job);
 }
 
-/// Stop the deliveries, as the interpreter exits: the `atexit` hook of the extension.
+/// Stop the deliveries, as the interpreter exits: the `atexit` hook of the extension, which the
+/// thread that exits runs, once the threads that are not daemons have ended. From then on, the
+/// Python work of the binding does not start on the other threads ([`python_work`]), and the work
+/// that runs there ends first, with the GIL, which this releases meanwhile, so that none is under
+/// way when the interpreter finalizes: within a bound, for work that waits for something that the
+/// exit holds.
 #[pyfunction]
-pub(crate) fn _stop_deliveries() {
+pub(crate) fn _stop_deliveries(py: Python<'_>) {
+    let _ = EXIT_THREAD.try_with(|exits| exits.set(true));
     EXITING.store(true, Ordering::SeqCst);
+    if PYTHON_WORK.load(Ordering::SeqCst) == 0 {
+        return;
+    }
+    crate::gc::detach_without_parts(py, || {
+        let deadline = std::time::Instant::now() + EXIT_WAIT;
+        while PYTHON_WORK.load(Ordering::SeqCst) != 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    });
+}
+
+/// The Python work of the binding that runs now (see [`python_work`]).
+static PYTHON_WORK: AtomicUsize = AtomicUsize::new(0);
+
+/// The bound of the wait of the exit for the Python work that runs (see [`_stop_deliveries`]).
+const EXIT_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+thread_local! {
+    /// Whether this thread exits the interpreter: it ran the `atexit` hook of the extension.
+    static EXIT_THREAD: Cell<bool> = const { Cell::new(false) };
+    /// The Python work of the binding that runs on this thread, one within another (see
+    /// [`python_work`]).
+    static WORK_DEPTH: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Python work that the binding runs on this thread with the GIL, such as the build of the
+/// exception of a failed call, which imports modules and runs Python code: counted while it runs,
+/// so that the exit waits for it ([`_stop_deliveries`]). Once the exit has begun, a thread other
+/// than the one that exits, a daemon thread, does not start it: it waits until the process ends,
+/// without the GIL, as CPython 3.14 holds such a thread once it finalizes. Before 3.14, the
+/// finalization ends a thread that waits for the GIL with `pthread_exit`, whose unwind cannot pass
+/// the frames of the binding below the Python code that it ran, and so aborts the process; pyo3
+/// holds the thread instead only where it takes the GIL itself. Work within work that runs goes
+/// on, as the exit waits for the outer one. One count and one read otherwise.
+pub(crate) fn python_work() -> PythonWork {
+    let outer = WORK_DEPTH
+        .try_with(|depth| depth.replace(depth.get() + 1) == 0)
+        .unwrap_or(true);
+    PYTHON_WORK.fetch_add(1, Ordering::SeqCst);
+    let work = PythonWork(());
+    if outer && EXITING.load(Ordering::SeqCst) && !EXIT_THREAD.try_with(Cell::get).unwrap_or(false)
+    {
+        drop(work);
+        hold_until_the_process_ends();
+    }
+    work
+}
+
+/// Python work of the binding that runs, counted while it lives ([`python_work`]).
+pub(crate) struct PythonWork(());
+
+impl Drop for PythonWork {
+    fn drop(&mut self) {
+        PYTHON_WORK.fetch_sub(1, Ordering::SeqCst);
+        let _ = WORK_DEPTH.try_with(|depth| depth.set(depth.get().saturating_sub(1)));
+    }
+}
+
+/// Hold this thread until the process ends, without the GIL: it releases the GIL if it holds it,
+/// and holds none of an interpreter that the GIL cannot be taken of any more.
+fn hold_until_the_process_ends() -> ! {
+    let _ = Python::try_attach(|py| {
+        crate::gc::detach_without_parts(py, || loop {
+            std::thread::park();
+        })
+    });
+    loop {
+        std::thread::park();
+    }
 }
 
 /// Register [`_stop_deliveries`] with `atexit`, as the extension loads.

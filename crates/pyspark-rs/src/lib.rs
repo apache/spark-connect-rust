@@ -130,6 +130,17 @@ fn grpcio_roots_file(py: Python<'_>) -> Option<std::path::PathBuf> {
 
 #[pymodule(gil_used = false)]
 fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    // How Python's garbage collector sees the parts of plans and expressions: not at all on a
+    // free-threaded build, and of the counts of the calls without the GIL of the forking thread
+    // alone in the child of a fork (see `gc`).
+    gc::init(_py)?;
+    // The check of the clones of the parts that the tests turn on (see `gc::check_clone`).
+    m.add_function(wrap_pyfunction!(gc::_check_part_clones, m)?)?;
+    m.add_function(wrap_pyfunction!(gc::_part_clones_checked, m)?)?;
+    m.add_function(wrap_pyfunction!(gc::_take_part_clone_violations, m)?)?;
+    // The watch of the parts that the collector sees, of a test of its own (see
+    // `gc::_watch_reported_parts`).
+    m.add_function(wrap_pyfunction!(gc::_watch_reported_parts, m)?)?;
     origin::listen_to_plan_builds();
     // As grpcio's fork support, which registers its handlers as it loads: a child of a `fork()`
     // is of a generation of its own, whatever thread used the client first.
@@ -382,9 +393,11 @@ fn bare_type_names(m: &Bound<'_, PyModule>) -> PyResult<()> {
 /// The native classes that are not attributes of the module, of objects that it makes: the
 /// expression of a Column (`Column._expr`), the attribute of a param of an ML class, the exit
 /// hook and the active session of the sessions (`SparkSession._active_session`), the handle of a
-/// session that a client holds, the listener bus of a stream manager, and the objects of the
-/// options and the kept arguments that the copies of a reader, a writer or a builder share.
-fn classes_outside_module(py: Python<'_>) -> [Bound<'_, pyo3::types::PyType>; 7] {
+/// session that a client holds, the listener bus of a stream manager, the objects of the
+/// options and the kept arguments that the copies of a reader, a writer or a builder share, and
+/// the objects that the garbage collector sees of the parts of plans and expressions and of the
+/// states of the writers (see `gc`).
+fn classes_outside_module(py: Python<'_>) -> [Bound<'_, pyo3::types::PyType>; 9] {
     [
         py.get_type::<column::PyColumnExpression>(),
         py.get_type::<ml::params_api::PyParamAttribute>(),
@@ -393,5 +406,7 @@ fn classes_outside_module(py: Python<'_>) -> [Bound<'_, pyo3::types::PyType>; 7]
         py.get_type::<session::PyWeakSession>(),
         py.get_type::<streaming::PyStreamingQueryListenerBus>(),
         py.get_type::<options::PySharedObjects>(),
+        py.get_type::<gc::SharedPart>(),
+        py.get_type::<dataframe::WriterParts>(),
     ]
 }
