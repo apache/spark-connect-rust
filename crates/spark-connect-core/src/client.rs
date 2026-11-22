@@ -433,13 +433,28 @@ impl Drop for ChannelLease {
     }
 }
 
+/// The proxy of the environment now that the channel of `builder` connects through, if any, as
+/// gRPC's proxy mapper decides it: of a target of gRPC, of the host of its path, and none of a
+/// socket of `unix:`; else of the host of the connection string.
+fn proxy_of(
+    builder: &ChannelBuilder,
+) -> std::result::Result<Option<crate::proxy::HttpProxy>, String> {
+    match builder.target_names() {
+        Some(names) => match &names.proxied {
+            Some((host, _)) => ProxyEnv::from_process().proxy_for(host),
+            None => Ok(None),
+        },
+        None => ProxyEnv::from_process().proxy_for(builder.host()),
+    }
+}
+
 impl ChannelFactory {
     /// The factory of the channel of a new session of the same endpoint as of `builder`, through
     /// the proxy of the environment now, as grpcio's channel of a new client reads it, which logs
     /// what grpcio logs of it again. Of the proxy of this factory if that one is not valid, as
     /// the error of the creation of a session of it is of the first session only.
     fn renewed(&self, builder: &ChannelBuilder) -> Self {
-        let target = match ProxyEnv::from_process().proxy_for(builder.host()) {
+        let target = match proxy_of(builder) {
             Ok(proxy) => self.target.renewed(builder.host(), builder.port(), proxy),
             Err(_) => self.target.clone(),
         };
@@ -1815,7 +1830,20 @@ impl SparkConnectClient {
         // client, where getOrCreate() does not dial the server). This also means the
         // client can be constructed without a live server (e.g. in unit tests that only
         // build request protos).
-        let endpoint = builder.endpoint();
+        // The `:authority` of the calls: of a target of gRPC, gRPC's default authority of it, of
+        // the host and the port of the connection string, which stand for it, where HTTP cannot
+        // carry it (of a `%` but in brackets, or of more than one `:`, as of a Unix socket or of a
+        // list of addresses); else the host and the port of the connection string.
+        let endpoint = builder
+            .target_names()
+            .map(|names| names.authority.clone())
+            .filter(|authority| {
+                !authority.is_empty()
+                    && authority
+                        .parse::<tonic::codegen::http::uri::Authority>()
+                        .is_ok()
+            })
+            .unwrap_or_else(|| builder.endpoint());
         // The connector makes the TLS session itself (see `crate::connector`), so the endpoint is
         // of plaintext, and the requests have the `https` scheme of its origin.
         let mut tonic_endpoint = Channel::from_shared(format!("http://{endpoint}"))
@@ -1824,10 +1852,16 @@ impl SparkConnectClient {
             // TLS with the roots of GRPC_DEFAULT_SSL_ROOTS_FILE_PATH alone, as grpcio trusts them,
             // else those of the system's store and of the bundled roots file, grpcio's bundle of
             // the Python binding (see `docs/configuration.md`). The server name of an IPv6 host
-            // is its address without the brackets of the URL.
-            let domain = builder.host().trim_start_matches('[').trim_end_matches(']');
-            let tls = crate::connector::Tls::new(domain, ssl_roots())
-                .map_err(|e| SparkError::connect_msg(format!("Failed to configure TLS: {}", e)))?;
+            // is its address without the brackets of the URL; of a target of gRPC, it is the
+            // name that gRPC's TLS verifies of its authority, never the host that stands for it.
+            let tls = match builder.target_names() {
+                Some(names) => crate::connector::Tls::of_target_name(names.tls_name(), ssl_roots()),
+                None => crate::connector::Tls::new(
+                    builder.host().trim_start_matches('[').trim_end_matches(']'),
+                    ssl_roots(),
+                ),
+            }
+            .map_err(|e| SparkError::connect_msg(format!("Failed to configure TLS: {}", e)))?;
             let origin = format!("https://{endpoint}")
                 .parse()
                 .map_err(|e| SparkError::connect_msg(format!("Invalid endpoint: {}", e)))?;
@@ -1841,9 +1875,7 @@ impl SparkConnectClient {
             // Far past gRPC's limits of the metadata of a response, which the channel checks.
             .http2_max_header_list_size(crate::metadata::MAX_HEADER_LIST_SIZE);
         // Through the proxy of the environment, as grpcio's channel of PySpark is.
-        let proxy = ProxyEnv::from_process()
-            .proxy_for(builder.host())
-            .map_err(SparkError::connect_msg)?;
+        let proxy = proxy_of(builder).map_err(SparkError::connect_msg)?;
         let origin = format!(
             "{}://{endpoint}",
             if tls.is_some() { "https" } else { "http" }
@@ -1857,7 +1889,7 @@ impl SparkConnectClient {
                 .of_local_credentials(
                     builder.credentials() == Some(crate::channel::Credentials::Local),
                 )
-                .of_channel_target(builder.target().cloned()),
+                .of_channel_target(builder.target().cloned(), builder.target_names().cloned()),
         });
         let transport = std::sync::Arc::new(Transport::new(std::sync::Arc::clone(&factory)));
 
@@ -5078,11 +5110,13 @@ impl SparkConnectClient {
         req: &mut Request<T>,
         source: std::sync::Arc<dyn crate::channel::MetadataSource>,
     ) {
-        for (key, value) in &self.call_credentials {
-            req.metadata_mut().insert(key.clone(), value.clone());
-        }
+        // After the metadata of the source, as grpcio's call credentials (see
+        // `crate::metadata::append_metadata`).
         req.extensions_mut()
-            .insert(crate::metadata::PendingMetadata(source));
+            .insert(crate::metadata::PendingMetadata {
+                source,
+                after: self.call_credentials.clone(),
+            });
     }
 
     /// Attach the metadata of the builder, and the token, to a request.
@@ -5095,8 +5129,10 @@ impl SparkConnectClient {
         // associate work with the wrong session. So we do not attach it here.
         // No user_id header: as PySpark's `ChannelBuilder.metadata()`, which leaves the user ID
         // to the user context of the requests.
+        // Of every value of a key, in their order, the token's `authorization` last, as grpcio
+        // sends the metadata of a call and then its call credentials.
         for (key, value) in &self.headers {
-            metadata.insert(key.clone(), value.clone());
+            metadata.append(key.clone(), value.clone());
         }
     }
 }
@@ -5298,8 +5334,9 @@ impl SparkConnectClient {
         };
         let pairs = source.metadata().await?;
         Ok(crate::metadata::call_metadata(&pairs).map(|mut metadata| {
+            // After the metadata of the source, as grpcio's call credentials.
             for (key, value) in &self.call_credentials {
-                metadata.insert(key.clone(), value.clone());
+                metadata.append(key.clone(), value.clone());
             }
             metadata
         }))
@@ -5309,7 +5346,7 @@ impl SparkConnectClient {
     fn execution_metadata(&self) -> MetadataMap {
         let mut metadata = MetadataMap::new();
         for (key, value) in &self.headers {
-            metadata.insert(key.clone(), value.clone());
+            metadata.append(key.clone(), value.clone());
         }
         metadata
     }
@@ -9842,11 +9879,19 @@ mod metadata_validation_tests {
     }
 
     #[test]
-    fn token_parameter_wins_over_an_authorization_parameter() {
+    fn the_token_follows_an_authorization_parameter() {
+        // As grpcio sends the metadata of a call, of PySpark's `ChannelBuilder.metadata()`, and
+        // then that of its call credentials, the token's: a server that reads the last value of a
+        // key, as grpc-java's `Metadata.get`, takes the token.
         let client = connect("sc://localhost/;authorization=Basic%20abc;token=tok").unwrap();
-        let metadata = client.execution_metadata();
-        let all: Vec<_> = metadata.get_all("authorization").iter().collect();
-        assert_eq!(all, ["Bearer tok"]);
+        for metadata in [client.execution_metadata(), {
+            let mut request = Request::new(());
+            client._attach_metadata(&mut request);
+            request.metadata().clone()
+        }] {
+            let all: Vec<_> = metadata.get_all("authorization").iter().collect();
+            assert_eq!(all, ["Basic abc", "Bearer tok"]);
+        }
     }
 
     #[test]

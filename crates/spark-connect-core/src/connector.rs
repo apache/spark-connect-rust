@@ -68,7 +68,7 @@ use tokio::net::TcpStream;
 use tokio::time::Instant;
 use tokio_rustls::rustls;
 
-use crate::channel::ChannelTarget;
+use crate::channel::{ChannelTarget, TargetNames};
 use crate::proxy::HttpProxy;
 
 /// Whether the transport speaks as grpcio, where a Rust client would not: the texts of the
@@ -159,6 +159,13 @@ pub(crate) struct Tls {
         Arc<rustls::client::WebPkiServerVerifier>,
     )>,
     server_name: rustls::pki_types::ServerName<'static>,
+    /// The name that the certificates are checked against, as given, by which the connections of
+    /// the process are told apart (see [`Target::key`]).
+    name: String,
+    /// Whether rustls can check the certificates against the name: of a name that is neither an
+    /// IP address nor a name of DNS, which no certificate matches, each session's certificate
+    /// fails its check of the name once its chain is verified (see [`Tls::of_target_name`]).
+    verifiable: bool,
 }
 
 impl Tls {
@@ -168,7 +175,44 @@ impl Tls {
     /// parsed are skipped; of none to trust, the TLS is made all the same, and each attempt
     /// fails. The error is the message of what cannot be configured.
     pub(crate) fn new(domain: &str, roots: Roots<'_>) -> Result<Self, String> {
-        use rustls::pki_types::{pem::PemObject, CertificateDer, ServerName};
+        use rustls::pki_types::ServerName;
+        let (store, provider) = Self::store_of(roots);
+        let server_name = ServerName::try_from(domain.to_string())
+            .map_err(|error| format!("invalid server name {domain:?}: {error}"))?;
+        Self::of_store(store, provider, server_name, domain, true)
+    }
+
+    /// The TLS of a channel to a target of gRPC, of the name `name` that gRPC's TLS verifies of its
+    /// authority (see `crate::channel::TargetNames::tls_name`), whose sessions trust `roots`. As
+    /// gRPC's check of the peer, an IP address is checked against the addresses of the
+    /// certificate and a name of DNS against its names; of a name that is neither, as of a `*` or
+    /// of a list of addresses, or of none, the TLS is made all the same, of no SNI, and each
+    /// session's certificate fails its check of the name once its chain is verified, as gRPC's
+    /// fails (`Hostname Verification Check failed`), so that nothing is sent to its server.
+    pub(crate) fn of_target_name(name: Option<&str>, roots: Roots<'_>) -> Result<Self, String> {
+        use rustls::pki_types::ServerName;
+        let unbracketed = name.map(|name| name.trim_start_matches('[').trim_end_matches(']'));
+        let server_name = unbracketed.and_then(|name| match name.parse::<std::net::IpAddr>() {
+            Ok(ip) => Some(ServerName::IpAddress(ip.into())),
+            Err(_) => ServerName::try_from(name.to_string()).ok(),
+        });
+        let verifiable = server_name.is_some();
+        let server_name = server_name.unwrap_or(ServerName::IpAddress(
+            std::net::IpAddr::from(std::net::Ipv4Addr::UNSPECIFIED).into(),
+        ));
+        let (store, provider) = Self::store_of(roots);
+        Self::of_store(
+            store,
+            provider,
+            server_name,
+            name.unwrap_or_default(),
+            verifiable,
+        )
+    }
+
+    /// The roots of `roots`, and the crypto provider (see [`Tls::new`]).
+    fn store_of(roots: Roots<'_>) -> (rustls::RootCertStore, Arc<rustls::crypto::CryptoProvider>) {
+        use rustls::pki_types::{pem::PemObject, CertificateDer};
         let provider = rustls::crypto::CryptoProvider::get_default()
             .cloned()
             .unwrap_or_else(|| Arc::new(rustls::crypto::ring::default_provider()));
@@ -196,12 +240,25 @@ impl Tls {
                 }
             }
         }
-        let server_name = ServerName::try_from(domain.to_string())
-            .map_err(|error| format!("invalid server name {domain:?}: {error}"))?;
+        (store, provider)
+    }
+
+    /// The TLS of the roots `store` of `provider`, to the server of `server_name`, which is the
+    /// name `name` if `verifiable`.
+    fn of_store(
+        store: rustls::RootCertStore,
+        provider: Arc<rustls::crypto::CryptoProvider>,
+        server_name: rustls::pki_types::ServerName<'static>,
+        name: &str,
+        verifiable: bool,
+    ) -> Result<Self, String> {
+        let name = name.to_string();
         if store.is_empty() {
             return Ok(Self {
                 trust: None,
                 server_name,
+                name,
+                verifiable,
             });
         }
         let webpki = rustls::client::WebPkiServerVerifier::builder_with_provider(
@@ -223,6 +280,8 @@ impl Tls {
         Ok(Self {
             trust: Some((Arc::new(config), webpki)),
             server_name,
+            name,
+            verifiable,
         })
     }
 
@@ -233,6 +292,7 @@ impl Tls {
         let verifier = Arc::new(Verifier {
             inner: webpki.clone(),
             self_signed: Default::default(),
+            verifiable: self.verifiable,
         });
         let mut config = (**config).clone();
         config
@@ -249,6 +309,9 @@ struct Verifier {
     inner: Arc<rustls::client::WebPkiServerVerifier>,
     /// How the last chain that the verifier did not trust is self-signed, if it is.
     self_signed: Mutex<Option<SelfSigned>>,
+    /// Whether the name of the server can be checked (see [`Tls::of_target_name`]): else a
+    /// certificate of a chain that is verified is not of the name.
+    verifiable: bool,
 }
 
 /// How a chain of certificates that is not trusted is self-signed, which BoringSSL's error tells.
@@ -288,7 +351,21 @@ impl rustls::client::danger::ServerCertVerifier for Verifier {
             };
             *self.self_signed.lock().unwrap_or_else(|e| e.into_inner()) = self_signed;
         }
-        verified
+        if self.verifiable {
+            return verified;
+        }
+        // Of a name that no certificate matches: the chain first, as BoringSSL verifies it in the
+        // handshake, then the name, as gRPC checks it once the handshake is done.
+        match verified {
+            Ok(_)
+            | Err(rustls::Error::InvalidCertificate(
+                rustls::CertificateError::NotValidForName
+                | rustls::CertificateError::NotValidForNameContext { .. },
+            )) => Err(rustls::Error::InvalidCertificate(
+                rustls::CertificateError::NotValidForName,
+            )),
+            Err(error) => Err(error),
+        }
     }
 
     fn verify_tls12_signature(
@@ -375,6 +452,8 @@ pub(crate) struct Target {
     /// The target of gRPC that the channel connects to in place of its host and its port (see
     /// [`Target::of_channel_target`]), if any.
     form: Option<ChannelTarget>,
+    /// gRPC's names of the target of gRPC, if any, of which the tunnel of a proxy names the server.
+    names: Option<TargetNames>,
     /// The addresses of the host, resolved by the tests rather than by the system's resolver.
     #[cfg(test)]
     addresses: Option<Vec<SocketAddr>>,
@@ -419,6 +498,7 @@ impl Target {
             local: false,
             grpcio: grpcio_dialect(),
             form: None,
+            names: None,
             #[cfg(test)]
             addresses: None,
             #[cfg(test)]
@@ -436,13 +516,18 @@ impl Target {
         self
     }
 
-    /// This target, of the target of gRPC `form`, if any (see [`ChannelTarget`]): the
-    /// connections are made to the host and the port of a name, to the addresses or to the Unix
-    /// sockets of the target in turn, or the calls of a target that gRPC refuses fail of its
-    /// status (see [`refused_connection`]). The tunnel of a proxy names the name of the target, or
-    /// its addresses, as the path of the target that gRPC's `CONNECT` names; a Unix socket and a
-    /// target that gRPC refuses have none.
-    pub(crate) fn of_channel_target(mut self, form: Option<ChannelTarget>) -> Self {
+    /// This target, of the target of gRPC `form`, if any (see [`ChannelTarget`]), of gRPC's names
+    /// `names` of it: the connections are made to the host and the port of a name, to the
+    /// addresses or to the Unix sockets of the target in turn, or the calls of a target that gRPC
+    /// refuses fail of its status (see [`refused_connection`]). The tunnel of a proxy names the
+    /// server of gRPC's proxy mapper (`[127.0.0.1:1,127.0.0.1:2]:443`), or without names, the name
+    /// or the addresses of the target; a socket of `unix:`, which gRPC does not proxy, and a target
+    /// that gRPC refuses have none, and an abstract one is proxied as gRPC proxies it.
+    pub(crate) fn of_channel_target(
+        mut self,
+        form: Option<ChannelTarget>,
+        names: Option<TargetNames>,
+    ) -> Self {
         match &form {
             Some(ChannelTarget::Name { host, port, name }) => match &mut self.tunnel {
                 Some(tunnel) => tunnel.authority = name.clone(),
@@ -461,12 +546,27 @@ impl Target {
                     tunnel.authority = authority.clone();
                 }
             }
-            Some(ChannelTarget::Unix { .. }) | Some(ChannelTarget::Refused { .. }) => {
+            Some(ChannelTarget::Unix {
+                abstract_names: false,
+                ..
+            })
+            | Some(ChannelTarget::Refused { .. }) => {
                 self.tunnel = None;
             }
-            None => {}
+            Some(ChannelTarget::Unix { .. }) | None => {}
+        }
+        if let (
+            Some(tunnel),
+            Some(TargetNames {
+                proxied: Some((_, server)),
+                ..
+            }),
+        ) = (&mut self.tunnel, &names)
+        {
+            tunnel.authority = server.clone();
         }
         self.form = form;
+        self.names = names;
         self
     }
 
@@ -482,10 +582,7 @@ impl Target {
                 .tunnel
                 .as_ref()
                 .map(|tunnel| (tunnel.authority.clone(), tunnel.authorization.clone())),
-            tls: self
-                .tls
-                .as_ref()
-                .map(|tls| tls.server_name.to_str().into_owned()),
+            tls: self.tls.as_ref().map(|tls| tls.name.clone()),
             local: self.local,
             grpcio: self.grpcio,
             form: self.form.clone(),
@@ -497,7 +594,7 @@ impl Target {
     pub(crate) fn renewed(&self, host: &str, port: u16, proxy: Option<HttpProxy>) -> Self {
         Self::new(host, port, proxy, self.tls.clone())
             .of_local_credentials(self.local)
-            .of_channel_target(self.form.clone())
+            .of_channel_target(self.form.clone(), self.names.clone())
     }
 
     /// The name that gRPC resolves for this target, `host:port`, as its errors give it: of a name
@@ -544,7 +641,7 @@ impl Target {
             Some(ChannelTarget::Unix {
                 paths,
                 abstract_names,
-            }) => {
+            }) if self.tunnel.is_none() => {
                 return Ok(paths
                     .iter()
                     .map(|path| Address::Unix {

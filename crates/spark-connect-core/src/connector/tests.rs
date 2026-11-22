@@ -122,6 +122,7 @@ fn target(addresses: Vec<SocketAddr>, grpcio: bool) -> Target {
         local: false,
         grpcio,
         form: None,
+        names: None,
         addresses: Some(addresses),
         resolves_never: false,
         lookups: Default::default(),
@@ -1247,11 +1248,12 @@ fn form_target(form: ChannelTarget, grpcio: bool) -> Target {
         local: false,
         grpcio,
         form: None,
+        names: None,
         addresses: None,
         resolves_never: false,
         lookups: Default::default(),
     }
-    .of_channel_target(Some(form))
+    .of_channel_target(Some(form), None)
 }
 
 /// The text of the failure of the attempts to `target`, in the dialect of grpcio.
@@ -1537,4 +1539,124 @@ async fn the_calls_of_a_target_that_grpc_refuses_fail_of_its_status() {
         assert_eq!(status.message(), message);
     }
     assert_eq!(grpc_message("a%b\u{e9}"), "a%25b%C3%A9");
+}
+
+/// The target of a TLS server at `address` of gRPC's TLS name `name` of a target, trusting the
+/// certificate `root`.
+fn tls_target_of_name(address: SocketAddr, name: Option<&str>, root: &[u8]) -> Target {
+    Target {
+        tls: Some(Tls::of_target_name(name, Roots::Only(pem(root).as_bytes())).unwrap()),
+        ..target(vec![address], true)
+    }
+}
+
+#[tokio::test]
+async fn the_tls_of_a_target_of_grpc_verifies_grpcs_name_of_it() {
+    // Of the probes of grpcio 1.85.1 (a certificate of `localhost` and `127.0.0.1`): the name of a
+    // target is the host of its authority up to a `%`, an IP address checked against the addresses
+    // of the certificate; a name that is neither an address nor a name of DNS (`x*y.localhost`, a
+    // list of addresses, none) fails the check of the name once the chain is verified, as gRPC's
+    // (`Hostname Verification Check failed`), and so does a name of another certificate.
+    let address = tls_server(&certs().localhost, true, true).await;
+    for name in ["localhost", "LOCALHOST", "127.0.0.1", "[127.0.0.1]"] {
+        let target = tls_target_of_name(address, Some(name), &certs().ca);
+        assert!(
+            attempt(&target, Duration::from_secs(5)).await.is_ok(),
+            "{name}"
+        );
+    }
+    let hostname = format!(
+        "failed to connect to all addresses; last error: UNKNOWN: ipv4:{address}: Custom \
+         verification check failed with error: UNAUTHENTICATED: Hostname Verification Check \
+         failed."
+    );
+    for name in [
+        Some("x*y.localhost"),
+        Some("a%2Fb.localhost"),
+        Some("127.0.0.1:1,127.0.0.1:2"),
+        Some("other.test"),
+        Some("::1"),
+        None,
+    ] {
+        let target = tls_target_of_name(address, name, &certs().ca);
+        assert_eq!(failure_of(&target).await, hostname, "{name:?}");
+    }
+    // The chain first: of a root that does not sign it, its error, whatever the name.
+    let target = tls_target_of_name(address, Some("x*y.localhost"), &certs().other.cert);
+    assert!(
+        failure_of(&target)
+            .await
+            .contains("CERTIFICATE_VERIFY_FAILED"),
+        "{}",
+        failure_of(&target).await
+    );
+}
+
+#[test]
+fn the_tunnel_of_a_target_of_grpc_names_the_server_of_grpcs_proxy_mapper() {
+    let proxy = || {
+        Some(crate::proxy::HttpProxy {
+            authority: "proxy.test:3128".to_string(),
+            host: "proxy.test".to_string(),
+            port: 3128,
+            authorization: None,
+        })
+    };
+    let names = |authority: &str, proxied: Option<(&str, &str)>| TargetNames {
+        authority: authority.to_string(),
+        proxied: proxied.map(|(host, server)| (host.to_string(), server.to_string())),
+    };
+    let tunnel_of = |form: ChannelTarget, names: Option<TargetNames>| {
+        Target::new("localhost", 443, proxy(), None)
+            .of_channel_target(Some(form), names)
+            .tunnel
+            .map(|tunnel| tunnel.authority)
+    };
+    let addresses = ChannelTarget::Addresses {
+        addresses: vec![
+            "127.0.0.1:1".parse().unwrap(),
+            "127.0.0.1:2".parse().unwrap(),
+        ],
+        authority: "127.0.0.1:1,127.0.0.1:2".to_string(),
+    };
+    assert_eq!(
+        tunnel_of(
+            addresses.clone(),
+            Some(names(
+                "127.0.0.1:1,127.0.0.1:2",
+                Some(("127.0.0.1:1,127.0.0.1:2", "[127.0.0.1:1,127.0.0.1:2]:443"))
+            ))
+        ),
+        Some("[127.0.0.1:1,127.0.0.1:2]:443".to_string())
+    );
+    assert_eq!(
+        tunnel_of(addresses, None),
+        Some("127.0.0.1:1,127.0.0.1:2".to_string())
+    );
+    // An abstract Unix socket is proxied as gRPC proxies it, through the proxy's name; one of a
+    // path is not.
+    let abstract_socket = ChannelTarget::Unix {
+        paths: vec![b"rv62220ab".to_vec()],
+        abstract_names: true,
+    };
+    let target = Target::new("localhost", 443, proxy(), None).of_channel_target(
+        Some(abstract_socket),
+        Some(names("rv62220ab", Some(("rv62220ab", "rv62220ab:443")))),
+    );
+    assert_eq!(
+        target
+            .tunnel
+            .as_ref()
+            .map(|tunnel| tunnel.authority.as_str()),
+        Some("rv62220ab:443")
+    );
+    assert_eq!(target.name(), "proxy.test:3128");
+    let path_socket = ChannelTarget::Unix {
+        paths: vec![b"/tmp/a.sock".to_vec()],
+        abstract_names: false,
+    };
+    assert_eq!(
+        tunnel_of(path_socket, Some(names("tmp%2Fa.sock", None))),
+        None
+    );
 }

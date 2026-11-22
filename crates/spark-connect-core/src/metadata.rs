@@ -412,9 +412,43 @@ fn refusal(status: Option<&str>, headers: &http::HeaderMap) -> Option<tonic::Sta
 }
 
 /// The mark of a request whose metadata `MetadataSource` gives as it is sent, which [`Checked`]
-/// reads then (see `SparkConnectClient::set_metadata_source`).
+/// reads then (see `SparkConnectClient::set_metadata_source`), and the metadata of the call
+/// credentials, the `authorization` of the token, which gRPC sends after the metadata of the call.
 #[derive(Clone)]
-pub(crate) struct PendingMetadata(pub(crate) std::sync::Arc<dyn crate::channel::MetadataSource>);
+pub(crate) struct PendingMetadata {
+    pub(crate) source: std::sync::Arc<dyn crate::channel::MetadataSource>,
+    pub(crate) after: Vec<(
+        tonic::metadata::AsciiMetadataKey,
+        tonic::metadata::AsciiMetadataValue,
+    )>,
+}
+
+/// Append `metadata`, the metadata of a call, of its order, to `headers`, and then `after`, as
+/// gRPC sends the metadata of a call and then that of its call credentials. A key of several values
+/// keeps them all, in their order.
+pub(crate) fn append_metadata(
+    headers: &mut http::HeaderMap,
+    metadata: tonic::metadata::MetadataMap,
+    after: &[(
+        tonic::metadata::AsciiMetadataKey,
+        tonic::metadata::AsciiMetadataValue,
+    )],
+) {
+    let mut metadata = metadata;
+    for (key, value) in after {
+        metadata.append(key.clone(), value.clone());
+    }
+    // The iterator names the first value of each key only, and the values after it of None.
+    let mut last = None;
+    for (name, value) in metadata.into_headers() {
+        if name.is_some() {
+            last = name;
+        }
+        if let Some(name) = &last {
+            headers.append(name.clone(), value);
+        }
+    }
+}
 
 /// The error of the source of the metadata of a call, as the source of the status that fails the
 /// call, which is then the error of the call as it is, of no retry (see [`metadata_failure`]).
@@ -459,7 +493,8 @@ impl Service<http::Request<tonic::body::Body>> for Checked {
 
     fn call(&mut self, mut request: http::Request<tonic::body::Body>) -> Self::Future {
         let closed = Arc::clone(&self.closed);
-        let Some(PendingMetadata(source)) = request.extensions_mut().remove::<PendingMetadata>()
+        let Some(PendingMetadata { source, after }) =
+            request.extensions_mut().remove::<PendingMetadata>()
         else {
             return Box::pin(checked_response(self.channel.call(request), closed));
         };
@@ -477,13 +512,7 @@ impl Service<http::Request<tonic::body::Body>> for Checked {
                 }
             };
             match call_metadata(&pairs) {
-                Ok(metadata) => {
-                    for (name, value) in metadata.into_headers() {
-                        if let Some(name) = name {
-                            request.headers_mut().append(name, value);
-                        }
-                    }
-                }
+                Ok(metadata) => append_metadata(request.headers_mut(), metadata, &after),
                 Err(status) => return Err(Box::new(status) as StdError),
             }
             checked_response(channel.call(request), closed).await
@@ -1088,6 +1117,41 @@ mod tests {
             assert_eq!(status.code(), tonic::Code::Internal);
             assert_eq!(status.message(), "Invalid metadata");
         }
+    }
+
+    #[test]
+    fn the_metadata_of_a_call_is_sent_of_its_order_and_the_token_last() {
+        // Of the review of SPARK-62220: grpcio sends every value of a key, in its order, and the
+        // `authorization` of its call credentials after the metadata of the call.
+        let pair = |key: &str, value: &str| (key.as_bytes().to_vec(), value.as_bytes().to_vec());
+        let metadata = call_metadata(&[
+            pair("x-seq", "2"),
+            pair("authorization", "Bearer FROM-METADATA"),
+            pair("x-dup", "1"),
+            pair("x-dup", "2"),
+        ])
+        .unwrap();
+        let token = (
+            tonic::metadata::AsciiMetadataKey::from_static("authorization"),
+            tonic::metadata::AsciiMetadataValue::from_static("Bearer TOKEN"),
+        );
+        let mut headers = http::HeaderMap::new();
+        headers.insert("te", http::HeaderValue::from_static("trailers"));
+        append_metadata(&mut headers, metadata, &[token]);
+        let values = |key: &str| -> Vec<&str> {
+            headers
+                .get_all(key)
+                .iter()
+                .map(|value| value.to_str().unwrap())
+                .collect()
+        };
+        assert_eq!(values("x-seq"), ["2"]);
+        assert_eq!(values("x-dup"), ["1", "2"]);
+        assert_eq!(
+            values("authorization"),
+            ["Bearer FROM-METADATA", "Bearer TOKEN"]
+        );
+        assert_eq!(values("te"), ["trailers"]);
     }
 
     #[test]

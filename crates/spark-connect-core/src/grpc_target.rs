@@ -39,10 +39,14 @@
 //!
 //! A target that is not valid fails each call of `UNKNOWN`, as grpcio's channel of it does
 //! (`Failed to create channel to '...':the target uri is not valid: ...`).
+//!
+//! Of each target, the channel takes gRPC's names of it besides what it connects to (see
+//! [`TargetNames`]): its default authority, of its calls and of the name that its TLS verifies,
+//! and the server of the tunnel of a proxy, as gRPC's proxy mapper takes it.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6};
 
-use crate::channel::ChannelTarget;
+use crate::channel::{ChannelTarget, TargetNames};
 
 /// The code of gRPC's `UNKNOWN`, of a target that is not valid.
 const UNKNOWN: i32 = 2;
@@ -63,16 +67,19 @@ const MAX_UNIX_PATH: usize = 107;
 /// The longest IPv6 address before its zone that gRPC takes (`GRPC_INET6_ADDRSTRLEN`).
 const MAX_IPV6_TEXT: usize = 46;
 
-/// What a channel connects to of a target of gRPC, and the host and the port that its connection
-/// string has in place of it, which name the server of its TLS, as gRPC's default authority of
-/// the target does, and the authority of its requests.
+/// What a channel connects to of a target of gRPC, gRPC's names of the target, and the host and
+/// the port that its connection string has in place of it, which stand for it only.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Parsed {
     /// What the channel connects to.
     pub target: ChannelTarget,
+    /// gRPC's names of the target: its default authority, of the calls and of the name that TLS
+    /// verifies, and the server of the tunnel of a proxy (see [`TargetNames`]).
+    pub names: TargetNames,
     /// The host of the connection string: of a name of DNS, its host, an IPv6 one in brackets,
-    /// of an address, the first one, else `localhost`, as gRPC's default authority of a Unix
-    /// socket. A host that a connection string cannot hold is `localhost`.
+    /// of an address, the first one, else `localhost`. A host that a connection string cannot
+    /// hold is `localhost`. It stands for the target in the URL of the connection only, and
+    /// decides nothing of its TLS, its proxy or its calls, which are of [`Parsed::names`].
     pub host: String,
     /// The port of the connection string.
     pub port: u16,
@@ -106,7 +113,55 @@ pub fn parse(target: &str) -> Parsed {
         "unix" => sockets(&uri, false),
         _ => sockets(&uri, true),
     };
-    parsed.unwrap_or_else(|| not_valid(&canonical))
+    match parsed {
+        Some(mut parsed) => {
+            if !matches!(parsed.target, ChannelTarget::Refused { .. }) {
+                parsed.names = names_of(&uri);
+            }
+            parsed
+        }
+        None => not_valid(&canonical),
+    }
+}
+
+/// gRPC's names of the target of `uri` (see [`TargetNames`]): its default authority, the path of
+/// no first `/`, percent-encoded as an authority (`ResolverFactory::GetDefaultAuthority`); and,
+/// but of `unix:`, which gRPC's proxy mapper does not proxy, the host of the path
+/// (`SplitHostPort`), of the exclusions of the proxy, and the `host:port` of it, of the port 443
+/// without one, as the server of the tunnel.
+fn names_of(uri: &Uri) -> TargetNames {
+    let path = uri.path.strip_prefix('/').unwrap_or(&uri.path);
+    let proxied = (uri.scheme != "unix").then(|| match split_host_port(path) {
+        Some((host, port)) => {
+            let port = port.filter(|port| !port.is_empty()).unwrap_or("443");
+            let tunnel = if host.contains(':') {
+                format!("[{host}]:{port}")
+            } else {
+                format!("{host}:{port}")
+            };
+            (host.to_string(), tunnel)
+        }
+        None => (path.to_string(), path.to_string()),
+    });
+    TargetNames {
+        authority: percent_encode_authority(path.as_bytes()),
+        proxied,
+    }
+}
+
+/// `bytes` percent-encoded as gRPC's `URI::PercentEncodeAuthority` encodes an authority: of its
+/// unreserved characters, its sub-delims, `:`, `[`, `]` and `@` as they are, and of any other
+/// byte as `%` and two upper-case hexadecimal digits.
+pub(crate) fn percent_encode_authority(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len());
+    for &b in bytes {
+        if b.is_ascii_alphanumeric() || b"-._~!$&'()*+,;=:[]@".contains(&b) {
+            out.push(char::from(b));
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
 }
 
 /// A target whose calls fail of `code` and `message`, of the host and port of no server.
@@ -118,6 +173,7 @@ fn refused(code: i32, message: String) -> Parsed {
 fn of_localhost(target: ChannelTarget) -> Parsed {
     Parsed {
         target,
+        names: TargetNames::default(),
         host: "localhost".to_string(),
         port: 443,
     }
@@ -164,6 +220,7 @@ fn dns(uri: &Uri) -> Option<Parsed> {
     Some(Parsed {
         host: url_host(host),
         port,
+        names: TargetNames::default(),
         target: ChannelTarget::Name {
             host: host.to_string(),
             port,
@@ -193,6 +250,7 @@ fn addresses(uri: &Uri, v6: bool) -> Option<Parsed> {
             addresses,
             authority: uri.path.strip_prefix('/').unwrap_or(&uri.path).to_string(),
         },
+        names: TargetNames::default(),
         host,
         port,
     })
@@ -968,6 +1026,107 @@ mod tests {
     }
 
     #[test]
+    fn the_names_of_a_target_are_grpcs() {
+        // Of the probes of grpcio 1.85.1: the `:authority` of each form, and the `CONNECT` of a
+        // proxy (`no_proxy` aside).
+        let proxied = |host: &str, server: &str| Some((host.to_string(), server.to_string()));
+        for (target, authority, proxy) in [
+            (
+                "localhost:15002",
+                "localhost:15002",
+                proxied("localhost", "localhost:15002"),
+            ),
+            (
+                "dns:///localhost",
+                "localhost",
+                proxied("localhost", "localhost:443"),
+            ),
+            (
+                "LOCALHOST:18611",
+                "LOCALHOST:18611",
+                proxied("LOCALHOST", "LOCALHOST:18611"),
+            ),
+            (
+                "localhost:+18611",
+                "localhost:+18611",
+                proxied("localhost", "localhost:+18611"),
+            ),
+            (
+                "loc%61lhost:18611",
+                "localhost:18611",
+                proxied("localhost", "localhost:18611"),
+            ),
+            (
+                "127.0.0.1:18611?x=1",
+                "127.0.0.1:18611",
+                proxied("127.0.0.1", "127.0.0.1:18611"),
+            ),
+            (
+                "[::1%25lo]:17843",
+                "[::1%25lo]:17843",
+                proxied("::1%lo", "[::1%lo]:17843"),
+            ),
+            (
+                "a/b.localhost:18620",
+                "a%2Fb.localhost:18620",
+                proxied("a/b.localhost", "a/b.localhost:18620"),
+            ),
+            (
+                "127.0.0.1%00:18620",
+                "127.0.0.1%00:18620",
+                proxied("127.0.0.1\0", "127.0.0.1\0:18620"),
+            ),
+            (
+                "ipv4:127.0.0.1:1,127.0.0.1:18611",
+                "127.0.0.1:1,127.0.0.1:18611",
+                proxied(
+                    "127.0.0.1:1,127.0.0.1:18611",
+                    "[127.0.0.1:1,127.0.0.1:18611]:443",
+                ),
+            ),
+            (
+                "unix:/tmp/rv62220/rec.sock",
+                "tmp%2Frv62220%2Frec.sock",
+                None,
+            ),
+            (
+                "unix-abstract:rv62220ab",
+                "rv62220ab",
+                proxied("rv62220ab", "rv62220ab:443"),
+            ),
+            (
+                "dns://127.0.0.1:53/localhost:15002",
+                "localhost:15002",
+                proxied("localhost", "localhost:15002"),
+            ),
+        ] {
+            let names = parse(target).names;
+            assert_eq!(names.authority, authority, "{target}");
+            assert_eq!(names.proxied, proxy, "{target}");
+        }
+        // The name that TLS verifies: the host of the authority, up to a `%`.
+        for (target, name) in [
+            ("localhost%00:18620", Some("localhost")),
+            ("127.0.0.1%00:18620", Some("127.0.0.1")),
+            ("[::1%25lo]:18621", Some("::1")),
+            ("x*y.localhost:18620", Some("x*y.localhost")),
+            ("a/b.localhost:18620", Some("a")),
+            ("unix:/tmp/rv62220/tls.sock", Some("tmp")),
+            (
+                "ipv4:127.0.0.1:18622,127.0.0.1:1",
+                Some("127.0.0.1:18622,127.0.0.1:1"),
+            ),
+            ("ipv4:127.0.0.1:18622", Some("127.0.0.1")),
+            ("ipv6:[::1]:18621", Some("::1")),
+            ("%25:1", None),
+        ] {
+            assert_eq!(parse(target).names.tls_name(), name, "{target}");
+        }
+        // A target that gRPC refuses has none.
+        assert_eq!(parse("a?").names, TargetNames::default());
+    }
+
+    #[test]
     fn the_numbers_are_read_as_grpc_reads_them() {
         assert_eq!(simple_atoi(" +17 "), Some(17));
         assert_eq!(simple_atoi("-0"), Some(0));
@@ -994,5 +1153,9 @@ mod tests {
         assert_eq!(ares_numeric_v4("127.1"), None);
         assert_eq!(ares_numeric_v4("256.0.0.1"), None);
         assert_eq!(percent_decode("%41%4%%zz%4h%3F"), "A%4%%zz%4h?");
+        assert_eq!(
+            percent_encode_authority(b"a/b %\x00\xff:[]@*,"),
+            "a%2Fb%20%25%00%FF:[]@*,"
+        );
     }
 }

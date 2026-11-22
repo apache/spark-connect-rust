@@ -82,6 +82,41 @@ pub enum ChannelTarget {
     Refused { code: i32, message: String },
 }
 
+/// gRPC's names of a target of gRPC (see [`ChannelTarget`]) that its channel takes besides what it
+/// connects to, as the Python binding reads them of the `endpoint` of a channel builder (see
+/// `grpc_target`), in place of the host and the port of its connection string, which stand for the
+/// target only. Not a stable API.
+#[doc(hidden)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub struct TargetNames {
+    /// gRPC's default authority of the target: its path of no first `/`, percent-encoded as an
+    /// authority (`localhost:15002`, `127.0.0.1:1,127.0.0.1:2`, `tmp%2Fa.sock`), the `:authority`
+    /// of its calls, of whose host TLS verifies the name (see [`TargetNames::tls_name`]).
+    pub authority: String,
+    /// Of a target that gRPC's proxy mapper proxies, any but one of `unix:`: the host of its path,
+    /// which the exclusions of the proxy are checked against, and the server of the `CONNECT` of
+    /// the tunnel, the `host:port` of the path, of the port 443 without one
+    /// (`[127.0.0.1:1,127.0.0.1:2]:443`).
+    pub proxied: Option<(String, String)>,
+}
+
+impl TargetNames {
+    /// The host of the authority, as gRPC's `SplitHostPort` gives it, an IPv6 address without its
+    /// brackets, or None of an authority that it does not split.
+    pub fn host(&self) -> Option<&str> {
+        crate::grpc_target::split_host_port(&self.authority).map(|(host, _)| host)
+    }
+
+    /// The name that TLS verifies of the target, as gRPC's `grpc_ssl_host_matches_name` takes it:
+    /// the host of the authority up to its first `%`, which would start the zone of an IPv6
+    /// address, or None of no host, which no certificate matches.
+    pub fn tls_name(&self) -> Option<&str> {
+        let host = self.host()?;
+        let name = &host[..host.find('%').unwrap_or(host.len())];
+        (!name.is_empty()).then_some(name)
+    }
+}
+
 /// The metadata of the calls of a client, which a binding reads for each call, as PySpark's client
 /// calls `self._builder.metadata()` for each attempt of a call, of a channel builder whose
 /// `metadata()` is its own (see `SparkConnectClient::set_metadata_source`). Not a stable API.
@@ -111,6 +146,8 @@ pub struct ChannelBuilder {
     credentials: Option<Credentials>,
     /// The [`ChannelTarget`] that the binding gave the builder, which no connection string sets.
     target: Option<ChannelTarget>,
+    /// gRPC's names of the target, which no connection string sets (see [`TargetNames`]).
+    names: Option<TargetNames>,
     /// The metadata of the requests that the binding gave the builder, in place of the parameters
     /// of the connection string that are not the channel's own (see
     /// [`ChannelBuilder::with_metadata`]).
@@ -151,6 +188,7 @@ impl std::fmt::Debug for ChannelBuilder {
             .field("port", &self.port)
             .field("credentials", &self.credentials)
             .field("target", &self.target)
+            .field("names", &self.names)
             .field(
                 "metadata",
                 &self.metadata.as_ref().map(|metadata| {
@@ -259,6 +297,7 @@ impl ChannelBuilder {
             port,
             credentials: None,
             target: None,
+            names: None,
             metadata: None,
         })
     }
@@ -352,6 +391,23 @@ impl ChannelBuilder {
         self
     }
 
+    /// gRPC's names of the target that the builder was given ([`ChannelBuilder::with_target_names`]),
+    /// if any. Not a stable API.
+    #[doc(hidden)]
+    pub fn target_names(&self) -> Option<&TargetNames> {
+        self.names.as_ref()
+    }
+
+    /// This builder, of gRPC's names `names` of its target (see [`TargetNames`]), which decide the
+    /// `:authority` of its calls, the name that its TLS verifies, its proxy and whether its host is
+    /// `localhost` in place of the host of its connection string, which stands for the target only,
+    /// as the Python binding gives them of the `endpoint` of a channel builder. Not a stable API.
+    #[doc(hidden)]
+    pub fn with_target_names(mut self, names: TargetNames) -> Self {
+        self.names = Some(names);
+        self
+    }
+
     /// This builder, of the metadata `metadata`, which the requests carry in place of the
     /// parameters that are not the channel's own (see [`ChannelBuilder::metadata`]), in its
     /// order, as the Python binding gives it of the `metadata()` of a channel builder, which
@@ -385,15 +441,26 @@ impl ChannelBuilder {
     /// Whether the host is `localhost`. The reference client compares `localhost` after
     /// `urllib` has lowercased the host (`core.py` `toChannel`), so the match is
     /// case-insensitive. The IP loopback literals are not `localhost`, so they use TLS with
-    /// a token.
+    /// a token. Of a target of gRPC ([`ChannelBuilder::with_target_names`]), the host is that of
+    /// its authority, and never the host of the connection string that stands for it.
     pub fn is_localhost(&self) -> bool {
-        self.host.eq_ignore_ascii_case("localhost")
+        match &self.names {
+            Some(names) => names
+                .host()
+                .is_some_and(|host| host.eq_ignore_ascii_case("localhost")),
+            None => self.host.eq_ignore_ascii_case("localhost"),
+        }
     }
 
     /// Whether the endpoint is a loopback address: `localhost` or the IPv4/IPv6 loopback
-    /// literals. Only `localhost` keeps a token in plaintext; see [`Self::secure`].
+    /// literals. Only `localhost` keeps a token in plaintext; see [`Self::secure`]. Of a target
+    /// of gRPC, of the host of its authority.
     pub fn is_loopback(&self) -> bool {
-        self.is_localhost() || matches!(self.host.as_str(), "127.0.0.1" | "[::1]")
+        let host = match &self.names {
+            Some(names) => names.host().unwrap_or_default(),
+            None => self.host.trim_start_matches('[').trim_end_matches(']'),
+        };
+        self.is_localhost() || matches!(host, "127.0.0.1" | "::1")
     }
 
     pub fn user_id(&self) -> Option<&str> {
@@ -1763,5 +1830,41 @@ mod tests {
                 rest(1)
             )
         );
+    }
+
+    #[test]
+    fn the_host_of_a_target_of_grpc_decides_its_tls_never_its_stand_in() {
+        // Of the review of SPARK-62220: the host of the connection string stands for the target
+        // only (`localhost` of a name that a URL cannot hold), so a token goes in cleartext to no
+        // host but `localhost`, of the authority of the target.
+        let of = |target: &str| {
+            let parsed = crate::grpc_target::parse(target);
+            ChannelBuilder::parse(&format!("sc://{}:{}/;token=t", parsed.host, parsed.port))
+                .unwrap()
+                .with_target(parsed.target)
+                .with_target_names(parsed.names)
+        };
+        for target in [
+            "[::1%25lo]:18613",
+            "x*y.localhost:18611",
+            "a/b.localhost:18611",
+            "localhost%00:18611",
+            "ipv4:127.0.0.1:1,127.0.0.1:2",
+            "unix:/tmp/a.sock",
+            "[fe80::1%25eth0]:15002",
+        ] {
+            let builder = of(target);
+            assert!(!builder.is_localhost(), "{target}");
+            assert!(builder.secure(), "{target}");
+        }
+        for target in ["localhost:18611", "LOCALHOST:18611", "dns:///localhost"] {
+            let builder = of(target);
+            assert!(builder.is_localhost(), "{target}");
+            assert!(!builder.secure(), "{target}");
+        }
+        // The stand-in of a name that a URL cannot hold, which decides nothing.
+        assert_eq!(of("x*y.localhost:18611").host(), "localhost");
+        assert!(of("ipv6:[::1]:1").is_loopback());
+        assert!(!of("[::1%25lo]:1").is_loopback());
     }
 }

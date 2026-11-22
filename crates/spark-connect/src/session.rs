@@ -2534,6 +2534,8 @@ pub struct SparkSessionBuilder {
     credentials: Option<spark_connect_core::channel::Credentials>,
     /// The target of gRPC of the channel (see [`SparkSessionBuilder::channel_target`]).
     target: Option<spark_connect_core::channel::ChannelTarget>,
+    /// gRPC's names of the target, if any (see [`SparkSessionBuilder::channel_target_names`]).
+    target_names: Option<spark_connect_core::channel::TargetNames>,
     /// The metadata of the requests (see [`SparkSessionBuilder::channel_metadata`]).
     metadata: Option<Vec<(String, String)>>,
 }
@@ -2546,6 +2548,7 @@ impl SparkSessionBuilder {
             configure: None,
             credentials: None,
             target: None,
+            target_names: None,
             metadata: None,
         }
     }
@@ -2569,6 +2572,15 @@ impl SparkSessionBuilder {
     #[doc(hidden)]
     pub fn channel_target(mut self, target: spark_connect_core::channel::ChannelTarget) -> Self {
         self.target = Some(target);
+        self
+    }
+
+    /// Take `names`, gRPC's names of the target of the channel, for the `:authority` of its calls,
+    /// the name that its TLS verifies and its proxy (see `ChannelBuilder::with_target_names`), as
+    /// the Python binding gives them of the `endpoint` of a channel builder. Not a stable API.
+    #[doc(hidden)]
+    pub fn channel_target_names(mut self, names: spark_connect_core::channel::TargetNames) -> Self {
+        self.target_names = Some(names);
         self
     }
 
@@ -2614,6 +2626,9 @@ impl SparkSessionBuilder {
         }
         if let Some(target) = self.target {
             builder = builder.with_target(target);
+        }
+        if let Some(names) = self.target_names {
+            builder = builder.with_target_names(names);
         }
         if let Some(metadata) = self.metadata {
             builder = builder.with_metadata(metadata);

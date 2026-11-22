@@ -645,6 +645,10 @@ impl PySparkSessionBuilder {
 pub(crate) struct OfChannelBuilder {
     credentials: Option<spark_connect_core::channel::Credentials>,
     target: Option<spark_connect_core::channel::ChannelTarget>,
+    /// gRPC's names of the target, of the `:authority` of the calls, the name that TLS verifies,
+    /// the proxy and whether its host is `localhost`, never of the host of the URL, which stands
+    /// for the target only.
+    target_names: Option<spark_connect_core::channel::TargetNames>,
     metadata: Option<Vec<(String, String)>>,
     user: Option<Py<PyAny>>,
     /// Of a builder of a `metadata()` of its own, the builder and the `metadata()` that the client
@@ -860,6 +864,7 @@ pub(crate) fn url_of_channel_builder(
         OfChannelBuilder {
             credentials,
             target: Some(parsed.target),
+            target_names: Some(parsed.names),
             metadata: Some(metadata),
             user: Some(user.unbind()),
             sources,
@@ -1227,6 +1232,9 @@ fn of_channel_builder(
 ) -> spark_connect::SparkSessionBuilder {
     if let Some(credentials) = of_builder.credentials {
         builder = builder.channel_credentials(credentials);
+    }
+    if let Some(names) = of_builder.target_names {
+        builder = builder.channel_target_names(names);
     }
     if let Some(target) = of_builder.target {
         builder = builder.channel_target(target);

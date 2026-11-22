@@ -4030,10 +4030,20 @@ fails of gRPC's `INTERNAL` (`Illegal status code from resolver; original status:
 Cannot parse authority: ...`). The addresses of `ipv4:` and `ipv6:`, separated by `,`, each an IP
 address of the family, of a zone of IPv6, and a port of 0 to 65535, are tried in turn as those of a
 host are, and the Unix sockets of `unix:` and `unix-abstract:`, of their paths or of their abstract
-names; of none, each call fails of `UNAVAILABLE` (`empty address list`). A Unix socket is not of
+names; of none, each call fails of `UNAVAILABLE` (`empty address list`). Of each target, the
+channel takes gRPC's names, and not the host of its connection string, which stands for the target
+only: gRPC's default authority of the target, its path of no first `/`, percent-encoded as an
+authority (`127.0.0.1:1,127.0.0.1:2`, `tmp%2Fa.sock`), is the `:authority` of the calls where HTTP
+can carry it, and of its host up to a `%` the name that TLS verifies (`::1` of `[::1%25lo]`, `tmp`
+of `tmp%2Fa.sock`): an IP address of the addresses of the certificate, a name of DNS of its names,
+and another name (`x*y.localhost`, a list of addresses) of none, which fails each attempt of gRPC's
+`Custom verification check failed with error: UNAUTHENTICATED: Hostname Verification Check
+failed.`; whether a token goes in plaintext is of the host of the authority (`localhost`) too. The
+proxy of the environment is chosen of the host of the path, of any target but one of `unix:`, which
+gRPC does not proxy, and its `CONNECT` names the `host:port` of the path, of the port 443 without
+one (`[127.0.0.1:1,127.0.0.1:2]:443`, `name:443` of `unix-abstract:name`). A Unix socket is not of
 gRPC's local credentials of TCP, so a channel of them fails each call to it of `Endpoint is neither
-UDS or TCP loopback address.`, and one of TLS takes `localhost` as the name of its server, as gRPC's
-default authority of a Unix socket is; a socket of no file fails of gRPC's text of it
+UDS or TCP loopback address.`; a socket of no file fails of gRPC's text of it
 (`FAILED_PRECONDITION: unix:/tmp/a.sock: connect failed: addr: unix:/tmp/a.sock error: No such file
 or directory`). A target that gRPC does not take fails each call of its `UNKNOWN` (`Failed to create
 channel to '127.0.0.1:15002?':the target uri is not valid: dns:///127.0.0.1:15002?`), which
