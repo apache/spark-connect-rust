@@ -2467,6 +2467,8 @@ pub struct SparkSessionBuilder {
     /// The configuration of the client of the session (see
     /// [`SparkSessionBuilder::configure_client`]).
     configure: Option<ClientConfiguration>,
+    /// The credentials of the channel (see [`SparkSessionBuilder::channel_credentials`]).
+    credentials: Option<spark_connect_core::channel::Credentials>,
 }
 
 impl SparkSessionBuilder {
@@ -2475,7 +2477,21 @@ impl SparkSessionBuilder {
         SparkSessionBuilder {
             remote_url: None,
             configure: None,
+            credentials: None,
         }
+    }
+
+    /// Give the channel of the session the credentials `credentials`, which decide its TLS and
+    /// its token in place of the rule of the parameters of the connection string, as the Python
+    /// binding gives them of a channel builder of PySpark's `toChannel` (see
+    /// `ChannelBuilder::with_credentials`). Not a stable API.
+    #[doc(hidden)]
+    pub fn channel_credentials(
+        mut self,
+        credentials: spark_connect_core::channel::Credentials,
+    ) -> Self {
+        self.credentials = Some(credentials);
+        self
     }
 
     /// Configure the client of the session once it is connected, before the session is built
@@ -2505,7 +2521,10 @@ impl SparkSessionBuilder {
             )
         })?;
 
-        let builder = ChannelBuilder::parse(&url)?;
+        let mut builder = ChannelBuilder::parse(&url)?;
+        if let Some(credentials) = self.credentials {
+            builder = builder.with_credentials(credentials);
+        }
         let mut client = block_on(SparkConnectClient::connect(&builder))?;
         if let Some(configure) = self.configure {
             configure(&mut client);

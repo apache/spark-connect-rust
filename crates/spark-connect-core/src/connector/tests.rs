@@ -119,6 +119,7 @@ fn target(addresses: Vec<SocketAddr>, grpcio: bool) -> Target {
         port: addresses[0].port(),
         tunnel: None,
         tls: None,
+        local: false,
         grpcio,
         addresses: Some(addresses),
         resolves_never: false,
@@ -299,6 +300,11 @@ fn the_failures_have_grpc_core_s_texts_in_grpcio_s_dialect_and_the_rust_client_s
             format!("{all} 127.0.0.1:15: the server did not answer in HTTP/2: its first frame is of type 80, not SETTINGS"),
         ),
         (
+            at(SocketAddr::from(([10, 92, 26, 67], 17839)), Failure::NotLoopback),
+            format!("{all} UNKNOWN: ipv4:10.92.26.67:17839: Endpoint is neither UDS or TCP loopback address."),
+            format!("{all} 10.92.26.67:17839: local credentials: the connection is not of the loopback"),
+        ),
+        (
             ChannelFailure::Resolve {
                 name: "nonexistent.test:15002".to_string(),
                 failure: ResolveFailure::NotFound("failed to lookup address information: Name or service not known".to_string()),
@@ -319,6 +325,78 @@ fn the_failures_have_grpc_core_s_texts_in_grpcio_s_dialect_and_the_rust_client_s
         assert_eq!(failure.text(true), grpcio);
         assert_eq!(failure.text(false), rust);
     }
+}
+
+#[test]
+fn a_connection_of_local_credentials_is_of_the_loopback_as_grpc_takes_it() {
+    // As gRPC's local credentials of TCP, which take a connection whose local address is
+    // `INADDR_LOOPBACK` or `::1`, also of IPv4 mapped to IPv6.
+    for (address, loopback) in [
+        ("127.0.0.1:1", true),
+        ("[::1]:1", true),
+        ("[::ffff:127.0.0.1]:1", true),
+        ("127.0.0.2:1", false),
+        ("10.92.26.67:1", false),
+        ("[::ffff:10.92.26.67]:1", false),
+        ("[2001:db8::1]:1", false),
+        ("0.0.0.0:1", false),
+        ("[::]:1", false),
+    ] {
+        assert_eq!(
+            is_of_the_loopback(address.parse().unwrap()),
+            loopback,
+            "{address}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_target_of_local_credentials_connects_of_the_loopback_only() {
+    // A connection whose local address is of the loopback is made as of no credentials, also of
+    // `0.0.0.0`, and one to another address of the host, of a listener of every address, fails of
+    // grpcio's text once it is connected, as gRPC's handshake of local credentials reads the
+    // local address of the connection, not the address that it is made to.
+    let local = |addresses| {
+        let mut target = target(addresses, true);
+        target.local = true;
+        target
+    };
+    let (server, _) = settings_server().await;
+    let ready = attempt(&local(vec![server]), Duration::from_secs(20)).await;
+    assert!(ready.is_ok(), "{:?}", ready.err());
+    let listener = TcpListener::bind("0.0.0.0:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    settings_server_on(listener);
+    if cfg!(target_os = "linux") {
+        let any = SocketAddr::from(([0, 0, 0, 0], port));
+        let ready = attempt(&local(vec![any]), Duration::from_secs(20)).await;
+        assert!(ready.is_ok(), "{:?}", ready.err());
+    }
+    // An address of the host that is not of the loopback, as its route to the outside has.
+    let outside = std::net::UdpSocket::bind("0.0.0.0:0")
+        .and_then(|socket| socket.connect("192.0.2.1:9").map(|()| socket))
+        .and_then(|socket| socket.local_addr())
+        .ok()
+        .map(|address| address.ip())
+        .filter(|ip| !ip.is_loopback() && !ip.is_unspecified());
+    let Some(outside) = outside else {
+        eprintln!("skipped: the host has no address outside the loopback");
+        return;
+    };
+    let address = SocketAddr::new(outside, port);
+    // Not of the TCP connection, which is made, but of its local address.
+    match attempt(&local(vec![address]), Duration::from_secs(20)).await {
+        Err(ChannelFailure::Addresses { failure, .. }) => {
+            assert!(matches!(failure, Failure::NotLoopback), "{failure:?}");
+        }
+        other => panic!("{:?}", other.map(|_| ())),
+    }
+    // Of no local credentials, the same address connects.
+    assert!(
+        attempt(&target(vec![address], true), Duration::from_secs(20))
+            .await
+            .is_ok()
+    );
 }
 
 #[cfg(target_os = "linux")]

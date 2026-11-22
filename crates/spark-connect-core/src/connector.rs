@@ -365,6 +365,9 @@ pub(crate) struct Target {
     /// credentials of the proxy.
     tunnel: Option<Tunnel>,
     tls: Option<Tls>,
+    /// Whether the connections are of gRPC's local credentials (see
+    /// [`crate::channel::Credentials::Local`]): of the loopback only.
+    local: bool,
     /// Whether the connections speak as grpcio (see [`set_grpcio_dialect`]), as the transport
     /// did when the channel was made.
     grpcio: bool,
@@ -409,6 +412,7 @@ impl Target {
             port,
             tunnel,
             tls,
+            local: false,
             grpcio: grpcio_dialect(),
             #[cfg(test)]
             addresses: None,
@@ -419,9 +423,18 @@ impl Target {
         }
     }
 
+    /// This target, of gRPC's local credentials when `local` (see
+    /// [`crate::channel::Credentials::Local`]): its connections are of the loopback only, as
+    /// gRPC's handshake of local credentials of TCP refuses another.
+    pub(crate) fn of_local_credentials(mut self, local: bool) -> Self {
+        self.local = local;
+        self
+    }
+
     /// What the connections of this target are made of, by which the channels of the process
     /// share them (see `crate::client`): the host and the port, the tunnel and its credentials,
-    /// the name of the server of the TLS, whose roots are those of the process, and the dialect.
+    /// the name of the server of the TLS, whose roots are those of the process, local
+    /// credentials, and the dialect.
     pub(crate) fn key(&self) -> TargetKey {
         TargetKey {
             host: self.host.clone(),
@@ -434,6 +447,7 @@ impl Target {
                 .tls
                 .as_ref()
                 .map(|tls| tls.server_name.to_str().into_owned()),
+            local: self.local,
             grpcio: self.grpcio,
         }
     }
@@ -441,7 +455,7 @@ impl Target {
     /// What a new channel of the same server and TLS as this target connects to, through `proxy`,
     /// in the dialect of the transport now.
     pub(crate) fn renewed(&self, host: &str, port: u16, proxy: Option<HttpProxy>) -> Self {
-        Self::new(host, port, proxy, self.tls.clone())
+        Self::new(host, port, proxy, self.tls.clone()).of_local_credentials(self.local)
     }
 
     /// The name that gRPC resolves for this target, `host:port`, as its errors give it.
@@ -495,6 +509,7 @@ pub(crate) struct TargetKey {
     port: u16,
     tunnel: Option<(String, Option<String>)>,
     tls: Option<String>,
+    local: bool,
     grpcio: bool,
 }
 
@@ -741,6 +756,9 @@ enum Failure {
     /// The TLS of the channel has no root to trust, as of a roots file without a certificate,
     /// with which grpcio fails to create the handshaker of each session.
     NoRoots,
+    /// The local address of a connection of gRPC's local credentials is not of the loopback,
+    /// which their handshake refuses.
+    NotLoopback,
 }
 
 impl Failure {
@@ -810,6 +828,10 @@ impl Failure {
                 "UNKNOWN",
                 "Failed to create security handshaker.".to_string(),
             ),
+            Self::NotLoopback => (
+                "UNKNOWN",
+                "Endpoint is neither UDS or TCP loopback address.".to_string(),
+            ),
         }
     }
 
@@ -838,6 +860,9 @@ impl Failure {
                  not SETTINGS"
             ),
             Self::NoRoots => "tls handshake: no root certificate to trust".to_string(),
+            Self::NotLoopback => {
+                "local credentials: the connection is not of the loopback".to_string()
+            }
         }
     }
 
@@ -1145,6 +1170,10 @@ async fn connect_address(
         Ok(Err(error)) => return Err(Failure::Connect(IoFailure::of(&error))),
         Err(_) => return Err(Failure::ConnectTimeout),
     };
+    // As the handshake of gRPC's local credentials of TCP, which reads the local address of the
+    // connection, that to the proxy of a tunnel too, and not the address it was made to, so that
+    // one to `0.0.0.0` is of the loopback.
+    let refused = target.local && !tcp.local_addr().is_ok_and(is_of_the_loopback);
     // As tonic's connector of an endpoint, of its defaults.
     let _ = tcp.set_nodelay(true);
     let mut tcp = Socket::new(tcp);
@@ -1154,6 +1183,9 @@ async fn connect_address(
         let tunnel = open_tunnel(&mut tcp, tunnel, target.grpcio, deadline).await;
         dropped.0 = false;
         replay = tunnel?;
+    }
+    if refused {
+        return Err(Failure::NotLoopback);
     }
     let mut io: Box<dyn Io> = match &target.tls {
         Some(tls) => Box::new(handshake(tls, tcp, deadline).await?),
@@ -1166,6 +1198,15 @@ async fn connect_address(
         io,
         replay: settings,
     })
+}
+
+/// Whether `address`, the local address of a connection, is of the loopback as gRPC's local
+/// credentials of TCP take it: `127.0.0.1` (`INADDR_LOOPBACK`), also mapped to IPv6, or `::1`.
+fn is_of_the_loopback(address: SocketAddr) -> bool {
+    match address.ip().to_canonical() {
+        std::net::IpAddr::V4(ip) => ip == std::net::Ipv4Addr::LOCALHOST,
+        std::net::IpAddr::V6(ip) => ip == std::net::Ipv6Addr::LOCALHOST,
+    }
 }
 
 /// Logs, in the dialect of grpcio, an attempt that is dropped while its tunnel opens, as when
