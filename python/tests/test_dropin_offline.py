@@ -4595,6 +4595,196 @@ def test_empty_dataframe_takes_a_schema_as_pysparks(mock_connect):
         assert not relation.HasField("data") and json.loads(relation.schema) == schema.jsonValue()
 
 
+def test_create_dataframe_of_a_struct_of_a_foreign_field_is_pysparks(mock_connect):
+    # As PySpark's createDataFrame of no rows, of any data that it takes the length of, which
+    # sends the json() of the schema object: of a struct whose fields hold an element that is not
+    # a StructField, also of a struct of it, an array or a map, as a change in place gives them, it
+    # writes the jsonValue of each element in its order, so it raises the AttributeError of an
+    # element of none, and sends the jsonValue of an element that has one, a raising one's error;
+    # of a pandas DataFrame of rows, the errors of PySpark's deduplication of the names; of an
+    # array of rows, the errors of the json(); and of rows of an element of what PySpark reads of
+    # it, the relation of the converted data, of the json().
+    import numpy as np
+    import pandas as pd
+    import pyarrow as pa
+    import pyspark.sql.connect.proto as pb2
+
+    spark, service = mock_connect
+
+    def foreign(*elements, wrap=lambda inner: inner):
+        inner = T.StructType([T.StructField("a", T.LongType())])
+        outer = wrap(inner)
+        inner.fields.extend(elements)
+        return outer
+
+    class Duck:
+        def jsonValue(self):
+            return {"name": "d", "type": "long", "nullable": True, "metadata": {}}
+
+    class Boom:
+        def jsonValue(self):
+            raise KeyError("boom")
+
+    sent = len(service.execute_requests), len(service.analyze_requests)
+    no_rows = [
+        [], (), pd.DataFrame({"a": []}), pa.table({"a": pa.array([], pa.int64())}),
+        np.array([]), np.empty((0, 1)),
+    ]
+    for data in no_rows:
+        with pytest.raises(AttributeError, match="^'str' object has no attribute 'jsonValue'$"):
+            spark.createDataFrame(data, foreign("x"))
+    wraps = [
+        lambda inner: T.StructType([T.StructField("s", inner)]),
+        lambda inner: T.StructType([T.StructField("s", T.ArrayType(inner))]),
+        lambda inner: T.StructType([T.StructField("s", T.MapType(T.StringType(), inner))]),
+        lambda inner: T.StructType([T.StructField("s", T.MapType(inner, T.StringType()))]),
+    ]
+    for wrap in wraps:
+        with pytest.raises(AttributeError, match="^'str' object has no attribute 'jsonValue'$"):
+            spark.createDataFrame([], foreign("x", wrap=wrap))
+    for element, name in [(None, "NoneType"), (5, "int")]:
+        with pytest.raises(AttributeError, match=f"^'{name}' object has no attribute 'jsonValue'$"):
+            spark.emptyDataFrame(foreign(element))
+    with pytest.raises(AttributeError, match="'str' object has no attribute 'jsonValue'"):
+        spark.createDataFrame([], foreign(Duck(), "x"))
+    with pytest.raises(KeyError, match="boom"):
+        spark.createDataFrame([], foreign(Boom()))
+    assert (len(service.execute_requests), len(service.analyze_requests)) == sent
+    # Of a pandas DataFrame of rows, as PySpark's conversion, which deduplicates the names of the
+    # fields first (`_deduplicate_field_names`): of the IndexError of an element past the cached
+    # names, of any number of columns, and of the AttributeError of one within names changed too.
+    for frame in (pd.DataFrame({"a": [1]}), pd.DataFrame({"a": [1], "b": [2]})):
+        with pytest.raises(IndexError, match="^list index out of range$"):
+            spark.createDataFrame(frame, foreign("x"))
+        renamed = foreign("x")
+        renamed.names.append("y")
+        with pytest.raises(AttributeError, match="^'str' object has no attribute 'dataType'$"):
+            spark.createDataFrame(frame, renamed)
+    for wrap in wraps:
+        with pytest.raises(IndexError, match="^list index out of range$"):
+            spark.createDataFrame(pd.DataFrame({"s": [None]}), foreign("x", wrap=wrap))
+    # Of an array of rows of the width of the fields, as PySpark, which converts it without its
+    # fields and then writes the json() of the schema: of the AttributeError of an element of no
+    # jsonValue, nested too, and of another width, AXIS_LENGTH_MISMATCH first.
+    from pyspark.errors import PySparkValueError
+
+    for element, name in [("x", "str"), (None, "NoneType")]:
+        with pytest.raises(AttributeError, match=f"^'{name}' object has no attribute 'jsonValue'$"):
+            spark.createDataFrame(np.array([[1, 2]]), foreign(element))
+    with pytest.raises(AttributeError, match="^'str' object has no attribute 'jsonValue'$"):
+        spark.createDataFrame(np.array([[None, 1]], dtype=object), foreign("x", wrap=lambda inner: (
+            T.StructType([T.StructField("s", inner), T.StructField("b", T.LongType())]))))
+    with pytest.raises(PySparkValueError) as error:
+        spark.createDataFrame(np.array([1, 2]), foreign("x"))
+    assert error.value.getCondition() == "AXIS_LENGTH_MISMATCH"
+
+    # An element of a jsonValue of its own is sent of it, nested too, as PySpark's json() of it.
+    def sent_schema(schema):
+        spark.createDataFrame([], schema).collect()
+        plan = pb2.ExecutePlanRequest.FromString(service.execute_requests[-1]).plan
+        return plan.root.local_relation.schema
+
+    long_a = {"name": "a", "type": "long", "nullable": True, "metadata": {}}
+    duck = Duck().jsonValue()
+    assert sent_schema(foreign(Duck())) == json.dumps(
+        {"type": "struct", "fields": [long_a, duck]}, separators=(",", ":"), sort_keys=True)
+    nested = foreign(Duck(), wrap=lambda inner: T.StructType(
+        [T.StructField("s", T.ArrayType(inner, False), False, {"k": "v"})]))
+    assert json.loads(sent_schema(nested)) == {"type": "struct", "fields": [{
+        "name": "s", "nullable": False, "metadata": {"k": "v"},
+        "type": {"type": "array", "containsNull": False,
+                 "elementType": {"type": "struct", "fields": [long_a, duck]}}}]}
+    # A struct, or an array of one, that is itself an element of `fields` is written of its
+    # elements in turn, of the AttributeError of one of no jsonValue.
+    inner_duck = {"type": "struct", "fields": [long_a, duck]}
+    assert json.loads(sent_schema(foreign(foreign(Duck())))) == {
+        "type": "struct", "fields": [long_a, inner_duck]}
+    assert json.loads(sent_schema(foreign(foreign(Duck(), wrap=T.ArrayType)))) == {
+        "type": "struct",
+        "fields": [long_a, {"type": "array", "containsNull": True, "elementType": inner_duck}]}
+    with pytest.raises(AttributeError, match="^'str' object has no attribute 'jsonValue'$"):
+        spark.createDataFrame([], foreign(foreign("x")))
+    # A field of such a struct writes the collations of its arrays and maps into its metadata, and
+    # its type without them, as PySpark's StructField.jsonValue.
+    collated = foreign(Duck(), wrap=lambda inner: T.StructType(
+        [T.StructField("s", T.MapType(T.StringType("UNICODE"), inner))]))
+    assert json.loads(sent_schema(collated)) == {"type": "struct", "fields": [{
+        "name": "s", "nullable": True, "metadata": {"__COLLATIONS": {"s.key": "icu.UNICODE"}},
+        "type": {"type": "map", "keyType": "string", "valueContainsNull": True,
+                 "valueType": inner_duck}}]}
+    # Of fields of a Python subclass whose `dataType` property makes a new struct at each read:
+    # each struct that is read is written of its own elements, as PySpark's StructField.jsonValue
+    # reads it, whether the structs that the fields were made of hold an element that is not a
+    # StructField or not, in any order of the structs read, whose addresses the structs read after
+    # them may take once they are freed.
+    class MadeField(T.StructField):
+        @property
+        def dataType(self):
+            make = self.__dict__.get("make")
+            return make() if make is not None else self.__dict__["kept"]
+
+        @dataType.setter
+        def dataType(self, value):
+            self.__dict__["kept"] = value
+
+    def valid():
+        return T.StructType([T.StructField("v", T.LongType())])
+
+    kinds = [("valid", "foreign"), ("foreign", "valid"), ("valid", "foreign") * 2,
+             ("valid", "valid"), ("foreign", "foreign")]
+    for kept_foreign in (True, False):
+        for kind in kinds:
+            made = [valid() for _ in kind]
+            schema = T.StructType([MadeField(f"s{i}", m) for i, m in enumerate(made)])
+            for m in made if kept_foreign else []:
+                m.fields.append(Duck())
+            for field, k in zip(schema.fields, kind):
+                field.__dict__["make"] = valid if k == "valid" else lambda: foreign(Duck())
+            sent = json.loads(sent_schema(schema))
+            assert [f["type"]["fields"] for f in sent["fields"]] == [
+                [{"name": "v", "type": "long", "nullable": True, "metadata": {}}]
+                if k == "valid" else [long_a, duck] for k in kind], (kept_foreign, kind)
+
+    # Of rows, under an element of what PySpark reads of it (a field's attributes, and of an array
+    # of rows, whose conversion reads no field, a jsonValue), the relation of the data that
+    # PySpark's conversion converts, of PySpark's json() of the schema, of any kind of data, and
+    # of the names of the struct of a pandas DataFrame (toDF).
+    class Field(Duck):
+        name, dataType, nullable, metadata = "d", T.LongType(), True, {}
+
+        def needConversion(self):
+            return False
+
+        def toInternal(self, obj):
+            return obj
+
+        def fromInternal(self, obj):
+            return obj
+
+        def simpleString(self):
+            return "d:bigint"
+
+    def relation(data, schema):
+        spark.createDataFrame(data, schema).collect()
+        root = pb2.ExecutePlanRequest.FromString(service.execute_requests[-1]).plan.root
+        names = list(root.to_df.column_names) if root.HasField("to_df") else None
+        local = (root.to_df.input if names is not None else root).local_relation
+        table = pa.ipc.open_stream(local.data).read_all()
+        return json.loads(local.schema), table.column_names, table.to_pylist(), names
+
+    expected = {"type": "struct", "fields": [long_a, duck]}
+    named = foreign(Field())
+    named.names.append("d")
+    rows = [{"a": 1, "d": 2}]
+    assert relation([(1, 2)], named) == (expected, ["a", "d"], rows, None)
+    assert relation(pa.table({"a": [1], "d": [2]}), named) == (expected, ["a", "d"], rows, None)
+    assert relation(pd.DataFrame({"a": [1], "d": [2]}), named) == (
+        expected, ["a", "d"], rows, ["a", "d"])
+    for element in (Duck(), Field()):
+        assert relation(np.array([[1, 2]]), foreign(element)) == (
+            expected, ["_1", "_2"], [{"_1": 1, "_2": 2}], None)
+
+
 def test_session_constructor_and_its_flags_as_pyspark_connect():
     import threading
 

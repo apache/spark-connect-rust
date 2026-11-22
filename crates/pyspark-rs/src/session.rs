@@ -1950,36 +1950,69 @@ impl PySparkSession {
         }
     }
 
-    /// The error of PySpark's `createDataFrame` of `data` under the struct `schema` of a type that
-    /// does not lower now, whose lowering raised `error`: PySpark reads its settings and converts
-    /// the data to Arrow, of the errors of its converters, also those of the `sqlType()` and the
+    /// PySpark's `createDataFrame` of `data` under the struct `schema` of a type that does not
+    /// lower now, whose lowering raised `error`: PySpark reads its settings and converts the data
+    /// to Arrow, of the errors of its converters, also those of the `sqlType()` and the
     /// `serialize` of a `UserDefinedType`, before it writes the `json()` of the schema, which
     /// raises the error of the type. The data is converted by PySpark's conversion of local rows
     /// (`convert_local_rows`) or of a pandas DataFrame (`prepare_pandas_table`), whose errors are
-    /// PySpark's. Without PyArrow, which PySpark's conversion needs, the error is `error`.
-    fn unlowered_schema_error(
+    /// PySpark's. Without PyArrow, which PySpark's conversion needs, the error is `error`. Of a
+    /// struct whose fields hold an element that is not a `StructField`, the `json()` is PySpark's
+    /// (`types::foreign_schema_json`), so of the `AttributeError` of such an element of no
+    /// `jsonValue`, and of the JSON of one that has it, PySpark's relation of the converted data,
+    /// of that text, and of the names of the struct (`toDF`) of a pandas DataFrame.
+    fn create_of_unlowered_schema(
         &self,
         py: Python<'_>,
         data: &Bound<'_, PyAny>,
         schema: &Bound<'_, PyAny>,
         pandas: bool,
         error: PyErr,
-    ) -> PyErr {
-        match self.convert_of_unlowered_schema(py, data, schema, pandas) {
-            Ok(true) => schema.call_method0("json").err().unwrap_or(error),
-            Ok(false) => error,
-            Err(conversion_error) => conversion_error,
+    ) -> PyResult<PyDataFrame> {
+        let Some(converted) = self.convert_of_unlowered_schema(py, data, schema, pandas)? else {
+            return Err(error);
+        };
+        let Some(json) = crate::types::foreign_schema_json(schema)? else {
+            return Err(schema.call_method0("json").err().unwrap_or(error));
+        };
+        let Some((table, options)) = converted else {
+            return schema_text_dataframe(&self.session, json);
+        };
+        let batches = crate::pyarrow_import::table_batches(&table)?;
+        let unparsed = DataType::Unparsed {
+            data_type_string: json,
+        };
+        let df = interruptible(py, &self.session, || {
+            self.session
+                .create_dataframe_from_arrow_with_options(batches, unparsed, &options)
+                .map_err(Box::new)
+        })?;
+        // As PySpark, which applies the names of the struct to the relation of a pandas DataFrame
+        // with `toDF`, of `str()` of a name that is not a str, when there are any.
+        let mut at_build = crate::plan_args::PlanArgs::new();
+        let mut names = Vec::new();
+        if pandas {
+            for name in schema.call_method0("fieldNames")?.try_iter()? {
+                names.push(label_name(&name?, &mut at_build)?);
+            }
         }
+        if names.is_empty() {
+            return Ok(PyDataFrame::new(df));
+        }
+        Ok(PyDataFrame::new(at_build.plan(df.to_df(
+            names.iter().map(String::as_str).collect::<Vec<_>>(),
+        ))))
     }
 
-    /// The conversion of `data` of [`Self::unlowered_schema_error`]: whether it ran, of no error.
-    fn convert_of_unlowered_schema(
+    /// The conversion of `data` of [`Self::create_of_unlowered_schema`], of no error: none when it
+    /// did not run, else its table (none of data of no rows).
+    fn convert_of_unlowered_schema<'py>(
         &self,
-        py: Python<'_>,
-        data: &Bound<'_, PyAny>,
-        schema: &Bound<'_, PyAny>,
+        py: Python<'py>,
+        data: &Bound<'py, PyAny>,
+        schema: &Bound<'py, PyAny>,
         pandas: bool,
-    ) -> PyResult<bool> {
+    ) -> PyResult<Option<Option<ConvertedTable<'py>>>> {
         let fields = schema.getattr(pyo3::intern!(py, "fields"))?.len()?;
         // As PySpark, which checks the dimensions of an array first, writes the `json()` of an
         // empty one, and then checks its number of columns against the fields.
@@ -1994,7 +2027,8 @@ impl PySparkSession {
                 ));
             }
             if data.len()? > 0 {
-                interruptible(py, &self.session, || self.session.arrow_input_options())?;
+                let options =
+                    interruptible(py, &self.session, || self.session.arrow_input_options())?;
                 let width: usize = if ndim == 1 {
                     1
                 } else {
@@ -2005,14 +2039,16 @@ impl PySparkSession {
                 } else {
                     (1..=width).map(|i| format!("_{i}")).collect()
                 };
-                py.import("pyspark.sql._arrow_input")?
+                let table = py
+                    .import("pyspark.sql._arrow_input")?
                     .getattr("ndarray_table")?
                     .call1((data, names))?;
                 if fields != width {
                     return Err(crate::infer::axis_length_mismatch(py, fields, width));
                 }
+                return Ok(Some(Some((table, options))));
             }
-            return Ok(true);
+            return Ok(Some(None));
         }
         let pandas_input = py.import("pyspark.sql._pandas_input")?;
         if !pandas_input
@@ -2020,32 +2056,38 @@ impl PySparkSession {
             .call0()?
             .is_truthy()?
         {
-            return Ok(false);
+            return Ok(None);
         }
         let options = interruptible(py, &self.session, || self.session.arrow_input_options())?;
         let large = options.use_large_var_types() == Some("true");
         if pandas {
-            // As the conversion of a frame of a struct (`create_from_pandas_arrow`), of a frame of
-            // the width of the struct.
+            // As PySpark's conversion of a frame of a struct, which first deduplicates the names
+            // of its fields (`_deduplicate_field_names`), of the `IndexError` of an element of
+            // `fields` past its cached `names`, as of one that is not a `StructField`, and then
+            // (`create_from_pandas_arrow`) takes a frame of the width of the struct.
+            py.import("pyspark.sql.pandas.types")?
+                .getattr("_deduplicate_field_names")?
+                .call1((schema,))?;
             let width = data.getattr("columns")?.len()?;
             if width != fields {
                 return Err(crate::infer::axis_length_mismatch(py, fields, width));
             }
-            pandas_input.getattr("prepare_pandas_table")?.call1((
+            let table = pandas_input.getattr("prepare_pandas_table")?.call1((
                 data,
                 schema,
                 options.timezone().unwrap_or("UTC"),
                 options.safecheck(),
                 large,
             ))?;
+            Ok(Some(Some((table, options))))
         } else {
             let arrow_input = py.import("pyspark.sql._arrow_input")?;
             let rows = arrow_input.getattr("local_rows")?.call1((data,))?;
-            arrow_input
+            let table = arrow_input
                 .getattr("convert_local_rows")?
                 .call1((rows, schema, large))?;
+            Ok(Some(Some((table, options))))
         }
-        Ok(true)
     }
 
     /// The error of PySpark's `createDataFrame` of the local rows `items` of no schema, or of the
@@ -3111,6 +3153,10 @@ fn pandas_column_names(
     }
 }
 
+/// The Arrow table that PySpark's conversion makes of data of rows, with the settings that the
+/// conversion read (see `PySparkSession::convert_of_unlowered_schema`).
+type ConvertedTable<'py> = (Bound<'py, PyAny>, spark_connect::ArrowInputOptions);
+
 /// The settings `options` of a relation of local data, of the `json()` of its schema object `json`,
 /// if any, which the relation sends as the text of its schema, as PySpark sends it (see
 /// `crate::types::schema_json_text`).
@@ -3401,6 +3447,20 @@ impl PySparkSession {
             }
         }
 
+        // Data of no rows, of any kind that PySpark takes the length of, under a struct whose
+        // fields hold an element that is not a `StructField`: as PySpark, which sends the
+        // `json()` of the schema object, of the `AttributeError` of such an element of no
+        // `jsonValue` (see `types::foreign_schema_json`), after it checks the dimensions of an
+        // array.
+        if let Some(schema) = schema.filter(|_| data.len().is_ok_and(|n| n == 0)) {
+            if !is_loaded_instance(py, data, "numpy", "ndarray")?
+                || matches!(data.getattr("ndim")?.extract::<i64>()?, 1 | 2)
+            {
+                if let Some(json) = crate::types::foreign_schema_json(schema)? {
+                    return schema_text_dataframe(&self.session, json);
+                }
+            }
+        }
         // A caller holding a Table, or a pandas DataFrame, has already imported its module.
         if is_loaded_instance(py, data, "pyarrow", "Table")? {
             return crate::pyarrow_import::create_dataframe(
@@ -3428,20 +3488,19 @@ impl PySparkSession {
         let spec = match schema_spec(py, &self.session, schema, pandas.then_some(&mut names)) {
             Ok(spec) => spec,
             // A struct of a type that does not lower now, such as one of a `UserDefinedType` whose
-            // `module()` or `sqlType()` is not implemented, which PySpark writes the `json()` of
-            // after it converts the data (`unlowered_schema_error`).
+            // `module()` or `sqlType()` is not implemented, or whose fields hold an element that is
+            // not a `StructField`, which PySpark writes the `json()` of after it converts the data
+            // (`create_of_unlowered_schema`).
             Err(error) => {
-                return Err(
-                    match schema.filter(|schema| {
-                        schema.is_instance_of::<crate::types::PyStructType>()
-                            && error.is_instance_of::<pyo3::exceptions::PyException>(py)
-                    }) {
-                        Some(schema) => {
-                            self.unlowered_schema_error(py, data, schema, pandas, error)
-                        }
-                        None => error,
-                    },
-                );
+                return match schema.filter(|schema| {
+                    schema.is_instance_of::<crate::types::PyStructType>()
+                        && error.is_instance_of::<pyo3::exceptions::PyException>(py)
+                }) {
+                    Some(schema) => {
+                        self.create_of_unlowered_schema(py, data, schema, pandas, error)
+                    }
+                    None => Err(error),
+                };
             }
         };
         if is_loaded_instance(py, data, "numpy", "ndarray")? {
