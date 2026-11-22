@@ -1112,10 +1112,11 @@ def callback_rpc_case():
         assert not stopping.is_alive()
         assert stopping_errors == []
         # A callback already in flight can finish normally or observe terminal session closure:
-        # NO_ACTIVE_SESSION, or the cancel of its stream by the close of the channel, as grpcio's
-        # `close` cancels the calls of the channel (`CANCELLED`, `Stream removed (Channel closed!)`).
+        # NO_ACTIVE_SESSION, or the cancel of its call by the close of the channel, as grpcio's
+        # `close` cancels the calls of the channel (`CANCELLED`, `Channel closed!` before the
+        # response of the call begins, `Stream removed (Channel closed!)` once it is read).
         assert all(
-            "NO_ACTIVE_SESSION" in str(error) or "Stream removed (Channel closed!)" in str(error)
+            "NO_ACTIVE_SESSION" in str(error) or "Channel closed!" in str(error)
             for error in callback_errors
         ), callback_errors
         assert service.execute_gate_timeouts == 0

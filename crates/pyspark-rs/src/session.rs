@@ -1437,7 +1437,7 @@ pub fn _close_sessions_at_exit(py: Python<'_>) {
     );
     py.detach(|| {
         for session in &sessions {
-            session.close();
+            session.close_at_once();
         }
     });
 }
@@ -4033,7 +4033,15 @@ impl PySparkSession {
                     py,
                     spark_connect::session::enter_stop_lock,
                 )?;
-                py.detach(|| self.session.close());
+                // As PySpark's `close`, whose wait for the releases of the executions a signal
+                // interrupts, leaving the session open.
+                if self.session.has_releases_to_wait_for() {
+                    crate::interrupt::abortable_without_session(py, || {
+                        self.session.close_after_releases()
+                    })?;
+                } else {
+                    py.detach(|| self.session.close_at_once());
+                }
                 unbuilt.map_or(Ok(()), Err)
             };
             crate::progress::forget_session(&self.session);
@@ -4294,10 +4302,18 @@ impl PySparkSession {
         })
     }
 
-    /// Close the session without releasing it on the server, for `client.close`.
+    /// Close the session without releasing it on the server, for `client.close`, once the
+    /// releases of its executions ended, as PySpark's `close` waits for them, at most 10 s: a
+    /// signal that ends the wait raises its exception and leaves the session open, as PySpark's.
     /// Do not join listener callbacks; the current event's listener snapshot may finish afterward.
-    fn _close(&self, py: Python<'_>) {
-        py.detach(|| self.session.close());
+    fn _close(&self, py: Python<'_>) -> PyResult<()> {
+        // Of no wait, and no poll of the signals, when no release is in flight, as of a session
+        // that the program dropped, which a finalizer may close.
+        if !self.session.has_releases_to_wait_for() {
+            py.detach(|| self.session.close_at_once());
+            return Ok(());
+        }
+        crate::interrupt::abortable_without_session(py, || self.session.close_after_releases())
     }
 
     /// Keep the session alive until the interpreter exits, for a client that no session object

@@ -353,7 +353,14 @@ threshold of the plan compression once its settings are read) and `SparkSession:
 serve the plans and the requests of the Python client, and `client::converting_failure` gives
 the failure that the calling thread converts, of grpcio's error and of the operation ID of its
 execution (a `client::Conversion`), during which a signal interrupts nothing, as during PySpark's
-`_handle_error`. The methods of a `RetriesListener` of what
+`_handle_error`, and `SparkConnectClient::inside_error_handling` (and
+`SparkSession::inside_error_handling`) whether the calling thread converts a failure of the client,
+during which the failure of another of its calls is not converted, as PySpark's
+`inside_error_handling` tells it: of a call that runs within a poll of the conversion, as of a
+handler of one of its records or of a `RetriesListener`, also through the blocking API, or on the
+thread of a call of the Python binding whose conversion runs, as of a signal handler, but not of
+another task of an async caller of the client, which the thread polls between two polls of the
+conversion. The methods of a `RetriesListener` of what
 PySpark's client logs of its retries (`retrying`, `retrying_at_once`, `given_up`,
 `server_retry_delay`) return the error of the record, which fails the call, and
 `RetriesListener::raised_in_handling` is given the error of a record that the client writes as it
@@ -836,13 +843,26 @@ sent them, and the RPCs of the artifacts of a closed client fail with that `Buil
 rather than `NO_ACTIVE_SESSION`, and so do the reattaches and the retries of a reattachable
 execution that runs as its session is stopped, as by another thread, and its release, which is
 logged (`ReleaseExecute failed with exception: Cannot invoke RPC on closed channel!.`), as
-PySpark's iterator sends them through the stub that it was made with. The stream of an execution
-of the client that is read after the close, as of an iterator left open across `stop()`, fails at
-its next read, as grpcio's `close` cancels the calls of the channel: of `CANCELLED` (`Stream
-removed (Channel closed!)`), and of no more of its responses, or of the `ValueError` of
-grpc_status of a failure that the server ended it with before, whose `google.rpc.Status` does not
-match the cancel, as PySpark's. A client that is marked closed (`set_closed(true)`,
-`SparkSession::mark_closed`), as a response of another server-side session and
+PySpark's iterator sends them through the stub that it was made with. As grpcio's `close` cancels
+the calls of the channel, a call of the client, or of its clones, that is in flight when it is
+closed, as by another thread, ends then, of `CANCELLED`: `Channel closed!` before its response
+begins, and `Stream removed (Channel closed!)` while its response is read, as of an execution whose
+next response the server has not sent. The stream of an execution of the client that is read after
+the close, as of an iterator left open across `stop()`, fails at its next read so too: of
+`CANCELLED` (`Stream removed (Channel closed!)`), and of no more of its responses, or of the
+`ValueError` of grpc_status of a failure that the server ended it with before, whose
+`google.rpc.Status` does not match the cancel, as PySpark's. `SparkSession::close` and `stop` (and
+so `client.close()` and `stop()` of the Python client) first wait for the releases in the background
+of the executions whose streams ended, at most 10 s, as PySpark's `close` waits for the release
+futures that its iterators left it, so that the close of the channel does not cancel them: a release
+that the server refuses, as of the session that `stop()` released, is logged once it is answered,
+and the releases of a stream that is still read are not waited for. A signal of the process that
+ends that wait, in the Python client, raises its exception and leaves the session open, as the
+`KeyboardInterrupt` of PySpark's wait leaves its `close`; the doc-hidden
+`SparkSession::close_at_once` closes at once, `close_after_releases` gives None when the wait was
+ended so, of `SparkConnectClient::wait_for_releases`, and `has_releases_to_wait_for` tells whether
+the wait has releases to wait for. A client that is marked closed
+(`set_closed(true)`, `SparkSession::mark_closed`), as a response of another server-side session and
 `INVALID_HANDLE.SESSION_CHANGED` mark it, keeps its channel open: it uploads artifacts, as PySpark's
 ArtifactManager does, reattaches an execution that it reads, as PySpark's iterator, and sends its
 RPCs again once it is open.
@@ -2503,8 +2523,10 @@ list, exist once a thread uses them, and are the set and the list that the reque
 carry, as they change or are set, as the tags of `SparkSession.addTag` and `getTags` are; another
 attribute that a thread sets is its own. As PySpark's, an execution gives a thread of no tags an
 empty set of them, as the `get_tags` of its request does, and a failed request leaves
-`inside_error_handling` False, as its `_handle_error` does. A thread of `inheritable_thread_target`
-shares the copies of the attributes of the thread that decorated its function, as PySpark's does.
+`inside_error_handling` False, as its `_handle_error` does, but one that fails while the client
+converts another failure on the thread, which leaves it as it is. A thread of
+`inheritable_thread_target` shares the copies of the attributes of the thread that decorated its
+function, as PySpark's does.
 The transport reads them, on the calling thread, of the client that it calls, when a call starts its
 requests and when a finalizer sends its request (the release of the relation of a checkpointed
 DataFrame or of the cached objects of a model), as PySpark reads them when it builds each request,
@@ -4001,10 +4023,15 @@ execution, as PySpark's `except KeyboardInterrupt`, but at a record of the conve
 of the execution (`GRPC Error received`, `Received ErrorInfo: ...`), which PySpark's `except
 Exception` writes, of no interrupt; the exception of a record that the client writes as it handles
 a failure, of the conversion of a failure or of the failed lookup of the plan compression, has the
-failure as its context, as PySpark's. A call of a closed client, as of a stopped session, writes
-the records that come before the request, and then raises NO_ACTIVE_SESSION, as PySpark's client,
-which reads its `_stub`, of that error, only to send. The level of the logger is read once per
-call, as the call starts: a record of a level that the logger does not write is not made, and
+failure as its context, as PySpark's. A call of the client that fails while the client converts
+another failure on the thread, as a call of a handler of such a record, raises its error as grpc
+gives it, grpcio's `RpcError` of the call, of no records, no request of the details of the error or
+of its stack-trace settings, and no `_operation_id`, as PySpark's `_handle_error` raises the error
+of a request as it is while it handles another (`inside_error_handling`); the failure of a call of
+the client of another session is converted. A call of a closed client, as of a stopped session,
+writes the records that come before the request, and then raises NO_ACTIVE_SESSION, as PySpark's
+client, which reads its `_stub`, of that error, only to send. The level of the logger is read once
+per call, as the call starts: a record of a level that the logger does not write is not made, and
 nothing is formatted for it, so a level that a progress handler enables during a call applies from
 the next call on, while one that it disables applies at once, as the logger's methods filter the
 records. With

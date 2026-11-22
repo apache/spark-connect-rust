@@ -2054,6 +2054,15 @@ impl SparkSession {
         self.client.running_operation_id()
     }
 
+    /// Whether the calling thread converts the failure of a call of the session now, during which
+    /// the failure of another call of the session is not converted (see
+    /// [`spark_connect_core::client::SparkConnectClient::inside_error_handling`]). Not a stable
+    /// API.
+    #[doc(hidden)]
+    pub fn inside_error_handling(&self) -> bool {
+        self.client.inside_error_handling()
+    }
+
     /// Add local files, or `file:` URIs, as artifacts of the session, mirroring
     /// `pyspark.sql.SparkSession.addArtifacts(*path)`: a `.jar` is added to the classpath and
     /// a `.class` to the classes (a Rust extension: PySpark does not upload class files); any
@@ -2344,6 +2353,18 @@ impl SparkSession {
                 None => return Err(interrupted()),
             }
         };
+        // As the `close` of PySpark's `stop()`, which waits for the releases of the executions
+        // of the client before it closes the channel (see `SparkSession::close`): a signal of the
+        // process that ends the wait leaves the session open, as the exception of the signal
+        // leaves PySpark's `close`.
+        if spark_connect_core::runtime::block_on_abortable(self.client.wait_for_releases())
+            .is_none()
+        {
+            return Err(SparkError::connect_msg(
+                "the wait for the releases of the executions of the session was interrupted; \
+                 the session is still open",
+            ));
+        }
         // Before the listener bus is cancelled: an add of a listener that the cancellation ends
         // finds the session stopped.
         self.stopped.store(true, Ordering::SeqCst);
@@ -2373,7 +2394,37 @@ impl SparkSession {
     /// closes its channel: it is stopped, and `stop()` does nothing more. Cancel local listener
     /// registration/dispatch before closing the client. Callbacks are not joined; the current
     /// event's listener snapshot may finish after close returns.
+    ///
+    /// As PySpark's `close`, it first waits for the releases in the background of the executions
+    /// whose results were read, at most 10 s (see
+    /// [`spark_connect_core::client::SparkConnectClient::wait_for_releases`]), which the close of
+    /// the channel would cancel.
     pub fn close(&self) {
+        let _ = spark_connect_core::runtime::block_on_abortable(self.client.wait_for_releases());
+        self.close_at_once();
+    }
+
+    /// As [`SparkSession::close`], of a wait for the releases that a signal of the process ends
+    /// in the Python client: the session is then left open, and None, as the exception of the
+    /// signal leaves PySpark's `close` before it closes the channel. Not a stable API.
+    #[doc(hidden)]
+    pub fn close_after_releases(&self) -> Option<()> {
+        spark_connect_core::runtime::block_on_abortable(self.client.wait_for_releases())?;
+        self.close_at_once();
+        Some(())
+    }
+
+    /// Whether the close of the session currently has releases of its executions to wait for (see
+    /// [`SparkSession::close`]). Not a stable API.
+    #[doc(hidden)]
+    pub fn has_releases_to_wait_for(&self) -> bool {
+        self.client.has_releases_to_wait_for()
+    }
+
+    /// As [`SparkSession::close`], at once, of no wait for the releases of its executions, which
+    /// the close of the channel cancels if they are in flight. Not a stable API.
+    #[doc(hidden)]
+    pub fn close_at_once(&self) {
         self.stopped.store(true, Ordering::SeqCst);
         self.streams().cancel_listener_bus();
         self.client.close();

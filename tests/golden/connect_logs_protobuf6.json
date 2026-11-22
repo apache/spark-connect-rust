@@ -14,6 +14,16 @@
    "Execute command for command sql_command { input { sql { query: \"select 1 as a\" } } }",
    "Execute command as iterator for command sql_command { input { sql { query: \"select 1 as a\" } } }"
   ],
+  "close_after_releases_in_flight": [
+   "Executing plan root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } }"
+  ],
+  "close_by_another_thread_before_the_first_response": [
+   "Executing plan root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } }"
+  ],
+  "close_by_another_thread_during_a_config_read": [],
+  "close_by_another_thread_during_a_read": [
+   "Executing plan root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } }"
+  ],
   "closed_client": [
    "Executing plan root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } }",
    "Executing plan root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } }",
@@ -50,6 +60,13 @@
   "explain_not_allowed": [
    "Explain (mode=FORMATTED) for plan root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } }",
    "Explain (mode=bogus) for plan root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } }"
+  ],
+  "failure_of_a_call_of_a_handler_of_a_conversion": [
+   "Executing plan root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } }",
+   "Executing plan root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } }"
+  ],
+  "failure_of_a_config_read_of_a_handler_of_a_conversion": [
+   "Executing plan root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } }"
   ],
   "handler_interrupts": [
    "Executing plan root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } }",
@@ -117,6 +134,7 @@
   "sql": [
    "Execute command for command sql_command { input { common { plan_id: <id> } sql { query: \"select 1 as a\" } } }"
   ],
+  "stop_after_releases_in_flight": [],
   "stopped_by_another_thread": [
    "Executing plan root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } }"
   ],
