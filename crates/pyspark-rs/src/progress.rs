@@ -72,27 +72,31 @@ pub(crate) fn session_progress(py: Python<'_>, session: &SparkSession) -> Arc<Se
 /// of the done call of an execution dropped before its end goes to `sys.unraisablehook`, as
 /// PySpark's generator reports it, and that of an execution that the exception of its done call
 /// replaced is the `__context__` of the one the done call raises, as PySpark's `__exit__` does.
+/// The exception that propagates while the execution is dropped is kept, as the finalization of
+/// PySpark's generator keeps it (see `crate::deliver::preserving_pending_exception`).
 fn install_unreturned_error_handler() {
     static INSTALL: std::sync::Once = std::sync::Once::new();
     INSTALL.call_once(|| {
         spark_connect::progress::set_unreturned_error_handler(|error| {
             use spark_connect::progress::UnreturnedError;
-            Python::attach(|py| match error {
-                UnreturnedError::DroppedDone(error) => {
-                    // The generator of toLocalIterator may be freed by now, so no reference to it
-                    // is left: its type is the object of the hook. Only that generator drops an
-                    // execution that calls the handlers unfinished; the other iterators do not
-                    // report progress.
-                    let error = crate::errors::spark_error_to_py_exception(error);
-                    match py.import("types").and_then(|t| t.getattr("GeneratorType")) {
-                        Ok(generator) => error.write_unraisable(py, Some(&generator)),
-                        Err(_) => error.write_unraisable(py, None),
+            Python::attach(|py| {
+                crate::deliver::preserving_pending_exception(py, |py| match error {
+                    UnreturnedError::DroppedDone(error) => {
+                        // The generator of toLocalIterator may be freed by now, so no reference to
+                        // it is left: its type is the object of the hook. Only that generator
+                        // drops an execution that calls the handlers unfinished; the other
+                        // iterators do not report progress.
+                        let error = crate::errors::spark_error_to_py_exception(error);
+                        match py.import("types").and_then(|t| t.getattr("GeneratorType")) {
+                            Ok(generator) => error.write_unraisable(py, Some(&generator)),
+                            Err(_) => error.write_unraisable(py, None),
+                        }
                     }
-                }
-                UnreturnedError::Replaced { error, done } => {
-                    let context = crate::errors::spark_error_to_py_exception(error);
-                    crate::errors::set_callback_context(py, done, context);
-                }
+                    UnreturnedError::Replaced { error, done } => {
+                        let context = crate::errors::spark_error_to_py_exception(error);
+                        crate::errors::set_callback_context(py, done, context);
+                    }
+                })
             })
         });
     });
@@ -175,7 +179,9 @@ impl SessionProgress {
 
     /// Call the handlers with `update`. The exception of a handler fails the execution that
     /// called it, and is raised in its caller, as PySpark's result loop raises it; that of the
-    /// done call too, as PySpark's `Progress.__exit__` raises it from the execution.
+    /// done call too, as PySpark's `Progress.__exit__` raises it from the execution. The done call
+    /// of an execution that is dropped while an exception propagates keeps that exception, as the
+    /// finalization of PySpark's generator does (see `crate::deliver::preserving_pending_exception`).
     fn notify(
         &self,
         update: &ProgressUpdate,
@@ -186,8 +192,12 @@ impl SessionProgress {
             return Ok(());
         }
         Python::attach(|py| {
-            self.notify_python(py, update, bar).map_err(|error| {
-                crate::errors::callback_error(interrupted_by_handler(py, session, update, error))
+            crate::deliver::preserving_pending_exception(py, |py| {
+                self.notify_python(py, update, bar).map_err(|error| {
+                    crate::errors::callback_error(interrupted_by_handler(
+                        py, session, update, error,
+                    ))
+                })
             })
         })
     }

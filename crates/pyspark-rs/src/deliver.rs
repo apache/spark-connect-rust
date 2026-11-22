@@ -54,12 +54,80 @@ pub(crate) fn on_python_thread() -> bool {
     !unsafe { pyo3::ffi::PyGILState_GetThisThreadState() }.is_null()
 }
 
-/// Run `job` with the GIL: at once on a thread of Python, else on the delivery thread, later.
+/// Run `job` with the GIL: at once on a thread of Python, of the exception that is set on the
+/// thread kept (see [`preserving_pending_exception`]), else on the delivery thread, later.
 pub(crate) fn run(job: impl FnOnce(Python<'_>) + Send + 'static) {
     if on_python_thread() {
-        Python::attach(job);
+        Python::attach(|py| preserving_pending_exception(py, job));
     } else {
         deliver(Box::new(job));
+    }
+}
+
+/// Run `f` with the GIL of `py`, with the exception that is set on the thread, if any, set aside
+/// before it and set again after it, as CPython keeps it around a finalizer (`slot_tp_finalize`
+/// around a `__del__`, and the finalization of a generator): Python code that a native drop or
+/// finalizer runs, or a call of the C API that clears or sets the indicator of the exception,
+/// neither fails of the exception nor consumes or replaces it. A drop runs while an exception
+/// propagates when CPython drops the values of a frame that it unwinds, which it does with the
+/// exception set, as of a temporary DataFrame that holds the last reference to a fitted model
+/// (`est.fit(df).transform(bad).columns`): of an exception that the drop consumed, CPython raises
+/// `SystemError: error return without exception set` in its place, or crashes. Of CPython's own
+/// fetch and restore, which take the exception as it is, where PyO3's `PyErr::take` would resume
+/// the panic of a `PanicException`. An exception that `f` leaves set, which nothing raises, is
+/// reported as an unraisable one, as CPython reports that of a `__del__`; the errors that `f`
+/// returns are its own.
+pub(crate) fn preserving_pending_exception<T>(
+    py: Python<'_>,
+    f: impl FnOnce(Python<'_>) -> T,
+) -> T {
+    let _pending = PendingException::take(py);
+    f(py)
+}
+
+/// The exception that was set on the thread when [`preserving_pending_exception`] began, if any,
+/// which is set again when this drops, also when its work unwinds of a panic: of the references of
+/// its type, its value and its traceback, which `PyErr_Fetch` gave, or null pointers.
+struct PendingException {
+    kind: *mut pyo3::ffi::PyObject,
+    value: *mut pyo3::ffi::PyObject,
+    traceback: *mut pyo3::ffi::PyObject,
+}
+
+impl PendingException {
+    /// Take the exception that is set on the thread of `_py`, which clears it.
+    fn take(_py: Python<'_>) -> Self {
+        let mut pending = PendingException {
+            kind: std::ptr::null_mut(),
+            value: std::ptr::null_mut(),
+            traceback: std::ptr::null_mut(),
+        };
+        // SAFETY: with the GIL (`_py`), the fetch moves the references of the exception that is
+        // set, if any, to the three pointers, and clears it.
+        unsafe {
+            pyo3::ffi::PyErr_Fetch(
+                &mut pending.kind,
+                &mut pending.value,
+                &mut pending.traceback,
+            )
+        };
+        pending
+    }
+}
+
+impl Drop for PendingException {
+    fn drop(&mut self) {
+        // SAFETY: with the GIL, which the work of `preserving_pending_exception` holds as it
+        // returns or unwinds: the report takes the exception that the work left set, if any, and
+        // the restore takes back the references that the fetch gave, once.
+        unsafe {
+            if !pyo3::ffi::PyErr_Occurred().is_null() {
+                pyo3::ffi::PyErr_WriteUnraisable(std::ptr::null_mut());
+            }
+            if !self.kind.is_null() {
+                pyo3::ffi::PyErr_Restore(self.kind, self.value, self.traceback);
+            }
+        }
     }
 }
 
@@ -135,7 +203,7 @@ fn on_main_thread(py: Python<'_>) -> bool {
 /// the delivery thread.
 pub(crate) fn run_apart(job: impl FnOnce(Python<'_>) + Send + 'static) {
     if on_python_thread() {
-        Python::attach(job);
+        Python::attach(|py| preserving_pending_exception(py, job));
         return;
     }
     if EXITING.load(Ordering::SeqCst) {
@@ -160,7 +228,7 @@ pub(crate) async fn call_apart<T: Send + 'static>(
     job: impl FnOnce(Python<'_>) -> T + Send + 'static,
 ) -> Option<T> {
     if on_python_thread() {
-        return Python::try_attach(job);
+        return Python::try_attach(|py| preserving_pending_exception(py, job));
     }
     call(|_| ()).await;
     let (sender, receiver) = tokio::sync::oneshot::channel();
@@ -176,7 +244,7 @@ pub(crate) async fn call<T: Send + 'static>(
     job: impl FnOnce(Python<'_>) -> T + Send + 'static,
 ) -> Option<T> {
     if on_python_thread() {
-        return Python::try_attach(job);
+        return Python::try_attach(|py| preserving_pending_exception(py, job));
     }
     let (sender, receiver) = tokio::sync::oneshot::channel();
     deliver(Box::new(move |py| {

@@ -32620,6 +32620,233 @@ def test_the_requests_of_finalizers_read_the_client_when_they_are_sent_as_pyspar
     spark.clearTags()
 
 
+def _relation_removals(service, count, wait):
+    # The removals of the relations of checkpoints that the server received, once `count` of them
+    # arrived or `wait` seconds passed: the request of a finalizer is sent in the background.
+    import pyspark.sql.connect.proto as pb2
+
+    deadline = time.time() + wait
+    while True:
+        found = [
+            request
+            for request in map(pb2.ExecutePlanRequest.FromString, service.execute_requests)
+            if request.plan.command.HasField("remove_cached_remote_relation_command")
+        ]
+        if len(found) >= count or time.time() > deadline:
+            return found
+        time.sleep(0.05)
+
+
+@pytest.mark.parametrize("reads", ["plain", "client", "call stack"])
+def test_a_finalizer_that_runs_while_an_exception_propagates_keeps_it_as_pyspark(
+    mock_connect, monkeypatch, reads
+):
+    # As PySpark's `CachedRemoteRelation.__del__`, which CPython runs with the exception that
+    # propagates set aside, and sets again after it: a checkpoint that a frame of no handler holds
+    # on its stack as an exception unwinds it, which CPython drops with the exception set, removes
+    # its relation, and the exception goes on. The reads of the request of the removal took it
+    # before, of the refresher of the client once it is used, or of the call stack of
+    # SPARK_CONNECT_DEBUG_CLIENT_CALL_STACK, and the caller got a `SystemError` ("error return
+    # without exception set") in its place. Of a handler in that frame, CPython crashed (see
+    # test_a_finalizer_that_runs_while_an_exception_propagates_does_not_crash).
+    import sys
+
+    spark, service = mock_connect
+    # ExecutePlanResponse.checkpoint_command_result=19 -> relation=1 -> relation_id=1.
+    service.execute_payload = message_field(19, message_field(1, message_field(1, "r1")))
+    if reads == "client":
+        spark.client  # noqa: B018 - its refresher of the context of the requests
+    elif reads == "call stack":
+        monkeypatch.setenv("SPARK_CONNECT_DEBUG_CLIENT_CALL_STACK", "1")
+    unraisable = []
+    monkeypatch.setattr(sys, "unraisablehook", unraisable.append)
+
+    def fails():
+        raise ValueError("propagates")
+
+    def unhandled():
+        # The checkpoint is on the stack of this frame, of no handler, when `fails()` raises.
+        return [spark.range(1).localCheckpoint(), fails()]
+
+    with pytest.raises(ValueError, match="propagates"):
+        unhandled()
+    (removal,) = _relation_removals(service, 1, 10)
+    assert removal.plan.command.remove_cached_remote_relation_command.relation.relation_id == "r1"
+    assert unraisable == []
+
+
+@pytest.mark.parametrize("reads", ["plain", "client"])
+def test_a_finalizer_that_runs_while_an_exception_propagates_in_a_call_keeps_it_as_pyspark(
+    mock_connect, reads
+):
+    # As test_a_finalizer_that_runs_while_an_exception_propagates_keeps_it_as_pyspark, of a
+    # finalizer that runs during a call of the thread, as in a progress handler of an execution:
+    # the thread has the context of the requests of the execution again once the request of the
+    # removal is built, read again of the client, and neither read takes the exception.
+    spark, service = mock_connect
+    # ExecutePlanResponse.checkpoint_command_result=19 -> relation=1 -> relation_id=1.
+    service.execute_payload = message_field(19, message_field(1, message_field(1, "r1")))
+    held = [spark.range(1).localCheckpoint()]
+    if reads == "client":
+        spark.client  # noqa: B018 - its refresher of the context of the requests
+    _progress_of_one_stage(service)
+    caught = []
+
+    def fails():
+        raise ValueError("propagates")
+
+    def unhandled():
+        # The checkpoint is on the stack of this frame, of no handler, when `fails()` raises.
+        return [held.pop(), fails()]
+
+    def handler(**kwargs):
+        if kwargs["done"] or caught:
+            return
+        try:
+            unhandled()
+        except ValueError as error:
+            caught.append(error)
+
+    spark.registerProgressHandler(handler)
+    try:
+        spark.range(1).collect()
+    finally:
+        spark.clearProgressHandlers()
+    assert [str(error) for error in caught] == ["propagates"]
+    assert len(_relation_removals(service, 1, 10)) == 1
+
+
+@pytest.mark.parametrize("reads", ["plain", "client", "call stack"])
+def test_a_finalizer_that_runs_while_an_exception_propagates_does_not_crash(mock_connect, reads):
+    # As test_a_finalizer_that_runs_while_an_exception_propagates_keeps_it_as_pyspark, of a handler
+    # in the frame that drops the checkpoint too, where CPython crashed once the exception was
+    # taken (`PyException_SetTraceback` of none, as it hands the exception to the handler): in a
+    # process of its own, whose crash fails this test only.
+    import subprocess
+    import sys
+    import textwrap
+
+    _, service = mock_connect
+    service.execute_payload = message_field(19, message_field(1, message_field(1, "r1")))
+    code = textwrap.dedent("""
+        import sys
+
+        from pyspark.sql import SparkSession
+
+        spark = SparkSession.builder.remote(sys.argv[1]).getOrCreate()
+        if sys.argv[2] == "client":
+            spark.client
+
+
+        def fails():
+            raise ValueError("propagates")
+
+
+        def unhandled():
+            return [spark.range(1).localCheckpoint(), fails()]
+
+
+        try:
+            [spark.range(1).localCheckpoint(), fails()]
+        except ValueError as error:
+            print("in the frame:", error)
+        try:
+            unhandled()
+        except ValueError as error:
+            print("in the caller:", error)
+    """)
+    env = dict(os.environ)
+    if reads == "call stack":
+        env["SPARK_CONNECT_DEBUG_CLIENT_CALL_STACK"] = "1"
+    result = subprocess.run(
+        [sys.executable, "-c", code, service.remote, reads],
+        capture_output=True, text=True, timeout=120, env=env,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr[-3000:]
+    assert result.stdout.splitlines() == ["in the frame: propagates", "in the caller: propagates"]
+
+
+@pytest.mark.parametrize("of", ["retry policy", "progress handler"])
+def test_an_execution_dropped_while_an_exception_propagates_keeps_it(mock_connect, monkeypatch, of):
+    # The responses of an execution of the client (`SparkConnectClient._execute_plan`), unfinished,
+    # that a frame of no handler holds on its stack as an exception unwinds it, which CPython drops
+    # with the exception set, release the execution, whose retries a retry policy of the client's
+    # own makes in Python as the release starts, and give the progress handlers their done call,
+    # as the finalization of PySpark's generator of an execution does: the exception goes on, which
+    # their Python took before (a `SystemError`, "error return without exception set", in its
+    # place), and the exception of the done call is reported as an unraisable one, as that
+    # finalization reports it.
+    import sys
+
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.sql.connect.client.retries import RetryPolicy
+
+    spark, service = mock_connect
+    client = spark.client
+    _two_row_range_results(service)
+    service.block_result_complete = True
+    unraisable = []
+    monkeypatch.setattr(sys, "unraisablehook", unraisable.append)
+    done = []
+
+    class OfItsOwn(RetryPolicy):
+        # A policy of its own, which PySpark's `Retrying` of each request asks.
+        def can_retry(self, exception):
+            return False
+
+    def handler(**kwargs):
+        if kwargs["done"]:
+            done.append(kwargs["operation_id"])
+            raise RuntimeError("of the done call")
+
+    if of == "retry policy":
+        client.set_retry_policies([OfItsOwn()])
+    else:
+        spark.registerProgressHandler(handler)
+    plan = spark.range(2)._plan.to_proto(client)
+
+    def started():
+        responses = client._execute_plan(plan, {}, True, "to_table")
+        next(responses)
+        return responses
+
+    def fails():
+        raise ValueError("propagates")
+
+    def unhandled():
+        # The responses are on the stack of this frame, of no handler, when `fails()` raises.
+        return [started(), fails()]
+
+    try:
+        with pytest.raises(ValueError, match="propagates"):
+            unhandled()
+    finally:
+        spark.clearProgressHandlers()
+        service.block_result_complete = False
+        service.release_response()
+
+    def released():
+        # The ReleaseExecute of the whole execution, which its drop sends, after that of the
+        # response that it read.
+        return [
+            request
+            for request in map(pb2.ReleaseExecuteRequest.FromString, service.release_execute_requests)
+            if request.HasField("release_all")
+        ]
+
+    deadline = time.time() + 10
+    while not released() and time.time() < deadline:
+        time.sleep(0.05)
+    assert len(released()) == 1
+    if of == "progress handler":
+        assert len(done) == 1
+        assert [(u.exc_type, str(u.exc_value)) for u in unraisable] == [
+            (RuntimeError, "of the done call")
+        ]
+    else:
+        assert unraisable == []
+
+
 @pytest.mark.parametrize("during", ["call", "finalizer"])
 @pytest.mark.parametrize("of", ["copy", "change"])
 def test_a_call_during_a_call_leaves_it_the_attributes_of_its_client_as_pyspark(
