@@ -2024,9 +2024,10 @@ class SparkConnectClient:
         # ``register_udf``: the name. A DDL ``return_type`` is parsed by the server, and the
         # function is pickled with the type, as PySpark's ``PythonUDF`` does. As PySpark's, the
         # name and ``deterministic`` are set in the fields of the command first, then the return
-        # type is parsed and converted, then ``eval_type`` is set, and the function is pickled
-        # last, so each raises the error of its protobuf field or of its conversion in that
-        # order.
+        # type is parsed, and the function is pickled last, once the type is converted, which
+        # ``_registerPythonUdf`` does before it calls the pickling, so each raises the error of
+        # its protobuf field or of its conversion in that order: of a type of more levels than
+        # Python's recursion limit, the conversion's ``RecursionError``.
         import pyspark.sql.connect.proto as pb2
         from pyspark.serializers import CloudPickleSerializer
 
@@ -2046,12 +2047,11 @@ class SparkConnectClient:
             _check_data_type(return_type)
         udf = pb2.PythonUDF()
         udf.eval_type = eval_type
-        command = CloudPickleSerializer().dumps((function, output_type))
         self._session._registerPythonUdf(
             fun.function_name,
             output_type,
             udf.eval_type,
-            command,
+            lambda: CloudPickleSerializer().dumps((function, output_type)),
             f"{sys.version_info.major}.{sys.version_info.minor}",
             fun.deterministic,
         )

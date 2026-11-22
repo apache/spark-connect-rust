@@ -1550,7 +1550,26 @@ fn cast_column(column: &Column, data_type: &Bound<'_, PyAny>, try_: bool) -> PyR
                 // `simpleString()` (see `crate::types::lenient_type`).
                 Err(err) if err.is_instance_of::<pyo3::exceptions::PyException>(py) => {
                     args.raised(py, err)?;
-                    let text: String = data_type.call_method0("simpleString")?.extract()?;
+                    // Of a type that holds itself, whose `simpleString()` raises its
+                    // `RecursionError` too: PySpark's repr reads it as it renders the Column,
+                    // which raises it then, as the Column's repr and requests do.
+                    let text = match data_type.call_method0("simpleString") {
+                        Ok(text) => text.extract::<String>()?,
+                        Err(err)
+                            if err.is_instance_of::<pyo3::exceptions::PyRecursionError>(py) =>
+                        {
+                            let unrenderable = crate::plan_args::recursion_error(py, &err)?;
+                            return Ok(PyColumn::new(Column::new(
+                                spark_connect::expression::Expression::unbuildable(
+                                    unparsed("").expression().clone(),
+                                    None,
+                                    args.error().cloned(),
+                                    Some(unrenderable),
+                                ),
+                            )));
+                        }
+                        Err(err) => return Err(err),
+                    };
                     return Ok(PyColumn::new(args.column_after(unparsed(&text))));
                 }
                 Err(err) => return Err(err),

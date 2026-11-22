@@ -796,9 +796,19 @@ impl KeptType {
 
     /// The core type of the child as it is now, as [`KeptType::live`] reads it, or else the type
     /// that stands for a child that does not lower now (see [`lenient_type`]).
-    fn live_or_stand_in(&self, py: Python<'_>, snapshot: &DataType) -> PyResult<DataType> {
+    fn lenient(&self, py: Python<'_>, snapshot: &DataType) -> PyResult<DataType> {
         match self.kept(py) {
             Some(object) => lenient_type(object.bind(py)),
+            None => Ok(snapshot.clone()),
+        }
+    }
+
+    /// [`KeptType::lenient`] of a level of the types that stand for a type, of the
+    /// `RecursionError` of a child of more levels than Python's recursion limit (see
+    /// [`stand_in_type`]).
+    fn live_or_stand_in(&self, py: Python<'_>, snapshot: &DataType) -> PyResult<DataType> {
+        match self.kept(py) {
+            Some(object) => stand_in_type(object.bind(py)),
             None => Ok(snapshot.clone()),
         }
     }
@@ -812,39 +822,131 @@ impl KeptType {
 /// stands as the null type, and an array, a map, a field or a struct that holds one stands as
 /// the types that it holds, each so. Such a use reads the object again, which raises its error
 /// then (see [`KeptType::live`]). An error of another object, or one that is not an `Exception`,
-/// such as a `KeyboardInterrupt`, is raised.
+/// such as a `KeyboardInterrupt`, is raised. A type of more levels than Python's recursion limit,
+/// such as one that holds itself (see [`type_level`]), stands as the null type too: each use
+/// that reads its levels raises its `RecursionError`, as PySpark's do.
 fn lenient_type(obj: &Bound<'_, PyAny>) -> PyResult<DataType> {
+    match stand_in_type(obj) {
+        Err(error)
+            if error.is_instance_of::<pyo3::exceptions::PyRecursionError>(obj.py())
+                && obj.is_instance_of::<PyDataType>() =>
+        {
+            Ok(DataType::Null)
+        }
+        result => result,
+    }
+}
+
+/// The core type of the type object `obj`, or the type that stands for it, as [`lenient_type`]
+/// gives them, of the `RecursionError` of a type of more levels than Python's recursion limit:
+/// of its lowering, or of the levels of the types that stand for it, which are walks of its type
+/// objects too (see [`type_level`]), as a type that holds itself and a type that does not lower
+/// now has levels that no walk ends.
+fn stand_in_type(obj: &Bound<'_, PyAny>) -> PyResult<DataType> {
     let error = match py_to_data_type(obj) {
         Ok(data_type) => return Ok(data_type),
         Err(error) => error,
     };
     let py = obj.py();
-    if !is_exception(py, &error) || !obj.is_instance_of::<PyDataType>() {
+    if !is_exception(py, &error)
+        || !obj.is_instance_of::<PyDataType>()
+        || error.is_instance_of::<pyo3::exceptions::PyRecursionError>(py)
+    {
         return Err(error);
     }
-    if let Ok(array) = obj.cast::<PyArrayType>() {
-        let array = array.borrow();
-        return Ok(DataType::Array {
-            element_type: Box::new(
-                array
-                    .element_object
-                    .live_or_stand_in(py, &array.element_type)?,
-            ),
-            contains_null: array.contains_null,
-        });
-    }
-    if let Ok(map) = obj.cast::<PyMapType>() {
-        let map = map.borrow();
-        return Ok(DataType::Map {
-            key_type: Box::new(map.key_object.live_or_stand_in(py, &map.key_type)?),
-            value_type: Box::new(map.value_object.live_or_stand_in(py, &map.value_type)?),
-            value_contains_null: map.value_contains_null,
-        });
-    }
-    if let Ok(st) = obj.cast::<PyStructType>() {
-        return st.borrow().stand_in_data_type(py);
-    }
-    Ok(DataType::Null)
+    type_level(py, || {
+        if let Ok(array) = obj.cast::<PyArrayType>() {
+            let array = array.borrow();
+            return Ok(DataType::Array {
+                element_type: Box::new(
+                    array
+                        .element_object
+                        .live_or_stand_in(py, &array.element_type)?,
+                ),
+                contains_null: array.contains_null,
+            });
+        }
+        if let Ok(map) = obj.cast::<PyMapType>() {
+            let map = map.borrow();
+            return Ok(DataType::Map {
+                key_type: Box::new(map.key_object.live_or_stand_in(py, &map.key_type)?),
+                value_type: Box::new(map.value_object.live_or_stand_in(py, &map.value_type)?),
+                value_contains_null: map.value_contains_null,
+            });
+        }
+        if let Ok(st) = obj.cast::<PyStructType>() {
+            return st.borrow().stand_in_data_type(py);
+        }
+        Ok(DataType::Null)
+    })
+}
+
+/// The core type of the type object `obj` for a tree string of `levels` levels of the types that
+/// it holds, of a type of more levels than Python's recursion limit, such as one that holds
+/// itself, whose lowering raises its `RecursionError`: of each struct, array and map to `levels`
+/// levels, below which a struct is of no fields, and an array and a map of the null type, whose
+/// kinds the string names and whose levels it does not hold, and of each other type as
+/// [`lenient_type`] lowers it. A walk of the type objects (see [`type_level`]), which raises the
+/// `RecursionError` of more levels than the limit, as PySpark's walk of a tree string does.
+fn tree_stand_in(obj: &Bound<'_, PyAny>, levels: usize) -> PyResult<DataType> {
+    let py = obj.py();
+    let below = levels.saturating_sub(1);
+    // The child kept as `kept`, or else its snapshot, of the levels below.
+    let child = |kept: Option<Py<PyAny>>, snapshot: DataType| match kept {
+        _ if levels == 0 => Ok(DataType::Null),
+        Some(object) => tree_stand_in(object.bind(py), below),
+        None => Ok(snapshot),
+    };
+    type_level(py, || {
+        if let Ok(st) = obj.cast::<PyStructType>() {
+            let items = st.borrow().fields.clone_ref(py);
+            let mut fields = Vec::new();
+            if levels > 0 {
+                for item in items.bind(py).iter() {
+                    let field = as_struct_field(&item)?;
+                    let (kept, snapshot) = {
+                        let field = field.borrow();
+                        (
+                            field.data_type_object.kept(py),
+                            field.field.data_type.clone(),
+                        )
+                    };
+                    let data_type = child(kept, snapshot)?;
+                    fields.push(field.borrow().field_of_type(py, data_type, true)?);
+                }
+            }
+            return Ok(DataType::Struct { fields });
+        }
+        if let Ok(array) = obj.cast::<PyArrayType>() {
+            let (kept, snapshot, contains_null) = {
+                let array = array.borrow();
+                let kept = array.element_object.kept(py);
+                (kept, array.element_type.clone(), array.contains_null)
+            };
+            return Ok(DataType::Array {
+                element_type: Box::new(child(kept, snapshot)?),
+                contains_null,
+            });
+        }
+        if let Ok(map) = obj.cast::<PyMapType>() {
+            let (key, key_type, value, value_type, value_contains_null) = {
+                let map = map.borrow();
+                (
+                    map.key_object.kept(py),
+                    map.key_type.clone(),
+                    map.value_object.kept(py),
+                    map.value_type.clone(),
+                    map.value_contains_null,
+                )
+            };
+            return Ok(DataType::Map {
+                key_type: Box::new(child(key, key_type)?),
+                value_type: Box::new(child(value, value_type)?),
+                value_contains_null,
+            });
+        }
+        lenient_type(obj)
+    })
 }
 
 /// Whether `error`, of the lowering of a type object, is an `Exception`, which a use that does
@@ -932,7 +1034,7 @@ fn need_conversion_of_fields(py: Python<'_>, fields: &Bound<'_, PyList>) -> PyRe
 /// (see `child_need_conversion`).
 fn need_conversion_of_object(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<bool> {
     // A level of the type objects of a type of many levels, on a stack with room.
-    crate::pbmsg::grow(|| need_conversion_of_object_level(py, obj))
+    type_level(py, || need_conversion_of_object_level(py, obj))
 }
 
 /// [`need_conversion_of_object`] of one level of a type object.
@@ -1301,7 +1403,9 @@ fn nested_lowered_in<'py>(
     fields_only: bool,
 ) -> PyResult<Option<Bound<'py, PyAny>>> {
     // A level of a type of many levels, on a stack with room.
-    crate::pbmsg::grow(|| nested_lowered_in_level(py, data_type, depth, fields_only))
+    type_level(py, || {
+        nested_lowered_in_level(py, data_type, depth, fields_only)
+    })
 }
 
 /// [`nested_lowered_in`] of one level.
@@ -1416,7 +1520,9 @@ fn converter_flag_is_other(
     nullable: bool,
 ) -> PyResult<bool> {
     // A level of a type of many levels, on a stack with room.
-    crate::pbmsg::grow(|| converter_flag_is_other_level(py, data_type, object, nullable))
+    type_level(py, || {
+        converter_flag_is_other_level(py, data_type, object, nullable)
+    })
 }
 
 /// [`converter_flag_is_other`] of one level.
@@ -1509,7 +1615,7 @@ fn converter_flag_is_other_level(
 /// whose JSON is of its own methods.
 pub(crate) fn has_other_flag(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<bool> {
     // A level of a type of many levels, on a stack with room.
-    crate::pbmsg::grow(|| has_other_flag_level(py, obj))
+    type_level(py, || has_other_flag_level(py, obj))
 }
 
 /// [`has_other_flag`] of one level.
@@ -1608,7 +1714,7 @@ fn keep_flags_in_json(
     collated: bool,
 ) -> PyResult<bool> {
     // A level of the JSON of a type of many levels, on a stack with room.
-    crate::pbmsg::grow(|| keep_flags_in_json_level(py, json, obj, collated))
+    type_level(py, || keep_flags_in_json_level(py, json, obj, collated))
 }
 
 /// [`keep_flags_in_json`] of one level of a type object.
@@ -1740,7 +1846,7 @@ fn type_json_value<'py>(
 ) -> PyResult<(Bound<'py, PyAny>, bool)> {
     // Of a type of many levels, whose JSON values and copies recurse over its levels as they
     // are made, on a stack with room for a level (the recursions below grow on their own).
-    crate::pbmsg::grow(|| type_json_value_level(py, obj))
+    type_level(py, || type_json_value_level(py, obj))
 }
 
 /// [`type_json_value`] of one level.
@@ -1768,7 +1874,7 @@ fn type_json_value_level<'py>(
 fn type_json_text(obj: &Bound<'_, PyAny>) -> PyResult<String> {
     // Of a type of many levels, whose JSON values and copies recurse over its levels as they
     // are made, on a stack with room for a level (the recursions below grow on their own).
-    crate::pbmsg::grow(|| type_json_text_level(obj))
+    type_level(obj.py(), || type_json_text_level(obj))
 }
 
 /// [`type_json_text`] of one level.
@@ -1858,8 +1964,11 @@ impl ForeignFields {
         if let Some((_, holds)) = self.0.get(&key) {
             return Ok(*holds);
         }
-        // Of a type of many levels, on a stack with room for a level.
-        let holds = crate::pbmsg::grow(|| self.holds_level(obj))?;
+        // Of a type of many levels, on a stack with room for a level. An object is marked as
+        // holding none while it is looked at: a type that holds itself reaches it again, which
+        // adds nothing to the answer of the walk that is looking at it.
+        self.0.insert(key, (obj.clone().unbind(), false));
+        let holds = type_level(obj.py(), || self.holds_level(obj))?;
         self.0.insert(key, (obj.clone().unbind(), holds));
         Ok(holds)
     }
@@ -1944,7 +2053,7 @@ impl ForeignFields {
     ) -> PyResult<Bound<'py, PyAny>> {
         // Of a type of many levels, whose JSON values recurse over its levels as they are made, on
         // a stack with room for a level.
-        crate::pbmsg::grow(|| self.json_value_level(py, obj))
+        type_level(py, || self.json_value_level(py, obj))
     }
 
     /// [`ForeignFields::json_value`] of one level.
@@ -2035,7 +2144,7 @@ impl ForeignFields {
         py: Python<'py>,
         data_type: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        crate::pbmsg::grow(|| {
+        type_level(py, || {
             let json = pyo3::types::PyDict::new(py);
             if data_type.is_instance_of::<PyArrayType>() {
                 let element = data_type.getattr(pyo3::intern!(py, "elementType"))?;
@@ -2103,7 +2212,7 @@ fn visit_collations(
     path: &Bound<'_, PyAny>,
     out: &Bound<'_, pyo3::types::PyDict>,
 ) -> PyResult<()> {
-    crate::pbmsg::grow(|| {
+    type_level(py, || {
         if data_type.is_instance_of::<PyArrayType>() {
             let element = data_type.getattr(pyo3::intern!(py, "elementType"))?;
             process_collations(py, &element, &path.add(".element")?, out)
@@ -2176,7 +2285,7 @@ fn field_json_value<'py>(
 ) -> PyResult<(Bound<'py, PyAny>, bool)> {
     // Of a type of many levels, whose JSON values and copies recurse over its levels as they
     // are made, on a stack with room for a level (the recursions below grow on their own).
-    crate::pbmsg::grow(|| field_json_value_level(py, field))
+    type_level(py, || field_json_value_level(py, field))
 }
 
 /// [`field_json_value`] of one level.
@@ -2760,11 +2869,15 @@ fn has_pyspark_attributes(data_type: &DataType) -> bool {
 fn data_type_eq(a: &Bound<'_, PyAny>, b: &Bound<'_, PyAny>) -> PyResult<bool> {
     // Of a type of many levels, whose JSON values and copies recurse over its levels as they
     // are made, on a stack with room for a level (the recursions below grow on their own).
-    crate::pbmsg::grow(|| data_type_eq_level(a, b))
+    type_level(a.py(), || data_type_eq_level(a, b))
 }
 
-/// [`data_type_eq`] of one level.
+/// [`data_type_eq`] of one level: of the same object, true, as Python compares the `__dict__` of
+/// PySpark's type, of the same objects in it, without reading them.
 fn data_type_eq_level(a: &Bound<'_, PyAny>, b: &Bound<'_, PyAny>) -> PyResult<bool> {
+    if a.is(b) {
+        return Ok(true);
+    }
     if !b.is_instance_of::<PyDataType>() {
         return Ok(false);
     }
@@ -4331,10 +4444,18 @@ impl PyArrayType {
         self.contains_null_object = containsNull;
         Ok(())
     }
+    // The type is lowered before the array is borrowed, as a type that holds the array, such as
+    // the array itself, reads it then (PySpark's sets the attribute, of a type that holds itself
+    // too), and the type that it replaces is dropped after, as its drop may run Python code.
     #[setter]
-    fn set_elementType(&mut self, elementType: &Bound<'_, PyAny>) -> PyResult<()> {
-        self.element_type = kept_child_type(elementType)?;
-        self.element_object = KeptType::of(elementType);
+    fn set_elementType(slf: &Bound<'_, Self>, elementType: &Bound<'_, PyAny>) -> PyResult<()> {
+        let element_type = kept_child_type(elementType)?;
+        let replaced = {
+            let mut this = slf.borrow_mut();
+            this.element_type = element_type;
+            std::mem::replace(&mut this.element_object, KeptType::of(elementType))
+        };
+        drop(replaced);
         Ok(())
     }
 
@@ -4379,7 +4500,8 @@ impl PyArrayType {
     /// `reduce_of`).
     fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
         let py = slf.py();
-        if !is_native(slf) || has_dict_state(slf.as_any())? {
+        // Of its class and PySpark's `__dict__` of it (see `subclass_reduce`).
+        let reduce_of_dict = || {
             let (element_type, contains_null) = {
                 let this = slf.borrow();
                 (
@@ -4387,19 +4509,27 @@ impl PyArrayType {
                     this.contains_null_object.clone_ref(py),
                 )
             };
-            return subclass_reduce(
+            subclass_reduce(
                 slf.as_any(),
                 vec![
                     ("elementType", element_type.into_bound(py)),
                     ("containsNull", contains_null.into_bound(py)),
                 ],
-            );
+            )
+        };
+        if !is_native(slf) || has_dict_state(slf.as_any())? {
+            return reduce_of_dict();
         }
         let this = slf.borrow();
         // A type that holds one that does not lower now pickles of its objects (see
-        // `lenient_type`), as PySpark's does.
+        // `lenient_type`), as PySpark's does, and one whose levels pass Python's recursion limit,
+        // such as one that holds itself, of its `__dict__`, as the struct's does.
         let element_type = match this.element_object.live(py, &this.element_type) {
             Ok(element_type) => Some(element_type),
+            Err(error) if error.is_instance_of::<pyo3::exceptions::PyRecursionError>(py) => {
+                drop(this);
+                return reduce_of_dict();
+            }
             Err(error) if is_exception(py, &error) => None,
             Err(error) => return Err(error),
         };
@@ -4579,16 +4709,27 @@ impl PyMapType {
     fn valueContainsNull(&self, py: Python<'_>) -> Py<PyAny> {
         self.value_contains_null_object.clone_ref(py)
     }
+    // As `ArrayType.elementType`'s setter: of a type that holds the map, such as the map itself.
     #[setter]
-    fn set_keyType(&mut self, keyType: &Bound<'_, PyAny>) -> PyResult<()> {
-        self.key_type = kept_child_type(keyType)?;
-        self.key_object = KeptType::of(keyType);
+    fn set_keyType(slf: &Bound<'_, Self>, keyType: &Bound<'_, PyAny>) -> PyResult<()> {
+        let key_type = kept_child_type(keyType)?;
+        let replaced = {
+            let mut this = slf.borrow_mut();
+            this.key_type = key_type;
+            std::mem::replace(&mut this.key_object, KeptType::of(keyType))
+        };
+        drop(replaced);
         Ok(())
     }
     #[setter]
-    fn set_valueType(&mut self, valueType: &Bound<'_, PyAny>) -> PyResult<()> {
-        self.value_type = kept_child_type(valueType)?;
-        self.value_object = KeptType::of(valueType);
+    fn set_valueType(slf: &Bound<'_, Self>, valueType: &Bound<'_, PyAny>) -> PyResult<()> {
+        let value_type = kept_child_type(valueType)?;
+        let replaced = {
+            let mut this = slf.borrow_mut();
+            this.value_type = value_type;
+            std::mem::replace(&mut this.value_object, KeptType::of(valueType))
+        };
+        drop(replaced);
         Ok(())
     }
     #[setter]
@@ -4643,7 +4784,8 @@ impl PyMapType {
     /// `reduce_of`).
     fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
         let py = slf.py();
-        if !is_native(slf) || has_dict_state(slf.as_any())? {
+        // Of its class and PySpark's `__dict__` of it (see `subclass_reduce`).
+        let reduce_of_dict = || {
             let (key_type, value_type, value_contains_null) = {
                 let this = slf.borrow();
                 (
@@ -4652,24 +4794,32 @@ impl PyMapType {
                     this.value_contains_null_object.clone_ref(py),
                 )
             };
-            return subclass_reduce(
+            subclass_reduce(
                 slf.as_any(),
                 vec![
                     ("keyType", key_type.into_bound(py)),
                     ("valueType", value_type.into_bound(py)),
                     ("valueContainsNull", value_contains_null.into_bound(py)),
                 ],
-            );
+            )
+        };
+        if !is_native(slf) || has_dict_state(slf.as_any())? {
+            return reduce_of_dict();
         }
         let this = slf.borrow();
         // A type that holds one that does not lower now pickles of its objects (see
-        // `lenient_type`), as PySpark's does.
+        // `lenient_type`), as PySpark's does, and one whose levels pass Python's recursion limit,
+        // such as one that holds itself, of its `__dict__`, as the struct's does.
         let types = this
             .key_object
             .live(py, &this.key_type)
             .and_then(|key_type| Ok((key_type, this.value_object.live(py, &this.value_type)?)));
         let types = match types {
             Ok(types) => Some(types),
+            Err(error) if error.is_instance_of::<pyo3::exceptions::PyRecursionError>(py) => {
+                drop(this);
+                return reduce_of_dict();
+            }
             Err(error) if is_exception(py, &error) => None,
             Err(error) => return Err(error),
         };
@@ -4974,6 +5124,14 @@ impl PyStructField {
     /// a type that does not lower now (see [`lenient_type`]), for a use that does not read its
     /// JSON, and of no metadata of a dict that `json.dumps` refuses (see `kept_metadata`).
     fn stand_in_field(&self, py: Python<'_>) -> PyResult<StructField> {
+        let data_type = self.data_type_object.lenient(py, &self.field.data_type)?;
+        self.field_of_type(py, data_type, true)
+    }
+
+    /// [`PyStructField::stand_in_field`] of a level of the types that stand for a type, of the
+    /// `RecursionError` of a type of more levels than Python's recursion limit (see
+    /// [`stand_in_type`]).
+    fn stand_in_level(&self, py: Python<'_>) -> PyResult<StructField> {
         let data_type = self
             .data_type_object
             .live_or_stand_in(py, &self.field.data_type)?;
@@ -4988,17 +5146,23 @@ impl PyStructField {
         data_type: DataType,
         lenient: bool,
     ) -> PyResult<StructField> {
-        let mut field = self.field.clone();
-        field.data_type = data_type;
         let metadata = self.metadata.bind(py);
-        field.metadata = if metadata.is_empty() {
-            Metadata::new()
-        } else if lenient {
-            kept_metadata(py, metadata)?
-        } else {
-            py_metadata_to_map(py, metadata)?
-        };
-        Ok(field)
+        // Of the name and the flag of the field, not of a copy of its snapshot of the type, which
+        // `data_type` replaces: a lowering of a type of many levels copies no snapshot of the
+        // levels below each, which would make it quadratic in the levels, and the making of a
+        // type of many levels, one at a time, cubic.
+        Ok(StructField {
+            name: self.field.name.clone(),
+            data_type,
+            nullable: self.field.nullable,
+            metadata: if metadata.is_empty() {
+                Metadata::new()
+            } else if lenient {
+                kept_metadata(py, metadata)?
+            } else {
+                py_metadata_to_map(py, metadata)?
+            },
+        })
     }
 }
 
@@ -5250,12 +5414,19 @@ impl PyStructField {
     fn data_type(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         self.data_type_object.object(py, &self.field.data_type)
     }
+    // As `ArrayType.elementType`'s setter: of a type that holds the field, such as a struct of
+    // it, or the field itself.
     #[setter]
     #[pyo3(name = "dataType")]
-    fn set_data_type(&mut self, dataType: &Bound<'_, PyAny>) -> PyResult<()> {
-        self.field.data_type = kept_child_type(dataType)?;
-        self.data_type_object = KeptType::of(dataType);
-        self.need_conversion_of_type = std::sync::OnceLock::new();
+    fn set_data_type(slf: &Bound<'_, Self>, dataType: &Bound<'_, PyAny>) -> PyResult<()> {
+        let data_type = kept_child_type(dataType)?;
+        let replaced = {
+            let mut this = slf.borrow_mut();
+            this.field.data_type = data_type;
+            this.need_conversion_of_type = std::sync::OnceLock::new();
+            std::mem::replace(&mut this.data_type_object, KeptType::of(dataType))
+        };
+        drop(replaced);
         Ok(())
     }
     /// The field's metadata dict (mirrors `StructField.metadata`; values may be any type).
@@ -5396,7 +5567,15 @@ impl PyStructField {
                 this.metadata.clone_ref(py),
             )
         };
-        if !is_native(slf) || has_dict_state(slf.as_any())? {
+        // A field whose type is a field that holds it again, as a field that is its own type does,
+        // pickles of its class and its `__dict__`, as the struct's of a type that holds itself
+        // does: the cycles through a struct, an array or a map pickle so of those.
+        let holds_itself = data_type.bind(py).is_instance_of::<PyStructField>()
+            && matches!(
+                py_to_data_type(data_type.bind(py)),
+                Err(error) if error.is_instance_of::<pyo3::exceptions::PyRecursionError>(py)
+            );
+        if !is_native(slf) || has_dict_state(slf.as_any())? || holds_itself {
             return subclass_reduce(
                 slf.as_any(),
                 vec![
@@ -5460,13 +5639,14 @@ impl PyStructType {
 
     /// The core type of the struct, as [`PyStructType::current_fields`] reads it, of the types
     /// that stand for the types that do not lower now (see [`lenient_type`]), for a use that does
-    /// not read its JSON.
+    /// not read its JSON, of the `RecursionError` of a type of more levels than Python's
+    /// recursion limit in it (see [`stand_in_type`]).
     fn stand_in_data_type(&self, py: Python<'_>) -> PyResult<DataType> {
         let fields = self
             .fields
             .bind(py)
             .iter()
-            .map(|item| as_struct_field(&item)?.borrow().stand_in_field(py))
+            .map(|item| as_struct_field(&item)?.borrow().stand_in_level(py))
             .collect::<PyResult<Vec<_>>>()?;
         Ok(DataType::Struct { fields })
     }
@@ -5476,6 +5656,37 @@ impl PyStructType {
         Ok(DataType::Struct {
             fields: self.current_fields(py)?,
         })
+    }
+
+    /// The reduce of the struct of its class and PySpark's `__dict__` of it, of the `fields`,
+    /// `names`, `_needConversion` and `_needSerializeAnyField` that PySpark's `__init__` sets
+    /// (see `subclass_reduce`).
+    fn reduce_of_dict(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        let py = slf.py();
+        let (fields, names, need_conversion) = {
+            let this = slf.borrow();
+            (
+                this.fields.clone_ref(py),
+                this.names.clone_ref(py),
+                this.need_conversion.clone(),
+            )
+        };
+        let any = need_conversion.iter().any(|&need| need);
+        subclass_reduce(
+            slf.as_any(),
+            vec![
+                ("fields", fields.into_bound(py).into_any()),
+                ("names", names.into_bound(py).into_any()),
+                (
+                    "_needConversion",
+                    need_conversion.into_pyobject(py)?.into_any(),
+                ),
+                (
+                    "_needSerializeAnyField",
+                    any.into_pyobject(py)?.to_owned().into_any(),
+                ),
+            ],
+        )
     }
 
     /// Whether the `names` or the `_needConversion` of the struct differ from those that its
@@ -5593,36 +5804,19 @@ impl PyStructType {
     fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
         let py = slf.py();
         if !is_native(slf) || has_dict_state(slf.as_any())? {
-            let (fields, names, need_conversion) = {
-                let this = slf.borrow();
-                (
-                    this.fields.clone_ref(py),
-                    this.names.clone_ref(py),
-                    this.need_conversion.clone(),
-                )
-            };
-            let any = need_conversion.iter().any(|&need| need);
-            return subclass_reduce(
-                slf.as_any(),
-                vec![
-                    ("fields", fields.into_bound(py).into_any()),
-                    ("names", names.into_bound(py).into_any()),
-                    (
-                        "_needConversion",
-                        need_conversion.into_pyobject(py)?.into_any(),
-                    ),
-                    (
-                        "_needSerializeAnyField",
-                        any.into_pyobject(py)?.to_owned().into_any(),
-                    ),
-                ],
-            );
+            return Self::reduce_of_dict(slf);
         }
         let this = slf.borrow();
         // A struct that holds a type that does not lower now pickles of its objects (see
-        // `lenient_type`), as PySpark's does.
+        // `lenient_type`), as PySpark's does. One whose levels pass Python's recursion limit,
+        // such as one that holds itself, pickles of its class and its `__dict__`, as PySpark's
+        // does, which pickle and copy keep before its fields, which hold it again.
         let dt = match this.current_data_type(py) {
             Ok(dt) => Some(dt),
+            Err(error) if error.is_instance_of::<pyo3::exceptions::PyRecursionError>(py) => {
+                drop(this);
+                return Self::reduce_of_dict(slf);
+            }
             Err(error) if is_exception(py, &error) => None,
             Err(error) => return Err(error),
         };
@@ -5936,10 +6130,32 @@ impl PyStructType {
         let py = slf.py();
         let depth = normalize_tree_depth(maxDepth.bind(py))?;
         // As PySpark's, which reads the type objects, not their JSON: a type that does not lower
-        // now stands as the null type, and its name is its object's (see `lenient_type`).
-        let (data_type, stand_ins) = match slf.borrow().current_data_type(py) {
-            Ok(data_type) => (data_type, false),
-            Err(error) if is_exception(py, &error) => (slf.borrow().stand_in_data_type(py)?, true),
+        // now stands as the null type, and its name is its object's (see `lenient_type`). A type
+        // of more levels than Python's recursion limit, such as one that holds itself, is read to
+        // the levels that the string holds, as PySpark's walk of the objects reads them, which
+        // raises its `RecursionError` of more (see `tree_stand_in`): its flags and names are
+        // those of its objects, as the walks of them would not end.
+        let (data_type, stand_ins, walked) = match slf.borrow().current_data_type(py) {
+            Ok(data_type) => (data_type, false, false),
+            Err(error) if error.is_instance_of::<pyo3::exceptions::PyRecursionError>(py) => {
+                let levels = usize::try_from(depth).unwrap_or(usize::MAX);
+                (tree_stand_in(slf.as_any(), levels)?, true, true)
+            }
+            Err(error) if is_exception(py, &error) => {
+                let stand_in = slf.borrow().stand_in_data_type(py);
+                match stand_in {
+                    Ok(data_type) => (data_type, true, false),
+                    // Of a type that does not lower now that holds one of more levels than the
+                    // limit, such as itself.
+                    Err(error)
+                        if error.is_instance_of::<pyo3::exceptions::PyRecursionError>(py) =>
+                    {
+                        let levels = usize::try_from(depth).unwrap_or(usize::MAX);
+                        (tree_stand_in(slf.as_any(), levels)?, true, true)
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
             Err(error) => return Err(error),
         };
         // As PySpark's, which takes the type name of each type it prints: a StructField as a type
@@ -5955,8 +6171,8 @@ impl PyStructType {
         // The flags are written as they were given, which the core's bools are not, and a type of
         // its class only, or of a Python subclass, by its `typeName()`, which PySpark's
         // `_get_jvm_type_name` writes of it.
-        let other_flags = has_other_flag(py, slf.as_any())?;
-        let subclasses = keeps_subclass_objects(py, slf.as_any())?;
+        let other_flags = walked || has_other_flag(py, slf.as_any())?;
+        let subclasses = walked || keeps_subclass_objects(py, slf.as_any())?;
         let error: std::cell::RefCell<Option<PyErr>> = std::cell::RefCell::new(None);
         let keep = |result: PyResult<Option<String>>| match result {
             Ok(text) => text,
@@ -7476,7 +7692,7 @@ fn keeps_object_of(
     holds: fn(Python<'_>, &Bound<'_, PyAny>) -> PyResult<bool>,
 ) -> PyResult<bool> {
     // A level of the type objects of a type of many levels, on a stack with room.
-    crate::pbmsg::grow(|| keeps_object_of_level(py, obj, holds))
+    type_level(py, || keeps_object_of_level(py, obj, holds))
 }
 
 /// [`keeps_object_of`] of one level of a type object.
@@ -7562,7 +7778,7 @@ fn holds_metadata(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<bool> {
 fn child_simple_string(py: Python<'_>, kept: &KeptType, snapshot: &DataType) -> PyResult<String> {
     // A level of the objects of a type of many levels, such as the schema of a response, on a
     // stack with room.
-    crate::pbmsg::grow(|| child_simple_string_level(py, kept, snapshot))
+    type_level(py, || child_simple_string_level(py, kept, snapshot))
 }
 
 /// [`child_simple_string`] of one level.
@@ -7587,7 +7803,7 @@ fn child_simple_string_level(
 /// `UserDefinedType`, a `DecimalType` or a type of its class only stays the object it was.
 fn as_nullable<'py>(obj: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
     // A level of a type of many levels, on a stack with room.
-    crate::pbmsg::grow(|| as_nullable_level(obj))
+    type_level(obj.py(), || as_nullable_level(obj))
 }
 
 /// [`as_nullable`] of one level.
@@ -8281,6 +8497,51 @@ fn nested_data_type(obj: &Bound<'_, PyAny>, name: &str) -> PyResult<DataType> {
     lenient_type(obj)
 }
 
+std::thread_local! {
+    /// The levels of the walks of type objects that the thread is in (see [`type_level`]).
+    static TYPE_LEVELS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// `f`, a level of a walk of type objects, of their fields, elements, keys and values, on a stack
+/// with room for it (see `crate::pbmsg::grow`), of no more levels of the walks of the thread than
+/// Python's recursion limit (`sys.getrecursionlimit()`), past which it raises PySpark's
+/// `RecursionError`: PySpark's methods walk the levels of a type in Python, of a frame of Python
+/// for each level at least, so they raise it of a type of more levels, and of a type that holds
+/// itself, as a struct that a field of it holds, whose levels no walk ends.
+#[inline]
+fn type_level<T>(_py: Python<'_>, f: impl FnOnce() -> PyResult<T>) -> PyResult<T> {
+    /// A level of [`TYPE_LEVELS`], of the cell of the thread, until it is dropped.
+    struct Level<'a>(&'a std::cell::Cell<usize>);
+    impl Drop for Level<'_> {
+        fn drop(&mut self) {
+            self.0.set(self.0.get().saturating_sub(1));
+        }
+    }
+    // Of one access of the thread-local, which the walk of a wide type makes at each level.
+    TYPE_LEVELS.with(|levels| {
+        let depth = levels.get() + 1;
+        levels.set(depth);
+        let _level = Level(levels);
+        // The limit is read only past the levels of the walks of ordinary types, which a wide
+        // type makes at each of its levels: a limit below them bounds the walks a little later.
+        if depth > TYPE_LEVELS_UNCHECKED {
+            // SAFETY: reads the recursion limit of the interpreter, of the thread that holds the
+            // GIL (`_py`), as `sys.getrecursionlimit()` does.
+            let limit = unsafe { pyo3::ffi::Py_GetRecursionLimit() };
+            if depth > usize::try_from(limit).unwrap_or(0) {
+                return Err(pyo3::exceptions::PyRecursionError::new_err(
+                    "maximum recursion depth exceeded",
+                ));
+            }
+        }
+        crate::pbmsg::grow(f)
+    })
+}
+
+/// The levels of the walks of type objects that a thread goes in without reading Python's
+/// recursion limit (see [`type_level`]).
+const TYPE_LEVELS_UNCHECKED: usize = 32;
+
 pub(crate) fn py_to_data_type(obj: &Bound<'_, PyAny>) -> PyResult<DataType> {
     lower_type(obj, MetadataOf::Strict)
 }
@@ -8297,7 +8558,7 @@ fn lower_type(obj: &Bound<'_, PyAny>, metadata: MetadataOf) -> PyResult<DataType
     // lowering recurses through the objects of its fields, elements and values: on a stack with
     // room, of a thread of a small stack too (its copies of the core types that they keep grow on
     // their own).
-    crate::pbmsg::grow(|| lower_type_level(obj, metadata))
+    type_level(obj.py(), || lower_type_level(obj, metadata))
 }
 
 /// [`lower_type`] of one level of a type object.
