@@ -2590,12 +2590,11 @@ def test_a_session_of_a_default_channel_builder_connects_to_its_endpoint_as_pysp
     # As PySpark's client, which connects through toChannel, whose channel of a
     # DefaultChannelBuilder connects to its `endpoint`, of `_host` and `_port`, of a subclass too:
     # neither of its `host`, which the client shows, nor of a `port` of its own. The endpoint is
-    # gRPC's target: bytes or the `encode("utf8")` of another object, the address of a URI of the
-    # schemes `dns:`, `ipv4:` and `ipv6:`, else a `host[:port]` of gRPC's default port, 443. Its
-    # channel is TLS of the builder's `use_ssl`, a subclass's too.
+    # gRPC's target: bytes or the `encode("utf8")` of another object, as gRPC reads a target (see
+    # test_the_endpoint_of_a_channel_builder_is_read_as_grpc_reads_a_target), of gRPC's default
+    # port, 443, without one. Its channel is TLS of the builder's `use_ssl`, a subclass's too.
     import socket
 
-    from pyspark.errors import PySparkNotImplementedError
     from pyspark.errors.exceptions.connect import SparkConnectGrpcException
     from pyspark.sql.connect.client import DefaultChannelBuilder
     from pyspark.sql.connect.session import SparkSession
@@ -2644,7 +2643,7 @@ def test_a_session_of_a_default_channel_builder_connects_to_its_endpoint_as_pysp
     assert outcome(builder_of(f"sc://unreachable.invalid:{port}", _host=host)) == (
         "reached", host)
     for endpoint in (
-        live.encode(), f"dns:///{live}", f"dns://8.8.8.8/{live}", f"dns:{live}",
+        live.encode(), f"dns:///{live}", f"dns://127.0.0.1:53/{live}", f"dns:{live}",
         f"ipv4:{live},127.0.0.1:1",
     ):
         assert outcome(builder_of(f"sc://{dead}", endpoint=endpoint))[0] == "reached", endpoint
@@ -2664,10 +2663,6 @@ def test_a_session_of_a_default_channel_builder_connects_to_its_endpoint_as_pysp
     # The errors of the endpoint are those of PySpark's toChannel when the session is made.
     with pytest.raises(AttributeError, match="^'int' object has no attribute 'encode'$"):
         SparkSession.builder.channelBuilder(builder_of(f"sc://{live}", endpoint=5)).create()
-    with pytest.raises(PySparkNotImplementedError) as error:
-        SparkSession.builder.channelBuilder(
-            builder_of(f"sc://{live}", endpoint="unix:/tmp/spark.sock")).create()
-    assert error.value.getCondition() == "NOT_IMPLEMENTED"
 
 
 def test_the_channel_of_a_default_channel_builder_is_secured_as_pysparks_to_channel(
@@ -2772,9 +2767,7 @@ def test_no_connection_string_nor_endpoint_sets_the_channel_of_a_builder(
     # The credentials of a DefaultChannelBuilder are the session's apart from its URL: a
     # parameter of any name, of a connection string of remote(), SPARK_REMOTE or a session of a
     # str, or of the `_params` of a builder, is a parameter, which a key of capitals fails as
-    # metadata, as gRPC refuses it, and changes neither the TLS nor the token. An endpoint that is
-    # not of a host and a port, of a character of the URL, is refused when the session is made.
-    from pyspark.errors import PySparkValueError
+    # metadata, as gRPC refuses it, and changes neither the TLS nor the token.
     from pyspark.sql.connect.client import ChannelBuilder, DefaultChannelBuilder
     from pyspark.sql.connect.session import SparkSession
 
@@ -2834,18 +2827,6 @@ def test_no_connection_string_nor_endpoint_sets_the_channel_of_a_builder(
         ), key
     assert (len(service.execute_requests), len(service.config_requests)) == before
 
-    def builder_of(endpoint):
-        return type("Builder", (DefaultChannelBuilder,), {"endpoint": property(
-            lambda self: endpoint)})(f"sc://localhost:{port}/;use_ssl=true")
-
-    for endpoint in (f"127.0.0.1:{port}?", f"127.0.0.1:{port}?x=1", f"127.0.0.1:{port}#",
-                     f"dns:///127.0.0.1:{port}?", f"127.0.0.1:{port}/x", f"127.0.0.1:{port};a=b",
-                     f"user@127.0.0.1:{port}", f"127.0.0.1 :{port}"):
-        with pytest.raises(PySparkValueError) as error:
-            SparkSession.builder.channelBuilder(builder_of(endpoint)).create()
-        assert error.value.getCondition() == "INVALID_CONNECT_URL", endpoint
-    assert (len(service.execute_requests), len(service.config_requests)) == before
-
     # As PySpark's toChannel, which reads the token twice, as it checks it and gives it to grpcio.
     reads = []
 
@@ -2867,6 +2848,272 @@ def test_no_connection_string_nor_endpoint_sets_the_channel_of_a_builder(
     SparkSession.builder.channelBuilder(logging(f"sc://localhost:{port}/;token=t")).create()
     assert reads[reads.index("secure"):] == [
         "secure", "use_ssl", "token", "use_ssl", "_host", "token", "token", "endpoint", "_host"]
+
+
+def test_the_endpoint_of_a_channel_builder_is_read_as_grpc_reads_a_target(mock_connect):
+    # As grpcio's channel of PySpark's `toChannel`, which reads its `endpoint` as gRPC reads a
+    # target: a URI of the scheme of a resolver of gRPC, of any case, else `dns:///` and the
+    # endpoint, of its authority and its path percent-decoded, and of its query and its fragment
+    # dropped; the name of `dns:` as gRPC's resolver splits it, of gRPC's ports and of 16 bits;
+    # the addresses of `ipv4:` and `ipv6:` and the sockets of `unix:` and `unix-abstract:`, tried
+    # in turn; and of a target that gRPC refuses, the status that fails each call, of its code, as
+    # grpcio's channel fails it, so that a retry policy, which retries `UNAVAILABLE`, retries the
+    # same calls. The URL of the channel takes nothing of the endpoint but its host and its port.
+    import os
+    import re
+    import socket
+    import sys
+    import tempfile
+    import threading
+
+    from pyspark.errors.exceptions.connect import SparkConnectGrpcException
+    from pyspark.sql.connect.client import DefaultChannelBuilder
+    from pyspark.sql.connect.session import SparkSession
+
+    _, service = mock_connect
+    live = service.remote[len("sc://"):]
+    host, port = live.rsplit(":", 1)
+
+    def builder_of(endpoint, url):
+        return type("Builder", (DefaultChannelBuilder,), {"endpoint": property(
+            lambda self: endpoint)})(url)
+
+    def outcome(endpoint, url=f"sc://{live}"):
+        session = SparkSession.builder.channelBuilder(builder_of(endpoint, url)).create()
+        try:
+            session.client.set_retry_policies([])
+            before = len(service.execute_requests)
+            try:
+                session.range(1).collect()
+            except SparkConnectGrpcException as error:
+                text = str(error)
+                assert len(service.execute_requests) == before, endpoint
+                return (re.search(r"status = StatusCode\.(\w+)", text).group(1),
+                        re.search(r'details = "(.*)"', text).group(1))
+            assert len(service.execute_requests) == before + 1, endpoint
+            return "reached"
+        finally:
+            session.stop()
+
+    for endpoint in [
+        f"{live}?x=1", f"{live}#", f"{live}#frag", f"{live}?x=1#y", f"{live}?x/y?z", f"DNS:///{live}",
+        f"dns:///{live}?x=1", f"dns:{live}", f"dns://127.0.0.1%3A53/{live}", f"{host}%3A{port}",
+        f"%31{live[1:]}", f"{host}:{int(port) + 65536}", f"{host}:{int(port) - 65536}",
+        f"{host}:+{port}", f"{host}: {port} ", f"{host}:0{port}", f"loc%61lhost:{port}",
+        f"x..localhost:{port}", f"ipv4:127.0.0.1:1,{live}", f"ipv4:,,{live}", f"Ipv4:{live}x",
+        f"ipv4:127.0.0.1:1%2C{live}", f"ipv4:///{live}", f"ipv6:[::ffff:{host}]:{port}",
+    ]:
+        assert outcome(endpoint) == "reached", endpoint
+    not_valid = "Failed to create channel to '{}':the target uri is not valid: {}"
+    resolving = "errors resolving {}: [field:hostname lookup error:{}]"
+    for endpoint, expected in [
+        (f"{live}?", ("UNKNOWN", not_valid.format(f"{live}?", f"dns:///{live}?"))),
+        (f"{live}#a#b", ("UNKNOWN", not_valid.format(f"{live}#a#b", f"dns:///{live}#a#b"))),
+        (f"{live}?[", ("UNKNOWN", not_valid.format(f"{live}?[", f"dns:///{live}?["))),
+        ("dns:///", ("UNKNOWN", not_valid.format("dns:///", "dns:///"))),
+        (f"dns://{live}", ("UNKNOWN", not_valid.format(f"dns://{live}", f"dns://{live}"))),
+        ("ipv4:127.0.0.1", ("UNKNOWN", not_valid.format("ipv4:127.0.0.1", "ipv4:127.0.0.1"))),
+        (f"ipv4:localhost:{port}", ("UNKNOWN", not_valid.format(
+            f"ipv4:localhost:{port}", f"ipv4:localhost:{port}"))),
+        (f"ipv4:{live},[::1]:{port}", ("UNKNOWN", not_valid.format(
+            f"ipv4:{live},[::1]:{port}", f"ipv4:{live},[::1]:{port}"))),
+        (f"ipv4://{live}", ("UNKNOWN", not_valid.format(f"ipv4://{live}", f"ipv4://{live}"))),
+        ("unix://relative.sock", ("UNKNOWN", not_valid.format(
+            "unix://relative.sock", "unix://relative.sock"))),
+        (f"dns://8.8.8.8/{live}", ("INTERNAL", "Illegal status code from resolver; original "
+                                    "status: INVALID_ARGUMENT: Cannot parse authority: 8.8.8.8")),
+        (f"dns://x:53/{live}", ("INTERNAL", "Illegal status code from resolver; original "
+                                "status: INVALID_ARGUMENT: Cannot parse authority: x:53")),
+        ("ipv4:", ("UNAVAILABLE", "empty address list")),
+        ("unix:", ("UNAVAILABLE", "empty address list")),
+        ("localhost:abc", ("UNAVAILABLE", resolving.format(
+            "localhost:abc", "Failed to parse port in name: localhost:abc"))),
+        (f"{live}/x", ("UNAVAILABLE", resolving.format(
+            f"{live}/x", f"Failed to parse port in name: {live}/x"))),
+        # Not a parameter of the URL of the channel, of no TLS and no token.
+        (f"{live}/;use_ssl=true;token=t", ("UNAVAILABLE", resolving.format(
+            f"{live}/;use_ssl=true;token=t",
+            f"Failed to parse port in name: {live}/;use_ssl=true;token=t"))),
+        (f"{live}%3F", ("UNAVAILABLE", resolving.format(
+            f"{live}?", f"Failed to parse port in name: {live}?"))),
+        (f"[::1:{port}", ("UNAVAILABLE", resolving.format(
+            f"[::1:{port}", f"Unparsable name: [::1:{port}"))),
+        (f":{port}", ("UNAVAILABLE", resolving.format(
+            f":{port}", f"host must not be empty in name: :{port}"))),
+        (f"local!host:{port}", ("UNAVAILABLE", resolving.format(
+            f"local!host:{port}",
+            f"address lookup failed for local!host:{port}: Misformatted domain name"))),
+        (f"user@{live}", ("UNAVAILABLE", resolving.format(
+            f"user@{live}", f"address lookup failed for user@{live}: Misformatted domain name"))),
+    ]:
+        assert outcome(endpoint) == expected, endpoint
+
+    # Of a Unix socket, of its path or of its abstract name, through a relay to the server.
+    def relay(address):
+        listener = socket.socket(socket.AF_UNIX)
+        listener.bind(address)
+        listener.listen()
+
+        def pump(source, target):
+            try:
+                while data := source.recv(65536):
+                    target.sendall(data)
+            except OSError:
+                pass
+            finally:
+                for end in (source, target):
+                    try:
+                        end.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass
+
+        def accept():
+            while True:
+                try:
+                    connection, _ = listener.accept()
+                except OSError:
+                    return
+                upstream = socket.create_connection((host, int(port)))
+                for source, target in ((connection, upstream), (upstream, connection)):
+                    threading.Thread(target=pump, args=(source, target), daemon=True).start()
+
+        threading.Thread(target=accept, daemon=True).start()
+        return listener
+
+    with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+        path = os.path.join(directory, "s.sock")
+        missing = os.path.join(directory, "none.sock")
+        listener = relay(path)
+        try:
+            for endpoint in [f"unix:{path}", f"unix://{path}", f"UNIX:{missing},{path}?x=1"]:
+                assert outcome(endpoint) == "reached", endpoint
+            assert outcome(f"unix:{missing}") == ("UNAVAILABLE", (
+                f"failed to connect to all addresses; last error: FAILED_PRECONDITION: "
+                f"unix:{missing}: connect failed: addr: unix:{missing} error: No such file or "
+                "directory"))
+            # Of gRPC's local credentials of TCP, which a Unix socket is not.
+            assert outcome(f"unix:{path}", f"sc://localhost:{port}/;token=t") == (
+                "UNAVAILABLE", f"failed to connect to all addresses; last error: UNKNOWN: "
+                f"unix:{path}: Endpoint is neither UDS or TCP loopback address.")
+        finally:
+            listener.close()
+    if sys.platform.startswith("linux"):
+        name = f"spark-connect-offline-{os.getpid()}"
+        listener = relay("\0" + name)
+        try:
+            assert outcome(f"unix-abstract:{name}") == "reached"
+            assert outcome(f"unix-abstract:{name}-none") == ("UNAVAILABLE", (
+                f"failed to connect to all addresses; last error: FAILED_PRECONDITION: "
+                f"unix-abstract:{name}-none: connect failed: addr: unix-abstract:{name}-none "
+                "error: Connection refused"))
+        finally:
+            listener.close()
+
+
+def test_a_channel_builder_is_read_as_pysparks_client_reads_it(mock_connect, monkeypatch):
+    # As PySpark's client as it is made: the `session_id` and the `userId` of the builder, and
+    # again when they are set, then what `toChannel` reads, of the keepalive of its channel options
+    # only when it is enabled, then `metadata()`, of which the calls are; and of a builder of a
+    # `metadata()` of its own, which PySpark's client calls for each call, the metadata of that
+    # method of each call, of its errors, which the call raises as they are. The `metadata()` of
+    # ChannelBuilder is not called for the calls.
+    import uuid
+
+    from pyspark.sql.connect.client import ChannelBuilder, DefaultChannelBuilder
+    from pyspark.sql.connect.session import SparkSession
+
+    _, service = mock_connect
+    port = service.remote.rsplit(":", 1)[1]
+    reads = []
+    members = ["session_id", "userId", "secure", "use_ssl", "token", "endpoint", "host",
+               "keepalive_enabled", "keepalive_time_ms", "keepalive_timeout_ms",
+               "keepalive_without_calls", "userAgent", "_host", "_port"]
+
+    def logged(name):
+        # Of a property, or of an attribute that `__init__` sets, such as `_host`.
+        base = getattr(DefaultChannelBuilder, name, None)
+
+        def get(self):
+            reads.append(name)
+            return base.fget(self) if isinstance(base, property) else self.__dict__["_v" + name]
+
+        def set_(self, value):
+            self.__dict__["_v" + name] = value
+
+        return property(get, set_)
+
+    calls = []
+
+    def metadata(self):
+        reads.append("metadata()")
+        calls.append(None)
+        if self.__dict__.get("fail_at") == len(calls):
+            raise KeyError("boom")
+        return [*ChannelBuilder.metadata(self), ("x-call", str(len(calls)))]
+
+    attributes = {name: logged(name) for name in members}
+    attributes["metadata"] = metadata
+    Logging = type("Logging", (DefaultChannelBuilder,), attributes)
+    toChannel = ("secure use_ssl token endpoint _host _port keepalive_enabled keepalive_time_ms "
+                 "keepalive_timeout_ms keepalive_without_calls metadata()")
+    session_id = str(uuid.uuid4())
+    for params, made in [
+        ("", "session_id userId " + toChannel),
+        ("/;user_id=u", "session_id userId userId " + toChannel),
+        (f"/;session_id={session_id}", "session_id session_id userId " + toChannel),
+        ("/;grpc_keepalive_enabled=false",
+         "session_id userId secure use_ssl token endpoint _host _port keepalive_enabled "
+         "metadata()"),
+    ]:
+        reads.clear()
+        calls.clear()
+        session = SparkSession.builder.channelBuilder(
+            Logging(f"sc://127.0.0.1:{port}{params}")).create()
+        try:
+            assert " ".join(reads) == made, params
+            reads.clear()
+            service.reset()
+            session.conf.set("spark.test.reads", "1")
+            session.conf.set("spark.test.reads", "2")
+            # A call of each read, of the metadata of its read.
+            assert reads == ["metadata()", "metadata()"], params
+            assert [entries for kind, entries in service.call_metadata if kind == "config"] == [
+                (("x-call", "2"),), (("x-call", "3"),)], params
+        finally:
+            session.stop()
+    # The error of the method is the error of the call, which sends nothing, as PySpark raises it.
+    calls.clear()
+    builder = Logging(f"sc://127.0.0.1:{port}")
+    builder.__dict__["fail_at"] = 2
+    session = SparkSession.builder.channelBuilder(builder).create()
+    try:
+        service.reset()
+        with pytest.raises(KeyError, match="boom"):
+            session.conf.set("spark.test.reads", "1")
+        assert service.call_metadata == []
+        session.conf.set("spark.test.reads", "2")
+        assert [entries for kind, entries in service.call_metadata if kind == "config"] == [
+            (("x-call", "3"),)]
+    finally:
+        session.stop()
+    # Of ChannelBuilder's own `metadata()`, as of the parameters: read as the session is made only.
+    made = []
+    plain = ChannelBuilder.metadata
+
+    def counted(self):
+        made.append(None)
+        return plain(self)
+
+    monkeypatch.setattr(ChannelBuilder, "metadata", counted)
+    session = SparkSession.builder.channelBuilder(
+        DefaultChannelBuilder(f"sc://127.0.0.1:{port}/;x-hdr=v")).create()
+    try:
+        service.reset()
+        session.conf.set("spark.test.reads", "1")
+        assert len(made) == 1
+        assert service.call_metadata == [("config", (("x-hdr", "v"),))]
+    finally:
+        session.stop()
 
 
 def test_functions_udtf_and_arrow_decorators():

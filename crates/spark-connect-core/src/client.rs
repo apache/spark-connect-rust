@@ -636,6 +636,22 @@ fn with_deadline<T>(mut request: Request<T>, deadline: Option<Duration>) -> Requ
     request
 }
 
+/// Add the entries of `metadata` to those of the request `req`: its `grpc-timeout` of a deadline,
+/// which [`with_deadline`] set, stays.
+fn add_metadata<T>(req: &mut Request<T>, metadata: &MetadataMap) {
+    let added = req.metadata_mut();
+    for entry in metadata.iter() {
+        match entry {
+            tonic::metadata::KeyAndValueRef::Ascii(key, value) => {
+                added.append(key.clone(), value.clone());
+            }
+            tonic::metadata::KeyAndValueRef::Binary(key, value) => {
+                added.append_bin(key.clone(), value.clone());
+            }
+        }
+    }
+}
+
 /// `request`, an execution request, of an operation ID: in the dialect of grpcio, of a new one when
 /// it has none, the one that the iterator of the execution would give it, as PySpark's request has
 /// one before its hooks run and its stub is called, so that the error of a closed client or
@@ -1345,6 +1361,14 @@ pub struct SparkConnectClient {
     /// The headers of every request: `metadata`, but a `user-agent` parameter (see `connect`).
     /// They are validated once, by `connect`, so that attaching them to a request cannot fail.
     headers: Vec<(AsciiMetadataKey, AsciiMetadataValue)>,
+    /// The `authorization` of the token among `headers`, which the requests of a source of the
+    /// metadata carry with the metadata of the source, as grpcio's call credentials of PySpark
+    /// add it to the metadata of each call.
+    call_credentials: Vec<(AsciiMetadataKey, AsciiMetadataValue)>,
+    /// What gives the metadata of each call, and of each request of the artifacts, in place of
+    /// `headers`, if anything, shared by the clones of the client (see
+    /// [`SparkConnectClient::set_metadata_source`]).
+    metadata_source: std::sync::Arc<crate::fork::Shared<MetadataSources>>,
     /// The user agent, which the requests that PySpark builds with `ChannelBuilder.userAgent`
     /// carry as their client type, or the error of that property, which each of them raises
     /// (see [`SparkConnectClient::client_type`]).
@@ -1832,7 +1856,8 @@ impl SparkConnectClient {
             target: crate::connector::Target::new(builder.host(), builder.port(), proxy, tls)
                 .of_local_credentials(
                     builder.credentials() == Some(crate::channel::Credentials::Local),
-                ),
+                )
+                .of_channel_target(builder.target().cloned()),
         });
         let transport = std::sync::Arc::new(Transport::new(std::sync::Arc::clone(&factory)));
 
@@ -1866,6 +1891,10 @@ impl SparkConnectClient {
             ));
             metadata.push((AUTHORIZATION_HEADER.to_string(), bearer));
         }
+        let call_credentials = match builder.token() {
+            Some(_) => headers.last().cloned().into_iter().collect(),
+            None => Vec::new(),
+        };
 
         let user_id = builder.user_id().map(String::from).or_else(default_user_id);
         Ok(Self {
@@ -1879,6 +1908,8 @@ impl SparkConnectClient {
             user_id,
             metadata,
             headers,
+            call_credentials,
+            metadata_source: Default::default(),
             user_agent: std::sync::Arc::new(crate::fork::Shared::new(user_agent)),
             user_context_extensions: Default::default(),
             retry_policy: Default::default(),
@@ -2132,6 +2163,9 @@ impl SparkConnectClient {
             user_id,
             metadata: self.metadata.clone(),
             headers: self.headers.clone(),
+            call_credentials: self.call_credentials.clone(),
+            // A client of a new session reads the metadata of its own builder, if anything.
+            metadata_source: Default::default(),
             user_agent: std::sync::Arc::new(crate::fork::Shared::new(self.user_agent.get())),
             // As PySpark's client of a new session, of no user context extensions.
             user_context_extensions: Default::default(),
@@ -2819,6 +2853,25 @@ impl SparkConnectClient {
     #[doc(hidden)]
     pub fn set_retry_decider(&self, decider: Option<std::sync::Arc<dyn RetryDecider>>) {
         self.retry_decider.set(decider);
+    }
+
+    /// Give the calls of this client and of its clones, from now on, the metadata of `calls`, and
+    /// the requests of the artifacts that of `artifacts`, in place of the metadata of the builder,
+    /// with the `authorization` of the token, or that of the builder again with none: as the
+    /// Python binding does of a channel builder whose `metadata()` is its own, which PySpark's
+    /// client calls for each attempt of a call, and once as it is made, of which its
+    /// ArtifactManager sends its requests. The requests of a reattachable execution, and the
+    /// release of its results, carry the metadata of `calls` as the execution started, as
+    /// PySpark's iterator is made of a `metadata()`, and a request sent in the background, of no
+    /// caller, the metadata of the builder. A client of a new session has none. Not a stable API.
+    #[doc(hidden)]
+    pub fn set_metadata_source(
+        &self,
+        calls: Option<std::sync::Arc<dyn crate::channel::MetadataSource>>,
+        artifacts: Option<std::sync::Arc<dyn crate::channel::MetadataSource>>,
+    ) {
+        self.metadata_source
+            .set(MetadataSources { calls, artifacts });
     }
 
     /// The retries of a call of the kind `call` that starts now: of the decider of the client, if
@@ -3760,6 +3813,13 @@ impl SparkConnectClient {
         log: crate::client_log::ExecutionLog,
     ) -> Result<ReattachableResponseStream> {
         let reattachable = self.reattachable_execute();
+        // As PySpark's: the metadata of a reattachable execution is read once, of which its
+        // iterator sends each of its requests; each attempt of one that is not reads its own.
+        let execution_metadata = if reattachable {
+            Some(self.metadata_of_execution().await?)
+        } else {
+            None
+        };
         let iter = if reattachable {
             ExecutePlanResponseReattachableIterator::new(request)
         } else {
@@ -3789,10 +3849,23 @@ impl SparkConnectClient {
             let op = || {
                 let request = clone_on_grown_stack(iter.request());
                 let mut req = with_deadline(Request::new(request), deadline);
-                self._attach_metadata(&mut req);
+                let refused = match &execution_metadata {
+                    Some(Ok(metadata)) => {
+                        add_metadata(&mut req, metadata);
+                        None
+                    }
+                    Some(Err(status)) => Some(status.clone()),
+                    None => {
+                        self._attach_metadata(&mut req);
+                        None
+                    }
+                };
                 stream_deadline = stream_deadline_in(deadline);
                 let mut stub = self.stub();
                 async move {
+                    if let Some(status) = refused {
+                        return Err(status);
+                    }
                     within_deadline(deadline, stub.execute_plan(req))
                         .await
                         .map(Response::into_inner)
@@ -3834,17 +3907,23 @@ impl SparkConnectClient {
                     if let Some(refused) = release_refused() {
                         return Err(refused);
                     }
-                    // Of an execution whose iterator ended with the failure.
-                    self.spawn_release(
-                        self.execution_metadata(),
-                        iter.release_all_request(),
-                        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
-                    );
+                    // Of an execution whose iterator ended with the failure. Of metadata that
+                    // gRPC does not send, the release fails too, unsent.
+                    if let Some(Ok(metadata)) = &execution_metadata {
+                        self.spawn_release(
+                            metadata.clone(),
+                            iter.release_all_request(),
+                            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+                        );
+                    }
                 }
                 return Err(error.with_operation_id(iter.operation_id()));
             }
         };
         Ok(ReattachableResponseStream {
+            metadata: execution_metadata
+                .and_then(std::result::Result::ok)
+                .unwrap_or_else(|| self.execution_metadata()),
             client: self.clone(),
             log,
             reattachable,
@@ -3900,6 +3979,10 @@ impl SparkConnectClient {
     /// which names the class of grpcio's error in the message of a status that the server did not
     /// raise an error of (see [`SparkError::from_grpc_status_of`]).
     async fn error_from_status_of(&self, status: tonic::Status, call: GrpcCall) -> SparkError {
+        // The error of the source of the metadata of the call, which PySpark raises as it is.
+        if let Some(error) = crate::metadata::metadata_failure(&status) {
+            return error;
+        }
         let failure = crate::error::grpcio_error(&status, call);
         // As PySpark's `_handle_error`, which raises the error of a call as grpc gives it while the
         // thread handles another failure of the client (`inside_error_handling`), as of a call
@@ -4918,7 +5001,7 @@ impl SparkConnectClient {
         });
         let deadline = self.rpc_deadlines.add_artifacts;
         let mut req = with_deadline(Request::new(futures::stream::iter(requests)), deadline);
-        self._attach_metadata(&mut req);
+        self.attach_artifact_metadata(&mut req);
         within_deadline(deadline, self.stub().add_artifacts(req))
             .await
             .map(Response::into_inner)
@@ -4958,7 +5041,7 @@ impl SparkConnectClient {
 
         let deadline = self.rpc_deadlines.artifact_status;
         let mut req = with_deadline(Request::new(request), deadline);
-        self._attach_metadata(&mut req);
+        self.attach_artifact_metadata(&mut req);
         within_deadline(deadline, self.stub().artifact_status(req))
             .await
             .map(Response::into_inner)
@@ -4967,8 +5050,43 @@ impl SparkConnectClient {
     /// Attach metadata headers to a request.
     ///
     /// Inserts the metadata of the connection string and the token (if present) into the gRPC
-    /// metadata. They were validated by `connect`. The `user-agent` header is tonic's own.
+    /// metadata. They were validated by `connect`. The `user-agent` header is tonic's own. Of a
+    /// source of the metadata ([`SparkConnectClient::set_metadata_source`]), the `authorization`
+    /// of the token only, and the mark of the source, which gives the rest as the request is sent
+    /// (see `crate::metadata::Checked`).
     fn _attach_metadata<T>(&self, req: &mut Request<T>) {
+        match self.metadata_source.get().calls {
+            Some(source) => self.attach_pending_metadata(req, source),
+            None => self.attach_static_metadata(req),
+        }
+    }
+
+    /// Attach the metadata of a request of the artifacts, as PySpark's ArtifactManager sends the
+    /// `metadata()` that its client read when it was made: of the source of the artifacts, if
+    /// any (see [`SparkConnectClient::set_metadata_source`]), else of the builder.
+    fn attach_artifact_metadata<T>(&self, req: &mut Request<T>) {
+        match self.metadata_source.get().artifacts {
+            Some(source) => self.attach_pending_metadata(req, source),
+            None => self.attach_static_metadata(req),
+        }
+    }
+
+    /// Attach the `authorization` of the token to a request, and the mark of `source`, which
+    /// gives the rest of its metadata as it is sent (see `crate::metadata::Checked`).
+    fn attach_pending_metadata<T>(
+        &self,
+        req: &mut Request<T>,
+        source: std::sync::Arc<dyn crate::channel::MetadataSource>,
+    ) {
+        for (key, value) in &self.call_credentials {
+            req.metadata_mut().insert(key.clone(), value.clone());
+        }
+        req.extensions_mut()
+            .insert(crate::metadata::PendingMetadata(source));
+    }
+
+    /// Attach the metadata of the builder, and the token, to a request.
+    fn attach_static_metadata<T>(&self, req: &mut Request<T>) {
         let metadata = req.metadata_mut();
         // NOTE: the session id is carried in the request *body* (proto), not in gRPC
         // metadata. The reference client sends no `session_id` header; sending one
@@ -5027,6 +5145,14 @@ fn metadata_value(key: &str, value: &str) -> Result<AsciiMetadataValue> {
     Ok(header)
 }
 
+/// The sources of the metadata of a client (see [`SparkConnectClient::set_metadata_source`]): of
+/// its calls, and of the requests of its artifacts.
+#[derive(Clone, Default)]
+struct MetadataSources {
+    calls: Option<std::sync::Arc<dyn crate::channel::MetadataSource>>,
+    artifacts: Option<std::sync::Arc<dyn crate::channel::MetadataSource>>,
+}
+
 /// The `Bearer <token>` of the token as the value of the `authorization` header. grpc-python,
 /// whose call credentials add the header, fails every call of a token that is not a header
 /// value with `UNAVAILABLE: Illegal metadata`; this is that error, which never holds the
@@ -5080,6 +5206,9 @@ pub struct ReattachableResponseStream {
     /// The client that started the execution, whose stub, headers, session and retry policy it
     /// uses.
     client: SparkConnectClient,
+    /// The gRPC metadata of the requests of the execution, as it started (see
+    /// `SparkConnectClient::metadata_of_execution`).
+    metadata: MetadataMap,
     /// What PySpark's client logs of the execution, of its responses as they are read.
     log: crate::client_log::ExecutionLog,
     /// Whether the execution is reattachable, as
@@ -5156,6 +5285,26 @@ fn release_refused() -> Option<SparkError> {
 }
 
 impl SparkConnectClient {
+    /// The gRPC metadata of every request of a reattachable execution that starts now, as
+    /// PySpark's iterator of the execution is made of a `metadata()`: of the source of the
+    /// metadata of the calls, read once (see [`SparkConnectClient::set_metadata_source`]), with
+    /// the `authorization` of the token, or the `INTERNAL` of metadata that gRPC does not send,
+    /// which fails the requests; else of the builder. The error is that of the source.
+    async fn metadata_of_execution(
+        &self,
+    ) -> Result<std::result::Result<MetadataMap, tonic::Status>> {
+        let Some(source) = self.metadata_source.get().calls else {
+            return Ok(Ok(self.execution_metadata()));
+        };
+        let pairs = source.metadata().await?;
+        Ok(crate::metadata::call_metadata(&pairs).map(|mut metadata| {
+            for (key, value) in &self.call_credentials {
+                metadata.insert(key.clone(), value.clone());
+            }
+            metadata
+        }))
+    }
+
     /// The gRPC metadata of every request about an execution.
     fn execution_metadata(&self) -> MetadataMap {
         let mut metadata = MetadataMap::new();
@@ -5347,11 +5496,11 @@ impl ReattachableResponseStream {
 
     /// The gRPC metadata of every request about this execution.
     fn metadata_map(&self) -> MetadataMap {
-        self.client.execution_metadata()
+        self.metadata.clone()
     }
 
     fn attach_metadata<T>(&self, req: &mut Request<T>) {
-        *req.metadata_mut() = self.metadata_map();
+        add_metadata(req, &self.metadata);
     }
 
     /// Next response, transparently reattaching whenever the stream ends before
@@ -5781,7 +5930,7 @@ impl ReattachableResponseStream {
         };
         let request = clone_on_grown_stack(self.iter.request());
         let mut req = with_deadline(Request::new(request), deadline);
-        self.client._attach_metadata(&mut req);
+        self.attach_metadata(&mut req);
         self.stream_deadline = stream_deadline_in(deadline);
         let response = within_deadline(deadline, self.client.stub().execute_plan(req)).await?;
         Ok(response.into_inner())
@@ -5867,7 +6016,7 @@ impl ReattachableResponseStream {
     /// Sends `request` in the background, as [`SparkConnectClient::spawn_release`] does.
     fn spawn_release(&self, request: ReleaseExecuteRequest) {
         self.client.spawn_release(
-            self.client.execution_metadata(),
+            self.metadata_map(),
             request,
             std::sync::Arc::clone(&self.stream_ended),
         );

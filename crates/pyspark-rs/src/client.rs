@@ -848,6 +848,84 @@ pub(crate) fn set_retry_decider(session: &SparkSession, policies: Option<Bound<'
     session.set_retry_decider(decider);
 }
 
+/// The metadata of the calls of a channel builder of a `metadata()` of its own, which PySpark's
+/// client calls for each attempt of a call (see `spark_connect_core::channel::MetadataSource`), or
+/// of its requests of the artifacts, of the `metadata()` that the client read when it was made:
+/// encoded as grpcio encodes the metadata of a call (`_metadata_of_call` of
+/// `pyspark.sql.connect.client.core`), of its errors, which fail the call as they are. Read on the
+/// thread of the call, with the GIL, as the retry policies are decided, of the exception that the
+/// thread was raising kept as it was.
+pub(crate) enum BuilderMetadata {
+    /// Of the `metadata()` of the builder, at each call.
+    Calls(std::sync::Arc<Py<PyAny>>),
+    /// Of the `metadata()` that the client read when it was made.
+    Read(std::sync::Arc<Py<PyAny>>),
+}
+
+impl spark_connect_core::channel::MetadataSource for BuilderMetadata {
+    #[allow(clippy::type_complexity)]
+    fn metadata(
+        &self,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = spark_connect_core::error::Result<Vec<(Vec<u8>, Vec<u8>)>>,
+                > + Send
+                + 'static,
+        >,
+    > {
+        let (object, of_builder) = match self {
+            BuilderMetadata::Calls(builder) => (std::sync::Arc::clone(builder), true),
+            BuilderMetadata::Read(metadata) => (std::sync::Arc::clone(metadata), false),
+        };
+        Box::pin(async move {
+            // Of the exception that propagates on the thread kept, of a request that a native drop
+            // or finalizer sends (see `crate::deliver::preserving_pending_exception`).
+            let read = crate::deliver::call(move |py| {
+                let object = object.bind(py);
+                let metadata = if of_builder {
+                    object.call_method0(pyo3::intern!(py, "metadata"))?
+                } else {
+                    object.clone()
+                };
+                py.import("pyspark.sql.connect.client.core")?
+                    .getattr("_metadata_of_call")?
+                    .call1((metadata,))?
+                    .extract::<Vec<(Vec<u8>, Vec<u8>)>>()
+            })
+            .await;
+            match read {
+                Some(Ok(pairs)) => Ok(pairs),
+                Some(Err(raised)) => Err(crate::errors::callback_error(raised)),
+                // The interpreter exits: of no metadata of the builder.
+                None => Ok(Vec::new()),
+            }
+        })
+    }
+}
+
+/// Read the metadata of the calls of `session` of the `metadata()` of `builder`, a channel
+/// builder of a method of its own, from now on, and that of its requests of the artifacts of
+/// `read`, the `metadata()` that its client read when it was made (see [`BuilderMetadata`]).
+pub(crate) fn set_metadata_source(
+    session: &SparkSession,
+    builder: Bound<'_, PyAny>,
+    read: Bound<'_, PyAny>,
+) {
+    let source = |metadata: BuilderMetadata| {
+        Some(std::sync::Arc::new(metadata)
+            as std::sync::Arc<
+                dyn spark_connect_core::channel::MetadataSource,
+            >)
+    };
+    session.set_metadata_source(
+        source(BuilderMetadata::Calls(std::sync::Arc::new(
+            builder.unbind(),
+        ))),
+        source(BuilderMetadata::Read(std::sync::Arc::new(read.unbind()))),
+    );
+}
+
 /// Make the client warn as PySpark's when the retries of a call are spent (see
 /// [`RetriesWarning`]).
 pub(crate) fn warn_of_spent_retries() {

@@ -47,6 +47,54 @@ pub enum Credentials {
     Ssl,
 }
 
+/// A target of gRPC that a channel connects to, in place of the host and the port of its connection
+/// string, as the Python binding reads the `endpoint` of a channel builder, which PySpark's
+/// `toChannel` gives grpcio's channel, as gRPC's resolvers read a target (see
+/// [`ChannelBuilder::with_target`]). A connection string never sets it. Not a stable API.
+#[doc(hidden)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ChannelTarget {
+    /// A name of `dns:` (or of no scheme), which the system's resolver resolves: its `host` and
+    /// its `port`, and `name`, the name as gRPC's errors and the tunnel of a proxy give it, which
+    /// is the path of the target (`localhost:15002`, `localhost:` of the port 443).
+    Name {
+        host: String,
+        port: u16,
+        name: String,
+    },
+    /// A name of `dns:` that gRPC's resolver does not resolve, of `detail`, the error that it
+    /// gives of it (`Failed to parse port in name: localhost:abc`).
+    Unresolvable { name: String, detail: String },
+    /// The addresses of `ipv4:` and `ipv6:`, in their order, which are tried in turn, and
+    /// `authority`, the path of the target, which the tunnel of a proxy names.
+    Addresses {
+        addresses: Vec<std::net::SocketAddr>,
+        authority: String,
+    },
+    /// The sockets of `unix:`, of their paths, or of `unix-abstract:`, of their names, in their
+    /// order, which are tried in turn.
+    Unix {
+        paths: Vec<Vec<u8>>,
+        abstract_names: bool,
+    },
+    /// A target whose calls fail with the status of `code`, of gRPC's codes, and `message`, as
+    /// those of gRPC's channel of a target that it does not take do.
+    Refused { code: i32, message: String },
+}
+
+/// The metadata of the calls of a client, which a binding reads for each call, as PySpark's client
+/// calls `self._builder.metadata()` for each attempt of a call, of a channel builder whose
+/// `metadata()` is its own (see `SparkConnectClient::set_metadata_source`). Not a stable API.
+#[doc(hidden)]
+pub trait MetadataSource: Send + Sync {
+    /// The metadata of a call that is sent now, as pairs of the bytes of a key and of a value, as
+    /// grpcio encodes them (a value of a key of `-bin` is the bytes that are sent in base64), or
+    /// the error of the call, which fails it as it is. A key or a value that gRPC does not send
+    /// fails the call of gRPC's `INTERNAL` (`Invalid metadata`).
+    #[allow(clippy::type_complexity)]
+    fn metadata(&self) -> futures::future::BoxFuture<'static, Result<Vec<(Vec<u8>, Vec<u8>)>>>;
+}
+
 const GRPC_DEFAULT_KEEPALIVE_ENABLED: bool = true;
 const GRPC_DEFAULT_KEEPALIVE_TIME_MS: i64 = 60 * 1000;
 const GRPC_DEFAULT_KEEPALIVE_TIMEOUT_MS: i64 = 20 * 1000;
@@ -61,6 +109,12 @@ pub struct ChannelBuilder {
     /// The [`Credentials`] that the binding gave the builder, apart from its parameters, which
     /// no connection string sets.
     credentials: Option<Credentials>,
+    /// The [`ChannelTarget`] that the binding gave the builder, which no connection string sets.
+    target: Option<ChannelTarget>,
+    /// The metadata of the requests that the binding gave the builder, in place of the parameters
+    /// of the connection string that are not the channel's own (see
+    /// [`ChannelBuilder::with_metadata`]).
+    metadata: Option<Vec<(String, String)>>,
 }
 
 /// The gRPC/HTTP2 keepalive of a channel: PINGs after `time` without activity, a connection that
@@ -96,6 +150,25 @@ impl std::fmt::Debug for ChannelBuilder {
             .field("host", &self.host)
             .field("port", &self.port)
             .field("credentials", &self.credentials)
+            .field("target", &self.target)
+            .field(
+                "metadata",
+                &self.metadata.as_ref().map(|metadata| {
+                    metadata
+                        .iter()
+                        .map(|(key, value)| {
+                            (
+                                key.as_str(),
+                                if is_secret_param(key) {
+                                    "<redacted>"
+                                } else {
+                                    value.as_str()
+                                },
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                }),
+            )
             .finish()
     }
 }
@@ -185,6 +258,8 @@ impl ChannelBuilder {
             host,
             port,
             credentials: None,
+            target: None,
+            metadata: None,
         })
     }
 
@@ -257,6 +332,33 @@ impl ChannelBuilder {
     #[doc(hidden)]
     pub fn with_credentials(mut self, credentials: Credentials) -> Self {
         self.credentials = Some(credentials);
+        self
+    }
+
+    /// The [`ChannelTarget`] that the builder was given ([`ChannelBuilder::with_target`]), if
+    /// any. Not a stable API.
+    #[doc(hidden)]
+    pub fn target(&self) -> Option<&ChannelTarget> {
+        self.target.as_ref()
+    }
+
+    /// This builder, of the target of gRPC `target`, which its channel connects to in place of
+    /// its host and its port (see [`ChannelTarget`]), as the Python binding gives it of the
+    /// `endpoint` of a channel builder. Its host and its port stay those of the connection
+    /// string: the client shows them, and its TLS and its proxy are of the host. Not a stable API.
+    #[doc(hidden)]
+    pub fn with_target(mut self, target: ChannelTarget) -> Self {
+        self.target = Some(target);
+        self
+    }
+
+    /// This builder, of the metadata `metadata`, which the requests carry in place of the
+    /// parameters that are not the channel's own (see [`ChannelBuilder::metadata`]), in its
+    /// order, as the Python binding gives it of the `metadata()` of a channel builder, which
+    /// PySpark's client reads. Not a stable API.
+    #[doc(hidden)]
+    pub fn with_metadata(mut self, metadata: Vec<(String, String)>) -> Self {
+        self.metadata = Some(metadata);
         self
     }
 
@@ -413,8 +515,12 @@ impl ChannelBuilder {
         ))
     }
 
-    /// gRPC metadata: every param except the reserved channel-config keys.
+    /// gRPC metadata: every param except the reserved channel-config keys, or the metadata that
+    /// the builder was given ([`ChannelBuilder::with_metadata`]).
     pub fn metadata(&self) -> Vec<(String, String)> {
+        if let Some(metadata) = &self.metadata {
+            return metadata.clone();
+        }
         const RESERVED: &[&str] = &[
             PARAM_TOKEN,
             PARAM_USE_SSL,

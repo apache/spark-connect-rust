@@ -498,7 +498,7 @@ impl PySparkSessionBuilder {
     // hooks of its factories before it holds `SparkSession._lock` to make it the default.
     fn create(slf: &Bound<'_, Self>) -> PyResult<Py<PySparkSession>> {
         let py = slf.py();
-        let ((url, credentials), factories, channel_builder) = {
+        let ((url, of_builder), factories, channel_builder) = {
             let this = slf.borrow();
             let channel_builder = this
                 .channel_builder
@@ -510,10 +510,17 @@ impl PySparkSessionBuilder {
                 channel_builder,
             )
         };
-        let session = new_session(py, &url, credentials)?;
+        let user = of_builder.user.as_ref().map(|user| user.clone_ref(py));
+        let session = new_session(py, &url, of_builder)?;
         if let Some(channel_builder) = channel_builder {
             // As PySpark's session of a channel builder, whose client's `_builder` it is.
-            init_client_state(py, session.bind(py), channel_builder.bind(py), None)?;
+            init_client_state(
+                py,
+                session.bind(py),
+                channel_builder.bind(py),
+                None,
+                user.as_ref().map(|user| user.bind(py)),
+            )?;
         }
         install_hook_factories(py, &factories, &session)?;
         set_default_and_active(py, &session)?;
@@ -527,10 +534,7 @@ impl PySparkSessionBuilder {
     /// The connection URL of the session that the builder creates: that of the channel builder
     /// of `channelBuilder`, or else of `remote()`. As PySpark Connect's `create`, it is an error
     /// to give both a channel builder and a URL, or neither.
-    fn connection_url(
-        &self,
-        py: Python<'_>,
-    ) -> PyResult<(String, Option<spark_connect_core::channel::Credentials>)> {
+    fn connection_url(&self, py: Python<'_>) -> PyResult<(String, OfChannelBuilder)> {
         let remote_url = self.options().remote_url.clone();
         match &self.channel_builder {
             Some(_) if remote_url.is_some() => Err(crate::column::raise_pyspark(
@@ -539,8 +543,8 @@ impl PySparkSessionBuilder {
                 "SESSION_NEED_CONN_STR_OR_BUILDER",
                 &[],
             )),
-            Some(channel_builder) => url_of_channel_builder(channel_builder.bind(py)),
-            None => Ok((session_url(py, remote_url)?, None)),
+            Some(channel_builder) => url_of_channel_builder(channel_builder.bind(py), None),
+            None => Ok((session_url(py, remote_url)?, OfChannelBuilder::default())),
         }
     }
 
@@ -632,55 +636,116 @@ impl PySparkSessionBuilder {
     }
 }
 
-/// The `sc://` URL of the channel builder of `connection`, which has the address that PySpark's
-/// `toChannel` connects to, the `endpoint` of a `DefaultChannelBuilder`, and the `_params` of its
-/// connection, as PySpark's `ChannelBuilder` does, and the credentials of the channel of a
-/// `DefaultChannelBuilder`, which the session takes apart from the URL (see
-/// `channel::Credentials`). Its parameters are percent-encoded, as the URL parser of the transport
-/// decodes them. As PySpark's client, the channel builder of an object that is not one is
+/// What the channel of a session takes of a channel builder apart from its URL (see
+/// `url_of_channel_builder`): the credentials of PySpark's `toChannel`, the target of gRPC of its
+/// `endpoint` (see `spark_connect_core::grpc_target`), the metadata of its `metadata()`, and the
+/// `userId` of the builder as PySpark's client read it, of which the client's `_user_id` is (see
+/// `pyspark.sql.connect.client.core._init_client_state`), none of a connection string.
+#[derive(Default)]
+pub(crate) struct OfChannelBuilder {
+    credentials: Option<spark_connect_core::channel::Credentials>,
+    target: Option<spark_connect_core::channel::ChannelTarget>,
+    metadata: Option<Vec<(String, String)>>,
+    user: Option<Py<PyAny>>,
+    /// Of a builder of a `metadata()` of its own, the builder and the `metadata()` that the client
+    /// read when it was made, of which the session's calls and artifacts are (see
+    /// `crate::client::set_metadata_source`).
+    sources: Option<(Py<PyAny>, Py<PyAny>)>,
+}
+
+impl OfChannelBuilder {
+    /// Give `session`, the session of the builder, its sources of the metadata, if any.
+    fn install_sources(
+        sources: Option<(Py<PyAny>, Py<PyAny>)>,
+        py: Python<'_>,
+        session: &SparkSession,
+    ) {
+        if let Some((builder, read)) = sources {
+            crate::client::set_metadata_source(
+                session,
+                builder.bind(py).clone(),
+                read.bind(py).clone(),
+            );
+        }
+    }
+}
+
+/// The parameters of the connection of a `DefaultChannelBuilder` that the channel takes of its
+/// `_params`: the user agent, which PySpark's client reads as each request is built; the others
+/// are those of its properties, as PySpark's client and `toChannel` read them.
+const DEFAULT_BUILDER_PARAMS: &[&str] = &[spark_connect_core::channel::PARAM_USER_AGENT];
+
+/// The parameters of the connection of a builder of its own that the channel takes of its
+/// `_params`, as the channel of its `toChannel`, which the transport does not have, has them.
+const OWN_BUILDER_PARAMS: &[&str] = &[
+    spark_connect_core::channel::PARAM_USE_SSL,
+    spark_connect_core::channel::PARAM_USER_AGENT,
+    spark_connect_core::channel::PARAM_GRPC_KEEPALIVE_ENABLED,
+    spark_connect_core::channel::PARAM_GRPC_KEEPALIVE_TIME_MS,
+    spark_connect_core::channel::PARAM_GRPC_KEEPALIVE_TIMEOUT_MS,
+    spark_connect_core::channel::PARAM_GRPC_KEEPALIVE_WITHOUT_CALLS,
+];
+
+/// The `sc://` URL of the channel builder of `connection`, and what the channel takes of it apart
+/// from the URL (see [`OfChannelBuilder`]), as PySpark's client reads the builder when it is
+/// made, in its order: its `session_id` and its `userId`, once, and again when it has one
+/// (`checked`, the result of `pyspark.sql.connect.client.core._checked_channel_builder`, if the
+/// caller has it); of a `DefaultChannelBuilder`, what its `toChannel` reads, its `secure`,
+/// `use_ssl`, `_host` and `token`, of which it decides the credentials of the channel, its
+/// `endpoint`, the target of gRPC that its channel connects to, and its keepalive properties, of
+/// which its channel options are; and the `metadata()` of the builder, which the requests carry.
+/// The URL has the host and the port that stand for the target, and the parameters of the
+/// channel only: the session ID and the user that were read, the token of the credentials, the
+/// user agent and the keepalive, percent-encoded, as the URL parser of the transport decodes
+/// them. As PySpark's client, the channel builder of an object that is not one is
 /// `DefaultChannelBuilder(connection)`, whose errors are raised, such as the `TypeError` of the
-/// slicing of an object that is not a str, and its session ID, its user and its channel are read
-/// first, so that a builder of no `toChannel` raises its error (see
-/// `pyspark.sql.connect.client.core._checked_channel_builder`).
+/// slicing of an object that is not a str, and a builder of its own is of the channel of its
+/// `toChannel`, which is called for its errors, and of its `host` and its `port`, as a target.
 pub(crate) fn url_of_channel_builder(
     connection: &Bound<'_, PyAny>,
-) -> PyResult<(String, Option<spark_connect_core::channel::Credentials>)> {
-    use spark_connect_core::channel::Credentials;
+    checked: Option<&Bound<'_, PyAny>>,
+) -> PyResult<(String, OfChannelBuilder)> {
+    use spark_connect_core::channel::{self as channel, Credentials};
     let core = connection.py().import("pyspark.sql.connect.client.core")?;
-    let channel_builder = core
-        .getattr("_checked_channel_builder")?
-        .call1((connection,))?;
+    let checked = match checked {
+        Some(checked) => checked.clone(),
+        None => core
+            .getattr("_checked_channel_builder")?
+            .call1((connection,))?,
+    };
+    let (channel_builder, session_id, user): (
+        Bound<'_, PyAny>,
+        Bound<'_, PyAny>,
+        Bound<'_, PyAny>,
+    ) = checked.extract()?;
     let default = channel_builder.is_instance(&core.getattr("DefaultChannelBuilder")?)?;
-    // Preserve connection params (token/use_ssl/user_id/...) if present as `_params`.
+    let taken = if default {
+        DEFAULT_BUILDER_PARAMS
+    } else {
+        OWN_BUILDER_PARAMS
+    };
     let mut params: Vec<(String, String)> = Vec::new();
     if let Ok(dict) = channel_builder.getattr("_params") {
         if let Ok(dict) = dict.cast::<pyo3::types::PyDict>() {
-            for (k, v) in dict.iter() {
-                params.push((k.str()?.to_string(), v.str()?.to_string()));
+            for (key, value) in dict.iter() {
+                let key = key.str()?.to_string();
+                if taken.contains(&key.as_str()) {
+                    params.push((key, value.str()?.to_string()));
+                }
             }
         }
     }
-    // As PySpark's client, which reads the user ID and the token of the builder's properties,
-    // those of a subclass that overrides them, when it is made: they replace the parameters. The
-    // token of a `DefaultChannelBuilder` is that of its channel (below).
-    let properties: &[(&str, &str)] = if default {
-        &[("userId", "user_id")]
-    } else {
-        &[("userId", "user_id"), ("token", "token")]
-    };
-    for &(property, param) in properties {
-        let Ok(value) = channel_builder.getattr(property) else {
-            continue;
-        };
-        if value.is_none() {
-            continue;
-        }
-        let value = value.str()?.to_string();
-        params.retain(|(key, _)| key != param);
-        params.push((param.to_string(), value));
+    if !session_id.is_none() {
+        params.push((
+            channel::PARAM_SESSION_ID.to_string(),
+            session_id.str()?.to_string(),
+        ));
+    }
+    if !user.is_none() {
+        params.push((channel::PARAM_USER_ID.to_string(), user.str()?.to_string()));
     }
     let mut credentials = None;
-    if default {
+    let parsed = if default {
         // As PySpark's `DefaultChannelBuilder.toChannel`, of the properties of the builder, a
         // subclass's own too, in its order: a channel of no security unless the builder is
         // `secure`, and then of gRPC's local credentials when it is not `use_ssl` and its `_host`
@@ -695,27 +760,56 @@ pub(crate) fn url_of_channel_builder(
         } else {
             Credentials::Ssl
         };
-        params.retain(|(key, _)| key != "token");
         if decided != Credentials::Insecure && !channel_builder.getattr("token")?.is_none() {
             let token = channel_builder.getattr("token")?;
             if !token.is_none() {
-                params.push(("token".to_string(), token.str()?.to_string()));
+                params.push((channel::PARAM_TOKEN.to_string(), token.str()?.to_string()));
             }
         }
         credentials = Some(decided);
-    }
-    let endpoint = if default {
-        // As PySpark's `DefaultChannelBuilder.toChannel`, whose channel connects to its
-        // `endpoint`, of `_host` and `_port`, a subclass's too: not to its `host`, which PySpark's
-        // client shows only, nor to a `port` of its own.
-        endpoint_of_target(&channel_builder.getattr("endpoint")?)?
+        // Its channel connects to its `endpoint`, of `_host` and `_port`, a subclass's too: not
+        // to its `host`, which PySpark's client shows only, nor to a `port` of its own.
+        let parsed = endpoint_of_target(&channel_builder.getattr("endpoint")?)?;
+        // As its `_effective_channel_options`: the keepalive of its properties, of no time, no
+        // timeout and no PINGs without calls when it is not enabled.
+        let enabled = channel_builder.getattr("keepalive_enabled")?.is_truthy()?;
+        let flag = |on: bool| if on { "true" } else { "false" }.to_string();
+        params.push((
+            channel::PARAM_GRPC_KEEPALIVE_ENABLED.to_string(),
+            flag(enabled),
+        ));
+        if enabled {
+            for (property, param) in [
+                ("keepalive_time_ms", channel::PARAM_GRPC_KEEPALIVE_TIME_MS),
+                (
+                    "keepalive_timeout_ms",
+                    channel::PARAM_GRPC_KEEPALIVE_TIMEOUT_MS,
+                ),
+            ] {
+                let value = channel_builder.getattr(property)?;
+                params.push((param.to_string(), value.str()?.to_string()));
+            }
+            let without_calls = channel_builder
+                .getattr("keepalive_without_calls")?
+                .is_truthy()?;
+            params.push((
+                channel::PARAM_GRPC_KEEPALIVE_WITHOUT_CALLS.to_string(),
+                flag(without_calls),
+            ));
+        }
+        parsed
     } else {
-        // A builder of its own, whose `toChannel` PySpark connects through, is of its `host`, of
-        // the error of a builder that has none, as PySpark's raises it, and of its `port`, or
-        // else of its `endpoint`, the `host:port` of DefaultChannelBuilder, if it has one, else
-        // of the port of Spark Connect.
+        // A builder of its own, whose `toChannel` PySpark connects through, is of its `token`, of
+        // its `host`, of the error of a builder that has none, as PySpark's raises it, and of its
+        // `port`, or else of its `endpoint`, the `host:port` of DefaultChannelBuilder, if it has
+        // one, else of the port of Spark Connect, as a target of gRPC.
+        if let Ok(token) = channel_builder.getattr("token") {
+            if !token.is_none() {
+                params.push((channel::PARAM_TOKEN.to_string(), token.str()?.to_string()));
+            }
+        }
         let host: String = channel_builder.getattr("host")?.extract()?;
-        match channel_builder.getattr("port") {
+        let endpoint = match channel_builder.getattr("port") {
             Ok(port) => format!("{host}:{}", port.extract::<i64>().unwrap_or(15002)),
             Err(_) => match channel_builder
                 .getattr("endpoint")
@@ -724,47 +818,62 @@ pub(crate) fn url_of_channel_builder(
                 Ok(endpoint) => endpoint,
                 Err(_) => format!("{host}:15002"),
             },
-        }
+        };
+        spark_connect_core::grpc_target::parse(&endpoint)
     };
-    // An address that is not of a host and a port is refused, of which a character would be a
-    // part of the URL, not of its authority, as a parameter, a path, a query or a fragment.
-    if endpoint.contains(['/', '?', '#', ';', '@']) || endpoint.chars().any(char::is_whitespace) {
-        return Err(crate::column::raise_pyspark(
-            connection.py(),
-            "PySparkValueError",
-            "INVALID_CONNECT_URL",
-            &[(
-                "detail",
-                &format!(
-                    "The endpoint '{endpoint}' of the channel builder must be of a host and a \
-                     port, of no '/', '?', '#', ';', '@' or whitespace. Please update the \
-                     endpoint to follow the correct format, e.g., 'hostname:port'."
-                ),
-            )],
-        ));
-    }
-    let mut url = format!("sc://{endpoint}");
+    // As PySpark's client, whose requests carry the `metadata()` of the builder, which it reads
+    // once it has made its channel, for its ArtifactManager: of `ChannelBuilder`'s, of the
+    // parameters, the metadata of the requests; of a method of its own, which the client calls
+    // again for each call, the calls read it then, and the artifacts encode this one then, as
+    // grpcio checks the metadata of each call (see `crate::client::BuilderMetadata`).
+    let read = channel_builder.call_method0("metadata")?;
+    let (metadata, sources) = if core
+        .getattr("_metadata_of_its_own")?
+        .call1((&channel_builder,))?
+        .is_truthy()?
+    {
+        (
+            Vec::new(),
+            Some((channel_builder.clone().unbind(), read.unbind())),
+        )
+    } else {
+        let metadata = read
+            .try_iter()?
+            .map(|pair| {
+                let (key, value): (Bound<'_, PyAny>, Bound<'_, PyAny>) = pair?.extract()?;
+                Ok((key.str()?.to_string(), value.str()?.to_string()))
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        (metadata, None)
+    };
+    let mut url = format!("sc://{}:{}", parsed.host, parsed.port);
     if !params.is_empty() {
-        let parts = params
+        let parts: Vec<String> = params
             .iter()
-            .map(|(key, value)| Ok(format!("{}={}", metadata_key(key)?, quote_param(value))))
-            .collect::<PyResult<Vec<String>>>()?;
+            .map(|(key, value)| format!("{key}={}", quote_param(value)))
+            .collect();
         url.push_str("/;");
         url.push_str(&parts.join(";"));
     }
-    Ok((url, credentials))
+    Ok((
+        url,
+        OfChannelBuilder {
+            credentials,
+            target: Some(parsed.target),
+            metadata: Some(metadata),
+            user: Some(user.unbind()),
+            sources,
+        },
+    ))
 }
 
-/// The `host:port` that gRPC's channel of PySpark's `toChannel` connects to of `target`, the
-/// `endpoint` of a `DefaultChannelBuilder`: of bytes as they are, and of the `encode("utf8")` of
-/// another object, as grpc's `_common.encode` takes a target (of the `AttributeError` of an object
-/// of no `encode`). As gRPC reads a target: a URI of the scheme of one of its resolvers, of any
-/// case, is of that scheme, the address of `dns:[//authority/]` and the first address of `ipv4:`
-/// and `ipv6:` (one of `unix:` and `unix-abstract:` raises `NOT_IMPLEMENTED`: the transport
-/// connects over TCP), and any other target is the `host[:port]` of DNS; of the default port of
-/// gRPC, 443, when it has none, as an IPv6 address without brackets has none.
-fn endpoint_of_target(target: &Bound<'_, PyAny>) -> PyResult<String> {
-    let py = target.py();
+/// What the channel of PySpark's `toChannel` connects to of `target`, the `endpoint` of a
+/// `DefaultChannelBuilder`: of bytes as they are, and of the `encode("utf8")` of another object,
+/// as grpc's `_common.encode` takes a target (of the `AttributeError` of an object of no
+/// `encode`), as gRPC's resolvers read a target (see `spark_connect_core::grpc_target`).
+fn endpoint_of_target(
+    target: &Bound<'_, PyAny>,
+) -> PyResult<spark_connect_core::grpc_target::Parsed> {
     let encoded = match target.cast::<pyo3::types::PyBytes>() {
         Ok(bytes) => bytes.clone(),
         Err(_) => target
@@ -772,58 +881,7 @@ fn endpoint_of_target(target: &Bound<'_, PyAny>) -> PyResult<String> {
             .cast_into::<pyo3::types::PyBytes>()?,
     };
     let target = String::from_utf8_lossy(encoded.as_bytes()).into_owned();
-    let (scheme, rest) = target.split_once(':').unwrap_or_default();
-    let address = if scheme.eq_ignore_ascii_case("dns") {
-        match rest.strip_prefix("//") {
-            Some(authority_and_path) => authority_and_path
-                .split_once('/')
-                .map_or("", |(_, path)| path),
-            None => rest,
-        }
-    } else if scheme.eq_ignore_ascii_case("ipv4") || scheme.eq_ignore_ascii_case("ipv6") {
-        rest.split(',').next().unwrap_or_default()
-    } else if scheme.eq_ignore_ascii_case("unix") || scheme.eq_ignore_ascii_case("unix-abstract") {
-        return Err(crate::column::raise_pyspark(
-            py,
-            "PySparkNotImplementedError",
-            "NOT_IMPLEMENTED",
-            &[(
-                "feature",
-                &format!(
-                    "An endpoint of the gRPC scheme '{}'",
-                    scheme.to_ascii_lowercase()
-                ),
-            )],
-        ));
-    } else {
-        target.as_str()
-    };
-    // Of a port, or else of gRPC's default one; an address that is neither is the transport's
-    // to refuse.
-    Ok(match address.strip_prefix('[') {
-        Some(rest) if rest.ends_with(']') => format!("{address}:443"),
-        Some(_) => address.to_string(),
-        None if address.parse::<std::net::Ipv6Addr>().is_ok() => format!("[{address}]:443"),
-        None if address.contains(':') => address.to_string(),
-        None => format!("{address}:443"),
-    })
-}
-
-/// `key`, a parameter of a channel builder, which the transport sends as the key of a metadata
-/// entry as it is, or the transport's `ValueError` of a key that gRPC does not take, of a character
-/// other than `[0-9a-z_.-]` (see `spark_connect_core::client`): so that a key of a character of
-/// the URL, such as `;` or `=`, is refused rather than a part of the URL, of the error that the
-/// transport raises of the same key of a connection string.
-fn metadata_key(key: &str) -> PyResult<&str> {
-    let legal = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_.-".contains(&b);
-    if key.is_empty() || !key.bytes().all(legal) {
-        return Err(pyo3::exceptions::PyValueError::new_err(format!(
-            "metadata was invalid: '{}' is not a gRPC metadata key, which is of the characters \
-             [0-9a-z_.-]",
-            key.escape_debug()
-        )));
-    }
-    Ok(key)
+    Ok(spark_connect_core::grpc_target::parse(&target))
 }
 
 /// `value`, percent-encoded outside the unreserved characters, so that it is one value of a
@@ -882,12 +940,13 @@ fn with_user_id_text(url: &str, user: &str) -> PyResult<String> {
 fn new_session_of_connection(
     py: Python<'_>,
     connection: &Bound<'_, PyAny>,
+    checked: Option<&Bound<'_, PyAny>>,
     user_id: Option<&Bound<'_, PyAny>>,
     hook_factories: Option<Bound<'_, PyAny>>,
     configure: impl FnOnce(spark_connect::SparkSessionBuilder) -> spark_connect::SparkSessionBuilder
         + Send,
 ) -> PyResult<Py<PySparkSession>> {
-    let session = connected_session(py, connection, user_id, configure)?;
+    let (session, _) = connected_session(py, connection, checked, user_id, configure)?;
     let session = session_object(py, &session)?;
     install_hook_factories(py, &hook_factories_of(hook_factories)?, &session)?;
     log_client_banner(py);
@@ -896,31 +955,38 @@ fn new_session_of_connection(
 
 /// The session of a new client of the URL or channel builder `connection`, of the user `user_id`
 /// unless its URL has one, of the builder that `configure` configures, as PySpark's
-/// `SparkSession(connection, userId)` makes its client.
+/// `SparkSession(connection, userId)` makes its client, and the `userId` of the channel builder
+/// as the client read it, none of a connection string (see [`OfChannelBuilder`]). `checked` is
+/// what `_checked_channel_builder` read of `connection`, if the caller read it.
 fn connected_session(
     py: Python<'_>,
     connection: &Bound<'_, PyAny>,
+    checked: Option<&Bound<'_, PyAny>>,
     user_id: Option<&Bound<'_, PyAny>>,
     configure: impl FnOnce(spark_connect::SparkSessionBuilder) -> spark_connect::SparkSessionBuilder
         + Send,
-) -> PyResult<SparkSession> {
-    let (url, credentials) = match connection.extract::<String>() {
-        Ok(url) => (url, None),
-        Err(_) => url_of_channel_builder(connection)?,
+) -> PyResult<(SparkSession, Option<Py<PyAny>>)> {
+    let (url, mut of_builder) = match connection.extract::<String>() {
+        Ok(url) => (url, OfChannelBuilder::default()),
+        Err(_) => url_of_channel_builder(connection, checked)?,
     };
     let url = match user_id.filter(|user| !user.is_none()) {
         Some(user) => with_user_id(&url, user)?,
         None => url,
     };
-    crate::gc::detach_without_parts(py, || {
-        configure(with_channel_credentials(
+    let user = of_builder.user.take();
+    let sources = of_builder.sources.take();
+    let session = crate::gc::detach_without_parts(py, || {
+        configure(of_channel_builder(
             SparkSession::builder().remote(&url),
-            credentials,
+            of_builder,
         ))
         .get_or_create()
         .map_err(Box::new)
     })
-    .to_pyerr()
+    .to_pyerr()?;
+    OfChannelBuilder::install_sources(sources, py, &session);
+    Ok((session, user))
 }
 
 /// Give `session`, a session object of `connection`, the state of the clients of PySpark's
@@ -933,10 +999,16 @@ fn init_client_state(
     session: &Bound<'_, PySparkSession>,
     connection: &Bound<'_, PyAny>,
     user_id: Option<&Bound<'_, PyAny>>,
+    builder_user: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<()> {
-    py.import("pyspark.sql.connect.client.core")?
-        .getattr("_init_client_state")?
-        .call1((session, connection, user_id))?;
+    let core = py.import("pyspark.sql.connect.client.core")?;
+    // The `userId` of the builder as the client read it (see [`OfChannelBuilder`]), else unread.
+    let builder_user = match builder_user {
+        Some(user) => user.clone(),
+        None => core.getattr("_MISSING")?,
+    };
+    core.getattr("_init_client_state")?
+        .call1((session, connection, user_id, builder_user))?;
     Ok(())
 }
 
@@ -1135,26 +1207,34 @@ fn default_session(py: Python<'_>) -> Option<Py<PySparkSession>> {
 fn new_session(
     py: Python<'_>,
     url: &str,
-    credentials: Option<spark_connect_core::channel::Credentials>,
+    mut of_builder: OfChannelBuilder,
 ) -> PyResult<Py<PySparkSession>> {
+    let sources = of_builder.sources.take();
     // The channel connects lazily, so this does not wait on the server.
-    let session = with_channel_credentials(SparkSession::builder().remote(url), credentials)
+    let session = of_channel_builder(SparkSession::builder().remote(url), of_builder)
         .get_or_create()
         .to_pyerr()?;
+    OfChannelBuilder::install_sources(sources, py, &session);
     log_rpc_deadlines(py, &session)?;
     session_object(py, &session)
 }
 
-/// `builder`, of the credentials `credentials` of the channel of a channel builder, if any, which
-/// the URL does not carry (see `url_of_channel_builder`).
-fn with_channel_credentials(
-    builder: spark_connect::SparkSessionBuilder,
-    credentials: Option<spark_connect_core::channel::Credentials>,
+/// `builder`, of what the channel takes of a channel builder apart from the URL, if any: its
+/// credentials, its target of gRPC and its metadata (see [`OfChannelBuilder`]).
+fn of_channel_builder(
+    mut builder: spark_connect::SparkSessionBuilder,
+    of_builder: OfChannelBuilder,
 ) -> spark_connect::SparkSessionBuilder {
-    match credentials {
-        Some(credentials) => builder.channel_credentials(credentials),
-        None => builder,
+    if let Some(credentials) = of_builder.credentials {
+        builder = builder.channel_credentials(credentials);
     }
+    if let Some(target) = of_builder.target {
+        builder = builder.channel_target(target);
+    }
+    if let Some(metadata) = of_builder.metadata {
+        builder = builder.channel_metadata(metadata);
+    }
+    builder
 }
 
 /// The Python session objects by session ID, held weakly, so that the registry keeps none
@@ -4424,7 +4504,8 @@ impl PySparkSession {
         hook_factories: Option<Bound<'_, PyAny>>,
     ) -> PyResult<()> {
         let py = slf.py();
-        let session = connected_session(py, connection, userId.as_ref(), |builder| builder)?;
+        let (session, builder_user) =
+            connected_session(py, connection, None, userId.as_ref(), |builder| builder)?;
         log_rpc_deadlines(py, &session)?;
         let value = PySparkSession::new(session.clone());
         let replaced = std::mem::replace(&mut *slf.borrow_mut(), value);
@@ -4434,7 +4515,13 @@ impl PySparkSession {
         let object = register_session_object(py, slf.clone().unbind(), &session)?;
         // As PySpark's client, of the channel builder of `connection` and of the user `userId`
         // as it is given, unless the connection has one.
-        init_client_state(py, object.bind(py), connection, userId.as_ref())?;
+        init_client_state(
+            py,
+            object.bind(py),
+            connection,
+            userId.as_ref(),
+            builder_user.as_ref().map(|user| user.bind(py)),
+        )?;
         install_hook_factories(py, &hook_factories_of(hook_factories)?, &object)?;
         log_client_banner(py);
         Ok(())
@@ -4445,11 +4532,15 @@ impl PySparkSession {
     /// one, whose client has the result chunking of `allow_arrow_batch_chunking` and
     /// `preferred_arrow_chunk_size` and the RPC deadlines of `rpc_deadlines`, a dict of the
     /// deadlines in seconds by the names of the fields of PySpark's `RpcDeadlines`, if given.
+    /// `checked` is what `_checked_channel_builder` read of a channel builder `connection`, which
+    /// the caller read as PySpark's client does, if any.
     #[staticmethod]
-    #[pyo3(signature = (connection, user_id, hook_factories, allow_arrow_batch_chunking, preferred_arrow_chunk_size, rpc_deadlines))]
+    #[pyo3(signature = (connection, checked, user_id, hook_factories, allow_arrow_batch_chunking, preferred_arrow_chunk_size, rpc_deadlines))]
+    #[allow(clippy::too_many_arguments)]
     fn _of_client_options(
         py: Python<'_>,
         connection: &Bound<'_, PyAny>,
+        checked: Option<Bound<'_, PyAny>>,
         user_id: Option<Bound<'_, PyAny>>,
         hook_factories: Option<Bound<'_, PyAny>>,
         allow_arrow_batch_chunking: bool,
@@ -4465,6 +4556,7 @@ impl PySparkSession {
         new_session_of_connection(
             py,
             connection,
+            checked.as_ref(),
             user_id.as_ref(),
             hook_factories,
             move |builder| {
@@ -4591,6 +4683,14 @@ impl PySparkSession {
     /// transport, or the policy again with None (see [`crate::client::PolicyRetries`]).
     fn _set_retry_decider(&self, policies: Option<Bound<'_, PyList>>) {
         crate::client::set_retry_decider(&self.session, policies);
+    }
+
+    /// Read the metadata of the calls of the session of the `metadata()` of `builder`, a channel
+    /// builder of a method of its own, for each attempt of a call from now on, as PySpark's client
+    /// calls it, and that of its requests of the artifacts of `read`, the `metadata()` that its
+    /// client read when it was made (see [`crate::client::BuilderMetadata`]).
+    fn _set_metadata_source(&self, builder: Bound<'_, PyAny>, read: Bound<'_, PyAny>) {
+        crate::client::set_metadata_source(&self.session, builder, read);
     }
 
     /// The retry policy of the RPCs of the session, as the keyword arguments of PySpark's

@@ -521,6 +521,24 @@ neither UDS or TCP loopback address.`; and `Ssl` is TLS, of the token of the con
 connection string never sets them: one of a parameter of any name is as before, so the connection
 strings of `remote()`, `SPARK_REMOTE` and the Rust API are unchanged.
 
+A `ChannelBuilder` of `ChannelBuilder::with_target` (of `channel::ChannelTarget`, with
+`ChannelBuilder::target`, `SparkSessionBuilder::channel_target` and `grpc_target::parse`, not a
+stable API), which the Python binding gives the channel of a channel builder of the target of gRPC
+of its `endpoint`, connects to the name, the addresses or the Unix sockets of the target, in their
+order, in place of its host and its port, or fails each call of the status of a target that gRPC
+refuses, and of `ChannelBuilder::with_metadata` (with `SparkSessionBuilder::channel_metadata`), the
+binding's of the `metadata()` of the builder, sends that metadata in place of its parameters; and
+`SparkConnectClient::set_metadata_source` (with `SparkSession::set_metadata_source` and
+`channel::MetadataSource`, not a stable API) gives the calls of a client the metadata of a source,
+which the binding reads of a `metadata()` of its own for each call. A connection string sets none of
+them. Of the connections of every client, a connection that fails as it starts, of the error of
+`connect`, as one of a network that cannot be reached, fails of gRPC's text of it in the dialect of
+grpcio (`FAILED_PRECONDITION: ... connect failed: addr: ... error: Network is unreachable`), and in
+that dialect a name is resolved as c-ares takes it: an address of four decimal numbers of leading
+zeros and an IPv6 address of a zone are addresses, a name of a character other than
+`[A-Za-z0-9-._/*]` or of an empty label is not resolved (`Misformatted domain name`), and a name
+that the system's resolver reads as an address, as `127.1`, is a name that it looks up.
+
 `GRPC_DEFAULT_SSL_ROOTS_FILE_PATH` and its file are read once in a process, when its first TLS
 session is made, as grpcio reads them, where each client read them when it connected, and an empty
 file is as no file, without a warning. A TLS channel trusts the roots of that file alone, as grpcio,
@@ -3995,6 +4013,32 @@ later or a connection to a port that was not given. A host that `no_proxy` lists
 directly whatever that address, as in grpcio, which resolves it only for a host that it proxies.
 As grpcio, the client logs a proxy variable that is not a proxy, and a roots file that cannot be
 read, as errors on stderr (see [Errors on stderr](configuration.md#errors-on-stderr)).
+
+The `endpoint` of a channel builder is read as grpcio's channel of PySpark's `toChannel` reads its
+target: bytes as they are, else the `encode("utf8")` of the object; a URI of the scheme of a
+resolver of gRPC, `dns`, `ipv4`, `ipv6`, `unix` or `unix-abstract`, of any case, else `dns:///` and
+the endpoint; of its authority and its path percent-decoded (`loc%61lhost:15002` is
+`localhost:15002`, and `[fe80::1%25eth0]:15002` of the zone `eth0`), and of its query and its
+fragment dropped, of the characters that gRPC takes there (`127.0.0.1:15002?x=1#y` is
+`127.0.0.1:15002`). The name of `dns:` is the path, a host and a port as gRPC's resolver splits
+them, of the port 443 without one, 80 and 443 of `http` and `https`, of a sign and of spaces around
+it, and of 16 bits (`localhost:99999` is the port 34463), resolved as c-ares resolves it, of the
+name of each error of the resolver (`errors resolving localhost:abc: [field:hostname lookup
+error:Failed to parse port in name: localhost:abc]`, `Unparsable name`, `host must not be empty in
+name`, `Misformatted domain name`); of an authority that is not an IP address and a port, each call
+fails of gRPC's `INTERNAL` (`Illegal status code from resolver; original status: INVALID_ARGUMENT:
+Cannot parse authority: ...`). The addresses of `ipv4:` and `ipv6:`, separated by `,`, each an IP
+address of the family, of a zone of IPv6, and a port of 0 to 65535, are tried in turn as those of a
+host are, and the Unix sockets of `unix:` and `unix-abstract:`, of their paths or of their abstract
+names; of none, each call fails of `UNAVAILABLE` (`empty address list`). A Unix socket is not of
+gRPC's local credentials of TCP, so a channel of them fails each call to it of `Endpoint is neither
+UDS or TCP loopback address.`, and one of TLS takes `localhost` as the name of its server, as gRPC's
+default authority of a Unix socket is; a socket of no file fails of gRPC's text of it
+(`FAILED_PRECONDITION: unix:/tmp/a.sock: connect failed: addr: unix:/tmp/a.sock error: No such file
+or directory`). A target that gRPC does not take fails each call of its `UNKNOWN` (`Failed to create
+channel to '127.0.0.1:15002?':the target uri is not valid: dns:///127.0.0.1:15002?`), which
+PySpark's retry policies do not retry, as they retry `UNAVAILABLE`. The connection string of the
+channel takes the host and the port of the target, and nothing else of the endpoint.
 
 As grpcio's, a channel connects to the addresses of its host, or of its proxy, as the system's
 resolver gives them, within the connect deadline, but those of `localhost` and of the names under

@@ -1602,6 +1602,18 @@ impl SparkSession {
         self.client.set_retry_decider(decider);
     }
 
+    /// Give the calls of this session the metadata of `source` from now on, in place of the
+    /// metadata of its connection, or that of the connection again with none (see
+    /// `SparkConnectClient::set_metadata_source`). A new session has none. Not a stable API.
+    #[doc(hidden)]
+    pub fn set_metadata_source(
+        &self,
+        calls: Option<Arc<dyn spark_connect_core::channel::MetadataSource>>,
+        artifacts: Option<Arc<dyn spark_connect_core::channel::MetadataSource>>,
+    ) {
+        self.client.set_metadata_source(calls, artifacts);
+    }
+
     /// Make the executions of this session reattachable or not, from the next one on, as PySpark's
     /// `SparkConnectClient.enable_reattachable_execute` and `disable_reattachable_execute` (see
     /// [`SparkConnectClient::set_reattachable_execute`]). A new session keeps the setting, as
@@ -2520,6 +2532,10 @@ pub struct SparkSessionBuilder {
     configure: Option<ClientConfiguration>,
     /// The credentials of the channel (see [`SparkSessionBuilder::channel_credentials`]).
     credentials: Option<spark_connect_core::channel::Credentials>,
+    /// The target of gRPC of the channel (see [`SparkSessionBuilder::channel_target`]).
+    target: Option<spark_connect_core::channel::ChannelTarget>,
+    /// The metadata of the requests (see [`SparkSessionBuilder::channel_metadata`]).
+    metadata: Option<Vec<(String, String)>>,
 }
 
 impl SparkSessionBuilder {
@@ -2529,6 +2545,8 @@ impl SparkSessionBuilder {
             remote_url: None,
             configure: None,
             credentials: None,
+            target: None,
+            metadata: None,
         }
     }
 
@@ -2542,6 +2560,24 @@ impl SparkSessionBuilder {
         credentials: spark_connect_core::channel::Credentials,
     ) -> Self {
         self.credentials = Some(credentials);
+        self
+    }
+
+    /// Connect the channel of the session to the target of gRPC `target` in place of the host and
+    /// the port of the connection string, as the Python binding gives it of the `endpoint` of a
+    /// channel builder (see `ChannelBuilder::with_target`). Not a stable API.
+    #[doc(hidden)]
+    pub fn channel_target(mut self, target: spark_connect_core::channel::ChannelTarget) -> Self {
+        self.target = Some(target);
+        self
+    }
+
+    /// Send `metadata` with the requests of the session in place of the parameters of the
+    /// connection string that are not the channel's own, as the Python binding gives it of the
+    /// `metadata()` of a channel builder (see `ChannelBuilder::with_metadata`). Not a stable API.
+    #[doc(hidden)]
+    pub fn channel_metadata(mut self, metadata: Vec<(String, String)>) -> Self {
+        self.metadata = Some(metadata);
         self
     }
 
@@ -2575,6 +2611,12 @@ impl SparkSessionBuilder {
         let mut builder = ChannelBuilder::parse(&url)?;
         if let Some(credentials) = self.credentials {
             builder = builder.with_credentials(credentials);
+        }
+        if let Some(target) = self.target {
+            builder = builder.with_target(target);
+        }
+        if let Some(metadata) = self.metadata {
+            builder = builder.with_metadata(metadata);
         }
         let mut client = block_on(SparkConnectClient::connect(&builder))?;
         if let Some(configure) = self.configure {

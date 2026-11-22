@@ -969,7 +969,8 @@ class SparkConnectClient:
             from pyspark.sql.connect.client.retries import DefaultPolicy
 
             policies = [DefaultPolicy(**retry_policy)]
-        _ = builder.session_id
+        # Its session ID and its user, and the channel of a builder of its own.
+        checked = _checked_channel_builder(builder)
         hook_factories = [_hook_factory(hook) for hook in session_hooks or []]
         deadlines = (
             None
@@ -978,6 +979,7 @@ class SparkConnectClient:
         )
         session = _pyspark.SparkSession._of_client_options(
             connection,
+            checked,
             user_id,
             hook_factories,
             allow_arrow_batch_chunking,
@@ -986,7 +988,7 @@ class SparkConnectClient:
         )
         # As PySpark's client, which logs the deadlines that it was given as it is made.
         _log_rpc_deadlines(rpc_deadlines if rpc_deadlines is not None else RpcDeadlines())
-        _init_client_state(session, builder, user_id)
+        _init_client_state(session, builder, user_id, checked[2])
         self._init_of_session(session)
         if not use_reattachable_execute:
             self.disable_reattachable_execute()
@@ -1041,7 +1043,7 @@ class SparkConnectClient:
         dropped = self._dropped
         if dropped is None:
             dropped = _pyspark.SparkSession._of_client_options(
-                self._url, None, [], True, None, None
+                self._url, None, None, [], True, None, None
             )
             dropped._close()
             self._dropped = dropped
@@ -2986,21 +2988,67 @@ del _name, _member
 _CLIENT_STATES_LOCK = threading.Lock()
 
 
-def _new_client_state(session: Any, builder: Any, user_id: Any) -> dict[str, Any]:
+def _metadata_of_its_own(builder: Any) -> bool:
+    """Whether the ``metadata()`` of the channel builder ``builder`` is its own, of its class or of
+    itself, rather than ``ChannelBuilder``'s, which the transport reads of the parameters."""
+    if builder is None:
+        return False
+    if "metadata" in getattr(builder, "__dict__", {}):
+        return True
+    return getattr(type(builder), "metadata", None) is not ChannelBuilder.metadata
+
+
+def _grpc_encode(value: Any) -> bytes:
+    """``value`` as grpcio's ``_encode`` takes a key or a value of metadata: bytes as they are, a
+    str of UTF-8, and of another the ``TypeError`` of grpcio."""
+    if isinstance(value, bytes):
+        return value
+    if isinstance(value, str):
+        return value.encode("utf8")
+    raise TypeError(f"Expected str, not {type(value)}")
+
+
+def _metadata_of_call(metadata: Any) -> list[tuple[bytes, bytes]]:
+    """The metadata ``metadata``, of the ``metadata()`` of a channel builder, as grpcio encodes the
+    metadata of a call: none of None, else the pairs of a key and a value of the iterable, of the
+    errors of the unpacking of each, of a key and a value of a str or of bytes, of grpcio's
+    ``TypeError`` of another, and of a value of bytes for a key of ``-bin``, of grpcio's
+    ``TypeError`` of another."""
+    if metadata is None:
+        return []
+    pairs = []
+    for key, value in metadata:
+        encoded_key = _grpc_encode(key)
+        encoded_value = value if encoded_key[-4:] == b"-bin" else _grpc_encode(value)
+        if not isinstance(encoded_value, bytes):
+            raise TypeError(
+                f'Binary metadata key="{key}" expected bytes, got {type(encoded_value)}'
+            )
+        pairs.append((encoded_key, encoded_value))
+    return pairs
+
+
+def _new_client_state(
+    session: Any, builder: Any, user_id: Any, builder_user: Any = _MISSING
+) -> dict[str, Any]:
     """The attributes of a new client of ``session``, as PySpark's ``SparkConnectClient`` makes
     them: its channel builder ``builder``, as ``_builder``, else a ``DefaultChannelBuilder`` of the
     connection of the session; a ``threading.local`` as its ``thread_local``; an empty list of
     global user context extensions, and its lock; the session ID of the session, as
-    ``_session_id``; and as ``_user_id``, the ``user_id`` of the channel builder, else
-    ``user_id`` as it is given, else the user of the connection of the session, of
-    ``SPARK_USER`` or ``USER``."""
+    ``_session_id``; and as ``_user_id``, the ``userId`` of the channel builder, as the client
+    read it (``builder_user``), else as it reads it now, else ``user_id`` as it is given, else the
+    user of the connection of the session, of ``SPARK_USER`` or ``USER``."""
     if builder is None:
         connection_string = getattr(session, "_connection_string", None)
         if connection_string is not None:
             # As PySpark's client of a session, of the channel builder of its connection.
             builder = DefaultChannelBuilder(connection_string())
-    if builder is not None and builder.userId is not None:
-        user = builder.userId
+    if builder_user is _MISSING:
+        builder_user = None
+        if builder is not None and builder.userId is not None:
+            builder_user = builder.userId
+    if builder_user is not None:
+        user = builder_user
     elif user_id is not None:
         user = user_id
     else:
@@ -3034,18 +3082,21 @@ def _client_state(session: Any) -> dict[str, Any]:
     return _client_context(session).state
 
 
-def _init_client_state(session: Any, connection: Any, user_id: Any = None) -> None:
+def _init_client_state(
+    session: Any, connection: Any, user_id: Any = None, builder_user: Any = _MISSING
+) -> None:
     """Give ``session``, a new session of ``connection``, the attributes of PySpark's client of
     ``connection`` and ``user_id``: of the channel builder of ``connection`` (the object itself if
-    it is one), and of the user ``user_id`` as it is given, unless the connection has one, as
-    PySpark's ``SparkSession(connection, userId)`` and ``SparkConnectClient(connection, user_id)``
-    make their client."""
+    it is one), and of the user ``user_id`` as it is given, unless the connection has one, of the
+    ``userId`` of the builder that the client read (``builder_user``, see
+    ``_checked_channel_builder``), as PySpark's ``SparkSession(connection, userId)`` and
+    ``SparkConnectClient(connection, user_id)`` make their client."""
     builder = (
         connection if isinstance(connection, ChannelBuilder) else DefaultChannelBuilder(connection)
     )
     with _CLIENT_STATES_LOCK:
         session._set_user_context_refresh(
-            _RequestContext(_new_client_state(session, builder, user_id))
+            _RequestContext(_new_client_state(session, builder, user_id, builder_user))
         )
 
 
@@ -3095,6 +3146,10 @@ def _new_session_of(
         # field of its user context, before the session is made: its requests and those of its
         # artifacts carry it.
         new = session._new_session(None if new_user is None else _proto_str(new_user))
+    if _metadata_of_its_own(new_builder):
+        # As PySpark's client of the new session, which reads the `metadata()` of its builder as
+        # it is made, and again for each call.
+        new._set_metadata_source(new_builder, new_builder.metadata())
     with _CLIENT_STATES_LOCK:
         new._set_user_context_refresh(
             _RequestContext(_new_client_state(new, new_builder, new_user))
@@ -3123,31 +3178,36 @@ def _client_of(session: Any) -> "SparkConnectClient":
     return client
 
 
-def _checked_channel_builder(connection: Any) -> ChannelBuilder:
-    """The channel builder of ``connection``, as PySpark's ``SparkConnectClient`` reads it when it
-    is made: ``connection`` itself if it is a ``ChannelBuilder``, else ``DefaultChannelBuilder``
-    of it, which raises the errors of an object that is not a connection string, such as the
-    ``TypeError`` of its slicing, of its ``session_id``, of its ``userId``, and of the channel of
-    its ``toChannel``, which a ``ChannelBuilder`` that is not a ``DefaultChannelBuilder`` has of
-    its own: PySpark's raises without one (``PySparkNotImplementedError``). The Rust transport
-    connects to the ``sc://`` URL of the ``endpoint`` of a ``DefaultChannelBuilder``, of its
-    ``_host`` and ``_port``, or of the ``host`` and the ``port`` of a builder of its own, and of
-    the ``_params`` of the
-    builder, and not to the channel of its ``toChannel``, which it calls for its errors only: a
+def _checked_channel_builder(connection: Any) -> tuple[ChannelBuilder, Any, Any]:
+    """The channel builder of ``connection``, and its session ID and its user, as PySpark's
+    ``SparkConnectClient`` reads them when it is made: ``connection`` itself if it is a
+    ``ChannelBuilder``, else ``DefaultChannelBuilder`` of it, which raises the errors of an object
+    that is not a connection string, such as the ``TypeError`` of its slicing; its ``session_id``,
+    and its ``str()`` of a second read when it has one; its ``userId``, of a second read when it
+    has one; and the channel of its ``toChannel``, which a ``ChannelBuilder`` that is not a
+    ``DefaultChannelBuilder`` has of its own: PySpark's raises without one
+    (``PySparkNotImplementedError``). The Rust transport connects to the target of gRPC of the
+    ``endpoint`` of a ``DefaultChannelBuilder``, which the binding reads with the rest of what its
+    ``toChannel`` reads, or of the ``host`` and the ``port`` of a builder of its own, and not to
+    the channel of its ``toChannel``, which it calls for its errors only: a
     ``DefaultChannelBuilder`` has none, so that one of a subclass, which may call the one of its
     base, is not called."""
     builder = (
         connection if isinstance(connection, ChannelBuilder) else DefaultChannelBuilder(connection)
     )
-    _ = builder.session_id
-    _ = builder.userId
+    session_id = builder.session_id
+    if session_id is not None:
+        session_id = str(builder.session_id)
+    user = builder.userId
+    if user is not None:
+        user = builder.userId
     if not isinstance(builder, DefaultChannelBuilder):
         to_channel = getattr(builder, "toChannel", None)
         if to_channel is None:
             # As PySpark's `ChannelBuilder.toChannel`, which a builder of its own overrides.
             raise PySparkNotImplementedError
         to_channel()
-    return builder
+    return builder, session_id, user
 
 
 def _check_data_type(data_type: Any) -> None:

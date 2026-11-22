@@ -394,6 +394,9 @@ def serve(connection):
             self.local_failure = False
             self.execute_requests = []
             self.execute_authorizations = []
+            # The metadata of each call of the server, by its kind, as `(kind, ((key, value), ...))`,
+            # but of the keys of gRPC and HTTP/2 of every call.
+            self.call_metadata = []
             # The requests of forgotten sessions that were answered, by kind: "execute", "analyze",
             # "config", "release_session", "release_execute", "reattach", "interrupt", "clone",
             # "fetch_error_details".
@@ -780,6 +783,7 @@ def serve(connection):
                     self.execute_authorizations.append(
                         dict(context.invocation_metadata()).get("authorization")
                     )
+                    self.record_metadata("execute", context)
                     self.rpc_events.append("execute")
                     self.execute_calls += 1
                 execute_epoch = self.listener_epoch
@@ -1061,7 +1065,18 @@ def serve(connection):
                 for operation_id in operation_status.get(1, [])
             ) + self.status_extra
 
+        def record_metadata(self, kind, context):
+            # The metadata of a call of `kind` (see `call_metadata`).
+            common = {"user-agent", "content-type", "te", "grpc-accept-encoding", "accept-encoding",
+                      "grpc-timeout"}
+            self.call_metadata.append((kind, tuple(
+                (key, value) for key, value in context.invocation_metadata()
+                if key not in common)))
+
         def config(self, request, context):
+            if PLAN_COMPRESSION_LOOKUP not in request:
+                with self.listener_condition:
+                    self.record_metadata("config", context)
             response = self._config(request, context)
             if PLAN_COMPRESSION_LOOKUP in request:
                 return response

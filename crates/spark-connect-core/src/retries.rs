@@ -619,6 +619,12 @@ impl Retrying {
     /// or once its retries are spent: `status` is then the error of the call.
     pub(crate) async fn backoff(&mut self, status: &tonic::Status) -> Backoff {
         use crate::error::StatusRead;
+        // The error of the source of the metadata of the attempt, which PySpark raises out of the
+        // attempt before it sends it, is the error of the call, as its policies retry no error
+        // that is not of gRPC (see `crate::metadata::MetadataFailed`).
+        if let Some(error) = crate::metadata::metadata_failure(status) {
+            return Backoff::Failed(Box::new(error));
+        }
         // The details as upb reads them, in the dialect of grpcio, read once for the readers of the
         // failure. Boxed, as they are kept across the waits.
         let read = crate::connector::grpcio_dialect()

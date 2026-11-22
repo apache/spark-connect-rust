@@ -14,6 +14,9 @@ pub mod error;
 #[doc(hidden)]
 pub mod fork;
 pub mod grpc_log;
+// The Python binding reads the endpoint of a channel builder of it.
+#[doc(hidden)]
+pub mod grpc_target;
 mod metadata;
 mod proxy;
 pub mod reattach;
