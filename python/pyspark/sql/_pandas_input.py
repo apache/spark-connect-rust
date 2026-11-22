@@ -1426,20 +1426,14 @@ def _reads_as(cls, base, names):
     return False
 
 
-def _canonical_struct(schema):
-    """Whether a native struct schema and its fields keep their own classes' behavior.
-
-    The conversion reads the fields, names and data types through the classes, and the importer
-    the native types that they hold, so a class that overrides one of these reads keeps the row
-    path. As PySpark's createDataFrame, which converts a frame under any StructType of
-    StructFields with its conversion, a Python subclass that overrides none takes it too.
-    """
+def _native_struct_classes_intact():
+    """Whether the native `StructType` and `StructField` keep their own reads: no class of them, or
+    a base, defines `__getattribute__` or `__class__`, and their `fields`, `names`, `__iter__`,
+    `name`, `dataType`, `nullable` and `metadata` are their own descriptors."""
     from types import GetSetDescriptorType, WrapperDescriptorType
 
     from pyspark._pyspark import StructField, StructType
 
-    if not isinstance(schema, StructType) or not _reads_as(type(schema), StructType, _STRUCT_READS):
-        return False
     for cls in (StructType, StructField):
         if (cls.__getattribute__ is not object.__getattribute__
                 or any("__class__" in vars(base) for base in cls.__mro__ if base is not object)):
@@ -1454,6 +1448,35 @@ def _canonical_struct(schema):
             if (type(descriptor) is not descriptor_type
                     or descriptor.__objclass__ is not cls or descriptor.__name__ != name):
                 return False
+    return True
+
+
+def converts_row_path_frames():
+    """Whether the row path converts a pandas frame of rows under a struct with PySpark's conversion
+    (`prepare_pandas_table`), as PySpark's createDataFrame does: where PyArrow is, of the native
+    classes and type names as they are (`_native_struct_classes_intact`,
+    `_converter_namespaces_intact`). The conversion then reads a struct of a class of a Python
+    subclass that reads its fields of its own, which the fast path declines (`_canonical_struct`),
+    as PySpark's does. Of a patched native class or a rebound type name, which the conversion would
+    read and the relation's schema of the native types would not, the row path converts the frame
+    of its rows."""
+    return pyarrow_available() and _native_struct_classes_intact() and _converter_namespaces_intact()
+
+
+def _canonical_struct(schema):
+    """Whether a native struct schema and its fields keep their own classes' behavior.
+
+    The conversion reads the fields, names and data types through the classes, and the importer
+    the native types that they hold, so a class that overrides one of these reads keeps the row
+    path. As PySpark's createDataFrame, which converts a frame under any StructType of
+    StructFields with its conversion, a Python subclass that overrides none takes it too.
+    """
+    from pyspark._pyspark import StructField, StructType
+
+    if not isinstance(schema, StructType) or not _reads_as(type(schema), StructType, _STRUCT_READS):
+        return False
+    if not _native_struct_classes_intact():
+        return False
     return all(
         isinstance(field, StructField) and _reads_as(type(field), StructField, _FIELD_READS)
         and type(field.name) is str

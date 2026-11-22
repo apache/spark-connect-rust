@@ -24,17 +24,28 @@ difference is intentional or tracked for a fix.
   dropped as those of local rows are, to the microsecond below, without the error of a safe cast
   (PySpark's unsafe cast of a `datetime64[ns]` column rounds a time before 1970 toward 1970:
   `1969-12-31 23:59:59.999999999` is `1970-01-01 00:00:00` there, and `1969-12-31 23:59:59.999999`
-  here and in local rows), and its errors are its own: of a frame of fewer columns than the fields
-  of its struct, `AXIS_LENGTH_MISMATCH`, where PySpark's conversion raises PyArrow's `ArrowInvalid`
-  of its rename (it zips the columns with the fields, and so does this path, of the columns past
-  the fields, which it drops). This fallback covers
+  here and in local rows), and its errors are its own. It zips the columns with the fields, as
+  PySpark's conversion does: the columns past the fields are dropped, and of a struct of no fields
+  the rows of a frame of columns too. Of a frame of fewer columns than the fields of its struct,
+  it raises `AXIS_LENGTH_MISMATCH`, where PySpark's conversion raises the error of the conversion
+  of a column that it zips with a field, if any, and then PyArrow's `ArrowInvalid` of its rename.
+  Of a frame of no columns whose index is not a RangeIndex, PySpark's table is of a column of each
+  level of the index (`pa.RecordBatch.from_pandas`), which the rename takes: `pd.DataFrame(index=
+  [0])` is `Row(a=0)` under `a long`, and raises `AXIS_LENGTH_MISMATCH` under `StructType([])`,
+  where this path raises `AXIS_LENGTH_MISMATCH` under `a long` and makes a `Row()` under
+  `StructType([])`. This fallback covers
   unavailable modules detected by `pyarrow_available`, not an installed PyArrow module that
-  fails during import. The row path also converts a frame, with PyArrow, when the type names
-  that the conversion and the importer resolve are rebound, or when the class of the struct of
-  the schema, or of one of its fields, overrides how the conversion reads it: its `fields`,
-  `names` or iteration, a field's `name`, `dataType`, `nullable` or `metadata`, or
-  `__getattribute__` or `__class__` (`accepts_pandas_schema`). The conversion would read the
-  override, and the importer the native type. A Python subclass of `StructType` or
+  fails during import. With PyArrow, a frame whose struct of the schema, or one of its fields,
+  is of a Python subclass that overrides how the conversion reads it: its `fields`, `names` or
+  iteration, a field's `name`, `dataType`, `nullable` or `metadata`, or `__getattribute__` or
+  `__class__` (`accepts_pandas_schema`), which the fast path declines, converts with PySpark's
+  conversion too, which reads the override as PySpark's does, of its table, its errors and its
+  columns; the relation's schema is of the native types of the fields, where PySpark's is of the
+  `json()` of the struct, which reads the override too (`converts_row_path_frames`). The row path
+  converts a frame of its rows, of the native types, when the type names that the conversion and
+  the importer resolve are rebound, or when the native classes themselves are patched to read
+  them otherwise: the conversion would read the patch, and the relation's schema the native
+  type. A Python subclass of `StructType` or
   `StructField` that overrides none of these takes PySpark's conversion, as in PySpark, with the
   JSON of its core types, where PySpark sends its `json()`, which names a struct of a subclass by
   its `typeName()` and which the server then fails to parse (see the types of

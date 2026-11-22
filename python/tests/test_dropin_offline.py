@@ -22443,9 +22443,49 @@ def test_create_dataframe_of_a_pandas_frame_of_another_width_zips_it_as_pyspark(
     ]:
         rows, names = sent(frame, st("a", t=t))
         assert names == ["a"] and list(rows[0]) == ["a"] and rows[0]["a"] == value, (rows, t)
-    # Of no fields, no row, and a frame of no columns of an index is of its index, as PySpark's.
-    assert sent(pd.DataFrame(ab), T.StructType()) == ([], [])
-    assert sent(pd.DataFrame(index=[0]), st("a")) == ([{"a": 0}], ["a"])
+    # Of no fields, no row, and a frame of no columns of an index is of its index, as PySpark's
+    # table of `pa.RecordBatch.from_pandas`, also of the row path, which takes PySpark's
+    # conversion where PyArrow is: a naive DatetimeIndex is of UTC wall clocks, which the
+    # session time zone does not shift. Of no fields, its columns are one more than the fields.
+    for cls in (T.StructType, Iterated):
+        assert sent(pd.DataFrame(ab), cls([])) == ([], [])
+        assert sent(pd.DataFrame(index=[0]), st("a", cls=cls)) == ([{"a": 0}], ["a"])
+        assert sent(pd.DataFrame(index=pd.DatetimeIndex(["2020-01-01"])),
+                    st("t", t=T.TimestampType(), cls=cls)) == (
+            [{"t": datetime.datetime(2020, 1, 1, tzinfo=datetime.timezone.utc)}], ["t"])
+        with pytest.raises(PySparkValueError) as error:
+            spark.createDataFrame(pd.DataFrame(index=[0]), cls([]))
+        assert error.value.getCondition() == "AXIS_LENGTH_MISMATCH"
+        assert error.value.getMessageParameters() == {
+            "expected_length": "0", "actual_length": "1"}
+    # The row path, where PyArrow is, raises the errors of PySpark's conversion of a column that
+    # it zips with the fields, of a frame of any width, and reads no label of a column.
+    class Label:
+        def __str__(self):
+            raise RuntimeError("str of a label")
+
+    for frame in (pd.DataFrame({"a": ["x"], "b": [1]}), pd.DataFrame({"a": ["x"]})):
+        with pytest.raises(PySparkValueError, match="with name 'a' to Arrow Array \\(int64\\)"):
+            spark.createDataFrame(frame, st("a", cls=Iterated))
+    for labels in ([Label()], [Label(), "b"]):
+        frame = pd.DataFrame([[1] * len(labels)], columns=pd.Index(labels, dtype=object))
+        assert sent(frame, st("a", cls=Iterated)) == ([{"a": 1}], ["a"])
+
+    # A struct of an element that is not a StructField, put in the place of a field within the
+    # names that the struct cached, zips the columns with the fields too (SPARK-62189).
+    class DuckField:
+        def __init__(self):
+            self.name, self.dataType, self.nullable, self.metadata = "d", T.LongType(), True, {}
+
+        def jsonValue(self):
+            return {"name": "d", "type": "long", "nullable": True, "metadata": {}}
+
+    ducked = st("a", "b")
+    ducked.fields[1] = DuckField()
+    assert sent(pd.DataFrame({"a": [1], "b": [2], "c": [3]}), ducked) == (
+        [{"a": 1, "b": 2}], ["a", "d"])
+    with pytest.raises(pa.ArrowInvalid, match="^tried to rename a table of 1 columns but only 2 "):
+        spark.createDataFrame(pd.DataFrame(a), ducked)
     before = len(service.execute_requests), len(service.analyze_requests)
     for cls in (T.StructType, Iterated):
         for frame, schema in [(pd.DataFrame(a), st("a", "b", cls=cls)),
@@ -22461,9 +22501,14 @@ def test_create_dataframe_of_a_pandas_frame_of_another_width_zips_it_as_pyspark(
         with pytest.raises(PySparkTypeError, match="with name 'a' to Arrow Array \\(string\\)"):
             spark.createDataFrame(pd.DataFrame(a), st("a", "b", t=T.StringType(), cls=cls))
     assert (len(service.execute_requests), len(service.analyze_requests)) == before
-    # The row path without PyArrow drops the columns past the fields too.
+    # The row path without PyArrow drops the columns past the fields too, and of no fields the
+    # rows: its relation is of no data.
     with _pandas_row_path():
         assert sent(pd.DataFrame(ab), st("a")) == ([{"a": 1}], ["a"])
+        spark.createDataFrame(pd.DataFrame(ab), T.StructType()).toArrow()
+        request = parse_message(service.execute_requests[-1])
+        local = parse_message(parse_message(parse_message(request[3][0])[1][0])[11][0])
+        assert 1 not in local and json.loads(local[2][0])["fields"] == []
         with pytest.raises(PySparkValueError) as error:
             spark.createDataFrame(pd.DataFrame(a), st("a", "b"))
         assert error.value.getCondition() == "AXIS_LENGTH_MISMATCH"

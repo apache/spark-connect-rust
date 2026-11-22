@@ -3087,12 +3087,21 @@ PySpark's shares the list of its fields. The class's own types compare without t
 a user set, where PySpark's comparison of the `__dict__`s holds them: a `DecimalType(7, 3)` of an
 attribute equals `DecimalType(7, 3)`, where a type of a Python subclass compares them (see below).
 
-`createDataFrame` of a pandas DataFrame of rows under a struct zips its columns with the fields, as
-PySpark's conversion does: the columns past the fields are dropped, and not converted, and of a
-struct of no fields the rows too, as the table of no columns has none; of fewer columns than the
-fields, it raises the errors of the conversion of its columns, and then PyArrow's `ArrowInvalid` of
-the rename of its table to the names of the fields (`tried to rename a table of 1 columns but only 2
-names were provided`).
+`createDataFrame` of a pandas DataFrame of rows under a struct converts it with PySpark's conversion
+where PyArrow is, also of a struct of a Python subclass that reads its fields of its own, and zips
+its columns with the fields, as that conversion does: the columns past the fields are dropped, and not
+converted, and of a struct of no fields the rows of a frame of columns too, as the table of the
+zip has no column and no row; of fewer columns than the fields, it raises the error of the
+conversion of a column that it zips with a field, if any, and then PyArrow's `ArrowInvalid` of the
+rename of its table to the names of the fields (`tried to rename a table of 1 columns but only 2
+names were provided`). A frame of no columns is the table of `pa.RecordBatch.from_pandas`, of its
+rows: of a RangeIndex, of no column, so `pd.DataFrame(index=range(2))` is two `Row()` under
+`StructType([])`; of another index, of a column of each level of the index, which the rename takes,
+so `pd.DataFrame(index=[0])` is `Row(a=0)` under `a long`, and raises `AXIS_LENGTH_MISMATCH` under
+`StructType([])`, of one more column than the fields. Without PyArrow, the frame takes the row path,
+which zips the columns with the fields too, but raises `AXIS_LENGTH_MISMATCH` of a frame of fewer
+columns than the fields, and does not take the columns of an index (see "pandas DataFrames without
+PyArrow" in `dev/parity/known-differences.md`).
 
 A `StructType` caches its `names` as it is made and as `add` adds a field, as PySpark's, so an
 in-place change of its `fields` list, such as a `StructField` appended, leaves `names` and

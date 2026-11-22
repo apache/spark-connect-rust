@@ -6720,8 +6720,9 @@ def test_pandas_explicit_struct_of_more_fields_raises_the_rename_of_pyspark(prot
             spark.createDataFrame(frame_class({"a": [1]}), "x long, y long")
         assert str(error.value) == (
             "tried to rename a table of 1 columns but only 2 names were provided")
-        spark.createDataFrame(frame_class({"a": [1, 2]}), T.StructType([]))
-        assert state["relations"] == []
+        spark.createDataFrame(frame_class({"a": [1, 2]}), T.StructType([])).toArrow()
+        assert [(table.num_columns, table.num_rows) for table in state["input_tables"]] == [
+            (0, 0)]
 
 
 @pytest.mark.parametrize("frame_class", [pd.DataFrame, _PandasSubclass], ids=["frame", "subclass"])
