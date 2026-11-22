@@ -2791,7 +2791,8 @@ impl PySparkSession {
         let relation = DataType::Struct {
             fields: fields.to_vec(),
         };
-        let df = interruptible(py, &self.session, || {
+        // Of no part of plans and expressions, as the other relations of local data.
+        let df = crate::interrupt::interruptible_without_parts(py, &self.session, || {
             self.session
                 .create_dataframe_from_arrow_with_options(batches, Some(relation), &options)
                 .map_err(Box::new)
