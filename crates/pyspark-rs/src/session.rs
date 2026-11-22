@@ -2804,13 +2804,16 @@ impl PySparkSession {
         }))
     }
 
-    /// A DataFrame of a pandas DataFrame on the row path, which converts it where PySpark's
-    /// conversion does not: without PyArrow, which the path does not need; when the type names
-    /// that the conversion resolves are rebound, or the classes of a struct schema customized
-    /// (`accepts_pandas_schema`); and of an empty frame, of which PySpark converts no data, or of
-    /// an atomic schema, of which it has no Arrow type. Its rows are lists with NaN and NaT as
-    /// None, typed by the first non-null value of each column, and its column labels, as
-    /// strings, or the given names, applied with `toDF`.
+    /// A DataFrame of a pandas DataFrame on the row path, of the frames that the fast path declines
+    /// (`accepts_pandas_schema`): where PyArrow is, the native classes and type names are intact
+    /// and the struct's `names` and `fields` are as many, of PySpark's conversion
+    /// (`create_from_pandas_table`); else of its rows, where PySpark's conversion does not convert
+    /// them: without PyArrow, which the path does not need; when the type names that the
+    /// conversion resolves are rebound or the native classes patched; of a struct whose `names`,
+    /// as Python reads them, are not as many as its `fields` (SPARK-62231); and of an empty frame,
+    /// of which PySpark converts no data, or of an atomic schema, of which it has no Arrow type.
+    /// Its rows are lists with NaN and NaT as None, typed by the first non-null value of each
+    /// column, and its column labels, as strings, or the given names, applied with `toDF`.
     fn create_from_pandas(
         &self,
         py: Python<'_>,
@@ -2849,6 +2852,7 @@ impl PySparkSession {
                     .getattr("converts_row_path_frames")?
                     .call0()?
                     .is_truthy()?
+                && names_as_many_as_fields(schema_object)?
             {
                 return self.create_from_pandas_table(
                     py,
@@ -3269,6 +3273,21 @@ fn pandas_column_names(
             .collect(),
         None => Ok(fields.iter().map(|field| field.name.clone()).collect()),
     }
+}
+
+/// Whether the `names` and the `fields` of the struct `schema`, as Python reads them, are as many,
+/// which PySpark's conversion zips (`_deduplicate_field_names`): a Python subclass whose `names` is
+/// a property, which the native `__init__` does not assign through, gives none (SPARK-62231). True
+/// of another schema.
+fn names_as_many_as_fields(schema: Option<&Bound<'_, PyAny>>) -> PyResult<bool> {
+    let Some(schema) =
+        schema.filter(|schema| schema.is_instance_of::<crate::types::PyStructType>())
+    else {
+        return Ok(true);
+    };
+    let py = schema.py();
+    Ok(schema.getattr(pyo3::intern!(py, "names"))?.len()?
+        == schema.getattr(pyo3::intern!(py, "fields"))?.len()?)
 }
 
 /// The Arrow table that PySpark's conversion makes of data of rows, with the settings that the

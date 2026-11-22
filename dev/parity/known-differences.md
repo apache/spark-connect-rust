@@ -35,20 +35,31 @@ difference is intentional or tracked for a fix.
   where this path raises `AXIS_LENGTH_MISMATCH` under `a long` and makes a `Row()` under
   `StructType([])`. This fallback covers
   unavailable modules detected by `pyarrow_available`, not an installed PyArrow module that
-  fails during import. With PyArrow, a frame whose struct of the schema, or one of its fields,
-  is of a Python subclass that overrides how the conversion reads it: its `fields`, `names` or
-  iteration, a field's `name`, `dataType`, `nullable` or `metadata`, or `__getattribute__` or
-  `__class__` (`accepts_pandas_schema`), which the fast path declines, converts with PySpark's
-  conversion too, which reads the override as PySpark's does, of its table, its errors and its
-  columns; the relation's schema is of the native types of the fields, where PySpark's is of the
-  `json()` of the struct, which reads the override too (`converts_row_path_frames`). The row path
-  converts a frame of its rows, of the native types, when the type names that the conversion and
-  the importer resolve are rebound, or when the native classes themselves are patched to read
-  them otherwise: the conversion would read the patch, and the relation's schema the native
-  type. A Python subclass of `StructType` or
-  `StructField` that overrides none of these takes PySpark's conversion, as in PySpark, with the
-  JSON of its core types, where PySpark sends its `json()`, which names a struct of a subclass by
-  its `typeName()` and which the server then fails to parse (see the types of
+  fails during import. With PyArrow, a frame whose struct of the schema, or one of its fields, is of
+  a Python subclass that overrides how the conversion reads it: its `fields`, `names` or iteration,
+  a field's `name`, `dataType`, `nullable` or `metadata`, or `__getattribute__` or `__class__`
+  (`accepts_pandas_schema`), which the fast path declines, converts with PySpark's conversion too,
+  which reads the override as PySpark's does, of its table, its errors and its columns
+  (`converts_row_path_frames`), when its `names` and `fields`, as Python reads them, are as many; of
+  a subclass whose `names` the native `__init__` does not set through its setter, the frame takes
+  the row path below, of the native types (SPARK-62231). The relation's schema is of the native
+  types of the fields, where PySpark's is the `json()` of the struct, which reads the overrides too:
+  of a field of a subclass whose `dataType` reads `StringType()` over a column of strs under `a
+  long`, PySpark's DataFrame is `struct<a:string>`, and the drop-in's table follows the override and
+  its schema does not, so its `schema` raises the server's `INVALID_COLUMN_OR_FIELD_DATA_TYPE`
+  ("Column or field col_0 is of type "STRING" while it's required to be "BIGINT""); the drop-in's
+  own `json()` does not read such a `dataType` either (SPARK-62236). When the native `StructType` or
+  `StructField` classes themselves are patched to read otherwise, or the type names that PySpark's
+  conversion resolves are rebound, the drop-in converts the frame of its rows, of the native types,
+  where PySpark's conversion reads the patch: it mostly raises
+  (`[UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION] LongType() is not supported`,
+  `ArrowNotImplementedError: Unsupported cast from timestamp[ns] to bool`, or the `AttributeError`
+  of a property of `StructField` that has no setter), or converts by the patched type (a public
+  `BooleanType` rebound over a column of ints `[1, 0, 2]` is `[1, 0, 1]` there and `[1, 0, 2]` here)
+  (SPARK-62237). A Python subclass of `StructType` or `StructField` that overrides none of these
+  takes PySpark's conversion, as in PySpark, with the JSON of its core types, where PySpark sends
+  its `json()`, which names a struct of a subclass by its `typeName()` and which the server then
+  fails to parse (see the types of
   `docs/compatibility.md`). So does a name that holds a NUL, at any depth, whose table the
   importer reads of its IPC stream, as the C data interface holds names as C strings.
 - **Nested pandas Decimal inference and failures** (intentional; related change:

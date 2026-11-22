@@ -22471,6 +22471,21 @@ def test_create_dataframe_of_a_pandas_frame_of_another_width_zips_it_as_pyspark(
         frame = pd.DataFrame([[1] * len(labels)], columns=pd.Index(labels, dtype=object))
         assert sent(frame, st("a", cls=Iterated)) == ([{"a": 1}], ["a"])
 
+    # A struct of a Python subclass whose `names` is a property, which the native `__init__` does
+    # not assign through, so that its `names` are not as many as its `fields`, takes the row path
+    # of its rows (SPARK-62231), as before, where PySpark's conversion would raise IndexError.
+    class StructName(T.StructType):
+        @property
+        def names(self):
+            return [n.upper() for n in self.__dict__.get("_names", [])]
+
+        @names.setter
+        def names(self, value):
+            self.__dict__["_names"] = list(value)
+
+    assert sent(pd.DataFrame(a), StructName([T.StructField("a", T.LongType())])) == (
+        [{"a": 1}], ["a"])
+
     # A struct of an element that is not a StructField, put in the place of a field within the
     # names that the struct cached, zips the columns with the fields too (SPARK-62189).
     class DuckField:

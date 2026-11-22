@@ -1494,8 +1494,9 @@ def accepts_pandas_schema(schema=None):
     arrays: only the schema and the type names are checked. The conversion and the importer
     resolve the type classes by their names, so each namespace must still hold the native
     classes (`_converter_namespaces_intact`), and they read a struct through its classes, which
-    must keep their own behavior (`_canonical_struct`); otherwise the row path, which reads the
-    native types, converts the frame.
+    must keep their own behavior (`_canonical_struct`); otherwise the row path converts the frame,
+    of PySpark's conversion where PyArrow is and the native classes and names are intact
+    (`converts_row_path_frames`), and else of its rows of the native types.
     """
     if schema is not None and type(schema) is not str and not _canonical_struct(schema):
         return False
