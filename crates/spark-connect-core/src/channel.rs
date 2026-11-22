@@ -54,13 +54,16 @@ pub enum Credentials {
 #[doc(hidden)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ChannelTarget {
-    /// A name of `dns:` (or of no scheme), which the system's resolver resolves: its `host` and
-    /// its `port`, and `name`, the name as gRPC's errors and the tunnel of a proxy give it, which
-    /// is the path of the target (`localhost:15002`, `localhost:` of the port 443).
+    /// A name of `dns:` (or of no scheme): its `host` and its `port`, and `name`, the name as
+    /// gRPC's errors and the tunnel of a proxy give it, which is the path of the target
+    /// (`localhost:15002`, `localhost:` of the port 443). The system's resolver resolves it, but
+    /// of `server`, the DNS server of the authority of the target (`dns://127.0.0.1:53/...`),
+    /// which is asked for it as gRPC's resolver asks it.
     Name {
         host: String,
         port: u16,
         name: String,
+        server: Option<std::net::SocketAddr>,
     },
     /// A name of `dns:` that gRPC's resolver does not resolve, of `detail`, the error that it
     /// gives of it (`Failed to parse port in name: localhost:abc`).

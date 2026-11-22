@@ -229,16 +229,24 @@ fn dns(uri: &Uri) -> Option<Parsed> {
     if name.is_empty() {
         return None;
     }
+    // The DNS server of the authority, as gRPC's resolver gives it to c-ares: an IP address and a
+    // port, else no resolver.
     let authority = String::from_utf8_lossy(&uri.authority);
-    if !authority.is_empty() && parse_host_port(&authority, None).is_none() {
-        return Some(refused(
-            INTERNAL,
-            format!(
-                "Illegal status code from resolver; original status: INVALID_ARGUMENT: Cannot \
-                 parse authority: {authority}"
-            ),
-        ));
-    }
+    let server = match authority.as_ref() {
+        "" => None,
+        authority => match parse_host_port(authority, None) {
+            Some(server) => Some(server),
+            None => {
+                return Some(refused(
+                    INTERNAL,
+                    format!(
+                        "Illegal status code from resolver; original status: INVALID_ARGUMENT: \
+                         Cannot parse authority: {authority}"
+                    ),
+                ));
+            }
+        },
+    };
     let unresolvable = |detail: String| {
         Some(of_localhost(ChannelTarget::Unresolvable {
             name: name.to_string(),
@@ -268,6 +276,7 @@ fn dns(uri: &Uri) -> Option<Parsed> {
             host: host.to_string(),
             port,
             name: name.to_string(),
+            server,
         },
     })
 }
@@ -625,6 +634,16 @@ mod tests {
             host: host.to_string(),
             port,
             name: name.to_string(),
+            server: None,
+        }
+    }
+
+    fn name_of_server(host: &str, port: u16, name: &str, server: &str) -> ChannelTarget {
+        ChannelTarget::Name {
+            host: host.to_string(),
+            port,
+            name: name.to_string(),
+            server: Some(server.parse().unwrap()),
         }
     }
 
@@ -733,7 +752,7 @@ mod tests {
             ),
             (
                 "dns://127.0.0.1:53/localhost:15002?x=1",
-                name("localhost", 15002, "localhost:15002"),
+                name_of_server("localhost", 15002, "localhost:15002", "127.0.0.1:53"),
             ),
             // Percent-decoded, of two hexadecimal digits only.
             (
@@ -1025,19 +1044,31 @@ mod tests {
         ] {
             assert_eq!(parse(target).target, internal(authority), "{target}");
         }
-        for target in [
-            "dns://127.0.0.1:53/localhost:15002",
-            "dns://127.0.0.1%3A53/localhost:15002",
-            "dns://%31%32%37.0.0.1:53/localhost:15002",
-            "dns://127.0.0.1:53x/localhost:15002",
-            "dns://[::1]:53/localhost:15002",
+        // The server of an authority of an IP address and a port, which the name is resolved
+        // through: of `sscanf("%d")`'s port, and of an IPv6 address of its zone.
+        for (target, server) in [
+            ("dns://127.0.0.1:53/localhost:15002", "127.0.0.1:53"),
+            ("dns://127.0.0.1%3A53/localhost:15002", "127.0.0.1:53"),
+            ("dns://%31%32%37.0.0.1:53/localhost:15002", "127.0.0.1:53"),
+            ("dns://127.0.0.1:53x/localhost:15002", "127.0.0.1:53"),
+            ("dns://127.0.0.1:+5353/localhost:15002", "127.0.0.1:5353"),
+            ("dns://[::1]:53/localhost:15002", "[::1]:53"),
+            ("dns://[::1]:0/localhost:15002", "[::1]:0"),
         ] {
             assert_eq!(
                 parse(target).target,
-                name("localhost", 15002, "localhost:15002"),
+                name_of_server("localhost", 15002, "localhost:15002", server),
                 "{target}"
             );
         }
+        // A name that gRPC's resolver does not take fails as it does of no authority.
+        assert_eq!(
+            parse("dns://127.0.0.1:53/localhost:abc").target,
+            unresolvable(
+                "localhost:abc",
+                "Failed to parse port in name: localhost:abc"
+            )
+        );
     }
 
     #[test]

@@ -10,6 +10,7 @@ pub mod channel;
 pub mod client;
 pub mod client_log;
 mod connector;
+mod dns;
 pub mod error;
 #[doc(hidden)]
 pub mod fork;

@@ -674,10 +674,21 @@ requests of the unpickled object pickle as it is then. This case still differs:
   token. The endpoint is read as gRPC reads a target (see `docs/compatibility.md`): of its bytes up
   to a NUL, of gRPC's names of it, its default authority, of the `:authority` of the calls and of
   the name that TLS verifies, and the server of the tunnel of a proxy and the host of its
-  exclusions; the host of the connection string stands for the target only, and decides neither its
-  TLS, nor its token, nor its proxy, nor its calls. What stays different: of `dns://` and an
-  authority of an IP address and a port, the name is resolved with the system's resolver, as any
-  name, where gRPC's resolver asks the DNS server of the authority (until SPARK-62232); the
+  exclusions, and the name of `dns://` and an authority of an IP address and a port is asked of that
+  DNS server, as gRPC's resolver asks it; the host of the connection string stands for the target
+  only, and decides neither its TLS, nor its token, nor its proxy, nor its calls. What stays
+  different: a channel resolves its name again as each pass of its attempts to connect starts, of a
+  backoff from the start of the last pass, where gRPC's resolver resolves it again no sooner than 30
+  s after its last resolution, connecting to the addresses of that one meanwhile, and of its backoff
+  from the end of a resolution that failed (until SPARK-62233); a new session of a target that the
+  process is connected to shares the connection, and does not resolve its name again, where the
+  channel of each client of grpcio resolves it (until SPARK-62234); the search domains and the
+  options of a lookup through a DNS server are those of `/etc/resolv.conf`, `LOCALDOMAIN` and
+  `RES_OPTIONS` on any system, where c-ares reads them on macOS of the system's configuration of
+  DNS, of each of its resolvers of no domain (their search lists joined), and not of
+  `/etc/resolv.conf` (`ares_sysconfig_mac.c` of c-ares 1.34.5), and on Windows of the registry (the
+  `SearchList`, `Domain`, `DhcpDomain` and `PrimaryDnsSuffix` of TCP/IP, of its policies and of each
+  interface; `ares_sysconfig_win.c`), which the transport does not read (until SPARK-62254); the
   `:authority` of the calls of a target whose authority HTTP's URIs cannot hold, of a `%` but in
   brackets or of more than one `:`, as of a Unix socket (`tmp%2Fa.sock`) or of a list of addresses,
   is the host and the port of the connection string (`localhost:443`, the first address), as hyper
