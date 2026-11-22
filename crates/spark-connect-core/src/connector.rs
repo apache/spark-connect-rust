@@ -162,10 +162,18 @@ pub(crate) struct Tls {
     /// The name that the certificates are checked against, as given, by which the connections of
     /// the process are told apart (see [`Target::key`]).
     name: String,
-    /// Whether rustls can check the certificates against the name: of a name that is neither an
-    /// IP address nor a name of DNS, which no certificate matches, each session's certificate
-    /// fails its check of the name once its chain is verified (see [`Tls::of_target_name`]).
-    verifiable: bool,
+    /// How the name of the certificate of a server is checked.
+    check: NameCheck,
+}
+
+/// How the name of the certificate of a server is checked: by webpki, of the name of the server
+/// of a connection string, or as gRPC checks it, of the name of a target of gRPC (see
+/// [`crate::tls_names`]).
+#[derive(Clone, Debug)]
+enum NameCheck {
+    Webpki,
+    /// Of the name that gRPC's TLS verifies, None of none, which no certificate is of.
+    Grpc(Option<String>),
 }
 
 impl Tls {
@@ -179,35 +187,58 @@ impl Tls {
         let (store, provider) = Self::store_of(roots);
         let server_name = ServerName::try_from(domain.to_string())
             .map_err(|error| format!("invalid server name {domain:?}: {error}"))?;
-        Self::of_store(store, provider, server_name, domain, true)
+        Self::of_store(store, provider, server_name, domain, NameCheck::Webpki)
     }
 
     /// The TLS of a channel to a target of gRPC, of the name `name` that gRPC's TLS verifies of its
-    /// authority (see `crate::channel::TargetNames::tls_name`), whose sessions trust `roots`. As
-    /// gRPC's check of the peer, an IP address is checked against the addresses of the
-    /// certificate and a name of DNS against its names; of a name that is neither, as of a `*` or
-    /// of a list of addresses, or of none, the TLS is made all the same, of no SNI, and each
-    /// session's certificate fails its check of the name once its chain is verified, as gRPC's
-    /// fails (`Hostname Verification Check failed`), so that nothing is sent to its server.
+    /// authority (see `crate::channel::TargetNames::tls_name`), whose sessions trust `roots`. The
+    /// chain of the certificate of a server is verified as of any TLS, and its name as gRPC checks
+    /// it (see [`crate::tls_names`]): once the handshake is done, of the name, which fails the
+    /// attempt of gRPC's error of it (`Hostname Verification Check failed`), so that nothing is sent
+    /// to the server, and for each call, of the host of the calls (see
+    /// [`Tls::of_the_call_host`]). Of no name, each attempt fails. SNI is sent of a name of DNS
+    /// only, as rustls sends no other.
     pub(crate) fn of_target_name(name: Option<&str>, roots: Roots<'_>) -> Result<Self, String> {
         use rustls::pki_types::ServerName;
         let unbracketed = name.map(|name| name.trim_start_matches('[').trim_end_matches(']'));
-        let server_name = unbracketed.and_then(|name| match name.parse::<std::net::IpAddr>() {
-            Ok(ip) => Some(ServerName::IpAddress(ip.into())),
-            Err(_) => ServerName::try_from(name.to_string()).ok(),
-        });
-        let verifiable = server_name.is_some();
-        let server_name = server_name.unwrap_or(ServerName::IpAddress(
-            std::net::IpAddr::from(std::net::Ipv4Addr::UNSPECIFIED).into(),
-        ));
+        let server_name = unbracketed
+            .and_then(|name| match name.parse::<std::net::IpAddr>() {
+                Ok(ip) => Some(ServerName::IpAddress(ip.into())),
+                Err(_) => ServerName::try_from(name.to_string()).ok(),
+            })
+            .unwrap_or(ServerName::IpAddress(
+                std::net::IpAddr::from(std::net::Ipv4Addr::UNSPECIFIED).into(),
+            ));
         let (store, provider) = Self::store_of(roots);
         Self::of_store(
             store,
             provider,
             server_name,
             name.unwrap_or_default(),
-            verifiable,
+            NameCheck::Grpc(name.map(str::to_string)),
         )
+    }
+
+    /// Whether the certificate of the server of `stream`, a session of this TLS, is of the host of
+    /// the calls, as gRPC's `SslCheckCallHost` checks it for each call, of the name of a target of
+    /// gRPC (see [`crate::tls_names::PeerNames::of_call_host`]): else each call fails of
+    /// `UNAUTHENTICATED`, which is not retried (see [`call_host_refused`]).
+    fn of_the_call_host(&self, stream: &tokio_rustls::client::TlsStream<Socket>) -> bool {
+        let NameCheck::Grpc(name) = &self.check else {
+            return true;
+        };
+        let certificate = stream
+            .get_ref()
+            .1
+            .peer_certificates()
+            .and_then(|certificates| certificates.first());
+        match (name, certificate) {
+            (Some(name), Some(certificate)) => {
+                crate::tls_names::PeerNames::of_certificate(certificate)
+                    .is_some_and(|names| names.of_call_host(name))
+            }
+            _ => false,
+        }
     }
 
     /// The roots of `roots`, and the crypto provider (see [`Tls::new`]).
@@ -243,14 +274,14 @@ impl Tls {
         (store, provider)
     }
 
-    /// The TLS of the roots `store` of `provider`, to the server of `server_name`, which is the
-    /// name `name` if `verifiable`.
+    /// The TLS of the roots `store` of `provider`, to the server of `server_name`, of the name
+    /// `name`, checked of `check`.
     fn of_store(
         store: rustls::RootCertStore,
         provider: Arc<rustls::crypto::CryptoProvider>,
         server_name: rustls::pki_types::ServerName<'static>,
         name: &str,
-        verifiable: bool,
+        check: NameCheck,
     ) -> Result<Self, String> {
         let name = name.to_string();
         if store.is_empty() {
@@ -258,7 +289,7 @@ impl Tls {
                 trust: None,
                 server_name,
                 name,
-                verifiable,
+                check,
             });
         }
         let webpki = rustls::client::WebPkiServerVerifier::builder_with_provider(
@@ -281,7 +312,7 @@ impl Tls {
             trust: Some((Arc::new(config), webpki)),
             server_name,
             name,
-            verifiable,
+            check,
         })
     }
 
@@ -292,7 +323,7 @@ impl Tls {
         let verifier = Arc::new(Verifier {
             inner: webpki.clone(),
             self_signed: Default::default(),
-            verifiable: self.verifiable,
+            check: self.check.clone(),
         });
         let mut config = (**config).clone();
         config
@@ -309,9 +340,8 @@ struct Verifier {
     inner: Arc<rustls::client::WebPkiServerVerifier>,
     /// How the last chain that the verifier did not trust is self-signed, if it is.
     self_signed: Mutex<Option<SelfSigned>>,
-    /// Whether the name of the server can be checked (see [`Tls::of_target_name`]): else a
-    /// certificate of a chain that is verified is not of the name.
-    verifiable: bool,
+    /// How the name of the certificate is checked.
+    check: NameCheck,
 }
 
 /// How a chain of certificates that is not trusted is self-signed, which BoringSSL's error tells.
@@ -351,19 +381,29 @@ impl rustls::client::danger::ServerCertVerifier for Verifier {
             };
             *self.self_signed.lock().unwrap_or_else(|e| e.into_inner()) = self_signed;
         }
-        if self.verifiable {
+        let NameCheck::Grpc(name) = &self.check else {
             return verified;
-        }
-        // Of a name that no certificate matches: the chain first, as BoringSSL verifies it in the
-        // handshake, then the name, as gRPC checks it once the handshake is done.
+        };
+        // The chain first, as BoringSSL verifies it in the handshake, which webpki verifies before
+        // the name, then the name, as gRPC checks it once the handshake is done.
         match verified {
             Ok(_)
             | Err(rustls::Error::InvalidCertificate(
                 rustls::CertificateError::NotValidForName
                 | rustls::CertificateError::NotValidForNameContext { .. },
-            )) => Err(rustls::Error::InvalidCertificate(
-                rustls::CertificateError::NotValidForName,
-            )),
+            )) => {
+                let of_the_name = name.as_deref().is_some_and(|name| {
+                    crate::tls_names::PeerNames::of_certificate(end_entity)
+                        .is_some_and(|names| names.of_target_name(name))
+                });
+                if of_the_name {
+                    Ok(rustls::client::danger::ServerCertVerified::assertion())
+                } else {
+                    Err(rustls::Error::InvalidCertificate(
+                        rustls::CertificateError::NotValidForName,
+                    ))
+                }
+            }
             Err(error) => Err(error),
         }
     }
@@ -1296,7 +1336,7 @@ fn grpc_address(address: &Address) -> String {
             } else {
                 "unix"
             };
-            return format!("{scheme}:{}", String::from_utf8_lossy(path));
+            return format!("{scheme}:{}", crate::grpc_target::percent_encode_path(path));
         }
     };
     match address {
@@ -1615,7 +1655,13 @@ async fn connect_address(
         return Err(Failure::NotLoopback);
     }
     let mut io: Box<dyn Io> = match &target.tls {
-        Some(tls) => Box::new(handshake(tls, tcp, deadline).await?),
+        Some(tls) => {
+            let stream = handshake(tls, tcp, deadline).await?;
+            if !tls.of_the_call_host(&stream) {
+                return call_host_refused().await;
+            }
+            Box::new(stream)
+        }
         None => Box::new(tcp),
     };
     // Bytes of the server that the proxy's response came with are of the plaintext connection;
@@ -1861,16 +1907,24 @@ async fn read_settings(
         // What the server sent or did before the preface is written: gRPC's transport reads the
         // end that it finds there, of a peer that closed at once (`Socket closed`), and its write
         // fails of a connection that the peer reset already.
+        let mut preface = PREFACE.to_vec();
+        preface.extend_from_slice(&EMPTY_SETTINGS);
         match pending_read(io) {
             Some(Ok(bytes)) if bytes.is_empty() => return Err(Failure::Closed(Phase::Settings)),
             Some(Ok(bytes)) => replay.extend_from_slice(&bytes),
+            // A socket that is not connected, as of a Unix socket whose listener's backlog was
+            // full: its read fails of `EINVAL`, where gRPC's write, which comes first, fails of
+            // `ENOTCONN`, of which its error is.
+            #[cfg(unix)]
+            Some(Err(error)) if error.raw_os_error() == Some(libc::EINVAL) => {
+                let written = io.write_all(&preface).await.err().unwrap_or(error);
+                return Err(Failure::Write(Phase::Settings, IoFailure::of(&written)));
+            }
             Some(Err(error)) => {
                 return Err(Failure::Write(Phase::Settings, IoFailure::of(&error)));
             }
             None => {}
         }
-        let mut preface = PREFACE.to_vec();
-        preface.extend_from_slice(&EMPTY_SETTINGS);
         io.write_all(&preface)
             .await
             .map_err(|error| Failure::Write(Phase::Settings, IoFailure::of(&error)))?;
@@ -2241,6 +2295,19 @@ async fn refused_connection(code: i32, message: &str) -> Result<Ready, ChannelFa
         .await
         .map_err(|failure| ChannelFailure::Refused(format!("{failure:?}")))?;
     Ok(Ready { io, replay })
+}
+
+/// The connection of a TLS session whose certificate is of the name of its target but not of the
+/// host of its calls (see [`Tls::of_the_call_host`]), of a server in memory that fails each call
+/// of gRPC's `UNAUTHENTICATED` (`call host does not match SSL server name`), as gRPC's check of the
+/// host of each call fails it, of no retry, on a connection that its handshake made.
+async fn call_host_refused() -> Result<Ready, Failure> {
+    refused_connection(
+        tonic::Code::Unauthenticated as i32,
+        "call host does not match SSL server name",
+    )
+    .await
+    .map_err(|_| Failure::Closed(Phase::Settings))
 }
 
 /// The server of [`refused_connection`] on `io`: each call is answered of the status `code` and

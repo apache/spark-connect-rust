@@ -862,7 +862,37 @@ pub(crate) enum BuilderMetadata {
     Read(std::sync::Arc<Py<PyAny>>),
 }
 
+impl BuilderMetadata {
+    /// The pairs of the metadata of this source, read now with the GIL (see
+    /// `pyspark.sql.connect.client.core._metadata_of_call`).
+    fn read(&self, py: Python<'_>) -> PyResult<Vec<(Vec<u8>, Vec<u8>)>> {
+        let metadata = match self {
+            BuilderMetadata::Calls(builder) => builder
+                .bind(py)
+                .call_method0(pyo3::intern!(py, "metadata"))?,
+            BuilderMetadata::Read(metadata) => metadata.bind(py).clone(),
+        };
+        py.import("pyspark.sql.connect.client.core")?
+            .getattr("_metadata_of_call")?
+            .call1((metadata,))?
+            .extract::<Vec<(Vec<u8>, Vec<u8>)>>()
+    }
+}
+
 impl spark_connect_core::channel::MetadataSource for BuilderMetadata {
+    /// Of a thread of the interpreter, as a finalizer's, read on it, with the GIL, of the exception
+    /// that propagates there kept (see `crate::deliver::preserving_pending_exception`).
+    fn metadata_now(&self) -> Option<spark_connect_core::error::Result<Vec<(Vec<u8>, Vec<u8>)>>> {
+        if !crate::deliver::on_python_thread() {
+            return None;
+        }
+        Python::try_attach(|py| {
+            crate::deliver::preserving_pending_exception(py, |py| {
+                self.read(py).map_err(crate::errors::callback_error)
+            })
+        })
+    }
+
     #[allow(clippy::type_complexity)]
     fn metadata(
         &self,
@@ -897,8 +927,11 @@ impl spark_connect_core::channel::MetadataSource for BuilderMetadata {
             match read {
                 Some(Ok(pairs)) => Ok(pairs),
                 Some(Err(raised)) => Err(crate::errors::callback_error(raised)),
-                // The interpreter exits: of no metadata of the builder.
-                None => Ok(Vec::new()),
+                // The interpreter exits: the request is not sent, as one without the metadata of
+                // the builder, such as its `authorization`, would be of no credentials.
+                None => Err(spark_connect_core::error::SparkError::builtin_runtime_msg(
+                    "the metadata() of the channel builder cannot be read: the interpreter exits",
+                )),
             }
         })
     }

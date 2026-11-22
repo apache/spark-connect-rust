@@ -2781,8 +2781,22 @@ def test_no_connection_string_nor_endpoint_sets_the_channel_of_a_builder(
         SparkSession.builder.remote(url).create()
     with invalid:
         SparkSession(connection=url)
-    with invalid:
-        SparkSession.builder.channelBuilder(DefaultChannelBuilder(url)).create()
+
+    def fails_each_call(builder):
+        # Of a builder that the program gave, whose `metadata()` the client reads for each call, as
+        # PySpark's: the session is made, and each call fails as gRPC refuses its key, unsent.
+        from pyspark.errors.exceptions.connect import SparkConnectGrpcException
+
+        session = SparkSession.builder.channelBuilder(builder).create()
+        try:
+            for _ in range(2):
+                with pytest.raises(SparkConnectGrpcException, match="Invalid metadata"):
+                    session.conf.get("spark.test.reads", "d")
+        finally:
+            with contextlib.suppress(Exception):
+                session.stop()
+
+    fails_each_call(DefaultChannelBuilder(url))
 
     class Own(ChannelBuilder):
         def __init__(self):
@@ -2800,8 +2814,7 @@ def test_no_connection_string_nor_endpoint_sets_the_channel_of_a_builder(
         def toChannel(self):
             return None
 
-    with invalid:
-        SparkSession.builder.channelBuilder(Own()).create()
+    fails_each_call(Own())
     monkeypatch.setenv("SPARK_REMOTE", url)
     import pyspark.sql
 
@@ -2810,21 +2823,24 @@ def test_no_connection_string_nor_endpoint_sets_the_channel_of_a_builder(
     monkeypatch.delenv("SPARK_REMOTE")
     assert (len(service.execute_requests), len(service.config_requests)) == before
     # A key of the parameters of a builder that gRPC does not take, of a character of the URL too,
-    # raises the transport's error of the key as it is, of a connection string or of `set`.
+    # of a connection string or of `set`: of the connection string, the transport's error of the
+    # key as it is, as the session is made; of a builder that the program gave, the error of each
+    # call, as PySpark's client reads its `metadata()` for each call.
     for key, of_url in [("x hdr", True), ("a%41", True), ("Bad:Key", False),
                         ("a=b;use_ssl", False), ("x%2Dy", False), ("", False)]:
         if of_url:
+            with pytest.raises(ValueError) as error:
+                SparkSession.builder.remote(f"sc://127.0.0.1:{port}/;{key}=v").create()
+            assert type(error.value) is ValueError
+            assert str(error.value) == (
+                f"metadata was invalid: '{key}' is not a gRPC metadata key, which is of the "
+                "characters [0-9a-z_.-]"
+            ), key
             builder = DefaultChannelBuilder(f"sc://127.0.0.1:{port}/;{key}=v")
         else:
             builder = DefaultChannelBuilder(f"sc://127.0.0.1:{port}")
             builder.set(key, "true")
-        with pytest.raises(ValueError) as error:
-            SparkSession.builder.channelBuilder(builder).create()
-        assert type(error.value) is ValueError
-        assert str(error.value) == (
-            f"metadata was invalid: '{key}' is not a gRPC metadata key, which is of the "
-            "characters [0-9a-z_.-]"
-        ), key
+        fails_each_call(builder)
     assert (len(service.execute_requests), len(service.config_requests)) == before
 
     # As PySpark's toChannel, which reads the token twice, as it checks it and gives it to grpcio.
@@ -3096,7 +3112,9 @@ def test_a_channel_builder_is_read_as_pysparks_client_reads_it(mock_connect, mon
             (("x-call", "3"),)]
     finally:
         session.stop()
-    # Of ChannelBuilder's own `metadata()`, as of the parameters: read as the session is made only.
+    # Of ChannelBuilder's own `metadata()`, of the parameters of a builder that the program gave:
+    # read as the session is made, and again for each call, of a parameter set since, as PySpark's
+    # client reads it.
     made = []
     plain = ChannelBuilder.metadata
 
@@ -3105,12 +3123,30 @@ def test_a_channel_builder_is_read_as_pysparks_client_reads_it(mock_connect, mon
         return plain(self)
 
     monkeypatch.setattr(ChannelBuilder, "metadata", counted)
-    session = SparkSession.builder.channelBuilder(
-        DefaultChannelBuilder(f"sc://127.0.0.1:{port}/;x-hdr=v")).create()
+    given = DefaultChannelBuilder(f"sc://127.0.0.1:{port}/;x-hdr=v")
+    session = SparkSession.builder.channelBuilder(given).create()
     try:
         service.reset()
         session.conf.set("spark.test.reads", "1")
-        assert len(made) == 1
+        assert len(made) == 2
+        given.set("x-hdr", "v2")
+        given.set("x-later", "l")
+        session.conf.set("spark.test.reads", "2")
+        assert len(made) == 3
+        assert service.call_metadata == [
+            ("config", (("x-hdr", "v"),)),
+            ("config", (("x-hdr", "v2"), ("x-later", "l"))),
+        ]
+    finally:
+        session.stop()
+    # Of a connection string, which no program holds a builder of: of its parameters, read as the
+    # session is made, and not of `ChannelBuilder.metadata()`.
+    made.clear()
+    session = SparkSession.builder.remote(f"sc://127.0.0.1:{port}/;x-hdr=v").create()
+    try:
+        service.reset()
+        session.conf.set("spark.test.reads", "1")
+        assert len(made) == 0
         assert service.call_metadata == [("config", (("x-hdr", "v"),))]
     finally:
         session.stop()

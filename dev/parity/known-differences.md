@@ -630,64 +630,57 @@ requests of the unpickled object pickle as it is then. This case still differs:
   `DefaultChannelBuilder`, what its `toChannel` reads, in its order, its `secure`, `use_ssl`,
   `_host` and `token`, of which the credentials of the channel are, its `endpoint`, and its
   keepalive properties, when it is enabled, of which the keepalive of the channel is; of a builder
-  of its own, its `token`, `host` and `port`; and its `metadata()`. Of a `metadata()` of its own, of
-  a subclass or of the builder, it calls it again for each call and each of its retries, as
-  PySpark's client does, whose requests carry the metadata that it gives as grpcio encodes and
-  checks it, of every value of a key, in its order, and then the `authorization` of the token, of
-  its errors, which fail the call; the requests of the artifacts carry what it gave as the session
-  was made, as PySpark's ArtifactManager, and those of a reattachable execution what it gave as the
-  execution started, as PySpark's iterator. What stays different: the `userAgent` of the builder is
-  not read as each request is built, where PySpark's client reads it then, but of the `user_agent`
-  parameter as the session is made (see `SPARK_CONNECT_USER_AGENT` below); the metadata of different
-  keys is sent of the order of their first values (`x-seq`, `authorization` twice, `x-dup` twice),
-  as the headers of HTTP of hyper hold it, where grpcio sends it of its order (`x-seq`,
-  `authorization`, `x-dup` twice, `authorization`), which HTTP does not tell apart; an exception of
-  `metadata()` fails the call without the `can_retry` of a retry policy of its own, which PySpark's
-  `Retrying` asks of it; and, until SPARK-62252, a session of a builder that the program gave, of
-  `ChannelBuilder`'s `metadata()`, reads it once, as the session is made, where PySpark's client
-  reads it for each call too, of a parameter set since; the `ExecutePlan` of a finalizer, which the
-  transport sends in the background, carries the metadata of the parameters of the builder as the
-  session was made and the token, none of a `metadata()` of its own, where PySpark's calls
-  `metadata()` for it, on the thread of the finalizer; the deletion of a native object of ML reads
-  `metadata()` on a thread of the transport (`Dummy-1`); a request that the transport sends as the
-  interpreter exits, once Python code no longer runs, carries none of the metadata of a `metadata()`
-  of its own; the keys of `metadata()` that gRPC's core sets itself (`te`, `content-type`,
-  `content-length`, `grpc-timeout`, `grpc-message`, `grpc-status`) are sent, of which the server
-  fails some calls, where gRPC sends its own and a call of `grpc-status` waits forever, and the
-  fields of a connection that HTTP/2 forbids (`connection`, `keep-alive`, `transfer-encoding`,
-  `upgrade`) are dropped, where grpcio's call of them fails of the reset of its stream; and a key or
-  a value of None of `metadata()` raises `TypeError`, where grpcio takes it as empty. It connects as
-  the channel of PySpark's `toChannel` of a `DefaultChannelBuilder` does: to its `endpoint`, of
-  `_host` and `_port` (of `DefaultChannelBuilder.default_port()` without one), a subclass's too, and
-  not to its `host`, which the client shows, nor to a `port` of its own; of no security, and no
-  token, unless it is `secure`, else of gRPC's local credentials and the token when it is not
-  `use_ssl` and its `_host` is `localhost`, over a connection whose local address is of the loopback
-  only, as their handshake takes it, which a Unix socket is not, else of TLS and the token. The
-  endpoint is read as gRPC reads a target (see `docs/compatibility.md`), of gRPC's names of it: its
-  default authority, of the `:authority` of the calls and of the name that TLS verifies, and the
-  server of the tunnel of a proxy and the host of its exclusions; the host of the connection string
-  stands for the target only, and decides neither its TLS, nor its token, nor its proxy, nor its
-  calls. What stays different: of `dns://` and an authority of an IP address and a port, the name is
-  resolved with the system's resolver, as any name, where gRPC's resolver asks the DNS server of the
-  authority (until SPARK-62232); the `:authority` of the calls of a target whose authority HTTP's
-  URIs cannot hold, of a `%` but in brackets or of more than one `:`, as of a Unix socket
-  (`tmp%2Fa.sock`) or of a list of addresses, is the host and the port of the connection string
-  (`localhost:443`, the first address), as hyper and h2, the HTTP/2 of the transport, take the
-  authority of a URI only, where gRPC sends its own, so the server of a long list does not refuse
-  the headers of its calls, as grpc-java refuses those of grpcio past their limit; the TLS sends the
-  name that it verifies as SNI only of a name of DNS, up to a `%` (`localhost` of `localhost%00`),
-  as rustls takes no other, where BoringSSL sends the host of gRPC's authority as it is
-  (`x*y.localhost`, `a%2Fb.localhost`); gRPC's core writes to stderr the errors of a target that it
-  refuses (`Error parsing URI(s)`, `channel stack builder failed`, `no port given for ipv4 scheme`),
-  which the transport does not write; and, until SPARK-62252, the endpoint is read past a NUL, where
-  grpcio's target, a C string, ends at it, and a byte of it that is not of UTF-8, as of the path of
-  a Unix socket (`unix:/tmp/%FF.sock`), is read as U+FFFD, so the socket is another one; a target of
-  `xds:` or `google-c2p:` is read as a name of DNS, which does not resolve (`Misformatted domain
-  name`), where grpcio fails each call of `xds:` of its client of xDS and resolves the name of
-  `google-c2p:`; a target that gRPC refuses whose text is longer than about 8 KB fails each call of
-  `RESOURCE_EXHAUSTED`, of the limit of the metadata of its status, where gRPC's fails of its
-  `UNKNOWN`; and a connection to a Unix socket whose listener's backlog is full fails of `EINVAL`,
-  where gRPC's fails of `ENOTCONN`.
+  of its own, its `token`, `host` and `port`; and its `metadata()`. Of a builder that the program
+  gave the session, or of a `metadata()` of its own, of a subclass or of the builder, it calls it
+  again for each call and each of its retries, as PySpark's client does, also for the `ExecutePlan`
+  of a finalizer, whose first attempt reads it on the thread of the finalizer, whose requests carry
+  the metadata that it gives as grpcio encodes and checks it, of every value of a key, in its order,
+  and then the `authorization` of the token, of its errors, which fail the call, but of the keys
+  that gRPC's core sets itself (`te`, `content-type`, `content-length`, `grpc-timeout`,
+  `grpc-status`, `grpc-message`), which are not sent; the requests of the artifacts carry what it
+  gave as the session was made, as PySpark's ArtifactManager, and those of a reattachable execution
+  what it gave as the execution started, as PySpark's iterator; a request that a client sends as the
+  interpreter exits, whose `metadata()` cannot be read then, is not sent. What stays different: the
+  `userAgent` of the builder is not read as each request is built, where PySpark's client reads it
+  then, but of the `user_agent` parameter as the session is made (see `SPARK_CONNECT_USER_AGENT`
+  below); a session of a connection string takes the metadata of its calls of the parameters of the
+  connection string, as the session is made, and does not call the `metadata()` of the builder that
+  its client makes of it, where PySpark's client calls it for each call, which a change of
+  `client._builder` or of `ChannelBuilder.metadata` alone shows, and a key of them that gRPC does
+  not take fails the creation of the session of `ValueError` (`metadata was invalid: 'A' is not a
+  gRPC metadata key, ...`), where grpcio fails each call of `INTERNAL` (`Invalid metadata`); a retry
+  of the `ExecutePlan` of a finalizer reads `metadata()` on a thread of the transport (`Dummy-1`),
+  where PySpark's finalizer retries on its own thread; the metadata of different keys is sent of the
+  order of their first values (`x-seq`, `authorization` twice, `x-dup` twice), as the headers of
+  HTTP of hyper hold it, where grpcio sends it of its order (`x-seq`, `authorization`, `x-dup`
+  twice, `authorization`), which HTTP does not tell apart; a `grpc-status` of `metadata()` is not
+  sent, where grpcio's call of it waits forever; and an exception of `metadata()` fails the call
+  without the `can_retry` of a retry policy of its own, which PySpark's `Retrying` asks of it. It
+  connects as the channel of PySpark's `toChannel` of a `DefaultChannelBuilder` does: to its
+  `endpoint`, of `_host` and `_port` (of `DefaultChannelBuilder.default_port()` without one), a
+  subclass's too, and not to its `host`, which the client shows, nor to a `port` of its own; of no
+  security, and no token, unless it is `secure`, else of gRPC's local credentials and the token when
+  it is not `use_ssl` and its `_host` is `localhost`, over a connection whose local address is of
+  the loopback only, as their handshake takes it, which a Unix socket is not, else of TLS and the
+  token. The endpoint is read as gRPC reads a target (see `docs/compatibility.md`): of its bytes up
+  to a NUL, of gRPC's names of it, its default authority, of the `:authority` of the calls and of
+  the name that TLS verifies, and the server of the tunnel of a proxy and the host of its
+  exclusions; the host of the connection string stands for the target only, and decides neither its
+  TLS, nor its token, nor its proxy, nor its calls. What stays different: of `dns://` and an
+  authority of an IP address and a port, the name is resolved with the system's resolver, as any
+  name, where gRPC's resolver asks the DNS server of the authority (until SPARK-62232); the
+  `:authority` of the calls of a target whose authority HTTP's URIs cannot hold, of a `%` but in
+  brackets or of more than one `:`, as of a Unix socket (`tmp%2Fa.sock`) or of a list of addresses,
+  is the host and the port of the connection string (`localhost:443`, the first address), as hyper
+  and h2, the HTTP/2 of the transport, take the authority of a URI only, where gRPC sends its own,
+  so the server of a long list does not refuse the headers of its calls, as grpc-java refuses those
+  of grpcio past their limit; the TLS sends the name that it verifies as SNI only of a name of DNS,
+  up to a `%` (`localhost` of `localhost%00`), as rustls takes no other, where BoringSSL sends the
+  host of gRPC's authority as it is (`x*y.localhost`, `a%2Fb.localhost`); a target of `xds:` of a
+  bootstrap of xDS in the environment fails each call of `UNAVAILABLE`, as the transport has no
+  client of xDS, where grpcio's would connect through it; and gRPC's core writes to stderr the
+  errors of a target that it refuses (`Error parsing URI(s)`, `channel stack builder failed`, `no
+  port given for ipv4 scheme`), which the transport does not write.
 
   The members of a gRPC channel are not there: `toChannel`, which the transport calls of a builder
   of its own for its errors only, so a subclass whose `toChannel` connects elsewhere is of its

@@ -96,7 +96,7 @@ pub struct TargetNames {
     /// Of a target that gRPC's proxy mapper proxies, any but one of `unix:`: the host of its path,
     /// which the exclusions of the proxy are checked against, and the server of the `CONNECT` of
     /// the tunnel, the `host:port` of the path, of the port 443 without one
-    /// (`[127.0.0.1:1,127.0.0.1:2]:443`).
+    /// (`[127.0.0.1:1,127.0.0.1:2]:443`), up to a NUL, as gRPC's argument of it is a C string.
     pub proxied: Option<(String, String)>,
 }
 
@@ -128,6 +128,15 @@ pub trait MetadataSource: Send + Sync {
     /// fails the call of gRPC's `INTERNAL` (`Invalid metadata`).
     #[allow(clippy::type_complexity)]
     fn metadata(&self) -> futures::future::BoxFuture<'static, Result<Vec<(Vec<u8>, Vec<u8>)>>>;
+
+    /// The metadata of a call that is sent now, as [`MetadataSource::metadata`] gives it, read on
+    /// the calling thread if it can be read there without a wait, as of a thread of the binding's
+    /// interpreter, which PySpark's finalizer reads it on; else None, of a source that is then read
+    /// as the call is sent.
+    #[allow(clippy::type_complexity)]
+    fn metadata_now(&self) -> Option<Result<Vec<(Vec<u8>, Vec<u8>)>>> {
+        None
+    }
 }
 
 const GRPC_DEFAULT_KEEPALIVE_ENABLED: bool = true;
@@ -424,7 +433,10 @@ impl ChannelBuilder {
     /// or a token is present, except for a token on `localhost`, which stays plaintext for
     /// local development (`core.py` `toChannel` uses local channel credentials there). Of this
     /// rule, of the parameters, a token is never sent in cleartext to any other host, `127.0.0.1`
-    /// and `[::1]` included.
+    /// and `[::1]` included, nor through a proxy: a loopback host of a channel that sends its token
+    /// in cleartext connects directly, never through the HTTP proxy of the environment, as no
+    /// local credentials check the address of its connection (see the HTTP proxies of
+    /// `docs/configuration.md`), where any other is proxied as grpcio proxies it.
     ///
     /// Of [`Credentials`] ([`ChannelBuilder::with_credentials`]), it is TLS of
     /// [`Credentials::Ssl`] only, and the token of [`Credentials::Local`] is sent in cleartext,

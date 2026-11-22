@@ -2988,6 +2988,21 @@ del _name, _member
 _CLIENT_STATES_LOCK = threading.Lock()
 
 
+# The `DefaultChannelBuilder`s that clients made of connection strings, and their copies, whose
+# parameters no program gave (see `_metadata_per_call`).
+_INTERNAL_BUILDERS: "weakref.WeakSet[ChannelBuilder]" = weakref.WeakSet()
+
+
+def _metadata_per_call(builder: Any) -> bool:
+    """Whether the client reads the ``metadata()`` of the channel builder ``builder`` again for each
+    call, as PySpark's client calls it for each: of a builder that the program gave the session, or
+    of a ``metadata()`` of its own; not of a ``DefaultChannelBuilder`` that a client made of a
+    connection string, whose parameters only its ``_builder`` holds, which the client reads once."""
+    if builder is None:
+        return False
+    return _metadata_of_its_own(builder) or builder not in _INTERNAL_BUILDERS
+
+
 def _metadata_of_its_own(builder: Any) -> bool:
     """Whether the ``metadata()`` of the channel builder ``builder`` is its own, of its class or of
     itself, rather than ``ChannelBuilder``'s, which the transport reads of the parameters."""
@@ -2999,8 +3014,10 @@ def _metadata_of_its_own(builder: Any) -> bool:
 
 
 def _grpc_encode(value: Any) -> bytes:
-    """``value`` as grpcio's ``_encode`` takes a key or a value of metadata: bytes as they are, a
-    str of UTF-8, and of another the ``TypeError`` of grpcio."""
+    """``value`` as grpcio's ``_encode`` (of ``cygrpc``) takes a key or a value of metadata: none
+    of None, bytes as they are, a str of UTF-8, and of another the ``TypeError`` of grpcio."""
+    if value is None:
+        return b""
     if isinstance(value, bytes):
         return value
     if isinstance(value, str):
@@ -3043,6 +3060,7 @@ def _new_client_state(
         if connection_string is not None:
             # As PySpark's client of a session, of the channel builder of its connection.
             builder = DefaultChannelBuilder(connection_string())
+            _INTERNAL_BUILDERS.add(builder)
     if builder_user is _MISSING:
         builder_user = None
         if builder is not None and builder.userId is not None:
@@ -3124,6 +3142,8 @@ def _new_session_of(
     builder = _client_attribute(state, "_builder")
     user = _client_attribute(state, "_user_id")
     new_builder = None if builder is None else copy.deepcopy(builder)
+    if builder is not None and builder in _INTERNAL_BUILDERS:
+        _INTERNAL_BUILDERS.add(new_builder)
     if new_builder is not None and not clone:
         new_builder._params.pop(ChannelBuilder.PARAM_SESSION_ID, None)
     if new_builder is not None and new_builder.userId is not None:
@@ -3146,7 +3166,7 @@ def _new_session_of(
         # field of its user context, before the session is made: its requests and those of its
         # artifacts carry it.
         new = session._new_session(None if new_user is None else _proto_str(new_user))
-    if _metadata_of_its_own(new_builder):
+    if _metadata_per_call(new_builder):
         # As PySpark's client of the new session, which reads the `metadata()` of its builder as
         # it is made, and again for each call.
         new._set_metadata_source(new_builder, new_builder.metadata())
@@ -3192,9 +3212,11 @@ def _checked_channel_builder(connection: Any) -> tuple[ChannelBuilder, Any, Any]
     the channel of its ``toChannel``, which it calls for its errors only: a
     ``DefaultChannelBuilder`` has none, so that one of a subclass, which may call the one of its
     base, is not called."""
-    builder = (
-        connection if isinstance(connection, ChannelBuilder) else DefaultChannelBuilder(connection)
-    )
+    if isinstance(connection, ChannelBuilder):
+        builder = connection
+    else:
+        builder = DefaultChannelBuilder(connection)
+        _INTERNAL_BUILDERS.add(builder)
     session_id = builder.session_id
     if session_id is not None:
         session_id = str(builder.session_id)

@@ -439,12 +439,17 @@ impl Drop for ChannelLease {
 fn proxy_of(
     builder: &ChannelBuilder,
 ) -> std::result::Result<Option<crate::proxy::HttpProxy>, String> {
+    // Of a channel of no credentials that sends its token in plaintext, of the rule of
+    // `ChannelBuilder::secure` (a token to `localhost`), a loopback host connects directly, as no
+    // local credentials keep the token from a proxy (see `crate::proxy`).
+    let direct_loopback =
+        builder.credentials().is_none() && !builder.secure() && builder.token().is_some();
     match builder.target_names() {
         Some(names) => match &names.proxied {
-            Some((host, _)) => ProxyEnv::from_process().proxy_for(host),
+            Some((host, _)) => ProxyEnv::from_process().proxy_for(host, direct_loopback),
             None => Ok(None),
         },
-        None => ProxyEnv::from_process().proxy_for(builder.host()),
+        None => ProxyEnv::from_process().proxy_for(builder.host(), direct_loopback),
     }
 }
 
@@ -1903,7 +1908,8 @@ impl SparkConnectClient {
         let mut metadata: Vec<(String, String)> = builder.metadata();
         for (key, value) in &metadata {
             let header = (metadata_key(key)?, metadata_value(key, value)?);
-            if key != USER_AGENT_HEADER {
+            // Neither the `user-agent`, of grpcio's own, nor a key that gRPC's core sets itself.
+            if key != USER_AGENT_HEADER && crate::metadata::sent_of_an_application(key) {
                 headers.push(header);
             }
         }
@@ -2232,6 +2238,10 @@ impl SparkConnectClient {
         crate::metadata::Checked {
             channel: self.channel(),
             closed: std::sync::Arc::clone(&self.channel_closed),
+            refused: matches!(
+                self.builder.target(),
+                Some(crate::channel::ChannelTarget::Refused { .. })
+            ),
         }
     }
 
@@ -5468,6 +5478,31 @@ impl SparkConnectClient {
             .clone();
         let stub = self.stub();
         let metadata = self.execution_metadata();
+        // As PySpark's finalizer, whose call reads the `metadata()` of a builder of its own for
+        // each attempt: of the source of the metadata of the calls, if any, of which the first
+        // attempt is read now, on the thread of the finalizer, where it can be.
+        let source = self.metadata_source.get().calls;
+        let after = self.call_credentials.clone();
+        let mut first = match source.as_ref().and_then(|source| source.metadata_now()) {
+            Some(Ok(pairs)) => match crate::metadata::call_metadata(&pairs) {
+                Ok(mut read) => {
+                    for (key, value) in &after {
+                        read.append(key.clone(), value.clone());
+                    }
+                    Some(read)
+                }
+                Err(status) => {
+                    tracing::warn!("ExecutePlan of a finalizer was not sent: {status}");
+                    return;
+                }
+            },
+            // As PySpark's finalizer, whose `except Exception` takes the error of its call.
+            Some(Err(error)) => {
+                tracing::warn!("ExecutePlan of a finalizer was not sent: {error}");
+                return;
+            }
+            None => None,
+        };
         let mut retries = self.retries_of(GrpcCall::Unary);
         let closed = std::sync::Arc::clone(&self.closed);
         let send = async move {
@@ -5482,7 +5517,17 @@ impl SparkConnectClient {
             };
             let sent = retrying(&mut retries, still_open, || {
                 let mut req = Request::new(request.clone());
-                *req.metadata_mut() = metadata.clone();
+                match (first.take(), &source) {
+                    (Some(read), _) => *req.metadata_mut() = read,
+                    (None, Some(source)) => {
+                        req.extensions_mut()
+                            .insert(crate::metadata::PendingMetadata {
+                                source: std::sync::Arc::clone(source),
+                                after: after.clone(),
+                            });
+                    }
+                    (None, None) => *req.metadata_mut() = metadata.clone(),
+                }
                 let mut stub = stub.clone();
                 async move {
                     let mut responses = stub
