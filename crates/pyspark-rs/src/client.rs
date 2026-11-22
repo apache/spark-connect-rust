@@ -691,9 +691,15 @@ fn call_retries(py: Python<'_>, policies: &Py<PyAny>) -> PyResult<Py<PyAny>> {
 impl RetryDecider for PolicyRetries {
     fn start(&self, call: GrpcCall) -> Box<dyn CallRetries> {
         // The `to_state` of the policies, on the thread of the call, as it starts; a thread of
-        // the runtime does not wait for the GIL, and makes them at its first failure.
+        // the runtime does not wait for the GIL, and makes them at its first failure. Of a request
+        // that a drop sends, as the release of a stream that a frame that CPython unwinds drops,
+        // of the exception that propagates kept (see `crate::deliver::preserving_pending_exception`).
         let retries = if crate::deliver::on_python_thread() {
-            Python::try_attach(|py| call_retries(py, &self.policies))
+            Python::try_attach(|py| {
+                crate::deliver::preserving_pending_exception(py, |py| {
+                    call_retries(py, &self.policies)
+                })
+            })
         } else {
             None
         };

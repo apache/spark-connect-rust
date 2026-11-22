@@ -2338,6 +2338,132 @@ def test_native_models_released_while_their_session_stops_send_their_delete_as_p
     assert "model-released-once-stopped" not in deleted()
 
 
+def _deleted_models(service, model, wait):
+    # The Deletes of `model` that the server received, once one arrived or `wait` seconds passed:
+    # a model sends its Delete without waiting for it.
+    import time
+
+    deadline = time.time() + wait
+    while True:
+        deleted = [
+            command
+            for command in _commands(service)
+            if [ref.id for ref in command.ml_command.delete.obj_refs] == [model]
+        ]
+        if deleted or time.time() > deadline:
+            return deleted
+        time.sleep(0.05)
+
+
+@pytest.mark.parametrize("reads", ["plain", "client", "call stack"])
+def test_a_model_deleted_while_an_exception_propagates_keeps_the_exception_as_pyspark(
+    ml_mock, monkeypatch, reads
+):
+    # As PySpark's `RemoteModelRef`, whose `__del__` CPython runs with the exception that
+    # propagates set aside, and sets again after it: of `est.fit(df).transform(df).columns`, whose
+    # analysis fails, the DataFrame of the transform holds the last reference to the model, which
+    # the frame that the error unwinds, of no handler, drops with the error set. The model is
+    # deleted, and the error goes on. The reads of the request of the Delete took it before, of the
+    # refresher of the client once it is used, or of the call stack of
+    # SPARK_CONNECT_DEBUG_CLIENT_CALL_STACK: the caller got a `SystemError` ("error return without
+    # exception set") in its place, and a refresh that failed of it sent no Delete. Of a handler
+    # in that frame, CPython crashed (see
+    # test_a_model_deleted_while_an_exception_propagates_does_not_crash).
+    from pyspark.errors.exceptions.connect import SparkConnectGrpcException
+    from pyspark.ml.connect.feature import StringIndexer
+
+    spark, service = ml_mock
+    if reads == "client":
+        spark.client  # noqa: B018 - its refresher of the context of the requests
+    elif reads == "call stack":
+        monkeypatch.setenv("SPARK_CONNECT_DEBUG_CLIENT_CALL_STACK", "1")
+    unraisable = []
+    monkeypatch.setattr(sys, "unraisablehook", unraisable.append)
+    df = spark.range(1).selectExpr("'a' AS s")
+    model = f"model-of-an-unwound-frame-{reads}"
+    service.execute_payload = _operator_info(model)
+    estimator = StringIndexer(inputCol="s", outputCol="o")
+
+    def columns():
+        # The fit and the transform send no analysis; the analysis of the columns fails.
+        service.failure = "rpc"
+        return estimator.fit(df).transform(df).columns
+
+    try:
+        with pytest.raises(SparkConnectGrpcException, match="schema unavailable"):
+            columns()
+    finally:
+        service.failure = None
+    assert len(_deleted_models(service, model, 10)) == 1
+    assert unraisable == []
+
+
+@pytest.mark.parametrize("reads", ["plain", "client", "call stack"])
+def test_a_model_deleted_while_an_exception_propagates_does_not_crash(ml_mock, reads):
+    # As test_a_model_deleted_while_an_exception_propagates_keeps_the_exception_as_pyspark, of a
+    # handler in the frame that drops the DataFrame of the transform too, where CPython crashed
+    # once the exception was taken (`PyException_SetTraceback` of none, as it hands the exception
+    # to the handler), and of an exception of the frame, rather than of the DataFrame, too: in a
+    # process of its own, whose crash fails this test only.
+    import os
+
+    _, service = ml_mock
+    service.execute_payload = _operator_info(f"model-of-a-child-{reads}")
+    code = textwrap.dedent("""
+        import sys
+
+        from pyspark.errors.exceptions.connect import SparkConnectGrpcException
+        from pyspark.ml.connect.feature import StringIndexer
+        from pyspark.sql import SparkSession
+
+        spark = SparkSession.builder.remote(sys.argv[1]).getOrCreate()
+        if sys.argv[2] == "client":
+            spark.client
+        df = spark.range(1).selectExpr("'a' AS s")
+        estimator = StringIndexer(inputCol="s", outputCol="o")
+
+
+        def fails():
+            raise ValueError("propagates")
+
+
+        def unhandled():
+            return [estimator.fit(df).transform(df), fails()]
+
+
+        try:
+            estimator.fit(df).transform(df).columns
+        except SparkConnectGrpcException as error:
+            print("of the analysis in the frame:", "schema unavailable" in str(error))
+        try:
+            [estimator.fit(df).transform(df), fails()]
+        except ValueError as error:
+            print("in the frame:", error)
+        try:
+            unhandled()
+        except ValueError as error:
+            print("in the caller:", error)
+    """)
+    env = dict(os.environ)
+    if reads == "call stack":
+        env["SPARK_CONNECT_DEBUG_CLIENT_CALL_STACK"] = "1"
+    # The fits and the transforms send no analysis; the analysis of the columns fails.
+    service.failure = "rpc"
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", code, service.remote, reads],
+            capture_output=True, text=True, timeout=120, env=env,
+        )
+    finally:
+        service.failure = None
+    assert result.returncode == 0, result.stdout + result.stderr[-3000:]
+    assert result.stdout.splitlines() == [
+        "of the analysis in the frame: True",
+        "in the frame: propagates",
+        "in the caller: propagates",
+    ]
+
+
 def test_the_deletes_of_the_models_of_an_ended_test_are_not_recorded_in_a_later_test(ml_mock):
     # The fixture forgets the session of a test when the test ends. A model sends its Delete
     # without waiting for it, so the Delete of a model of the session can reach the server while

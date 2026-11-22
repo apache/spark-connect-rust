@@ -632,58 +632,65 @@ fn after_call(
 /// interpreter that shuts down, has none to read: the request is of the context of the last call
 /// that the thread, or the session, made. The session gives the thread its context of before the
 /// hook once the request is built, so that a call that the finalizer ran during, as on a
-/// collection of the garbage collector, keeps its own (see [`after_finalizer_request`]).
+/// collection of the garbage collector, keeps its own (see [`after_finalizer_request`]). A
+/// finalizer that runs while an exception propagates, as the drop of the last owner of a fitted
+/// model of a frame that CPython unwinds, keeps that exception, as CPython keeps it around a
+/// `__del__` (see [`crate::deliver::preserving_pending_exception`]).
 pub(crate) fn before_finalizer_request(session: &SparkSession) -> bool {
     // SAFETY: a read of the thread state of the current thread, which needs no lock.
     if unsafe { pyo3::ffi::PyGILState_GetThisThreadState() }.is_null() {
         return true;
     }
     Python::try_attach(|py| {
-        match refresh_request_context(py, session, RequestContext::Finalizer) {
-            Ok(refreshed) => {
-                // The levels of its logs, and the call stack of its request, of the finalizer
-                // as it runs, as PySpark's builds its request then, of its `__del__`; of none that
-                // cannot be read. Of a finalizer that runs during a call of the thread, the call
-                // stack of that call, as PySpark's ends at the first frame of the pyspark package.
-                let started = match enclosing_call_stack(false) {
-                    Some(call_stack) => {
-                        crate::client_log::start_nested_call(py, session, call_stack);
-                        Ok(())
+        crate::deliver::preserving_pending_exception(py, |py| {
+            match read_for_finalizer_request(py, session) {
+                Ok(()) => true,
+                // As PySpark's finalizers, whose `except Exception` takes the error of the build
+                // of the request, out of whose `__del__` another exception goes, which Python
+                // reports as an unraisable one: the read after the request is not made then,
+                // which would raise it again (see `after_finalizer_request`).
+                Err(error) => {
+                    if !error.is_instance_of::<pyo3::exceptions::PyException>(py) {
+                        error.write_unraisable(py, None);
+                        FINALIZER_REPORTED.with(|reported| reported.set(true));
                     }
-                    None => crate::client_log::start_call(
-                        py,
-                        session,
-                        crate::client_log::Called::Finalizer,
-                    )
-                    .map(drop),
-                };
-                if started.is_err() {
-                    session.set_thread_call_stack(None);
+                    false
                 }
-                // An error of the reset of its state is not the request's.
-                let _ = after_call(
-                    py,
-                    session,
-                    refreshed.without_tags,
-                    false,
-                    refreshed.copy_token,
-                );
-                true
             }
-            // As PySpark's finalizers, whose `except Exception` takes the error of the request,
-            // out of whose `__del__` another exception goes, which Python reports as an
-            // unraisable one: the read after the request is not made then, which would raise it
-            // again (see `after_finalizer_request`).
-            Err(error) => {
-                if !error.is_instance_of::<pyo3::exceptions::PyException>(py) {
-                    error.write_unraisable(py, None);
-                    FINALIZER_REPORTED.with(|reported| reported.set(true));
-                }
-                false
-            }
-        }
+        })
     })
     .unwrap_or(true)
+}
+
+/// Read what the request of a finalizer of `session` reads of its client as it is built, as
+/// [`before_finalizer_request`] does: the error of the build of the request.
+fn read_for_finalizer_request(py: Python<'_>, session: &SparkSession) -> PyResult<()> {
+    let refreshed = refresh_request_context(py, session, RequestContext::Finalizer)?;
+    // The levels of its logs, and the call stack of its request, of the finalizer as it runs, as
+    // PySpark's builds its request then, of its `__del__`, whose build the error of the read of
+    // the call stack fails. Of a finalizer that runs during a call of the thread, the call stack
+    // of that call, as PySpark's ends at the first frame of the pyspark package.
+    let started = match enclosing_call_stack(false) {
+        Some(call_stack) => {
+            crate::client_log::start_nested_call(py, session, call_stack);
+            Ok(())
+        }
+        None => crate::client_log::start_call(py, session, crate::client_log::Called::Finalizer)
+            .map(drop),
+    };
+    // An `Exception` of the reset of its state is not the request's; another one, as the
+    // `KeyboardInterrupt` of a signal handler that ran meanwhile, goes out of the finalizer, as
+    // out of PySpark's `__del__`.
+    match after_call(
+        py,
+        session,
+        refreshed.without_tags,
+        false,
+        refreshed.copy_token,
+    ) {
+        Err(error) if !error.is_instance_of::<pyo3::exceptions::PyException>(py) => Err(error),
+        _ => started,
+    }
 }
 
 thread_local! {
@@ -856,16 +863,19 @@ impl Drop for Call<'_> {
             return;
         }
         // A call that ends of a panic: the thread has its context of before it again, read again
-        // as at the end of any other call, and nothing raises what the call keeps.
+        // as at the end of any other call, and nothing raises what the call keeps, nor takes an
+        // exception that is set meanwhile.
         let (nested, ended) = self.leave();
         let session = self.session;
         let _ = Python::try_attach(|py| {
-            if nested {
-                if let Err(reread) = reread_after_call(py, session) {
-                    reread.write_unraisable(py, None);
+            crate::deliver::preserving_pending_exception(py, |py| {
+                if nested {
+                    if let Err(reread) = reread_after_call(py, session) {
+                        reread.write_unraisable(py, None);
+                    }
                 }
-            }
-            ended.drop_unraised(py);
+                ended.drop_unraised(py);
+            })
         });
     }
 }
@@ -1195,7 +1205,8 @@ type CallValues<'py> = (
 /// now (see [`reread_after_call`]); an exception of the read that is not an `Exception` is kept
 /// for that call, which no call of the finalizer raises, whose wait raises it at its next poll, or
 /// the call when it returns (see [`keep_for_nearest_call`]). As [`before_finalizer_request`], a
-/// thread that is not one of Python, or an interpreter that shuts down, has none to read.
+/// thread that is not one of Python, or an interpreter that shuts down, has none to read, and an
+/// exception that propagates is kept.
 pub(crate) fn after_finalizer_request(session: &SparkSession) {
     // A finalizer whose read raised and was reported reads nothing more, as PySpark's `__del__`
     // ends with the exception.
@@ -1207,13 +1218,15 @@ pub(crate) fn after_finalizer_request(session: &SparkSession) {
         return;
     }
     let _ = Python::try_attach(|py| {
-        if let Err(raised) = reread_after_call(py, session) {
-            // No call of the finalizer raises it, but the call during which it ran, at the next
-            // poll of its wait, as the exception of a signal handler.
-            if let Some(refresher) = session.user_context_refresher() {
-                keep_for_nearest_call(py, &refresher, raised);
+        crate::deliver::preserving_pending_exception(py, |py| {
+            if let Err(raised) = reread_after_call(py, session) {
+                // No call of the finalizer raises it, but the call during which it ran, at the
+                // next poll of its wait, as the exception of a signal handler.
+                if let Some(refresher) = session.user_context_refresher() {
+                    keep_for_nearest_call(py, &refresher, raised);
+                }
             }
-        }
+        })
     });
 }
 
