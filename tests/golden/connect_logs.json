@@ -2,11 +2,11 @@
  "cases": {
   "call_stack": [
    [],
-   "[('execute', [('call_stack', '_connect_log_cases.py', 997), ('collect', '_connect_log_cases.py', 304)]), ('execute', [('call_stack', '_connect_log_cases.py', 997), ('toPandas', '_connect_log_cases.py', 307)]), ('execute', None), ('analyze', [('call_stack', '_connect_log_cases.py', 997), ('schema', '_connect_log_cases.py', 306)]), ('config', [('call_stack', '_connect_log_cases.py', 997), ('collect', '_connect_log_cases.py', 304)]), ('config', [('call_stack', '_connect_log_cases.py', 997), ('get', '_connect_log_cases.py', 305)]), ('config', [('call_stack', '_connect_log_cases.py', 997), ('toPandas', '_connect_log_cases.py', 307)]), ('config', None)]"
+   "[('execute', [('call_stack', '_connect_log_cases.py', 1209), ('collect', '_connect_log_cases.py', 304)]), ('execute', [('call_stack', '_connect_log_cases.py', 1209), ('toPandas', '_connect_log_cases.py', 307)]), ('execute', None), ('analyze', [('call_stack', '_connect_log_cases.py', 1209), ('schema', '_connect_log_cases.py', 306)]), ('config', [('call_stack', '_connect_log_cases.py', 1209), ('collect', '_connect_log_cases.py', 304)]), ('config', [('call_stack', '_connect_log_cases.py', 1209), ('get', '_connect_log_cases.py', 305)]), ('config', [('call_stack', '_connect_log_cases.py', 1209), ('toPandas', '_connect_log_cases.py', 307)]), ('config', None)]"
   ],
   "call_stack_of_calls": [
    [],
-   "[('execute', [('call_stack_of_calls', '_connect_log_cases.py', 997), ('to_table', '_connect_log_cases.py', 342)]), ('execute', [('call_stack_of_calls', '_connect_log_cases.py', 997), ('collect', '_connect_log_cases.py', 343)]), ('execute', [('call_stack_of_calls', '_connect_log_cases.py', 997), ('collect', '_connect_log_cases.py', 346)]), ('analyze', [('call_stack_of_calls', '_connect_log_cases.py', 997), ('__get__', '_connect_log_cases.py', 341), ('isStreaming', 'functools.py', None)]), ('config', [('call_stack_of_calls', '_connect_log_cases.py', 997), ('collect', '_connect_log_cases.py', 343)]), ('config', [('call_stack_of_calls', '_connect_log_cases.py', 997), ('collect', '_connect_log_cases.py', 343)]), ('config', [('call_stack_of_calls', '_connect_log_cases.py', 997), ('collect', '_connect_log_cases.py', 346)])]"
+   "[('execute', [('call_stack_of_calls', '_connect_log_cases.py', 1209), ('to_table', '_connect_log_cases.py', 342)]), ('execute', [('call_stack_of_calls', '_connect_log_cases.py', 1209), ('collect', '_connect_log_cases.py', 343)]), ('execute', [('call_stack_of_calls', '_connect_log_cases.py', 1209), ('collect', '_connect_log_cases.py', 346)]), ('analyze', [('call_stack_of_calls', '_connect_log_cases.py', 1209), ('__get__', '_connect_log_cases.py', 341), ('isStreaming', 'functools.py', None)]), ('config', [('call_stack_of_calls', '_connect_log_cases.py', 1209), ('collect', '_connect_log_cases.py', 343)]), ('config', [('call_stack_of_calls', '_connect_log_cases.py', 1209), ('collect', '_connect_log_cases.py', 343)]), ('config', [('call_stack_of_calls', '_connect_log_cases.py', 1209), ('collect', '_connect_log_cases.py', 346)])]"
   ],
   "cannot_parse": [
    [
@@ -252,6 +252,156 @@
     ]
    ],
    "['sql_command_result']"
+  ],
+  "close_after_releases_in_flight": [
+   [
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Plan compression threshold: 10485760, algorithm: ZSTD"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Executing plan <Truncated message due to truncation error>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetch"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Request: session_id: \"<uuid>\" user_context { user_id: \"connect-logs\" } plan { root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } } } client_type: \"<agent>\" request_options { result_chunking_options { allow_arrow_batch_chunking: true } } operation_id: \"<uuid>\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" schema { struct { fields { name: \"id\" data_type { long { } } } } } operation_id: \"<uuid>\" response_id: \"r1\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received the schema."
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" arrow_batch { row_count: 3 data: \"\\377\\377\\377\\377x\\000\\000\\000\\020\\000\\000\\000\\000\\000\\n\\000\\014\\000\\006\\000\\005\\000\\010\\000\\n\\000\\000\\000\\000\\001\\004\\000\\014\\000\\000\\000\\010\\000\\010\\000\\000\\000\\004\\000\\010\\000\\000\\000\\004\\000\\000\\000\\001\\000\\000\\000\\024\\000\\000\\000\\020\\000\\024\\000\\010\\000\\006\\000\\007\\000\\014\\000\\000\\000\\020\\000\\020\\000\\000\\000\\000\\000\\001\\002\\020\\000\\000\\000\\034\\000\\000\\000\\004\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000id\\000\\000\\010\\000\\014\\000\\010\\000\\007\\000\\010\\000\\000\\000\\000\\000\\000\\001@\\000\\000\\000\\377\\377\\377\\377\\210\\000\\000\\000\\024\\000\\000\\000\\000\\000\\000\\000\\014\\000\\026\\000\\006\\000\\005\\000\\010\\000\\014\\000\\014\\000\\000\\000\\000\\003\\004\\000\\030\\000\\000\\000\\030\\000\\000\\000\\000\\000\\000\\000\\000\\000\\n\\000\\030\\000\\014\\000\\004\\000\\010\\000\\n\\000\\000\\000<\\000\\000\\000\\020\\000\\000\\000\\003\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\030\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\001\\000\\000\\000\\003\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\001\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000\\000\\000\\000\\000\\377\\377\\377\\377\\000\\000\\000\\000\" } operation_id: \"<uuid>\" response_id: \"r2\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received arrow batch rows=3 Number of chunks in batch=0 Chunk index=0 size=304"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Assembling arrow batch of size 304 from 0 chunks."
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" operation_id: \"<uuid>\" response_id: \"r3\" result_complete { }"
+    ]
+   ],
+   "(True, 0, True)"
+  ],
+  "close_by_another_thread_before_the_first_response": [
+   [
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Plan compression threshold: 10485760, algorithm: ZSTD"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Executing plan <Truncated message due to truncation error>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetch"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Request: session_id: \"<uuid>\" user_context { user_id: \"connect-logs\" } plan { root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } } } client_type: \"<agent>\" request_options { result_chunking_options { allow_arrow_batch_chunking: true } } operation_id: \"<uuid>\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "ERROR",
+     "GRPC Error received <exc_info: _MultiThreadedRendezvous>"
+    ]
+   ],
+   "(('SparkConnectGrpcException', '<_MultiThreadedRendezvous of RPC that terminated with:\\n\\tstatus = StatusCode.CANCELLED\\n\\tdetails = \"Channel closed!\"\\n\\tdebug_error_string = \"CANCELLED:Channel closed!\"\\n>'), True, 1)"
+  ],
+  "close_by_another_thread_during_a_config_read": [
+   [
+    [
+     "pyspark.sql.connect.logging",
+     "ERROR",
+     "GRPC Error received <exc_info: _InactiveRpcError>"
+    ]
+   ],
+   "(('SparkConnectGrpcException', '<_InactiveRpcError of RPC that terminated with:\\n\\tstatus = StatusCode.CANCELLED\\n\\tdetails = \"Channel closed!\"\\n\\tdebug_error_string = \"CANCELLED:Channel closed!\"\\n>'), True, 0)"
+  ],
+  "close_by_another_thread_during_a_read": [
+   [
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Plan compression threshold: 10485760, algorithm: ZSTD"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Executing plan <Truncated message due to truncation error>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetch"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Request: session_id: \"<uuid>\" user_context { user_id: \"connect-logs\" } plan { root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } } } client_type: \"<agent>\" request_options { result_chunking_options { allow_arrow_batch_chunking: true } } operation_id: \"<uuid>\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" schema { struct { fields { name: \"id\" data_type { long { } } } } } operation_id: \"<uuid>\" response_id: \"r1\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received the schema."
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Response received: session_id: \"<uuid>\" arrow_batch { row_count: 3 data: \"\\377\\377\\377\\377x\\000\\000\\000\\020\\000\\000\\000\\000\\000\\n\\000\\014\\000\\006\\000\\005\\000\\010\\000\\n\\000\\000\\000\\000\\001\\004\\000\\014\\000\\000\\000\\010\\000\\010\\000\\000\\000\\004\\000\\010\\000\\000\\000\\004\\000\\000\\000\\001\\000\\000\\000\\024\\000\\000\\000\\020\\000\\024\\000\\010\\000\\006\\000\\007\\000\\014\\000\\000\\000\\020\\000\\020\\000\\000\\000\\000\\000\\001\\002\\020\\000\\000\\000\\034\\000\\000\\000\\004\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000id\\000\\000\\010\\000\\014\\000\\010\\000\\007\\000\\010\\000\\000\\000\\000\\000\\000\\001@\\000\\000\\000\\377\\377\\377\\377\\210\\000\\000\\000\\024\\000\\000\\000\\000\\000\\000\\000\\014\\000\\026\\000\\006\\000\\005\\000\\010\\000\\014\\000\\014\\000\\000\\000\\000\\003\\004\\000\\030\\000\\000\\000\\030\\000\\000\\000\\000\\000\\000\\000\\000\\000\\n\\000\\030\\000\\014\\000\\004\\000\\010\\000\\n\\000\\000\\000<\\000\\000\\000\\020\\000\\000\\000\\003\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\030\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\001\\000\\000\\000\\003\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\001\\000\\000\\000\\000\\000\\000\\000\\002\\000\\000\\000\\000\\000\\000\\000\\377\\377\\377\\377\\000\\000\\000\\000\" } operation_id: \"<uuid>\" response_id: \"r2\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received arrow batch rows=3 Number of chunks in batch=0 Chunk index=0 size=304"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Assembling arrow batch of size 304 from 0 chunks."
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "ERROR",
+     "GRPC Error received <exc_info: _MultiThreadedRendezvous>"
+    ]
+   ],
+   "(('SparkConnectGrpcException', '<_MultiThreadedRendezvous of RPC that terminated with:\\n\\tstatus = StatusCode.CANCELLED\\n\\tdetails = \"Stream removed (Channel closed!)\"\\n\\tdebug_error_string = \"CANCELLED:Stream removed (Channel closed!)\"\\n>'), True, 1)"
   ],
   "closed_client": [
    [
@@ -852,6 +1002,91 @@
     ]
    ],
    "['PySparkValueError', 'PySparkValueError']"
+  ],
+  "failure_of_a_call_of_a_handler_of_a_conversion": [
+   [
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Plan compression threshold: 10485760, algorithm: ZSTD"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Executing plan <Truncated message due to truncation error>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetch"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Request: session_id: \"<uuid>\" user_context { user_id: \"connect-logs\" } plan { root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } } } client_type: \"<agent>\" request_options { result_chunking_options { allow_arrow_batch_chunking: true } } operation_id: \"<uuid>\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "ERROR",
+     "GRPC Error received <exc_info: _MultiThreadedRendezvous>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received ErrorInfo: reason: \"org.apache.spark.SparkArithmeticException\"\ndomain: \"org.apache.spark\"\nmetadata {\n  key: \"sqlState\"\n  value: \"22012\"\n}\nmetadata {\n  key: \"messageParameters\"\n  value: \"{}\"\n}\nmetadata {\n  key: \"errorClass\"\n  value: \"DIVIDE_BY_ZERO\"\n}\nmetadata {\n  key: \"classes\"\n  value: \"[\\\"org.apache.spark.SparkArithmeticException\\\"]\"\n}\n"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Executing plan <Truncated message due to truncation error>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetch"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Request: session_id: \"<uuid>\" user_context { user_id: \"connect-logs\" } plan { root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } } } client_type: \"<agent>\" request_options { result_chunking_options { allow_arrow_batch_chunking: true } } operation_id: \"<uuid>\""
+    ]
+   ],
+   "(('_MultiThreadedRendezvous', True, ('_MultiThreadedRendezvous', False)), 0)"
+  ],
+  "failure_of_a_config_read_of_a_handler_of_a_conversion": [
+   [
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Plan compression threshold: 10485760, algorithm: ZSTD"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Executing plan <Truncated message due to truncation error>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetch"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "ExecuteAndFetchAsIterator. Request: session_id: \"<uuid>\" user_context { user_id: \"connect-logs\" } plan { root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } } } client_type: \"<agent>\" request_options { result_chunking_options { allow_arrow_batch_chunking: true } } operation_id: \"<uuid>\""
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "ERROR",
+     "GRPC Error received <exc_info: _MultiThreadedRendezvous>"
+    ],
+    [
+     "pyspark.sql.connect.logging",
+     "DEBUG",
+     "Received ErrorInfo: reason: \"org.apache.spark.SparkArithmeticException\"\ndomain: \"org.apache.spark\"\nmetadata {\n  key: \"sqlState\"\n  value: \"22012\"\n}\nmetadata {\n  key: \"messageParameters\"\n  value: \"{}\"\n}\nmetadata {\n  key: \"errorClass\"\n  value: \"DIVIDE_BY_ZERO\"\n}\nmetadata {\n  key: \"classes\"\n  value: \"[\\\"org.apache.spark.SparkArithmeticException\\\"]\"\n}\n"
+    ]
+   ],
+   "(('UnknownException', True, ('_InactiveRpcError', '<_InactiveRpcError of RPC that terminated with:\\n\\tstatus = StatusCode.INVALID_ARGUMENT\\n\\tdetails = \"the config read of the handler failed\"\\n\\tdebug_error_string = \"INVALID_ARGUMENT:the config read of the handler failed\"\\n>')), 2)"
   ],
   "handler_interrupts": [
    [
@@ -2126,6 +2361,10 @@
     ]
    ],
    "'DataFrame'"
+  ],
+  "stop_after_releases_in_flight": [
+   [],
+   "(True, 0, True)"
   ],
   "stopped_by_another_thread": [
    [

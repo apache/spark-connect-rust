@@ -43,8 +43,15 @@
 //! as the size of a header list that the client takes ([`ADVERTISED_HEADER_LIST_SIZE`]), as
 //! grpcio's channel does: a server that honours it, as grpc-java's, resets the stream of a call
 //! whose metadata would reach it, as it does of grpcio's calls.
+//!
+//! The channel ends the calls of a client that are in flight when the client is closed, as
+//! grpcio's `close` cancels the calls of its channel: of `CANCELLED`, `Channel closed!`, before the
+//! response of a call begins, and `Stream removed (Channel closed!)` while it is read (see
+//! [`crate::client::ChannelClosed`]).
 
+use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use hyper::body::{Body, Frame, SizeHint};
@@ -405,9 +412,14 @@ fn refusal(status: Option<&str>, headers: &http::HeaderMap) -> Option<tonic::Sta
 }
 
 /// The channel of a client, whose responses of metadata past the limits of gRPC fail their calls
-/// (see the module): their headers as they come, and their trailers as the body ends.
+/// (see the module): their headers as they come, and their trailers as the body ends; and whose
+/// calls in flight end when the client is closed.
 #[derive(Clone)]
-pub(crate) struct Checked(pub(crate) Channel);
+pub(crate) struct Checked {
+    pub(crate) channel: Channel,
+    /// Whether the client of the calls closed its channel (see `SparkConnectClient::close`).
+    pub(crate) closed: Arc<crate::client::ChannelClosed>,
+}
 
 impl Service<http::Request<tonic::body::Body>> for Checked {
     type Response = http::Response<CheckedBody>;
@@ -415,36 +427,79 @@ impl Service<http::Request<tonic::body::Body>> for Checked {
     type Future = BoxFuture<Self::Response, Self::Error>;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.0.poll_ready(cx).map_err(Into::into)
+        self.channel.poll_ready(cx).map_err(Into::into)
     }
 
     fn call(&mut self, request: http::Request<tonic::body::Body>) -> Self::Future {
-        let response = self.0.call(request);
+        let response = self.channel.call(request);
+        let closed = Arc::clone(&self.closed);
         Box::pin(async move {
-            let mut response = response.await?;
+            // As grpcio's `close`, which cancels the calls in flight on its channel: a call whose
+            // response has not begun ends as the client closes the channel.
+            let mut response = tokio::select! {
+                biased;
+                response = response => response?,
+                () = closed.closed() => {
+                    return Err(Box::new(tonic::Status::cancelled(
+                        crate::client::CLOSED_CHANNEL,
+                    )) as StdError);
+                }
+            };
             if let Some(status) = refusal(Some(response.status().as_str()), response.headers()) {
                 return Err(Box::new(status) as StdError);
             }
             if let Some(status) = read_details(response.headers_mut()) {
                 return Err(Box::new(status) as StdError);
             }
-            Ok(response.map(CheckedBody))
+            Ok(response.map(|body| CheckedBody::new(body, closed)))
         })
     }
 }
 
-/// The body of a response of [`Checked`], whose trailers past the limits fail its call.
-pub(crate) struct CheckedBody(tonic::body::Body);
+/// The body of a response of [`Checked`], whose trailers past the limits fail its call, and which
+/// ends as cancelled when the client of the call closes the channel while it is read.
+pub(crate) struct CheckedBody {
+    body: tonic::body::Body,
+    /// Ends once the client of the call closes the channel (see
+    /// [`crate::client::ChannelClosed::closed`]), None once the body ended so.
+    closed: Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
+}
+
+impl CheckedBody {
+    fn new(body: tonic::body::Body, closed: Arc<crate::client::ChannelClosed>) -> Self {
+        CheckedBody {
+            body,
+            closed: Some(Box::pin(async move { closed.closed().await })),
+        }
+    }
+}
 
 impl Body for CheckedBody {
     type Data = Bytes;
     type Error = StdError;
 
     fn poll_frame(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
-        match Pin::new(&mut self.0).poll_frame(cx) {
+        let this = self.get_mut();
+        let Some(closed) = this.closed.as_mut() else {
+            // Cancelled: the call has nothing more.
+            return Poll::Ready(None);
+        };
+        // A frame that has come is read first, so that a stream whose end came before the close
+        // ends as the server ended it.
+        let polled = Pin::new(&mut this.body).poll_frame(cx);
+        // As grpcio's `close`, which cancels the calls in flight on its channel: a response that
+        // is read as the client closes the channel ends then, as cancelled, of the stream of the
+        // call removed.
+        if polled.is_pending() && closed.as_mut().poll(cx).is_ready() {
+            this.closed = None;
+            return Poll::Ready(Some(Err(Box::new(tonic::Status::cancelled(
+                crate::client::STREAM_OF_A_CLOSED_CHANNEL,
+            )))));
+        }
+        match polled {
             Poll::Ready(Some(Ok(mut frame))) => {
                 if let Some(status) = frame
                     .trailers_ref()
@@ -464,11 +519,11 @@ impl Body for CheckedBody {
     }
 
     fn is_end_stream(&self) -> bool {
-        self.0.is_end_stream()
+        self.closed.is_none() || self.body.is_end_stream()
     }
 
     fn size_hint(&self) -> SizeHint {
-        self.0.size_hint()
+        self.body.size_hint()
     }
 }
 

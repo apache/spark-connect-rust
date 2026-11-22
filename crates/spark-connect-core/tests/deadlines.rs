@@ -28,7 +28,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use common::{FakeServer, FakeService};
-use futures::{stream, Stream};
+use futures::{stream, Stream, StreamExt};
 use spark_connect_core::{ChannelBuilder, RetryPolicy, RpcDeadlines, SparkConnectClient};
 use spark_connect_proto::execute_plan_response::{ResponseType, ResultComplete};
 use spark_connect_proto::release_execute_request::Release;
@@ -56,11 +56,13 @@ async fn bounded<T>(future: impl Future<Output = T>) -> T {
 }
 
 /// What the server does with one call: stall before its headers, fail the call, or stream
-/// these items (an error item ends the stream with that status).
+/// these items (an error item ends the stream with that status), and then hold the stream open,
+/// sending nothing more.
 enum Step {
     Stall,
     Fail(Status),
     Stream(Vec<Result<ExecutePlanResponse, Status>>),
+    StreamThenHold(Vec<Result<ExecutePlanResponse, Status>>),
 }
 
 fn operation_not_found() -> Status {
@@ -99,6 +101,10 @@ struct State {
     /// When each ReattachExecute call arrived, in order.
     reattached_at: Mutex<Vec<Instant>>,
     releases: Mutex<Vec<CapturedRelease>>,
+    /// How long each ReleaseExecute waits before its answer.
+    release_delay: Mutex<Duration>,
+    /// How many ReleaseExecute calls were answered.
+    releases_answered: Mutex<usize>,
 }
 
 impl State {
@@ -112,6 +118,8 @@ impl State {
             reattaches: Mutex::new(Vec::new()),
             reattached_at: Mutex::new(Vec::new()),
             releases: Mutex::new(Vec::new()),
+            release_delay: Mutex::new(Duration::ZERO),
+            releases_answered: Mutex::new(0),
         }
     }
 
@@ -738,6 +746,10 @@ async fn serve(step: Step) -> Result<Response<Responses>, Status> {
             let responses: Responses = Box::pin(stream::iter(items));
             Ok(Response::new(responses))
         }
+        Step::StreamThenHold(items) => {
+            let responses: Responses = Box::pin(stream::iter(items).chain(stream::pending()));
+            Ok(Response::new(responses))
+        }
     }
 }
 
@@ -806,7 +818,11 @@ impl tonic::server::UnaryService<ReleaseExecuteRequest> for ReleaseRpc {
         self.0.releases.lock().unwrap().push(CapturedRelease {
             request: request.clone(),
         });
+        let state = self.0.clone();
         Box::pin(async move {
+            let delay = *state.release_delay.lock().unwrap();
+            tokio::time::sleep(delay).await;
+            *state.releases_answered.lock().unwrap() += 1;
             Ok(Response::new(ReleaseExecuteResponse {
                 session_id: request.session_id,
                 operation_id: Some(request.operation_id),
@@ -906,6 +922,154 @@ async fn a_stream_read_after_its_channel_was_closed_fails_as_grpcio_cancels_it()
 }
 
 #[tokio::test]
+async fn a_read_in_flight_as_its_channel_is_closed_ends_at_once() {
+    // As grpcio's `close`, which cancels the calls in flight on its channel: a read of an execution
+    // that waits for the server when another task closes the client ends then, as cancelled, of
+    // its stream removed, rather than at the next response of the server, and its release is
+    // refused of the closed channel.
+    let mut fixture = Fixture::start(
+        vec![Step::StreamThenHold(vec![Ok(response("r1", false))])],
+        vec![],
+        quick_retries(),
+    )
+    .await;
+    // Of deadlines past the bound of the test, so that the read waits for the server.
+    fixture.client.set_rpc_deadlines(RpcDeadlines::default());
+    let mut stream = bounded(fixture.client.execute_plan_reattachable(execute_request()))
+        .await
+        .unwrap();
+    let first = bounded(stream.message()).await.unwrap().unwrap();
+    assert_eq!(first.response_id, "r1");
+    // The release of the response read arrives before the close.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let released = fixture.state.releases.lock().unwrap().len();
+    let closing = {
+        let client = fixture.client.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            client.close();
+        })
+    };
+    let error = bounded(stream.message()).await.unwrap_err();
+    assert_eq!(
+        error.grpc_code,
+        Some(tonic::Code::Cancelled as i32),
+        "{error:?}"
+    );
+    assert!(
+        error.message().contains("Stream removed (Channel closed!)"),
+        "{error:?}"
+    );
+    closing.await.unwrap();
+    assert!(bounded(stream.message()).await.unwrap().is_none());
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(fixture.state.releases.lock().unwrap().len(), released);
+    assert!(fixture.state.reattaches.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn calls_in_flight_as_their_channel_is_closed_end_at_once_before_their_response() {
+    // As grpcio's `close`: an execution whose server has not answered yet, and a Config that the
+    // server never answers, end as the client is closed, as cancelled, of `Channel closed!`, as
+    // their response has not begun.
+    let mut fixture = Fixture::start(vec![Step::Stall], vec![], quick_retries()).await;
+    fixture.client.set_rpc_deadlines(RpcDeadlines::default());
+    let closing = |client: SparkConnectClient| {
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            client.close();
+        })
+    };
+    let assert_cancelled = |error: spark_connect_core::SparkError| {
+        assert_eq!(
+            error.grpc_code,
+            Some(tonic::Code::Cancelled as i32),
+            "{error:?}"
+        );
+        assert!(error.message().contains("Channel closed!"), "{error:?}");
+        assert!(!error.message().contains("Stream removed"), "{error:?}");
+    };
+    // A client of another session, which the close of the first one leaves open.
+    let config_client = fixture.client.with_new_session_id();
+    let closed = closing(fixture.client.clone());
+    let error = bounded(fixture.client.execute_plan_reattachable(execute_request()))
+        .await
+        .err()
+        .expect("the execution should end as cancelled");
+    assert_cancelled(error);
+    closed.await.unwrap();
+    assert!(fixture.state.reattaches.lock().unwrap().is_empty());
+    let closed = closing(config_client.clone());
+    let error = bounded(config_client.config(Default::default()))
+        .await
+        .unwrap_err();
+    assert_cancelled(error);
+    closed.await.unwrap();
+}
+
+#[tokio::test]
+async fn the_wait_for_the_releases_is_of_the_streams_that_ended() {
+    // As PySpark's `close`, which waits for the release futures that its iterators left it once
+    // they ended, before it closes the channel, which would cancel them: the wait lets the
+    // releases of a stream read to its end end, and not those of a stream still read, whose
+    // iterator keeps them.
+    let fixture = Fixture::start(
+        vec![
+            streamed(vec![response("r1", false), response("r2", true)]),
+            Step::StreamThenHold(vec![Ok(response("r1", false))]),
+        ],
+        vec![],
+        quick_retries(),
+    )
+    .await;
+    *fixture.state.release_delay.lock().unwrap() = Duration::from_millis(300);
+    let mut ended = bounded(fixture.client.execute_plan_reattachable(execute_request()))
+        .await
+        .unwrap();
+    assert_eq!(drain(&mut ended).await.unwrap(), vec!["r1", "r2"]);
+    drop(ended);
+    let sent = || fixture.state.releases.lock().unwrap().len();
+    // The releases reach the server, which holds them.
+    bounded(async {
+        while sent() == 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await;
+    let started = Instant::now();
+    bounded(fixture.client.wait_for_releases()).await;
+    assert!(
+        started.elapsed() >= Duration::from_millis(200),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(*fixture.state.releases_answered.lock().unwrap(), sent());
+    // A stream still read, whose release of its first response is held.
+    let mut open = bounded(fixture.client.execute_plan_reattachable(execute_request()))
+        .await
+        .unwrap();
+    assert_eq!(
+        bounded(open.message()).await.unwrap().unwrap().response_id,
+        "r1"
+    );
+    let before = sent();
+    bounded(async {
+        while sent() == before {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await;
+    let started = Instant::now();
+    bounded(fixture.client.wait_for_releases()).await;
+    assert!(
+        started.elapsed() < Duration::from_millis(150),
+        "{:?}",
+        started.elapsed()
+    );
+    drop(open);
+}
+
+#[tokio::test]
 async fn reattach_of_a_stream_whose_client_was_closed_of_an_open_channel_is_sent() {
     // As the reference's iterator, which reattaches through the stub that it was made with rather
     // than the `_stub` of the client: a client closed of its session alone, as of a session change,
@@ -933,7 +1097,8 @@ async fn retry_of_an_execution_whose_channel_was_closed_raises_the_error_of_a_cl
     // As the reference's iterator, whose attempts go through the stub that it was made with, which
     // grpc refuses once the channel is closed. An execution that waits to retry when its session is
     // stopped, which closes the channel, raises grpc's `ValueError` of a closed channel at its next
-    // attempt, and sends nothing more.
+    // attempt, and sends nothing more. (An attempt in flight at the close is cancelled instead, as
+    // grpcio's `close` cancels it: the close lands in a backoff here.)
     let fixture = Fixture::start(
         (0..1000)
             .map(|_| Step::Fail(Status::unavailable("server unavailable")))
@@ -941,8 +1106,8 @@ async fn retry_of_an_execution_whose_channel_was_closed_raises_the_error_of_a_cl
         vec![],
         RetryPolicy {
             max_retries: Some(1000),
-            initial_backoff_ms: 20,
-            max_backoff_ms: Some(20),
+            initial_backoff_ms: 300,
+            max_backoff_ms: Some(300),
             ..RetryPolicy::default()
         },
     )
@@ -954,7 +1119,7 @@ async fn retry_of_an_execution_whose_channel_was_closed_raises_the_error_of_a_cl
             .await
             .map(|_| ())
     });
-    // The execution is retried before its session stops.
+    // The execution is retried before its session stops, which it stops in the backoff after.
     let state = fixture.state.clone();
     bounded(async {
         while *state.executes.lock().unwrap() < 2 {
@@ -962,6 +1127,7 @@ async fn retry_of_an_execution_whose_channel_was_closed_raises_the_error_of_a_cl
         }
     })
     .await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
 
     fixture.client.close();
     let error = bounded(call).await.unwrap().unwrap_err();

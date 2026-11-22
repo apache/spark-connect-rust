@@ -402,6 +402,7 @@ def serve(connection):
             # too (see RemoteService.forgotten_count).
             self.forgotten_requests_of_sessions = Counter()
             self.release_execute_requests = []
+            self.release_delay = 0
             self.execute_payload = b""
             self.execute_payloads = None
             self.execute_payload_queue = None
@@ -586,6 +587,8 @@ def serve(connection):
         # operation id, as the server does.
         execute_requests = []
         release_execute_requests = []
+        # With `release_delay` set, each ReleaseExecute is answered after that many seconds.
+        release_delay = 0
         execute_payload = b""
         # With `execute_payloads` set (a list of raw ExecutePlanResponse fields), the execution
         # streams one response of each, r1, r2, ..., instead of `execute_payload`.
@@ -964,6 +967,8 @@ def serve(connection):
             yield message_field(14, b"")
 
         def release_execute(self, request, context):
+            if self.release_delay:
+                time.sleep(self.release_delay)
             if self.is_recorded(request, "release_execute"):
                 self.release_execute_requests.append(request)
                 if self.release_failure:

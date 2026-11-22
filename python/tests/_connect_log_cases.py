@@ -794,6 +794,197 @@ def iterator_open_across_close(spark, service):
     return first, outcome
 
 
+def _closed_by_another_thread_during(spark, call):
+    # `call` of `spark` as another thread closes its client 0.3 s into it, while the server holds
+    # the call: grpcio's `close` cancels the call in flight, which ends then, of the CANCELLED of
+    # the cancel, which PySpark converts. What the call raised, whether it ended within a second of
+    # the close, well before the server would answer it, and how many releases were refused, as
+    # the iterator of an execution sends its release through the closed channel, which another
+    # thread logs.
+    import threading
+    import time
+
+    from pyspark.sql.connect.logging import logger
+
+    refused = []
+
+    class Refused(logging.Handler):
+        def emit(self, record):
+            if record.getMessage().startswith("ReleaseExecute failed"):
+                refused.append(record.getMessage())
+
+    handler = Refused()
+    logger.addHandler(handler)
+    closing = threading.Timer(0.3, spark.client.close)
+    started = time.monotonic()
+    closing.start()
+    try:
+        call()
+        outcome = "returned"
+    except Exception as e:  # noqa: BLE001
+        outcome = (type(e).__name__, str(e))
+    finally:
+        closing.join()
+    at_the_close = time.monotonic() - started < 1.3
+    # The release of an execution is logged in the background.
+    time.sleep(0.3)
+    logger.removeHandler(handler)
+    return outcome, at_the_close, len(refused)
+
+
+def close_by_another_thread_during_a_read(spark, service):
+    # An execution whose result the server holds after its first batch, of a client that another
+    # thread closes as the read of the rest waits: the cancel removes the stream of the call.
+    service.execute_payloads = [_schema_response(), _batch_response()]
+    service.block_result_complete = True
+    try:
+        return _closed_by_another_thread_during(spark, lambda: _range(spark).collect())
+    finally:
+        service.block_result_complete = False
+        service.release_response()
+
+
+def close_by_another_thread_before_the_first_response(spark, service):
+    # An execution that the server holds before any response, of a client that another thread
+    # closes: the call ends of `Channel closed!`, as its response has not begun.
+    service.execute_payloads = [_schema_response(), _batch_response()]
+    service.block_execute = True
+    try:
+        return _closed_by_another_thread_during(spark, lambda: _range(spark).collect())
+    finally:
+        service.block_execute = False
+        service.release_response()
+
+
+def close_by_another_thread_during_a_config_read(spark, service):
+    # A config read that the server holds, of a client that another thread closes.
+    service.block_config = True
+    try:
+        return _closed_by_another_thread_during(
+            spark, lambda: spark.conf.get("spark.sql.shuffle.partitions")
+        )
+    finally:
+        service.block_config = False
+        service.release_response()
+
+
+def _closed_after_releases_in_flight(spark, service, close):
+    # A collect, whose releases the server answers 1 s later, and then `close`, of the client or of
+    # the session: PySpark's `close` waits for the release futures of its iterators, at most 10 s,
+    # before it closes the channel, which would cancel them. Whether the close waited, how many
+    # releases were refused, which another thread logs, and how many the server answered.
+    import time
+
+    from pyspark.sql.connect.logging import logger
+
+    refused = []
+
+    class Refused(logging.Handler):
+        def emit(self, record):
+            if record.getMessage().startswith("ReleaseExecute failed"):
+                refused.append(record.getMessage())
+
+    handler = Refused()
+    logger.addHandler(handler)
+    service.execute_payloads = [_schema_response(), _batch_response()]
+    service.release_delay = 1.0
+    try:
+        _range(spark).collect()
+        started = time.monotonic()
+        close()
+        waited = time.monotonic() - started > 0.5
+        # The releases that the close cancelled, logged in the background.
+        time.sleep(0.3)
+    finally:
+        service.release_delay = 0
+        logger.removeHandler(handler)
+    return waited, len(refused), len(service.release_execute_requests) > 0
+
+
+def close_after_releases_in_flight(spark, service):
+    return _closed_after_releases_in_flight(spark, service, spark.client.close)
+
+
+def stop_after_releases_in_flight(spark, service):
+    return _closed_after_releases_in_flight(spark, service, spark.stop)
+
+
+def failure_of_a_call_of_a_handler_of_a_conversion(spark, service):
+    # A handler of a log of the conversion of the failure of an execution (`Received ErrorInfo`)
+    # that runs an execution of its own, which fails too, and lets its error out: PySpark's
+    # `_handle_error` raises the error of a call as grpc gives it while it handles another failure
+    # of the client (`inside_error_handling`), of no records, no details of the server, no configs
+    # of its stack trace and no operation ID, and it goes out of the handler, and so out of the
+    # conversion of the outer call, of the operation ID of the outer execution.
+    from pyspark.sql.connect.logging import logger
+
+    class Failing(logging.Handler):
+        armed = True
+        nested = None
+
+        def emit(self, record):
+            if self.armed and str(record.msg).startswith("Received ErrorInfo"):
+                self.armed = False
+                try:
+                    _range(spark).collect()
+                except Exception as e:
+                    self.nested = (type(e).__name__, getattr(e, "_operation_id", None) is not None)
+                    raise
+
+    service.execute_error = _server_error()
+    configs = len(service.config_requests)
+    handler = Failing()
+    logger.addHandler(handler)
+    try:
+        _range(spark).collect()
+        outcome = "returned"
+    except Exception as e:  # noqa: BLE001
+        has_operation_id = getattr(e, "_operation_id", None) is not None
+        outcome = (type(e).__name__, has_operation_id, handler.nested)
+    finally:
+        logger.removeHandler(handler)
+        service.execute_error = None
+    return outcome, len(service.config_requests) - configs
+
+
+def failure_of_a_config_read_of_a_handler_of_a_conversion(spark, service):
+    # A handler of a log of the conversion of the failure of an execution that reads a config,
+    # which fails too, and catches its error: PySpark raises it as grpc gives it, of no records,
+    # and the conversion of the outer call goes on, as without the handler, of the read of the
+    # config of its stack trace.
+    from pyspark.sql.connect.logging import logger
+
+    class Reading(logging.Handler):
+        armed = True
+        nested = None
+
+        def emit(self, record):
+            if self.armed and str(record.msg).startswith("Received ErrorInfo"):
+                self.armed = False
+                service.config_failure = "the config read of the handler failed"
+                try:
+                    spark.conf.get("spark.sql.shuffle.partitions")
+                except Exception as e:  # noqa: BLE001
+                    self.nested = (type(e).__name__, str(e))
+                finally:
+                    service.config_failure = None
+
+    service.execute_error = _server_error()
+    configs = len(service.config_requests)
+    handler = Reading()
+    logger.addHandler(handler)
+    try:
+        _range(spark).collect()
+        outcome = "returned"
+    except Exception as e:  # noqa: BLE001
+        has_operation_id = getattr(e, "_operation_id", None) is not None
+        outcome = (type(e).__name__, has_operation_id, handler.nested)
+    finally:
+        logger.removeHandler(handler)
+        service.execute_error = None
+    return outcome, len(service.config_requests) - configs
+
+
 def stopped_by_another_thread(spark, service):
     # A session that another thread stops while an execution of it waits to retry the failure of
     # its stream: PySpark's iterator retries through the stub that it was made with, of the channel
@@ -890,6 +1081,27 @@ CASES = {
         "DEBUG",
     ),
     "iterator_open_across_close": (iterator_open_across_close, "DEBUG"),
+    "close_by_another_thread_during_a_read": (close_by_another_thread_during_a_read, "DEBUG"),
+    "close_by_another_thread_before_the_first_response": (
+        close_by_another_thread_before_the_first_response,
+        "DEBUG",
+    ),
+    "close_by_another_thread_during_a_config_read": (
+        close_by_another_thread_during_a_config_read,
+        "DEBUG",
+    ),
+    "close_after_releases_in_flight": (close_after_releases_in_flight, "DEBUG"),
+    # Of the errors only: the mock's ReleaseSession answers with no session ID, which PySpark's
+    # `stop()` warns of as it checks the response, where the drop-in checks none of it.
+    "stop_after_releases_in_flight": (stop_after_releases_in_flight, "ERROR"),
+    "failure_of_a_call_of_a_handler_of_a_conversion": (
+        failure_of_a_call_of_a_handler_of_a_conversion,
+        "DEBUG",
+    ),
+    "failure_of_a_config_read_of_a_handler_of_a_conversion": (
+        failure_of_a_config_read_of_a_handler_of_a_conversion,
+        "DEBUG",
+    ),
     "stopped_by_another_thread": (stopped_by_another_thread, "DEBUG"),
     "info_level": (info_level, "INFO"),
     "info_level_of_an_error": (info_level_of_an_error, "INFO"),

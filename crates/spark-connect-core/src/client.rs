@@ -661,11 +661,13 @@ pub struct Conversion {
     pub operation_id: Option<String>,
 }
 
-/// A mark of [`CONVERTING`]: the conversion, of the thread that its call acts for and of the watch
-/// of the waits of that call (see [`crate::runtime::wait_watch_id`]).
+/// A mark of [`CONVERTING`]: the conversion, of the thread that its call acts for, of the watch
+/// of the waits of that call (see [`crate::runtime::wait_watch_id`]) and of the client of the call
+/// (see [`SparkConnectClient::identity`]).
 struct ConvertingMark {
     thread: std::thread::ThreadId,
     watch: Option<usize>,
+    client: usize,
     conversion: Conversion,
 }
 
@@ -689,11 +691,16 @@ struct Converting {
 }
 
 impl Converting {
-    fn start(failure: &crate::error::GrpcioError, operation_id: Option<String>) -> Self {
+    fn start(
+        failure: &crate::error::GrpcioError,
+        operation_id: Option<String>,
+        client: usize,
+    ) -> Self {
         let thread = crate::runtime::calling_thread_id();
         converting().push(ConvertingMark {
             thread,
             watch: crate::runtime::wait_watch_id(),
+            client,
             conversion: Conversion {
                 failure: failure.clone(),
                 operation_id,
@@ -815,6 +822,14 @@ fn stream_deadline_in(deadline: Option<Duration>) -> Option<tokio::time::Instant
     deadline.and_then(|deadline| tokio::time::Instant::now().checked_add(deadline))
 }
 
+/// The details of grpcio's cancel of a call in flight when `close` closes its channel, before the
+/// response of the call begins (see [`ChannelClosed`]).
+pub(crate) const CLOSED_CHANNEL: &str = "Channel closed!";
+
+/// The details of grpcio's cancel of a call in flight when `close` closes its channel, once the
+/// response of the call began, as of a stream whose responses are read.
+pub(crate) const STREAM_OF_A_CLOSED_CHANNEL: &str = "Stream removed (Channel closed!)";
+
 /// The next read of `stream`, a stream of responses of an execution, after grpcio's `close` of its
 /// channel, which cancels the calls of the channel whose status is not delivered yet: a call whose
 /// responses were all read, and which the server ended, ends as the server ended it, of its status;
@@ -826,9 +841,19 @@ fn stream_deadline_in(deadline: Option<Duration>) -> Option<tokio::time::Instant
 fn read_after_close(
     stream: &mut Streaming<ExecutePlanResponse>,
 ) -> std::result::Result<Option<ExecutePlanResponse>, tonic::Status> {
+    read_after_close_of(stream, false)
+}
+
+/// As [`read_after_close`], of a stream of which a response was read already after the close, as
+/// by a read in flight when the client closed the channel, if `discarded`: grpcio's cancel gives
+/// no response after it, so that response is discarded too, and no release of it is sent.
+fn read_after_close_of(
+    stream: &mut Streaming<ExecutePlanResponse>,
+    discarded: bool,
+) -> std::result::Result<Option<ExecutePlanResponse>, tonic::Status> {
     use futures::FutureExt;
-    const DETAILS: &str = "Stream removed (Channel closed!)";
-    let mut unread = false;
+    const DETAILS: &str = STREAM_OF_A_CLOSED_CHANNEL;
+    let mut unread = discarded;
     loop {
         match stream.message().now_or_never() {
             Some(Ok(Some(_))) => unread = true,
@@ -1355,8 +1380,9 @@ pub struct SparkConnectClient {
     /// clones, as PySpark's `close` closes its gRPC channel: once the client is open again (see
     /// [`SparkConnectClient::set_closed`]), its RPCs raise the `ValueError` of grpc's closed
     /// channel, and so do those of the artifacts, which PySpark's ArtifactManager sends whether
-    /// the client is closed or not.
-    channel_closed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// the client is closed or not. Its calls in flight at the close end then (see
+    /// [`ChannelClosed`]).
+    channel_closed: std::sync::Arc<ChannelClosed>,
     /// The server-side session ID that the first response carried, shared by the clones of the
     /// client, as PySpark's `_server_session_id`. Each request sends it as the observed ID, and
     /// each response is checked against it.
@@ -1370,8 +1396,53 @@ pub struct SparkConnectClient {
     /// each with the thread that waits for it now, if any. See
     /// [`SparkConnectClient::running_operation_id`].
     inflight_operations: std::sync::Arc<Inflight>,
+    /// The releases in the background of the executions of the client, shared by its clones (see
+    /// [`SparkConnectClient::wait_for_releases`]).
+    releases: std::sync::Arc<Releases>,
     /// The plan compression of the client, shared by its clones, looked up on its first plan.
     plan_compression: std::sync::Arc<std::sync::Mutex<PlanCompression>>,
+}
+
+/// Whether [`SparkConnectClient::close`] closed the channel of a client, which its clones share,
+/// and the wake-up of their calls in flight then, which end, as grpcio's `close` cancels the calls
+/// of its channel (see `crate::metadata::Checked`).
+#[derive(Default)]
+pub(crate) struct ChannelClosed {
+    closed: std::sync::atomic::AtomicBool,
+    /// Of each generation of the process (see [`crate::fork`]), as the calls that wait for it are
+    /// of the threads of its generation.
+    wake_up: crate::fork::PerGeneration<tokio::sync::Notify>,
+}
+
+impl ChannelClosed {
+    /// Whether the channel is closed.
+    pub(crate) fn is_closed(&self) -> bool {
+        self.closed.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Mark the channel closed: the calls that start from now on see it closed.
+    fn mark_closed(&self) {
+        self.closed.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Wake the calls that wait for the close of the channel, once it is marked closed.
+    fn wake_up(&self) {
+        self.notify().notify_waiters();
+    }
+
+    fn notify(&self) -> &tokio::sync::Notify {
+        self.wake_up.get_or_init(|_| tokio::sync::Notify::new())
+    }
+
+    /// Ends once the channel is closed: at once if it is.
+    pub(crate) async fn closed(&self) {
+        // Made before the mark is read, so that a close after the read wakes it.
+        let woken = self.notify().notified();
+        if self.is_closed() {
+            return;
+        }
+        woken.await;
+    }
 }
 
 /// An execution in flight: its operation ID, and the thread that waits for it now, if any, of the
@@ -1395,6 +1466,68 @@ fn inflight_of(registry: &Inflight) -> std::sync::MutexGuard<'_, Vec<InflightEnt
         .get_or_init(|_| Default::default())
         .lock()
         .unwrap_or_else(|e| e.into_inner())
+}
+
+/// How long the close of a session waits for the releases of its executions, as PySpark's
+/// `close` waits for its release futures (`concurrent.futures.wait(..., timeout=10)`).
+const RELEASES_WAIT: Duration = Duration::from_secs(10);
+
+/// The releases in the background of the executions of a client (see
+/// [`SparkConnectClient::spawn_release`]), of each generation of the process (see
+/// [`crate::fork`]): a child waits for none of its parent's.
+type Releases = crate::fork::PerGeneration<std::sync::Mutex<Vec<PendingRelease>>>;
+
+/// The releases of `releases` of the generation of the process, locked, of those that ended
+/// dropped.
+fn releases_of(releases: &Releases) -> std::sync::MutexGuard<'_, Vec<PendingRelease>> {
+    let mut pending = releases
+        .get_or_init(|_| Default::default())
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    pending.retain(|release| !release.done.is_done());
+    pending
+}
+
+/// A release in the background of an execution.
+struct PendingRelease {
+    /// Whether the stream of the execution ended, as PySpark's client keeps the release futures
+    /// of an iterator once the iterator ended (`_release_futures`), which its `close` waits for.
+    stream_ended: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    done: std::sync::Arc<ReleaseDone>,
+}
+
+/// Whether a release in the background ended, and the wake-up of its waits.
+#[derive(Default)]
+struct ReleaseDone {
+    done: std::sync::atomic::AtomicBool,
+    woken: tokio::sync::Notify,
+}
+
+impl ReleaseDone {
+    fn is_done(&self) -> bool {
+        self.done.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Ends once the release ended: at once if it did.
+    async fn ended(&self) {
+        // Made before the flag is read, so that an end after the read wakes it.
+        let woken = self.woken.notified();
+        if self.is_done() {
+            return;
+        }
+        woken.await;
+    }
+}
+
+/// Ends its release when it drops, with the task of the release, also unfinished, as of a
+/// runtime that drops its tasks.
+struct ReleaseEnds(std::sync::Arc<ReleaseDone>);
+
+impl Drop for ReleaseEnds {
+    fn drop(&mut self) {
+        self.0.done.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.0.woken.notify_waiters();
+    }
 }
 
 /// Keeps an execution in the registry of the in-flight executions of its client until it drops.
@@ -1760,6 +1893,7 @@ impl SparkConnectClient {
             server_session_id: Default::default(),
             session_tracking: true,
             inflight_operations: Default::default(),
+            releases: Default::default(),
             plan_compression: Default::default(),
         })
     }
@@ -2015,6 +2149,7 @@ impl SparkConnectClient {
             server_session_id: Default::default(),
             session_tracking: self.session_tracking,
             inflight_operations: Default::default(),
+            releases: Default::default(),
             plan_compression: Default::default(),
         }
     }
@@ -2024,6 +2159,16 @@ impl SparkConnectClient {
         self.transport.lease().pooled.channel.clone()
     }
 
+    /// The channel of the client for its calls, whose metadata is checked as gRPC's core checks it,
+    /// and which the close of the client ends while they are in flight (see
+    /// [`crate::metadata::Checked`]).
+    fn checked_channel(&self) -> crate::metadata::Checked {
+        crate::metadata::Checked {
+            channel: self.channel(),
+            closed: std::sync::Arc::clone(&self.channel_closed),
+        }
+    }
+
     /// The generated gRPC client stub of the channel of the client. Its message-size cap is
     /// raised from tonic's 4 MiB default (too small for real Arrow `collect()` results) to 128 MiB,
     /// as the raw Grpc calls' too: the reference client sets this unconditionally via
@@ -2031,7 +2176,7 @@ impl SparkConnectClient {
     /// option.
     fn stub(&self) -> Stub {
         Stub(
-            SparkConnectServiceClient::new(crate::metadata::Checked(self.channel()))
+            SparkConnectServiceClient::new(self.checked_channel())
                 .max_decoding_message_size(GRPC_MAX_MESSAGE_LENGTH_DEFAULT)
                 .max_encoding_message_size(GRPC_MAX_MESSAGE_LENGTH_DEFAULT),
         )
@@ -2044,13 +2189,54 @@ impl SparkConnectClient {
     /// a reattachable execution in flight, which raise it too, as PySpark's iterator sends them
     /// through the stub that it was made with; once the client is open again
     /// ([`SparkConnectClient::set_closed`]), all of them raise that `ValueError`, as PySpark's do
-    /// then.
+    /// then. Its calls in flight, and those of its clones, end now, as grpcio's `close` cancels
+    /// the calls of its channel: as cancelled, `CANCELLED`, `Channel closed!` of a call whose
+    /// response has not begun, and `Stream removed (Channel closed!)` of one whose response is
+    /// read (see `crate::metadata::Checked`), the releases of executions in the background too,
+    /// which the close of a session waits for first (see
+    /// [`SparkConnectClient::wait_for_releases`]).
     pub fn close(&self) {
-        self.channel_closed
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.channel_closed.mark_closed();
         self.closed.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.channel_closed.wake_up();
         // Once no open client uses the channel, it stops connecting in the background.
         self.transport.lease().close();
+    }
+
+    /// Wait for the releases in the background of the executions of the client, and of its
+    /// clones, whose streams ended, at most 10 s, as PySpark's `close` waits for the release
+    /// futures that its iterators left it (`concurrent.futures.wait(self._release_futures,
+    /// timeout=10)`) before it closes its channel, which would cancel them (see
+    /// [`SparkConnectClient::close`]): a release of an execution whose stream is still read is
+    /// not waited for, as PySpark's iterator keeps its own until it ends. Not a stable API.
+    #[doc(hidden)]
+    pub async fn wait_for_releases(&self) {
+        let pending = self.releases_to_wait_for();
+        if pending.is_empty() {
+            return;
+        }
+        let ended = futures::future::join_all(pending.iter().map(|done| done.ended()));
+        let _ = tokio::time::timeout(RELEASES_WAIT, ended).await;
+    }
+
+    /// Whether [`SparkConnectClient::wait_for_releases`] currently has releases to wait for. Not a
+    /// stable API.
+    #[doc(hidden)]
+    pub fn has_releases_to_wait_for(&self) -> bool {
+        !self.releases_to_wait_for().is_empty()
+    }
+
+    /// The releases in the background, not ended, of the streams of the client that ended.
+    fn releases_to_wait_for(&self) -> Vec<std::sync::Arc<ReleaseDone>> {
+        releases_of(&self.releases)
+            .iter()
+            .filter(|release| {
+                release
+                    .stream_ended
+                    .load(std::sync::atomic::Ordering::SeqCst)
+            })
+            .map(|release| std::sync::Arc::clone(&release.done))
+            .collect()
     }
 
     /// Mark this client closed, or open, as a set of PySpark's `client._closed`, without closing
@@ -2115,6 +2301,39 @@ impl SparkConnectClient {
             .map(|entry| entry.operation_id.clone())
     }
 
+    /// The identity of the client and of its clones, which share its state, as PySpark's session
+    /// has one client: not of the client of another session (see
+    /// [`SparkConnectClient::with_new_session_id`]).
+    fn identity(&self) -> usize {
+        std::sync::Arc::as_ptr(&self.inflight_operations) as *const () as usize
+    }
+
+    /// Whether the calling thread converts the failure of a call of this client now, as the
+    /// `inside_error_handling` of the `thread_local` of PySpark's client tells it while its
+    /// `_handle_error` runs: the failure of a call of the client that runs meanwhile, as of a
+    /// handler of a log of the conversion, is not converted, and the error of such a call has no
+    /// operation ID, as that `_handle_error` raises the error of the call as it is. Not a stable
+    /// API.
+    ///
+    /// A call runs during a conversion when it runs within a poll of the conversion (see
+    /// [`crate::runtime::polling_conversion`]), as a call of a handler of one of its records, or,
+    /// of a conversion of a call that a watch waits for (see [`crate::runtime::with_wait_watch`]),
+    /// which blocks its thread until it ends, of the Python binding, when it runs on the thread at
+    /// all, as a call of a signal handler that a poll of the watch runs. A call of another task
+    /// of an async caller of the client, which the thread polls between two polls of the
+    /// conversion, does not.
+    #[doc(hidden)]
+    pub fn inside_error_handling(&self) -> bool {
+        let client = self.identity();
+        if crate::runtime::polls_conversion_of(client) {
+            return true;
+        }
+        let thread = crate::runtime::calling_thread_id();
+        converting()
+            .iter()
+            .any(|mark| mark.thread == thread && mark.client == client && mark.watch.is_some())
+    }
+
     /// The operation ID of the innermost execution that the calling thread is waiting for within
     /// the call whose watch it runs (see [`crate::runtime::wait_watch_id`]), if any: not of the
     /// execution of another call of the thread that a call during it, as of a handler of a log,
@@ -2146,8 +2365,7 @@ impl SparkConnectClient {
 
     /// Whether [`SparkConnectClient::close`] closed the channel of this client.
     fn channel_is_closed(&self) -> bool {
-        self.channel_closed
-            .load(std::sync::atomic::Ordering::SeqCst)
+        self.channel_closed.is_closed()
     }
 
     /// The `ValueError` of a server-streaming RPC on a closed channel, as grpc raises it once
@@ -2156,10 +2374,7 @@ impl SparkConnectClient {
     /// the stub that it was made with rather than the `_stub` of the client.
     #[allow(clippy::result_large_err)] // SparkError is large; changing the type would break the API
     fn ensure_channel_open_for_stream(&self) -> Result<()> {
-        if self
-            .channel_closed
-            .load(std::sync::atomic::Ordering::SeqCst)
-        {
+        if self.channel_is_closed() {
             return Err(SparkError::builtin_value_msg(
                 "Cannot invoke RPC: Channel closed!",
             ));
@@ -2171,11 +2386,7 @@ impl SparkConnectClient {
     /// `ReattachExecute`, whose call grpc refuses of another message on a closed channel.
     #[allow(clippy::result_large_err)] // SparkError is large; changing the type would break the API
     fn ensure_open_for_stream(&self) -> Result<()> {
-        if self
-            .channel_closed
-            .load(std::sync::atomic::Ordering::SeqCst)
-            && !self.is_closed()
-        {
+        if self.channel_is_closed() && !self.is_closed() {
             return Err(SparkError::builtin_value_msg(
                 "Cannot invoke RPC: Channel closed!",
             ));
@@ -2188,10 +2399,7 @@ impl SparkConnectClient {
     /// artifacts check it only, as PySpark's ArtifactManager calls its own stub.
     #[allow(clippy::result_large_err)] // SparkError is large; changing the type would break the API
     fn ensure_channel_open(&self) -> Result<()> {
-        if self
-            .channel_closed
-            .load(std::sync::atomic::Ordering::SeqCst)
-        {
+        if self.channel_is_closed() {
             return Err(SparkError::builtin_value_msg(
                 "Cannot invoke RPC on closed channel!",
             ));
@@ -3006,7 +3214,7 @@ impl SparkConnectClient {
     pub async fn execute_plan_raw(&self, request: Vec<u8>) -> Result<Streaming<Vec<u8>>> {
         self.ensure_open_for_stream()?;
         sendable_bytes(&request)?;
-        let mut grpc = tonic::client::Grpc::new(crate::metadata::Checked(self.channel()))
+        let mut grpc = tonic::client::Grpc::new(self.checked_channel())
             .max_decoding_message_size(GRPC_MAX_MESSAGE_LENGTH_DEFAULT)
             .max_encoding_message_size(GRPC_MAX_MESSAGE_LENGTH_DEFAULT);
         wait_ready(&mut grpc).await?;
@@ -3027,7 +3235,7 @@ impl SparkConnectClient {
     pub async fn reattach_execute_raw(&self, request: Vec<u8>) -> Result<Streaming<Vec<u8>>> {
         self.ensure_open_for_stream()?;
         sendable_bytes(&request)?;
-        let mut grpc = tonic::client::Grpc::new(crate::metadata::Checked(self.channel()))
+        let mut grpc = tonic::client::Grpc::new(self.checked_channel())
             .max_decoding_message_size(GRPC_MAX_MESSAGE_LENGTH_DEFAULT)
             .max_encoding_message_size(GRPC_MAX_MESSAGE_LENGTH_DEFAULT);
         wait_ready(&mut grpc).await?;
@@ -3098,7 +3306,7 @@ impl SparkConnectClient {
     pub async fn analyze_plan_raw(&self, request: Vec<u8>) -> Result<Vec<u8>> {
         self.ensure_open()?;
         sendable_bytes(&request)?;
-        let mut grpc = tonic::client::Grpc::new(crate::metadata::Checked(self.channel()))
+        let mut grpc = tonic::client::Grpc::new(self.checked_channel())
             .max_decoding_message_size(GRPC_MAX_MESSAGE_LENGTH_DEFAULT)
             .max_encoding_message_size(GRPC_MAX_MESSAGE_LENGTH_DEFAULT);
         wait_ready(&mut grpc).await?;
@@ -3626,7 +3834,12 @@ impl SparkConnectClient {
                     if let Some(refused) = release_refused() {
                         return Err(refused);
                     }
-                    self.spawn_release(self.execution_metadata(), iter.release_all_request());
+                    // Of an execution whose iterator ended with the failure.
+                    self.spawn_release(
+                        self.execution_metadata(),
+                        iter.release_all_request(),
+                        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+                    );
                 }
                 return Err(error.with_operation_id(iter.operation_id()));
             }
@@ -3641,6 +3854,7 @@ impl SparkConnectClient {
             stream_deadline,
             execute_again: false,
             done: false,
+            stream_ended: Default::default(),
             // Nothing is released of an execution that is not reattachable.
             released: !reattachable,
             _inflight: inflight,
@@ -3687,10 +3901,39 @@ impl SparkConnectClient {
     /// raise an error of (see [`SparkError::from_grpc_status_of`]).
     async fn error_from_status_of(&self, status: tonic::Status, call: GrpcCall) -> SparkError {
         let failure = crate::error::grpcio_error(&status, call);
+        // As PySpark's `_handle_error`, which raises the error of a call as grpc gives it while the
+        // thread handles another failure of the client (`inside_error_handling`), as of a call
+        // that a handler of a log of that conversion makes, so that the handling does not recurse:
+        // of no records, no details of the server, no configs of its stack trace, and the error of
+        // the status as it is, of grpcio's error, which the Python binding raises.
+        if self.inside_error_handling() {
+            let mut error = SparkError::from_grpc_status(status);
+            error.grpcio = crate::connector::grpcio_dialect().then(|| Box::new(failure));
+            return error;
+        }
         // As PySpark's `_handle_error`, which converts the failure in the `except Exception`
         // clause of the call, outside of the `except KeyboardInterrupt` of an execution: a signal
         // while it runs interrupts nothing (see [`converting_failure`]).
-        let _converting = Converting::start(&failure, self.operation_id_of_this_call());
+        let _converting =
+            Converting::start(&failure, self.operation_id_of_this_call(), self.identity());
+        // Of whose polls a call of the client is of the handling of this failure (see
+        // [`SparkConnectClient::inside_error_handling`]). Boxed, as the future of every call that
+        // converts its failure would otherwise hold the conversion.
+        crate::runtime::polling_conversion(
+            self.identity(),
+            Box::pin(self.converted_error_of(status, call, failure)),
+        )
+        .await
+    }
+
+    /// The error of the failed RPC of `status`, of grpcio's error `failure`, as
+    /// [`SparkConnectClient::error_from_status_of`] converts it.
+    async fn converted_error_of(
+        &self,
+        status: tonic::Status,
+        call: GrpcCall,
+        failure: crate::error::GrpcioError,
+    ) -> SparkError {
         // As PySpark's `_handle_rpc_error`, which logs the error of grpc before it reads it, and
         // then the `ErrorInfo` of a status of the server, but of a call past its deadline, which
         // it raises at once. It reads the `google.rpc.Status` of the call with grpc_status, which
@@ -4858,6 +5101,9 @@ pub struct ReattachableResponseStream {
     /// reattaching: the server does not know the execution, which never reached it.
     execute_again: bool,
     done: bool,
+    /// Whether the stream ended, done or dropped, which its releases in the background share
+    /// (see [`SparkConnectClient::wait_for_releases`]).
+    stream_ended: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Whether `ReleaseAll` was sent, after which nothing else is released.
     released: bool,
     /// The registration of the execution as in flight, which ends with the stream.
@@ -4924,17 +5170,29 @@ impl SparkConnectClient {
     /// removes an execution that is never released once it has been detached for
     /// `spark.connect.execute.manager.detachedTimeout`. As the reference's, the request carries
     /// no observed server-side session ID.
-    fn spawn_release(&self, metadata: MetadataMap, request: ReleaseExecuteRequest) {
+    fn spawn_release(
+        &self,
+        metadata: MetadataMap,
+        request: ReleaseExecuteRequest,
+        stream_ended: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) {
         let stub = self.stub();
         let mut retries = self.retries_of(GrpcCall::Unary);
         let channel_closed = std::sync::Arc::clone(&self.channel_closed);
+        let done = std::sync::Arc::<ReleaseDone>::default();
+        releases_of(&self.releases).push(PendingRelease {
+            stream_ended,
+            done: std::sync::Arc::clone(&done),
+        });
+        let ends = ReleaseEnds(done);
         let release = async move {
+            let _ends = ends;
             // As the reference's, which goes through the stub of its iterator rather than the
             // `_stub` of the client: a release is retried whether or not the client was closed,
             // but grpc refuses each of its attempts once the channel is closed, as by the `stop()`
             // of another thread, of its `ValueError` of a closed channel, which is not retried.
             let channel_open = || {
-                if channel_closed.load(std::sync::atomic::Ordering::SeqCst) {
+                if channel_closed.is_closed() {
                     return Err(SparkError::builtin_value_msg(
                         "Cannot invoke RPC on closed channel!",
                     ));
@@ -5004,11 +5262,7 @@ impl SparkConnectClient {
     #[doc(hidden)]
     pub fn spawn_unary_execute_plan(&self, mut request: ExecutePlanRequest) {
         // Neither is sent of a closed channel, whose call PySpark's finalizer would fail.
-        if self.is_closed()
-            || self
-                .channel_closed
-                .load(std::sync::atomic::Ordering::SeqCst)
-        {
+        if self.is_closed() || self.channel_is_closed() {
             return;
         }
         add_result_chunking_option(&mut request, self.result_chunking);
@@ -5176,6 +5430,11 @@ impl ReattachableResponseStream {
                     }
                 };
                 match crate::runtime::until_abort(crate::runtime::ABORT_ALL, read).await {
+                    // A response that a read in flight gives once the client closed the channel,
+                    // which grpcio's cancel would not give (see `read_after_close_of`).
+                    Some(Ok(Some(_))) if self.client.channel_is_closed() => {
+                        read_after_close_of(stream, true)
+                    }
                     Some(next) => next,
                     None => return Err(self.fail(wait_aborted())),
                 }
@@ -5198,7 +5457,7 @@ impl ReattachableResponseStream {
                     // As the reference's `send`, whose release raises before it returns the
                     // response once releases are refused: the stream ends with that error.
                     let released = if self.iter.is_completed().await {
-                        self.done = true;
+                        self.end();
                         self.release_all()
                     } else if !resp.response_id.is_empty() {
                         self.release_until(&resp.response_id)
@@ -5206,7 +5465,7 @@ impl ReattachableResponseStream {
                         Ok(())
                     };
                     if let Err(refused) = released {
-                        self.done = true;
+                        self.end();
                         return Err(refused);
                     }
                     if let Err(error) = self.log_response(&resp).await {
@@ -5334,6 +5593,10 @@ impl ReattachableResponseStream {
             } else {
                 match crate::runtime::until_abort(crate::runtime::ABORT_ALL, stream.message()).await
                 {
+                    // As in the reattachable stream (see `read_after_close_of`).
+                    Some(Ok(Some(_))) if self.client.channel_is_closed() => {
+                        read_after_close_of(stream, true)
+                    }
                     Some(next) => next,
                     None => return Err(self.fail(wait_aborted())),
                 }
@@ -5353,7 +5616,7 @@ impl ReattachableResponseStream {
                     return Ok(Some(resp));
                 }
                 Ok(None) => {
-                    self.done = true;
+                    self.end();
                     return Ok(None);
                 }
                 Err(status) => match retrying.backoff(&status).await {
@@ -5569,7 +5832,7 @@ impl ReattachableResponseStream {
     /// Once releases are refused, the error is that of the refused release, as the reference's
     /// `_has_next` raises the error of its release of the failed execution.
     fn fail(&mut self, error: SparkError) -> SparkError {
-        self.done = true;
+        self.end();
         match self.release_all() {
             Ok(()) => error.with_operation_id(self.iter.operation_id()),
             Err(refused) => refused,
@@ -5603,8 +5866,19 @@ impl ReattachableResponseStream {
 
     /// Sends `request` in the background, as [`SparkConnectClient::spawn_release`] does.
     fn spawn_release(&self, request: ReleaseExecuteRequest) {
-        self.client
-            .spawn_release(self.client.execution_metadata(), request);
+        self.client.spawn_release(
+            self.client.execution_metadata(),
+            request,
+            std::sync::Arc::clone(&self.stream_ended),
+        );
+    }
+
+    /// Ends the stream: nothing more is read of it, and its releases are those of an ended
+    /// stream, which the close of the session waits for.
+    fn end(&mut self) {
+        self.done = true;
+        self.stream_ended
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -5616,6 +5890,8 @@ impl Drop for ReattachableResponseStream {
     /// it: the child releases nothing of it, and leaves its stream, of the parent's connection,
     /// as it is (see [`crate::fork`]).
     fn drop(&mut self) {
+        self.stream_ended
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         if self.generation == crate::fork::generation() {
             let _ = self.release_all();
         }
@@ -5998,7 +6274,11 @@ mod tests {
             &tonic::Status::internal("failed"),
             GrpcCall::ServerStreaming,
         );
-        let converting = Converting::start(&failure, client.operation_id_of_this_call());
+        let converting = Converting::start(
+            &failure,
+            client.operation_id_of_this_call(),
+            client.identity(),
+        );
         assert_eq!(
             converting_failure().and_then(|conversion| conversion.operation_id),
             Some("failed".to_string())
@@ -8641,6 +8921,96 @@ mod request_fields_tests {
                 assert!(matches!(op_type, Some(PlanOpType::Command(_))));
             }
         }
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_failure_while_the_thread_converts_another_of_its_client_is_not_converted() {
+        // As PySpark's `_handle_error`, which raises the error of a call as grpc gives it while
+        // the thread handles another failure of the client (`inside_error_handling` of the
+        // `thread_local` of the client), as of a call that a handler of a log of the conversion
+        // makes: neither the details of the error nor the configs of its stack trace are asked
+        // for, where they are of a failure of another client, or once the conversion ended.
+        let received: Received = Default::default();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let incoming = futures::stream::unfold(listener, |listener| async {
+            Some((listener.accept().await.map(|(socket, _)| socket), listener))
+        });
+        let service = Recorder(received.clone(), Default::default());
+        let server = tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(service)
+                .serve_with_incoming(incoming)
+                .await
+                .unwrap();
+        });
+        let env = crate::channel::set_env(&[("SPARK_CONNECT_AUTHENTICATE_TOKEN", None)]);
+        let builder =
+            ChannelBuilder::parse(&format!("sc://127.0.0.1:{}/;user_id=u1", address.port()))
+                .unwrap();
+        let client = SparkConnectClient::connect(&builder).await.unwrap();
+        drop(env);
+        let other = client.with_new_session_id();
+        let asked = || {
+            let mut received = received.lock().unwrap();
+            let methods: Vec<String> = received.drain(..).map(|(method, _)| method).collect();
+            methods
+        };
+        // The details, and the config of the stack trace of the server, which shows it as the
+        // server sends none.
+        let details_and_configs = vec!["FetchErrorDetails".to_string(), "Config".to_string()];
+        client.error_from_status(error_kept_under("error-1")).await;
+        assert_eq!(asked(), details_and_configs);
+        // Within the polls of a conversion of the client, as a call of a handler of one of its
+        // records.
+        crate::runtime::polling_conversion(client.identity(), async {
+            assert!(client.inside_error_handling());
+            assert!(!other.inside_error_handling());
+            let error = client.error_from_status(error_kept_under("error-2")).await;
+            assert_eq!(asked(), Vec::<String>::new());
+            assert_eq!(error.grpc_code, Some(tonic::Code::Internal as i32));
+            assert_eq!(error.server_stacktrace, None);
+            // Of a client of another session, whose `thread_local` is its own.
+            other.error_from_status(error_kept_under("error-3")).await;
+            assert_eq!(asked(), details_and_configs);
+            // Of a clone of the client, which shares it.
+            let error = client
+                .clone()
+                .error_from_status(error_kept_under("error-4"))
+                .await;
+            assert_eq!(asked(), Vec::<String>::new());
+            assert_eq!(error.server_stacktrace, None);
+            // Of another thread, which polls no conversion.
+            let elsewhere = client.clone();
+            std::thread::spawn(move || {
+                assert!(!elsewhere.inside_error_handling());
+            })
+            .join()
+            .unwrap();
+        })
+        .await;
+        assert!(!client.inside_error_handling());
+        client.error_from_status(error_kept_under("error-5")).await;
+        assert_eq!(asked(), details_and_configs);
+        // Of a conversion of a call that a watch waits for, of the Python binding, which blocks its
+        // thread: between the polls of the conversion too, as of a signal handler that a poll of
+        // the watch runs; but not of a conversion of no watch, of an async caller, whose other
+        // tasks the thread polls between the polls of the conversion.
+        let failure = crate::error::grpcio_error(
+            &tonic::Status::internal("failed"),
+            GrpcCall::ServerStreaming,
+        );
+        let watch: std::sync::Arc<crate::runtime::WaitWatch> =
+            std::sync::Arc::new(|| crate::runtime::Watch::Continue);
+        crate::runtime::with_wait_watch(watch, || {
+            let _converting = Converting::start(&failure, None, client.identity());
+            assert!(client.inside_error_handling());
+            assert!(!other.inside_error_handling());
+        });
+        let converting = Converting::start(&failure, None, client.identity());
+        assert!(!client.inside_error_handling());
+        drop(converting);
         server.abort();
     }
 

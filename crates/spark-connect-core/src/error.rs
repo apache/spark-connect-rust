@@ -237,15 +237,18 @@ pub struct SparkError {
     #[doc(hidden)]
     pub pyspark_message: Option<String>,
     /// grpcio's error of a failed call that PySpark's client leaves to grpc, as it does not
-    /// convert it (`cloneSession`, `copyFromLocalToFs`, and the caching of artifacts), which the
-    /// Python binding raises as grpcio's `RpcError`; or, of an error of the kind
+    /// convert it (`cloneSession`, `copyFromLocalToFs`, and the caching of artifacts, and a call
+    /// that fails while the client converts another failure on the thread, see
+    /// `SparkConnectClient::inside_error_handling`), which the Python binding raises as grpcio's
+    /// `RpcError`; or, of an error of the kind
     /// [`SparkErrorKind::BuiltinValueError`], the error of the call whose `google.rpc.Status` does
     /// not match it, or whose details upb does not read, of which PySpark raises the `ValueError`
     /// of `rpc_status.from_call`, or protobuf's `DecodeError` of `Error parsing message with type
     /// 'google.rpc.Status': ...` (or of its `ErrorInfo` or `RetryInfo`), as it handles it, its
     /// `__context__` (see `from_call_error`).
     /// Only in the dialect of grpcio (see [`crate::set_grpcio_dialect`]); the Rust client converts
-    /// these failures as any other.
+    /// these failures as any other, but that of a call during another conversion, which is the
+    /// error of its status as it is.
     #[doc(hidden)]
     pub grpcio: Option<Box<GrpcioError>>,
 }

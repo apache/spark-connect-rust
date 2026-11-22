@@ -1393,9 +1393,20 @@ fn run_interruptible<T: Send, E: Send + Into<Box<SparkError>>>(
     // As PySpark's requests, which read `SPARK_CONNECT_USER_AGENT` of `os.environ` as each is
     // built: of the environment as the call starts, read under the GIL, as Python changes it.
     session.refresh_user_agent();
-    let outcome = wait_interruptible(py, session, f, catch_interrupt_failure);
+    let mut outcome = wait_interruptible(py, session, f, catch_interrupt_failure);
+    // As PySpark's `_handle_error`, which raises the error of a call as it is while the thread
+    // handles another failure of the client (`inside_error_handling`), as of a call that a handler
+    // of a log of that conversion makes: before it sets the operation ID of an execution on it,
+    // and before its `finally` leaves `inside_error_handling` False, which it leaves True.
+    let inside_error_handling = context.handles_errors() && session.inside_error_handling();
+    if inside_error_handling {
+        if let Ok(Err(failure)) = &mut outcome {
+            failure.operation_id = None;
+        }
+    }
     let read_tags = refreshed.without_tags && session.has_thread_tags();
-    let handled_error = context.handles_errors() && matches!(outcome, Ok(Err(_)));
+    let handled_error =
+        context.handles_errors() && !inside_error_handling && matches!(outcome, Ok(Err(_)));
     let after = after_call(py, session, read_tags, handled_error, refreshed.copy_token);
     let mut ended = call.end(py);
     ended.release_failure_errors(match &outcome {

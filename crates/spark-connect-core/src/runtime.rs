@@ -443,7 +443,9 @@ async fn watched<F: Future>(
 /// that of the caller: [`calling_thread_id`] is the caller's ID there, the entries that it makes
 /// of that state end with the caller (see [`crate::thread_entries`]), and the callback depth and
 /// the recursion failure of the caller carry over, then back, so a call made from inside a
-/// callback bounds its recursion as on the caller's own thread.
+/// callback bounds its recursion as on the caller's own thread; and so do the conversions of
+/// failures that the caller polls (see [`polling_conversion`]), as of a call of a handler of a
+/// record of one.
 fn block_on_other_thread<F>(f: F) -> F::Output
 where
     F: std::future::Future + Send,
@@ -453,9 +455,13 @@ where
     let caller = calling_thread_id();
     let depth = CALLBACK_DEPTH.with(std::cell::Cell::get);
     let recursion_failed = CALLBACK_RECURSION_FAILED.with(std::cell::Cell::get);
+    // The future runs within the polls of the conversions that the caller polls now, as of a call
+    // of a handler of a record of one, which the caller waits for.
+    let conversions = CONVERSION_POLLS.with(|polls| polls.borrow().clone());
     let (output, recursion_failed, registrations) = std::thread::scope(|scope| {
         let worker = scope.spawn(move || {
             CALLER_THREAD.with(|caller_thread| caller_thread.set(Some(caller)));
+            CONVERSION_POLLS.with(|polls| *polls.borrow_mut() = conversions);
             CALLBACK_DEPTH.with(|d| d.set(depth));
             CALLBACK_RECURSION_FAILED.with(|failed| failed.set(recursion_failed));
             let output = get_runtime().block_on(f);
@@ -505,6 +511,41 @@ thread_local! {
     /// The thread that the calls of this thread act for, while [`block_on_other_thread`] runs a
     /// future on this thread for it.
     static CALLER_THREAD: std::cell::Cell<Option<std::thread::ThreadId>> = const { std::cell::Cell::new(None) };
+    /// The clients of the conversions of failures that this thread polls now, innermost last (see
+    /// [`polling_conversion`]), with those of the thread that it acts for, while
+    /// [`block_on_other_thread`] runs a future on it for that thread within one.
+    static CONVERSION_POLLS: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+}
+
+/// `conversion`, the conversion of the failure of a call of the client of the identity `client`,
+/// of whose polls the thread converts a failure of the client (see [`polls_conversion_of`]): a
+/// call of the client that runs within a poll, as a call of a handler of a record of the
+/// conversion, runs during the conversion, and a task that the thread polls between two polls,
+/// as a call of the client of another task of an async caller, does not.
+pub(crate) async fn polling_conversion<F: Future>(client: usize, conversion: F) -> F::Output {
+    struct Polled;
+
+    impl Drop for Polled {
+        fn drop(&mut self) {
+            CONVERSION_POLLS.with(|polls| {
+                polls.borrow_mut().pop();
+            });
+        }
+    }
+
+    let mut conversion = std::pin::pin!(conversion);
+    std::future::poll_fn(move |cx| {
+        CONVERSION_POLLS.with(|polls| polls.borrow_mut().push(client));
+        let _polled = Polled;
+        conversion.as_mut().poll(cx)
+    })
+    .await
+}
+
+/// Whether the calling thread polls a conversion of a failure of the client of the identity
+/// `client` now (see [`polling_conversion`]).
+pub(crate) fn polls_conversion_of(client: usize) -> bool {
+    CONVERSION_POLLS.with(|polls| polls.borrow().contains(&client))
 }
 
 /// The thread whose per-thread state the calls on this thread use: the thread that calls the
