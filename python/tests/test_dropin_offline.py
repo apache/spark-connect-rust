@@ -15876,18 +15876,26 @@ def test_no_part_that_the_collector_sees_is_cloned_without_the_gil_by_a_call(moc
     import threading
     import time
 
+    import pyspark.ml.connect as connect
     from pyspark import cloudpickle
     from pyspark._pyspark import _watch_reported_parts
     from pyspark.ml.feature import VectorAssembler
     from pyspark.ml.regression import LinearRegression
+    from pyspark.ml.util import RemoteModelRef
     from pyspark.sql import Observation
     from pyspark.sql import functions as F
+    from pyspark.sql.connect.session import SparkSession as ConnectSession
 
     spark, service = mock_connect
     u = F.udf(lambda x: x, "long")
     base = spark.range(10).select("id", u(F.col("id")).alias("u"))
     derived = base.filter("u >= 0")
     features = VectorAssembler(inputCols=["id", "u"], outputCol="features").transform(base)
+    # The native models of `pyspark.ml.connect`, whose transforms, fetches and cached members run
+    # without the GIL of the plans of their datasets and of what the models hold, and whose saves,
+    # and the releases of the `RemoteModelRef`s that they are made of, of no part.
+    model = connect.regression.LinearRegressionModel(RemoteModelRef("gc-watch-model"))
+    forest = connect.regression.RandomForestRegressionModel(RemoteModelRef("gc-watch-forest"))
     # Calls of a few milliseconds each, as of a server of a network, so that the parts that a call
     # clones are held while the watch reads them; the first plan of a session waits for the lookup
     # of its compression before it is built, so that its clones are made once the watch reads.
@@ -15925,6 +15933,24 @@ def test_no_part_that_the_collector_sees_is_cloned_without_the_gil_by_a_call(moc
         frame = base.select("*", F.lit(random.random()).alias("r"))
         frame.observe(observation, F.count(F.lit(1)).alias("n")).collect()
 
+    def of_the_active_session(call):
+        # The save of a model and the release of a `RemoteModelRef` are of the active session,
+        # which is of its thread, as PySpark's: of the session of the test, for the call.
+        def run():
+            saved = getattr(ConnectSession._active_session, "session", None)
+            ConnectSession._active_session.session = spark
+            try:
+                call()
+            finally:
+                ConnectSession._active_session.session = saved
+
+        return run
+
+    def drop_a_model_of_a_reference():
+        # Its `__del__` releases the last reference of its `RemoteModelRef`, which deletes the
+        # object of the server through the active session.
+        connect.regression.LinearRegressionModel(RemoteModelRef(f"w{random.randrange(10**9)}"))
+
     calls = [
         base.collect,
         derived.count,
@@ -15957,6 +15983,15 @@ def test_no_part_that_the_collector_sees_is_cloned_without_the_gil_by_a_call(moc
         lambda: copy.copy(derived).collect(),
         lambda: base.localCheckpoint(),
         lambda: LinearRegression(featuresCol="features", labelCol="id", maxIter=1).fit(features),
+        lambda: connect.regression.LinearRegression(labelCol="id", maxIter=1).fit(features),
+        lambda: model.transform(features).collect(),
+        lambda: model.copy().transform(features).schema,
+        lambda: model.numFeatures,
+        lambda: forest.trees,
+        lambda: pickle.dumps(model.transform(features)),
+        lambda: copy.deepcopy(model.transform(features)),
+        of_the_active_session(lambda: model.write().overwrite().save("gc_watch_model")),
+        of_the_active_session(drop_a_model_of_a_reference),
         lambda: base.cache().unpersist(),
         first_plan_of_a_session,
     ]

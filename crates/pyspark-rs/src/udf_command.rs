@@ -187,6 +187,17 @@ pub(crate) fn python_object_of(object: &(dyn std::any::Any + Send + Sync)) -> Op
         .map(|command| &command.object)
 }
 
+/// The Python object of `pickler`, a pickler of the binding: of a UDF its function and output type,
+/// of a UDTF its handler, of `DataFrame.to` its schema, which a pickle of a DataFrame, a Column or
+/// a table argument carries in place of its command (see [`PickleHoles`]). None of another pickler.
+pub(crate) fn pickler_object<'py>(
+    py: Python<'py>,
+    pickler: &CommandPickler,
+) -> Option<Bound<'py, PyAny>> {
+    let command = pickler.object().downcast_ref::<PythonCommand>()?;
+    Some(command.object.bind(py).clone())
+}
+
 /// The bytes of `command`, the pickle of a command.
 fn command_of(command: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
     Ok(command.cast::<PyBytes>()?.as_bytes().to_vec())

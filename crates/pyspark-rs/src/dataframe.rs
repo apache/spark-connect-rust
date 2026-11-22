@@ -1137,10 +1137,16 @@ impl PyDataFrame {
     /// of the relation of this DataFrame as it was sent, of its holes and of the error of a plan
     /// that does not build, as its pickle carries them (see `__reduce__`), a `LogicalPlan` on the
     /// client and on a Python worker of the server, whose PySpark has no class of the drop-in,
-    /// which `DataFrame(plan, session)` and PySpark's DataFrame of a plan over it build alike. So
-    /// a plan of the Python client over the plan of this DataFrame, such as a `SubqueryAlias`,
-    /// pickles plainly too, and unpickles on the worker, as PySpark's plan does. Not a stable API.
-    fn _plan_reduce<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyTuple>> {
+    /// which `DataFrame(plan, session)` and PySpark's DataFrame of a plan over it build alike, of
+    /// `observations`, the Observations of the plan by their names. So a plan of the Python client
+    /// over the plan of this DataFrame, such as a `SubqueryAlias`, pickles plainly too, and
+    /// unpickles on the worker, as PySpark's plan does; one of a model fails as the DataFrame's
+    /// pickle does (see `__reduce_ex__`). Not a stable API.
+    #[pyo3(signature = (observations=None))]
+    fn _plan_reduce<'py>(
+        slf: &Bound<'py, Self>,
+        observations: Option<Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let py = slf.py();
         let (relation, build_error, holes) = slf.borrow().pickled_relation(py)?;
         let reduce_module = py.import("pyspark.sql.connect._column_reduce")?;
@@ -1149,49 +1155,38 @@ impl PyDataFrame {
         } else {
             reduce_module.getattr("fill_holes")?
         };
-        let args = (relation, build_error, holes, fill).into_pyobject(py)?;
-        PyTuple::new(py, [reduce_module.getattr("sent_plan")?, args.into_any()])
+        let observations = observations.unwrap_or_else(|| py.None().into_bound(py));
+        let args = (relation, build_error, holes, fill, observations).into_pyobject(py)?;
+        let reduce = PyTuple::new(py, [reduce_module.getattr("sent_plan")?, args.into_any()])?;
+        // As PySpark's pickle of the plan of a model, which fails at the objects of `pyspark.ml`
+        // that it keeps, as the pickle of the DataFrame does (see `__reduce_ex__`).
+        let dataframe = slf.borrow().dataframe.clone();
+        let reach = crate::ml::object::pickle_reach(py, &dataframe)?;
+        crate::ml::object::reach_reduce(py, &reach, reduce.into_any())
     }
 
-    /// The reduce of a pickle at `protocol`, as PySpark Connect's DataFrame pickles its plan before
-    /// its session, of the objects of `pyspark.ml` that the plan keeps (see
-    /// `ml::object::pickle_block`, of the plans of its subqueries and of the Python plans of
-    /// PySpark's own classes of `pyspark.ml` too): of a plan that keeps a model first (a transform
-    /// of a model, a DataFrame of a method of a model or of the summary of an evaluation), the
-    /// error of the lock of the model's `RemoteModelRef` at the protocol, before the session; of a
-    /// DataFrame of a method of the training summary of a fit, the reduce of `__reduce__`, whose
-    /// local function a plain pickle refuses first, as PySpark's refuses the session of the
-    /// summary's `_summary_dataset`, and then a lock, as the model of the summary
-    /// (`_remote_model_obj`) keeps one, which cloudpickle, of the function, reaches next; else the
-    /// reduce of `__reduce__`.
+    /// The reduce of a pickle, as PySpark Connect's DataFrame pickles its plan before its session,
+    /// of the objects of `pyspark.ml` that the plan keeps (see `ml::object::pickle_reach`, of the
+    /// plans of its subqueries and of the Python plans of PySpark's own classes of `pyspark.ml`
+    /// too): of a plan that keeps a model or a summary (a transform of a model, a DataFrame of a
+    /// method of a model or of a summary), the reduce of the objects that PySpark's pickle of the
+    /// plan reaches first, the functions of its UDFs before them and then the lock of the model's
+    /// `RemoteModelRef`, or the summary dataset of a training summary, whose session a plain
+    /// pickle refuses, as PySpark's refuses the session of the summary's `_summary_dataset`, and
+    /// then the lock, which cloudpickle, of the function of the session, reaches next (see
+    /// `ml::object::reach_reduce`); so a pickle fails at the first object that it cannot pickle,
+    /// of the error of its protocol (the TypeError of a lock at 2 and up, its PicklingError below).
+    /// Else the reduce of `__reduce__`.
     fn __reduce_ex__<'py>(
         slf: &Bound<'py, Self>,
         protocol: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        let _ = protocol;
         let py = slf.py();
         let dataframe = slf.borrow().dataframe.clone();
-        let block = crate::ml::object::pickle_block(py, &dataframe)?;
-        let reduced = match block {
-            Some(spark_connect::ml::MlPickleBlock::ModelLock) => {
-                return Err(crate::ml::object::lock_pickle_error(py, protocol));
-            }
-            Some(spark_connect::ml::MlPickleBlock::SummarySession(_)) => {
-                slf.call_method0(pyo3::intern!(py, "__reduce__"))?
-            }
-            None => return slf.call_method0(pyo3::intern!(py, "__reduce__")),
-        };
-        let reduced = reduced.cast_into::<PyTuple>()?;
-        let state = PyDict::new(py);
-        match reduced.get_item(2).ok() {
-            Some(given) if given.is_instance_of::<PyDict>() => state.update(given.cast()?)?,
-            Some(given) if !given.is_none() => return Ok(reduced.into_any()),
-            _ => {}
-        }
-        state.set_item("_model_lock", py.import("threading")?.call_method0("Lock")?)?;
-        let mut items: Vec<Bound<'py, PyAny>> = reduced.iter().take(2).collect();
-        items.push(state.into_any());
-        items.extend(reduced.iter().skip(3));
-        Ok(PyTuple::new(py, items)?.into_any())
+        let reach = crate::ml::object::pickle_reach(py, &dataframe)?;
+        let reduced = slf.call_method0(pyo3::intern!(py, "__reduce__"))?;
+        crate::ml::object::reach_reduce(py, &reach, reduced)
     }
 
     /// The shallow copy of a DataFrame, as PySpark's `copy.copy` of its `__reduce__`: the same
@@ -1247,17 +1242,12 @@ impl PyDataFrame {
         this.own_schema(py)
             .map_err(|err| columns_read_error(py, err))?;
         // As PySpark's copy of the plan, which copies the objects of `pyspark.ml` that it keeps
-        // (see `__reduce_ex__`): the TypeError of the lock of a model, after a copy of the
-        // `_summary_dataset` of the training summary of a DataFrame of a method of the summary, of
-        // its requests of its schema.
-        if let Some(block) = crate::ml::object::pickle_block(py, &this.dataframe)? {
-            if let spark_connect::ml::MlPickleBlock::SummarySession(dataset) = block {
-                let dataset = Py::new(py, PyDataFrame::new(dataset))?;
-                py.import("copy")?
-                    .call_method1(pyo3::intern!(py, "deepcopy"), (dataset, memo))?;
-            }
-            let protocol = pyo3::types::PyInt::new(py, 4).into_any();
-            return Err(crate::ml::object::lock_pickle_error(py, &protocol));
+        // (see `__reduce_ex__`): the TypeError of the lock of a model, after copies of the
+        // functions of the UDFs before it and of the `_summary_dataset` of the training summary of
+        // a DataFrame of a method of the summary, of its requests of its schema.
+        let reach = crate::ml::object::pickle_reach(py, &this.dataframe)?;
+        if let Some(error) = crate::ml::object::reach_deepcopy_error(py, &reach, memo)? {
+            return Err(error);
         }
         let observations = this
             .dataframe
@@ -5918,7 +5908,9 @@ impl PyDataFrameWriter {
                 kept_options.into_any(),
             ],
         )?;
-        reduce_with_instance_dict(slf, state_reduce(py, "writer_reduce", args)?)
+        let reduce = reduce_with_instance_dict(slf, state_reduce(py, "writer_reduce", args)?)?;
+        // As PySpark's pickle of the plan of its DataFrame, of a model, before its session.
+        crate::ml::object::frames_reduce(py, &[&this.frame], reduce)
     }
 
     /// A writer of its state, as `__reduce__` gives it: of the DataFrame `frame`, the format,
@@ -6867,7 +6859,9 @@ impl PyDataFrameWriterV2 {
                 kept_properties.into_any(),
             ],
         )?;
-        reduce_with_instance_dict(slf, state_reduce(py, "writer_v2_reduce", args)?)
+        let reduce = reduce_with_instance_dict(slf, state_reduce(py, "writer_v2_reduce", args)?)?;
+        // As PySpark's pickle of the plan of its DataFrame, of a model, before its session.
+        crate::ml::object::frames_reduce(py, &[&this.frame], reduce)
     }
 
     /// A V2 writer of its state, as `__reduce__` gives it: of the DataFrame `frame`, the table,

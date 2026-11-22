@@ -44,7 +44,47 @@ impl MlRef {
             model_ref: proto::ObjectRef { id: id.to_string() },
             session: session.clone(),
             fit_warning: None,
+            release: None,
+            kept: Default::default(),
         }))
+    }
+
+    /// The object of the id `id` of the ML cache of `session`, which this client does not own, as
+    /// the `RemoteModelRef` that a Python program gives a model's constructor
+    /// (`LinearSVCModel(RemoteModelRef(id))`): its clones and the DataFrames whose plans read it
+    /// share it, as of an object of this client, and the last of them to drop runs `release`
+    /// rather than deleting it, which the owner of the object gives (the Python client releases a
+    /// reference of the `RemoteModelRef`, as PySpark's model releases it when it is collected,
+    /// which deletes the object at the last). `release` runs where the last owner drops, which
+    /// can be a thread of the runtime. Not a stable API.
+    #[doc(hidden)]
+    pub fn of_reference(
+        session: &SparkSession,
+        id: &str,
+        release: impl FnOnce() + Send + Sync + 'static,
+    ) -> Self {
+        Self(Arc::new(CachedModelRef {
+            model_ref: proto::ObjectRef { id: id.to_string() },
+            session: session.clone(),
+            fit_warning: None,
+            release: Some(Box::new(release)),
+            kept: Default::default(),
+        }))
+    }
+
+    /// Keep the object on the server when the last owner drops: neither delete it nor run the
+    /// release of [`MlRef::of_reference`] (whose owner the drop of the release lets go of), as
+    /// PySpark keeps the object of a model whose `_java_obj` is assigned another value, which its
+    /// `__del__` releases instead. Not a stable API.
+    #[doc(hidden)]
+    pub fn keep(&self) {
+        self.0.kept.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Whether this owner of the object is its only one, of no clone. Not a stable API.
+    #[doc(hidden)]
+    pub fn is_unshared(&self) -> bool {
+        Arc::strong_count(&self.0) == 1
     }
 
     pub(crate) fn object_ref(&self) -> proto::ObjectRef {
@@ -659,79 +699,210 @@ impl std::fmt::Debug for MlPickleBlock {
 }
 
 /// What PySpark's pickle of the DataFrame `df` reaches first that does not pickle, of the objects
-/// of `pyspark.ml` that its plan keeps, in the order that PySpark's pickle of the plan takes them:
-/// the child of a plan first, as its attribute `_child` comes first, then the plans that the
-/// subqueries of its expressions refer to (`exists()`, `scalar()`, `isin(df)`), as its
-/// `_references` come next, and then the objects that the plan keeps, of each plan in the order of
-/// its inputs. A transform of a model keeps the model (`__source_transformer__`); a DataFrame of a
-/// method of a model or of a summary keeps that object (`__source_instance__`), and the summary
-/// dataset of a summary as its child, but not the DataFrames of its arguments, which PySpark's plan
-/// holds as their relations. Not a stable API.
+/// of `pyspark.ml` that its plan keeps (see [`pickle_reach_with`]). Not a stable API.
 #[doc(hidden)]
 pub fn pickle_block(df: &DataFrame) -> Option<MlPickleBlock> {
-    pickle_block_with(df, &mut |_| None)
+    pickle_block_with(df, &mut |_| PickleReach::default())
 }
 
-/// [`pickle_block`] of the DataFrame `df`, of the block that `owned` gives of the owner of a
-/// relation built outside the core (`DataFrame::from_relation`), such as the Python plan of
-/// `pyspark.ml` of the Python client, whose pickle reaches what PySpark's pickle of the plan
-/// reaches, where the walk reaches the relation. Not a stable API.
+/// [`pickle_block`] of the DataFrame `df`, of what `owned` gives of the owner of a relation built
+/// outside the core (`DataFrame::from_relation`), such as the Python plan of `pyspark.ml` of the
+/// Python client, whose pickle reaches what PySpark's pickle of the plan reaches, where the walk
+/// reaches the relation: the picklers of the UDFs that it reaches, and its block. Not a stable
+/// API.
 #[doc(hidden)]
 pub fn pickle_block_with(
     df: &DataFrame,
-    owned: &mut dyn FnMut(&(dyn std::any::Any + Send + Sync)) -> Option<MlPickleBlock>,
+    owned: &mut dyn FnMut(&(dyn std::any::Any + Send + Sync)) -> PickleReach,
 ) -> Option<MlPickleBlock> {
-    // A walk of its own stack, as a plan may be deeper than the thread's stack, which leaves a plan
-    // after its inputs and the plans of its subqueries, and visits a plan that several plans read
-    // (a self-join) once.
-    enum Step<'a> {
-        Enter(&'a Arc<LogicalPlan>),
-        Leave(&'a LogicalPlan),
-    }
-    let mut steps = vec![Step::Enter(&df.plan)];
-    let mut visited = std::collections::HashSet::new();
+    pickle_reach_with(df, owned).block
+}
+
+/// What PySpark's pickle of a DataFrame, a Column or a table argument reaches, in the order in
+/// which it pickles their plan objects and expressions, up to the first object of `pyspark.ml`
+/// that does not pickle: the picklers of the UDFs that it reaches before that object, whose
+/// functions (or UDTF classes) it pickles first, and the object, if any. Not a stable API.
+#[doc(hidden)]
+#[derive(Default)]
+pub struct PickleReach {
+    /// The picklers of the UDFs and UDTFs that the pickle reaches before the block (all of them,
+    /// of no block), each once, in that order.
+    pub picklers: Vec<crate::udf::CommandPickler>,
+    /// The first object of `pyspark.ml` that does not pickle, of a plan that keeps it.
+    pub block: Option<MlPickleBlock>,
+}
+
+/// What PySpark's pickle of the DataFrame `df` reaches (see [`PickleReach`]), of the reach that
+/// `owned` gives of the owner of a relation built outside the core (see [`pickle_block_with`]): the
+/// objects of `pyspark.ml` that its plan keeps, in the order that PySpark's pickle of the plan
+/// objects takes them. Of a plan, its first input first, as its attribute `_child` comes first,
+/// then the plans that the subqueries of its expressions refer to (`exists()`, `scalar()`,
+/// `isin(df)`, a table argument), as its `_references` come next, then its other inputs (the right
+/// side of a join), then its expressions, of the functions of their UDFs, and last the objects that
+/// the plan keeps; of a grouped map, its grouping columns before its function, of a cogroup its
+/// other side between them, and of a `transformWithState` its initial state after them (see
+/// `LogicalPlan::push_pickled_fields`). A transform of a model keeps the model
+/// (`__source_transformer__`); a DataFrame of a method of a model or of a summary keeps that object
+/// (`__source_instance__`), and the summary dataset of a summary as its child, but not the
+/// DataFrames of its arguments, which PySpark's plan holds as their relations. Not a stable API.
+#[doc(hidden)]
+pub fn pickle_reach_with(
+    df: &DataFrame,
+    owned: &mut dyn FnMut(&(dyn std::any::Any + Send + Sync)) -> PickleReach,
+) -> PickleReach {
+    pickle_reach_of(vec![ReachStep::Plan(&df.plan)], owned)
+}
+
+/// What PySpark's pickle of the expression `expression` (of a Column, `Column._expr`, or of the
+/// subquery of a table argument) reaches (see [`PickleReach`]): its parts in their order, of the
+/// functions of its UDFs, and the plans of its subqueries where they are, each as of
+/// [`pickle_reach_with`], as PySpark's pickle of a `SubqueryExpression` pickles its plan first.
+/// Not a stable API.
+#[doc(hidden)]
+pub fn expression_pickle_reach_with(
+    expression: &crate::expression::Expression,
+    owned: &mut dyn FnMut(&(dyn std::any::Any + Send + Sync)) -> PickleReach,
+) -> PickleReach {
+    let start = crate::udf::PicklerHolder::Expression(expression);
+    pickle_reach_of(vec![ReachStep::Holder(start)], owned)
+}
+
+/// A step of the walk of [`pickle_reach_of`].
+enum ReachStep<'a> {
+    Plan(&'a LogicalPlan),
+    /// The objects that the plan keeps, after its fields.
+    Owners(&'a LogicalPlan),
+    Holder(crate::udf::PicklerHolder<'a>),
+}
+
+/// The walk of [`pickle_reach_with`] from `start`, of its own stack, as a plan may be deeper than
+/// the thread's stack: each plan, expression and pickler once, as a pickle memoizes the objects
+/// that several parts share (a self-join, the plan of a subquery in the `_references` of its plan
+/// and in its expression).
+fn pickle_reach_of(
+    start: Vec<ReachStep<'_>>,
+    owned: &mut dyn FnMut(&(dyn std::any::Any + Send + Sync)) -> PickleReach,
+) -> PickleReach {
+    use crate::udf::PicklerHolder;
+    let mut steps: Vec<ReachStep<'_>> = start.into_iter().rev().collect();
+    let mut seen = std::collections::HashSet::new();
+    let mut picklers = Vec::new();
     while let Some(step) = steps.pop() {
+        let mut next = Vec::new();
         match step {
-            Step::Enter(plan) => {
-                if !visited.insert(Arc::as_ptr(plan)) {
+            ReachStep::Plan(plan) => {
+                if !seen.insert(plan as *const LogicalPlan as usize) {
                     continue;
                 }
-                steps.push(Step::Leave(plan.as_ref()));
                 // The inputs that PySpark's plan pickles, of the attribute relations only the
-                // summary dataset, which are entered in their order, and then the plans of the
-                // subqueries of its expressions.
-                let inputs = match relation_target_of(plan) {
-                    Some(target) if target.target.summary_dataset.is_none() => Vec::new(),
-                    _ => plan.inputs(),
-                };
+                // summary dataset.
+                let relation = matches!(
+                    relation_target_of(plan),
+                    Some(target) if target.target.summary_dataset.is_none()
+                );
+                if !relation {
+                    next.extend(
+                        plan.inputs()
+                            .into_iter()
+                            .next()
+                            .map(|input| ReachStep::Plan(input.as_ref())),
+                    );
+                }
                 let subqueries = crate::plan::subquery_plans(plan);
-                steps.extend(subqueries.into_iter().rev().map(Step::Enter));
-                steps.extend(inputs.into_iter().rev().map(Step::Enter));
+                next.extend(
+                    subqueries
+                        .into_iter()
+                        .map(|plan| ReachStep::Plan(plan.as_ref())),
+                );
+                // Its other inputs and its expressions, in the order of the attributes of its
+                // plan object.
+                let mut own = Vec::new();
+                if relation {
+                    plan.push_own_pickler_holders(&mut own);
+                } else {
+                    plan.push_pickled_fields(&mut own);
+                }
+                next.extend(own.into_iter().map(ReachStep::Holder));
+                next.push(ReachStep::Owners(plan));
             }
-            Step::Leave(plan) => {
-                let owner = match plan {
-                    LogicalPlan::MlTransform {
-                        owner: Some(owner), ..
+            ReachStep::Owners(plan) => {
+                let reach = owner_reach(plan, owned);
+                for pickler in reach.picklers {
+                    if seen.insert(pickler.address()) {
+                        picklers.push(pickler);
                     }
-                    | LogicalPlan::Raw {
-                        owner: Some(owner), ..
-                    } => owner,
-                    _ => continue,
-                };
-                if owner.0.downcast_ref::<CachedModelRef>().is_some() {
-                    return Some(MlPickleBlock::ModelLock);
                 }
-                if let Some(relation) = owner.0.downcast_ref::<RelationTarget>() {
-                    if let Some(block) = relation.target.instance_pickle_block() {
-                        return Some(block);
+                if let Some(block) = reach.block {
+                    return PickleReach {
+                        picklers,
+                        block: Some(block),
+                    };
+                }
+            }
+            ReachStep::Holder(holder) => {
+                let mut below = Vec::new();
+                match holder {
+                    PicklerHolder::Plan(plan) => next.push(ReachStep::Plan(plan)),
+                    PicklerHolder::Expression(expression) => {
+                        if seen.insert(expression.node_address()) {
+                            expression.node().push_pickler_holders(&mut below);
+                        }
                     }
-                } else if let Some(block) = owned(owner.0.as_ref()) {
-                    return Some(block);
+                    PicklerHolder::Subquery(subquery) => subquery.push_pickler_holders(&mut below),
+                    PicklerHolder::Udf(udf) => {
+                        below.extend(udf.arguments.iter().map(PicklerHolder::Expression));
+                        below.extend(udf.python_udf.pickler.as_ref().map(PicklerHolder::Pickler));
+                    }
+                    PicklerHolder::Pickler(pickler) => {
+                        if seen.insert(pickler.address()) {
+                            picklers.push(pickler.clone());
+                        }
+                    }
+                    PicklerHolder::SentPlans(plans) => {
+                        next.extend(plans.plans().map(|plan| ReachStep::Plan(plan.as_ref())));
+                    }
                 }
+                next.extend(below.into_iter().map(ReachStep::Holder));
             }
         }
+        // The first of `next` is taken first.
+        steps.extend(next.into_iter().rev());
     }
-    None
+    PickleReach {
+        picklers,
+        block: None,
+    }
+}
+
+/// What PySpark's pickle reaches of the objects that the plan `plan` keeps (see
+/// [`pickle_reach_with`]): the first of them that does not pickle, and of `owned` of the owner of a
+/// relation built outside the core, the picklers of the UDFs that the pickle of the owner reaches
+/// before it too (the functions of the UDFs of the DataFrames below a Python plan).
+fn owner_reach(
+    plan: &LogicalPlan,
+    owned: &mut dyn FnMut(&(dyn std::any::Any + Send + Sync)) -> PickleReach,
+) -> PickleReach {
+    let owner = match plan {
+        LogicalPlan::MlTransform {
+            owner: Some(owner), ..
+        }
+        | LogicalPlan::Raw {
+            owner: Some(owner), ..
+        } => owner,
+        _ => return PickleReach::default(),
+    };
+    let block = if owner.0.downcast_ref::<CachedModelRef>().is_some() {
+        Some(MlPickleBlock::ModelLock)
+    } else {
+        match owner.0.downcast_ref::<RelationTarget>() {
+            Some(relation) => relation.target.instance_pickle_block(),
+            None => return owned(owner.0.as_ref()),
+        }
+    };
+    PickleReach {
+        picklers: Vec::new(),
+        block,
+    }
 }
 
 /// The target of the attribute relation of `plan` (see [`attribute_relation`]), if it is one.
@@ -1725,11 +1896,12 @@ mod tests {
         // `DataFrame::from_relation` (a Python plan of `pyspark.ml` of the Python client), where
         // the walk reaches it: of a DataFrame over it too, and after the inputs before it.
         fn block(df: &DataFrame, of_owner: Option<&'static str>) -> Option<&'static str> {
-            let mut owned = |owner: &(dyn std::any::Any + Send + Sync)| {
-                owner
+            let mut owned = |owner: &(dyn std::any::Any + Send + Sync)| PickleReach {
+                picklers: Vec::new(),
+                block: owner
                     .downcast_ref::<&'static str>()
                     .and(of_owner)
-                    .map(|_| MlPickleBlock::ModelLock)
+                    .map(|_| MlPickleBlock::ModelLock),
             };
             pickle_block_with(df, &mut owned).map(|block| match block {
                 MlPickleBlock::ModelLock => "lock",
@@ -1752,6 +1924,127 @@ mod tests {
         assert_eq!(block(&built.limit(1), Some("lock")), Some("lock"));
         assert_eq!(block(&built, None), None);
         assert!(pickle_block(&built).is_none());
+    }
+
+    #[test]
+    fn the_pickle_reaches_of_expressions_and_the_functions_of_udfs_before_them_are_pysparks() {
+        // As PySpark's pickle of a Column, which pickles its expression, the plan of a subquery
+        // where it is: a Column of `exists()`, `scalar()` or `isin(df)` of a transform of a model
+        // and the subquery of a table argument of one reach the lock of the model, and a Column of
+        // a subquery of a DataFrame of a method of a training summary the session of its summary
+        // dataset. The functions of the UDFs that the pickle reaches before them come first, in
+        // PySpark's order of its plan objects: of a Column, its expression in its order; of a plan,
+        // its child, then the plans of the subqueries of its expressions (`_references`), and then
+        // its own expressions.
+        use crate::column::Column;
+        use crate::expression::{Expression, ExpressionNode};
+        use crate::functions::col;
+        use crate::udf::{
+            CommandPickler, CommonInlineUserDefinedFunctionExpression, PythonUDFPayload,
+        };
+
+        fn udf(tag: &'static str) -> Column {
+            let pickler = CommandPickler::new(tag, |tag| Ok(tag.as_bytes().to_vec()));
+            let payload = PythonUDFPayload::pickled_at_build(
+                DataType::Long,
+                100,
+                pickler,
+                "3.11".to_string(),
+            );
+            let udf = CommonInlineUserDefinedFunctionExpression::new(
+                tag.to_string(),
+                true,
+                vec![Expression::column("id")],
+                payload,
+            );
+            Column::new(ExpressionNode::CommonInlineUserDefinedFunction(Box::new(udf)).into())
+        }
+        fn reached(reach: PickleReach) -> (Vec<&'static str>, Option<&'static str>) {
+            let tags = reach
+                .picklers
+                .iter()
+                .map(|pickler| *pickler.object().downcast_ref::<&'static str>().unwrap())
+                .collect();
+            let block = reach.block.map(|block| match block {
+                MlPickleBlock::ModelLock => "lock",
+                MlPickleBlock::SummarySession(_) => "session",
+            });
+            (tags, block)
+        }
+        let of_column = |column: &Column| {
+            reached(expression_pickle_reach_with(
+                column.expression(),
+                &mut |_| PickleReach::default(),
+            ))
+        };
+        let of_frame =
+            |df: &DataFrame| reached(pickle_reach_with(df, &mut |_| PickleReach::default()));
+
+        let session = crate::session::SparkSession::builder()
+            .remote("sc://localhost:15002")
+            .get_or_create()
+            .expect("session");
+        let object = MlRef::from_id(&session, "fitted");
+        let train = session.range(3).expect("range");
+        let transformed = summary_transform(&object, &train).expect("transform");
+        let summary = training_summary(&object, &train);
+        let of_summary = attribute_relation(&summary, "predictions", Vec::new()).expect("relation");
+        let lock = (Vec::new(), Some("lock"));
+        assert_eq!(of_column(&transformed.exists()), lock);
+        assert_eq!(of_column(&transformed.scalar()), lock);
+        assert_eq!(of_column(&col("id").isin_subquery(&transformed)), lock);
+        let table = crate::table_arg::TableArg::new(transformed.clone());
+        assert_eq!(of_column(&table.to_column()), lock);
+        assert_eq!(
+            of_column(&of_summary.exists()),
+            (Vec::new(), Some("session"))
+        );
+        assert_eq!(of_column(&train.exists()), (Vec::new(), None));
+        // The functions of a Column before its subquery, and none after it.
+        let first = udf("a").gt(col("id")).and(transformed.exists());
+        assert_eq!(of_column(&first), (vec!["a"], Some("lock")));
+        let after = transformed.exists().and(udf("b").gt(col("id")));
+        assert_eq!(of_column(&after), lock);
+        // Of a plan: of its child first, then of the plans of its subqueries, then its own.
+        let of_child = train
+            .select([udf("c").alias("id")])
+            .where_(transformed.exists());
+        assert_eq!(of_frame(&of_child), (vec!["c"], Some("lock")));
+        assert_eq!(
+            of_frame(&train.select([udf("d"), transformed.exists()])),
+            lock
+        );
+        assert_eq!(of_frame(&transformed.select([udf("e")])), lock);
+        assert_eq!(of_frame(&train.select([udf("f")])), (vec!["f"], None));
+        std::mem::forget((transformed, object, summary, of_summary, table));
+    }
+
+    #[test]
+    fn an_object_of_a_reference_runs_its_release_at_the_drop_of_its_last_owner() {
+        // An object that the client does not own (`MlRef::of_reference`): its clones and the
+        // DataFrames of its transforms keep it, and the last of them runs the release of its
+        // owner, once, in place of the deletion of the object.
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let session = crate::session::SparkSession::builder()
+            .remote("sc://localhost:15002")
+            .get_or_create()
+            .expect("session");
+        let released = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&released);
+        let object = MlRef::of_reference(&session, "given", move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+        });
+        assert_eq!(object.id(), "given");
+        let clone = object.clone();
+        let train = session.range(3).expect("range");
+        let transformed = summary_transform(&object, &train).expect("transform");
+        assert_eq!(pickle_block(&transformed).map(|_| ()), Some(()));
+        drop(object);
+        drop(clone);
+        assert_eq!(released.load(Ordering::SeqCst), 0);
+        drop(transformed);
+        assert_eq!(released.load(Ordering::SeqCst), 1);
     }
 
     #[test]

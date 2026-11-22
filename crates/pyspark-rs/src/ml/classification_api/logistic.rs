@@ -348,10 +348,10 @@ native_summary! {
 
 /// Register the typed LogisticRegression models and summaries.
 pub(super) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<PyLogisticRegressionModel>()?;
-    m.add_class::<PyLogisticRegressionSummary>()?;
-    m.add_class::<PyLogisticRegressionTrainingSummary>()?;
-    m.add_class::<PyBinaryLogisticRegressionSummary>()?;
-    m.add_class::<PyBinaryLogisticRegressionTrainingSummary>()?;
+    crate::ml::object::register_class::<PyLogisticRegressionModel>(m)?;
+    crate::ml::object::register_class::<PyLogisticRegressionSummary>(m)?;
+    crate::ml::object::register_class::<PyLogisticRegressionTrainingSummary>(m)?;
+    crate::ml::object::register_class::<PyBinaryLogisticRegressionSummary>(m)?;
+    crate::ml::object::register_class::<PyBinaryLogisticRegressionTrainingSummary>(m)?;
     Ok(())
 }

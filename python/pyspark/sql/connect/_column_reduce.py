@@ -458,6 +458,16 @@ def dataframe_of(
     return df
 
 
+# The object of ``function(*args)``, of the pickle of a DataFrame, a Column or a table argument
+# that reaches the objects of ``reached`` first: those that PySpark's pickle reaches first of the
+# plan of a model that it keeps (the functions of the UDFs before it, the summary dataset of a
+# training summary, whose session a plain pickle refuses, and the lock of the ``RemoteModelRef``
+# of the model), so that a pickle fails at the first of them that it cannot pickle, as PySpark's
+# does, and never gets here.
+def unpickled_after(reached: list[Any], function: Callable[..., Any], args: tuple[Any, ...]) -> Any:
+    return function(*args)
+
+
 # The plan of ``error``, ``("plan", "derived" or "", plan)``, of a plan of the Python client whose
 # build raised when an object of it was pickled, which the pickle carries as PySpark's carries its
 # plan objects: the plan itself, which PySpark's DataFrame or table argument builds at each request

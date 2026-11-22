@@ -195,9 +195,8 @@ class _DataFramePlan(LogicalPlan):
         # Observations of the plan, a LogicalPlan on the client and on a Python worker of the
         # server, which has no class of the drop-in. So a plan of the Python client over this
         # one, such as a ``SubqueryAlias``, pickles plainly and unpickles on the worker, as
-        # PySpark's does.
-        unpickle, args = self._df._plan_reduce()
-        return unpickle, (*args, self.observations)
+        # PySpark's does. One of the plan of a model fails as PySpark's, as the DataFrame's.
+        return self._df._plan_reduce(self.observations)
 
     def __copy__(self) -> "_DataFramePlan":
         # As PySpark's shallow copy of a plan object, of the same fields, as `copy` copies an

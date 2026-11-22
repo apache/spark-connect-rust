@@ -45,14 +45,9 @@ fn helper_relation(
 
 // PySpark's `ChiSquareTest`, a plain class of a static `test`: its objects, and those of a
 // subclass, construct as `object.__new__` makes PySpark's (see `reduce::check_plain_new`), take
-// attributes and weak references, and pickle and copy as plain objects.
-#[pyclass(
-    subclass,
-    weakref,
-    dict,
-    name = "ChiSquareTest",
-    module = "pyspark.ml.stat"
-)]
+// attributes and weak references, and pickle and copy as plain objects. Of no `weakref` of its
+// own: so the public class, a Python subclass, has the `__weakref__` of PySpark's plain class.
+#[pyclass(subclass, dict, name = "ChiSquareTest", module = "pyspark.ml.stat")]
 pub struct PyChiSquareTest;
 #[pymethods]
 impl PyChiSquareTest {
@@ -97,13 +92,7 @@ impl PyChiSquareTest {
 }
 
 // PySpark's `Correlation`, a plain class of a static `corr` (see `PyChiSquareTest`).
-#[pyclass(
-    subclass,
-    weakref,
-    dict,
-    name = "Correlation",
-    module = "pyspark.ml.stat"
-)]
+#[pyclass(subclass, dict, name = "Correlation", module = "pyspark.ml.stat")]
 pub struct PyCorrelation;
 #[pymethods]
 impl PyCorrelation {
@@ -147,7 +136,6 @@ impl PyCorrelation {
 // PySpark's `KolmogorovSmirnovTest`, a plain class of a static `test` (see `PyChiSquareTest`).
 #[pyclass(
     subclass,
-    weakref,
     dict,
     name = "KolmogorovSmirnovTest",
     module = "pyspark.ml.stat"
@@ -285,13 +273,7 @@ impl PySummaryBuilder {
 }
 
 // PySpark's `Summarizer`, a plain class of static methods (see `PyChiSquareTest`).
-#[pyclass(
-    subclass,
-    weakref,
-    dict,
-    name = "Summarizer",
-    module = "pyspark.ml.stat"
-)]
+#[pyclass(subclass, dict, name = "Summarizer", module = "pyspark.ml.stat")]
 pub struct PySummarizer;
 fn columns(
     col: &Bound<'_, PyAny>,
@@ -367,12 +349,19 @@ metrics!(
     (norm_l2, "normL2")
 );
 
+// The plain classes of no helpers.
+impl super::object::NativeClass for PyChiSquareTest {}
+impl super::object::NativeClass for PyCorrelation {}
+impl super::object::NativeClass for PyKolmogorovSmirnovTest {}
+impl super::object::NativeClass for PySummarizer {}
+impl super::object::NativeClass for PySummaryBuilder {}
+
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<PyChiSquareTest>()?;
-    m.add_class::<PyCorrelation>()?;
-    m.add_class::<PyKolmogorovSmirnovTest>()?;
-    m.add_class::<PySummarizer>()?;
-    m.add_class::<PySummaryBuilder>()?;
+    super::object::register_class::<PyChiSquareTest>(m)?;
+    super::object::register_class::<PyCorrelation>(m)?;
+    super::object::register_class::<PyKolmogorovSmirnovTest>(m)?;
+    super::object::register_class::<PySummarizer>(m)?;
+    super::object::register_class::<PySummaryBuilder>(m)?;
     let py = m.py();
     for class in [
         py.get_type::<PyChiSquareTest>(),

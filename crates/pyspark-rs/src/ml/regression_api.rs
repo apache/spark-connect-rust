@@ -6,8 +6,7 @@ use super::*;
 /// The trees of an ensemble, as PySpark's `trees` (a cached property of the model): each tree
 /// is a `DecisionTreeRegressionModel` of the constructor of the class and of the object that the
 /// server returns of its id (`DecisionTreeRegressionModel(RemoteModelRef(m))`).
-fn make_trees(py: Python<'_>, model: &object::ModelCore) -> PyResult<Py<PyAny>> {
-    let target = model.target()?;
+fn make_trees(py: Python<'_>, target: spark_connect::ml::MlTarget) -> PyResult<Py<PyAny>> {
     let objects = object::fetch_py(py, &target, "trees", &[])?
         .into_objects()
         .to_pyerr()?;
@@ -657,17 +656,17 @@ native_summary! {
 
 /// Register the typed regression models and summaries.
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<PyDecisionTreeRegressionModel>()?;
-    m.add_class::<PyRandomForestRegressionModel>()?;
-    m.add_class::<PyGBTRegressionModel>()?;
-    m.add_class::<PyLinearRegressionModel>()?;
-    m.add_class::<PyLinearRegressionSummary>()?;
-    m.add_class::<PyLinearRegressionTrainingSummary>()?;
-    m.add_class::<PyGeneralizedLinearRegressionModel>()?;
-    m.add_class::<PyGeneralizedLinearRegressionSummary>()?;
-    m.add_class::<PyGeneralizedLinearRegressionTrainingSummary>()?;
-    m.add_class::<PyAFTSurvivalRegressionModel>()?;
-    m.add_class::<PyIsotonicRegressionModel>()?;
-    m.add_class::<PyFMRegressionModel>()?;
+    super::object::register_class::<PyDecisionTreeRegressionModel>(m)?;
+    super::object::register_class::<PyRandomForestRegressionModel>(m)?;
+    super::object::register_class::<PyGBTRegressionModel>(m)?;
+    super::object::register_class::<PyLinearRegressionModel>(m)?;
+    super::object::register_class::<PyLinearRegressionSummary>(m)?;
+    super::object::register_class::<PyLinearRegressionTrainingSummary>(m)?;
+    super::object::register_class::<PyGeneralizedLinearRegressionModel>(m)?;
+    super::object::register_class::<PyGeneralizedLinearRegressionSummary>(m)?;
+    super::object::register_class::<PyGeneralizedLinearRegressionTrainingSummary>(m)?;
+    super::object::register_class::<PyAFTSurvivalRegressionModel>(m)?;
+    super::object::register_class::<PyIsotonicRegressionModel>(m)?;
+    super::object::register_class::<PyFMRegressionModel>(m)?;
     Ok(())
 }

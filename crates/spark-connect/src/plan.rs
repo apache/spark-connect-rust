@@ -2726,6 +2726,63 @@ impl LogicalPlan {
         parts
     }
 
+    /// The parts of this node that PySpark's pickle of its plan object takes after its child
+    /// (`_child`) and the plans of the subqueries of its expressions (`_references`), in the order
+    /// of the attributes of the plan object: its other inputs, as [`PicklerHolder::Plan`], and
+    /// its own pickler holders ([`Self::push_own_pickler_holders`]). Of most nodes the other
+    /// inputs first (the right side of a join, `right`, before its condition, `on`); of a
+    /// cogroup, its grouping columns, then its other side (`_other`), then its function; of a
+    /// `transformWithState`, its grouping columns, its function, then its initial state
+    /// (`_initial_state_plan`) and its grouping columns.
+    ///
+    /// [`PicklerHolder::Plan`]: crate::udf::PicklerHolder::Plan
+    pub(crate) fn push_pickled_fields<'a>(
+        &'a self,
+        pending: &mut Vec<crate::udf::PicklerHolder<'a>>,
+    ) {
+        use crate::udf::PicklerHolder::{Expression as Of, Plan, Udf};
+        match self {
+            LogicalPlan::CoGroupMap {
+                input_grouping_expressions,
+                other,
+                other_grouping_expressions,
+                func,
+                ..
+            } => {
+                pending.extend(
+                    input_grouping_expressions
+                        .iter()
+                        .chain(other_grouping_expressions)
+                        .map(Of),
+                );
+                pending.push(Plan(other));
+                pending.push(Udf(func));
+            }
+            LogicalPlan::GroupMap {
+                grouping_expressions,
+                func,
+                sorting_expressions,
+                initial_input,
+                initial_grouping_expressions,
+                ..
+            } => {
+                pending.extend(
+                    grouping_expressions
+                        .iter()
+                        .chain(sorting_expressions)
+                        .map(Of),
+                );
+                pending.push(Udf(func));
+                pending.extend(initial_input.iter().map(|input| Plan(input)));
+                pending.extend(initial_grouping_expressions.iter().map(Of));
+            }
+            _ => {
+                pending.extend(self.inputs().into_iter().skip(1).map(|input| Plan(input)));
+                self.push_own_pickler_holders(pending);
+            }
+        }
+    }
+
     /// The expressions, the UDFs and the pickler of the UDTF of this node, without those of its
     /// inputs, whose picklers [`crate::udf::all_picklers`] visits.
     pub(crate) fn push_own_pickler_holders<'a>(
@@ -2804,6 +2861,8 @@ impl LogicalPlan {
                 pending.push(Udf(func));
                 pending.extend(profile_id_reader.iter().map(Pickler));
             }
+            // As PySpark's plans of these, and their requests, which take the grouping columns
+            // before the function, and the initial state of a `transformWithState` after it.
             LogicalPlan::GroupMap {
                 grouping_expressions,
                 func,
@@ -2811,22 +2870,22 @@ impl LogicalPlan {
                 initial_grouping_expressions,
                 ..
             } => {
-                pending.push(Udf(func));
                 pending.extend(
                     grouping_expressions
                         .iter()
                         .chain(sorting_expressions)
-                        .chain(initial_grouping_expressions)
                         .map(Of),
                 );
+                pending.push(Udf(func));
+                pending.extend(initial_grouping_expressions.iter().map(Of));
             }
             LogicalPlan::ApplyInPandasWithState {
                 grouping_expressions,
                 func,
                 ..
             } => {
-                pending.push(Udf(func));
                 pending.extend(grouping_expressions.iter().map(Of));
+                pending.push(Udf(func));
             }
             LogicalPlan::CoGroupMap {
                 input_grouping_expressions,
@@ -2834,13 +2893,13 @@ impl LogicalPlan {
                 func,
                 ..
             } => {
-                pending.push(Udf(func));
                 pending.extend(
                     input_grouping_expressions
                         .iter()
                         .chain(other_grouping_expressions)
                         .map(Of),
                 );
+                pending.push(Udf(func));
             }
             LogicalPlan::AsOfJoin {
                 left_as_of,

@@ -162,9 +162,9 @@ fn linear_svc_training_summary(
 
 /// Register the typed classification models and summaries.
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<PyLinearSVCModel>()?;
-    m.add_class::<PyLinearSVCSummary>()?;
-    m.add_class::<PyLinearSVCTrainingSummary>()?;
+    super::object::register_class::<PyLinearSVCModel>(m)?;
+    super::object::register_class::<PyLinearSVCSummary>(m)?;
+    super::object::register_class::<PyLinearSVCTrainingSummary>(m)?;
     fm::register(m)?;
     logistic::register(m)?;
     mlp::register(m)?;

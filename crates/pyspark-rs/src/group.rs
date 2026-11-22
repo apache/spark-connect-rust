@@ -379,7 +379,9 @@ impl PyGroupedData {
             ],
         )?;
         let reduce = state_reduce(py, "grouped_reduce", args)?;
-        reduce_with_state(&reduce, slf.as_any())
+        // As PySpark's pickle of its DataFrame, of a plan of a model, before its session.
+        let reduce = reduce_with_state(&reduce, slf.as_any())?;
+        crate::ml::object::frames_reduce(py, &[&this.frame], reduce)
     }
 
     /// Grouped data of its state, as `__reduce__` gives it: of the DataFrame `frame`, the
@@ -1099,7 +1101,11 @@ impl PyCoGroupedData {
             ],
         )?;
         let reduce = crate::reduce::state_reduce(py, "cogrouped_reduce", args)?;
-        reduce_with_state(&reduce, slf.as_any())
+        // As PySpark's pickle of the DataFrames of its grouped data, of a plan of a model, before
+        // their session.
+        let reduce = reduce_with_state(&reduce, slf.as_any())?;
+        let (left, right) = (this.left.bind(py).borrow(), this.right.bind(py).borrow());
+        crate::ml::object::frames_reduce(py, &[&left.frame, &right.frame], reduce)
     }
 
     /// The cogrouped ops of two grouped data, as `__reduce__` gives them back.
