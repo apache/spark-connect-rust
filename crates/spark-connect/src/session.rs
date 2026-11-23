@@ -2527,9 +2527,25 @@ impl WeakSparkSession {
 /// The configuration of the client of a session that a [`SparkSessionBuilder`] builds.
 type ClientConfiguration = Box<dyn FnOnce(&mut SparkConnectClient) + Send>;
 
-/// Builder for creating a SparkSession.
+/// Builder for creating a SparkSession, as PySpark's `SparkSession.builder` of Spark Connect.
+///
+/// ```no_run
+/// use spark_connect::SparkSession;
+///
+/// let spark = SparkSession::builder()
+///     .remote("sc://localhost:15002")
+///     .app_name("my-app")
+///     .config("spark.sql.shuffle.partitions", 20)
+///     .configs([("spark.sql.ansi.enabled", "true")])
+///     .get_or_create()?;
+/// # Ok::<(), spark_connect::SparkError>(())
+/// ```
 pub struct SparkSessionBuilder {
-    remote_url: Option<String>,
+    /// The options of the builder, in the order that they were first given, of their last values,
+    /// as PySpark's `_options` dict: `spark.remote` (see [`SparkSessionBuilder::remote`]) and the
+    /// configurations that the session gets once it connects (see
+    /// [`SparkSessionBuilder::config`]).
+    options: Vec<(String, String)>,
     /// The configuration of the client of the session (see
     /// [`SparkSessionBuilder::configure_client`]).
     configure: Option<ClientConfiguration>,
@@ -2547,7 +2563,7 @@ impl SparkSessionBuilder {
     /// Create a new builder.
     pub fn new() -> Self {
         SparkSessionBuilder {
-            remote_url: None,
+            options: Vec::new(),
             configure: None,
             credentials: None,
             target: None,
@@ -2608,20 +2624,85 @@ impl SparkSessionBuilder {
         self
     }
 
-    /// Set the remote Spark Connect server URL.
-    pub fn remote(mut self, url: &str) -> Self {
-        self.remote_url = Some(url.to_string());
+    /// Set the remote Spark Connect server URL, the option `spark.remote`, as PySpark's
+    /// `remote`: `config("spark.remote", url)` is the same.
+    pub fn remote(self, url: &str) -> Self {
+        self.config("spark.remote", url)
+    }
+
+    /// Set the option `key` to `value`, as PySpark's `config(key, value)`: the session gets it
+    /// as a configuration once it connects (see [`SparkSessionBuilder::get_or_create`]), but
+    /// `spark.remote`, the URL of the server, and `spark.master`, which Spark Connect does not
+    /// take. A value given again of a key replaces the earlier one. A `bool` is `true` or
+    /// `false`, as PySpark's `to_str` writes it.
+    pub fn config(mut self, key: &str, value: impl ToString) -> Self {
+        let value = value.to_string();
+        match self.options.iter_mut().find(|(k, _)| k == key) {
+            Some((_, v)) => *v = value,
+            None => self.options.push((key.to_string(), value)),
+        }
         self
     }
 
-    /// Build and return a SparkSession.
+    /// Set the options of `pairs`, in their order, as PySpark's `config(map=...)` (see
+    /// [`SparkSessionBuilder::config`]).
+    pub fn configs<K: AsRef<str>, V: ToString>(
+        mut self,
+        pairs: impl IntoIterator<Item = (K, V)>,
+    ) -> Self {
+        for (key, value) in pairs {
+            self = self.config(key.as_ref(), value);
+        }
+        self
+    }
+
+    /// Set the name of the application, the configuration `spark.app.name`, as PySpark's
+    /// `appName`.
+    pub fn app_name(self, name: &str) -> Self {
+        self.config("spark.app.name", name)
+    }
+
+    /// Take the master URL of a Spark cluster, of no effect, as PySpark's `master` of Spark
+    /// Connect: the server is the one of [`SparkSessionBuilder::remote`].
+    pub fn master(self, _master: &str) -> Self {
+        self
+    }
+
+    /// The configurations that a session of this builder gets once it connects, as PySpark's
+    /// `_apply_options`: the options but `spark.remote` and `spark.master`.
+    fn configurations(&self) -> Vec<(String, String)> {
+        self.options
+            .iter()
+            .filter(|(key, _)| key != "spark.remote" && key != "spark.master")
+            .cloned()
+            .collect()
+    }
+
+    /// Build and return a SparkSession, of a new connection to the server of
+    /// [`SparkSessionBuilder::remote`], which gets the configurations of the builder (see
+    /// [`SparkSessionBuilder::config`]) in one silent `ConfigRequest`, as PySpark's
+    /// `_apply_options`. The Rust API keeps no active or default session, so each call creates
+    /// a session, as [`SparkSessionBuilder::create`] does, where PySpark's `getOrCreate` returns
+    /// its active or default session if there is one.
     pub fn get_or_create(self) -> Result<SparkSession> {
-        let url = self.remote_url.ok_or_else(|| {
-            SparkError::value(
-                "NO_REMOTE_URL",
-                &[("detail", "Must call .remote(url) before .get_or_create()")],
-            )
-        })?;
+        self.create()
+    }
+
+    /// Build and return a new SparkSession, as PySpark's `create` (see
+    /// [`SparkSessionBuilder::get_or_create`]).
+    pub fn create(self) -> Result<SparkSession> {
+        let configurations = self.configurations();
+        let url = self
+            .options
+            .iter()
+            .find(|(key, _)| key == "spark.remote")
+            .map(|(_, url)| url.clone())
+            .ok_or_else(|| {
+                SparkError::value(
+                    "NO_REMOTE_URL",
+                    &[("detail", "Must call .remote(url) before .get_or_create()")],
+                )
+            })?;
 
         let mut builder = ChannelBuilder::parse(&url)?;
         if let Some(credentials) = self.credentials {
@@ -2640,7 +2721,11 @@ impl SparkSessionBuilder {
         if let Some(configure) = self.configure {
             configure(&mut client);
         }
-        Ok(SparkSession::new(client))
+        let session = SparkSession::new(client);
+        if !configurations.is_empty() {
+            session.conf().set_all(&configurations, true)?;
+        }
+        Ok(session)
     }
 }
 
@@ -5125,6 +5210,53 @@ mod tests {
     fn session_builder_without_remote_fails() {
         let result = SparkSessionBuilder::new().get_or_create();
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn the_options_of_a_builder_are_pysparks_of_their_first_order_and_last_values() {
+        // As PySpark's `_options` dict and `_apply_options`: an option given again keeps its
+        // place and takes its last value; `remote` is `spark.remote`, `app_name` is
+        // `spark.app.name`, `master` sets nothing, and a bool is `true` or `false`; the session
+        // gets all but `spark.remote` and `spark.master`.
+        let builder = SparkSessionBuilder::new()
+            .config("spark.sql.shuffle.partitions", 3)
+            .remote("sc://a:1")
+            .app_name("first")
+            .master("local[2]")
+            .configs([("spark.sql.ansi.enabled", true), ("spark.master", false)])
+            .config("spark.sql.shuffle.partitions", "7")
+            .app_name("second")
+            .config("spark.remote", "sc://b:2");
+        let options: Vec<(&str, &str)> = builder
+            .options
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        assert_eq!(
+            options,
+            [
+                ("spark.sql.shuffle.partitions", "7"),
+                ("spark.remote", "sc://b:2"),
+                ("spark.app.name", "second"),
+                ("spark.sql.ansi.enabled", "true"),
+                ("spark.master", "false"),
+            ]
+        );
+        assert_eq!(
+            builder.configurations(),
+            [
+                ("spark.sql.shuffle.partitions".to_string(), "7".to_string()),
+                ("spark.app.name".to_string(), "second".to_string()),
+                ("spark.sql.ansi.enabled".to_string(), "true".to_string()),
+            ]
+        );
+        match SparkSessionBuilder::new()
+            .config("spark.sql.shuffle.partitions", 3)
+            .create()
+        {
+            Err(error) => assert_eq!(error.get_condition().as_deref(), Some("NO_REMOTE_URL")),
+            Ok(_) => panic!("a builder of no remote created a session"),
+        }
     }
 
     #[test]

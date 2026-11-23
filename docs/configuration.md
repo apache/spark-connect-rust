@@ -23,11 +23,18 @@ use spark_connect::SparkSessionBuilder;
 
 let spark = SparkSessionBuilder::default()
     .remote("sc://localhost:15002")
+    .app_name("my-app")
+    .config("spark.sql.shuffle.partitions", 20)
+    .configs([("spark.sql.ansi.enabled", "true")])
     .get_or_create()?;
 
-// Session configuration is applied at runtime via `spark.conf()`:
+// Or at runtime via `spark.conf()`:
 spark.conf().set("spark.sql.shuffle.partitions", "20")?;
 ```
+
+As PySpark's `SparkSession.builder` of Spark Connect, the session gets the options of `config`,
+`configs` and `app_name` (`spark.app.name`) once it connects, and `master` has no effect. The Rust
+API keeps no active session, so `get_or_create` creates a new session at each call, as `create` does.
 
 ## Runtime Configuration
 

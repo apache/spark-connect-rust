@@ -738,3 +738,47 @@ fn interrupting_the_wait_cancels_the_execution_of_the_calling_thread() {
         .expect("count");
     assert_eq!(count, 3);
 }
+
+/// As PySpark's `SparkSession.builder.config(...)` of Spark Connect: the session gets the
+/// configurations of its builder once it connects, a later value of a key replacing the earlier
+/// one, and `app_name` sets `spark.app.name` silently, as PySpark's `_apply_options` does of a
+/// static configuration.
+#[test]
+fn builder_configurations_are_set_on_the_session() {
+    if !should_run() {
+        return;
+    }
+    let url = std::env::var("SPARK_REMOTE").expect("SPARK_REMOTE");
+    let spark = spark_connect::SparkSession::builder()
+        .remote(&url)
+        .master("local[8]")
+        .app_name("e2e-builder")
+        .config("spark.sql.shuffle.partitions", 3)
+        .configs([
+            ("spark.sql.shuffle.partitions", "7"),
+            ("spark.sql.ansi.enabled", "false"),
+        ])
+        .get_or_create()
+        .expect("session of a builder with configurations");
+    assert_eq!(
+        spark
+            .conf()
+            .get("spark.sql.shuffle.partitions")
+            .unwrap()
+            .as_deref(),
+        Some("7")
+    );
+    assert_eq!(
+        spark
+            .conf()
+            .get("spark.sql.ansi.enabled")
+            .unwrap()
+            .as_deref(),
+        Some("false")
+    );
+    let created = spark_connect::SparkSession::builder()
+        .remote(&url)
+        .create()
+        .expect("session of create");
+    assert_ne!(created.session_id(), spark.session_id());
+}
