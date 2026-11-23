@@ -240,6 +240,14 @@ number or `any` as an SRID, as the DDL parser of Spark does, and no longer takes
 
 These are the changes for Rust users after v4.3.0, on `master`, which ship in 4.4.0.
 
+`SparkSessionBuilder` adds `config`, `configs`, `app_name`, `master` and `create`, as PySpark's
+`SparkSession.builder` of Spark Connect: the session gets the options as configurations once it
+connects, in one silent `ConfigRequest`, in the order that they were first given and of their last
+values, but `spark.remote` and `spark.master`; `app_name` sets `spark.app.name`, `master` sets
+nothing, and `remote(url)` is `config("spark.remote", url)`. The Rust API keeps no active or default
+session, so `get_or_create` creates a session at each call, as `create` does, where PySpark's
+`getOrCreate` returns its active or default session.
+
 `SparkErrorKind` adds `BuiltinAttributeError` and `BuiltinAssertionError`, Python's `AttributeError`
 and `AssertionError` as PySpark's client raises them, which `SparkError::builtin_attribute` and
 `SparkError::builtin_assertion` make. `SparkErrorKind` is not `#[non_exhaustive]`, so an exhaustive
