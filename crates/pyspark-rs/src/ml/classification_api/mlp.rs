@@ -83,7 +83,7 @@ native_model! {
         let summary = spark_connect::ml::evaluated_summary(&target, output).to_pyerr()?;
         let object = crate::ml::object::new_py(
             py,
-            PyMultilayerPerceptronClassificationSummary::from(summary),
+            PyMultilayerPerceptronClassificationSummary::from(py, summary),
         )?;
         crate::ml::object::evaluated(slf.as_any(), object)
     }
@@ -144,7 +144,7 @@ fn mlp_training_summary(
 ) -> PyResult<Py<PyAny>> {
     Ok(crate::ml::object::new_py(
         py,
-        PyMultilayerPerceptronClassificationTrainingSummary::from(target),
+        PyMultilayerPerceptronClassificationTrainingSummary::from(py, target),
     )?
     .into_any())
 }

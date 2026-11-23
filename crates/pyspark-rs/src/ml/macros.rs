@@ -1067,8 +1067,12 @@ macro_rules! native_summary {
 
         impl $ty {
             /// The summary of the server-side object `target`.
-            pub(crate) fn from(target: spark_connect::ml::MlTarget) -> pyo3::PyClassInitializer<Self> {
-                pyo3::PyClassInitializer::<$base>::from(<$base>::from(target)).add_subclass(Self)
+            pub(crate) fn from(
+                py: pyo3::Python<'_>,
+                target: spark_connect::ml::MlTarget,
+            ) -> pyo3::PyClassInitializer<Self> {
+                pyo3::PyClassInitializer::<$base>::from(<$base>::from(py, target))
+                    .add_subclass(Self)
             }
 
             /// The summary of PySpark's constructor.
@@ -1112,16 +1116,16 @@ macro_rules! native_summary {
     ) => {
         #[pyclass(subclass, name = $name, module = $module)]
         pub struct $ty {
+            /// The references of the target of `object` to the parts of plans, of its summary
+            /// dataset and of that of the model that it keeps, which `__traverse__` reports (see
+            /// `crate::gc::Parts`), as PySpark's summary holds its `_summary_dataset`.
+            parts: $crate::gc::Parts,
             object: $crate::ml::object::SummaryObject,
+            /// Whether the value is written, which `__traverse__` checks first (see
+            /// `crate::gc::GcReady`).
+            gc_ready: $crate::gc::GcReady,
         }
 
-        impl From<spark_connect::ml::MlTarget> for $ty {
-            fn from(target: spark_connect::ml::MlTarget) -> Self {
-                Self {
-                    object: $crate::ml::object::SummaryObject::Target(Box::new(target)),
-                }
-            }
-        }
 
         impl $crate::ml::object::NativeClass for $ty {
             const HELPERS: $crate::ml::object::NativeHelpers = $crate::ml::object::NativeHelpers {
@@ -1131,10 +1135,21 @@ macro_rules! native_summary {
         }
 
         impl $ty {
+            /// The summary of the server-side object `target`, of a fit, an evaluation or a copy.
+            pub(crate) fn from(py: pyo3::Python<'_>, target: spark_connect::ml::MlTarget) -> Self {
+                Self {
+                    parts: $crate::gc::Parts::of(py, target.held_parts()),
+                    object: $crate::ml::object::SummaryObject::Target(Box::new(target)),
+                    gc_ready: $crate::gc::GcReady::new(),
+                }
+            }
+
             /// The summary of PySpark's constructor.
             pub(crate) fn given() -> Self {
                 Self {
+                    parts: $crate::gc::Parts::none(),
                     object: $crate::ml::object::SummaryObject::Given,
+                    gc_ready: $crate::gc::GcReady::new(),
                 }
             }
 
@@ -1178,6 +1193,27 @@ macro_rules! native_summary {
             fn new(java_obj: Option<&Bound<'_, PyAny>>) -> Self {
                 let _ = java_obj;
                 Self::given()
+            }
+
+            /// Visit the parts of the plans of the summary dataset of the summary, of Python's
+            /// garbage collector, as PySpark's summary holds its `_summary_dataset` (see
+            /// `crate::gc::Parts`): a cycle through a UDF of the dataset is collected.
+            fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
+                if !self.gc_ready.get() {
+                    return Ok(());
+                }
+                self.parts.visit(&visit)
+            }
+
+            /// Break a reference cycle that the garbage collector found unreachable: the summary
+            /// drops its summary dataset, as a DataFrame drops its plan.
+            fn __clear__(&mut self) {
+                if self.gc_ready.get() {
+                    self.parts.release();
+                    if let $crate::ml::object::SummaryObject::Target(target) = &mut self.object {
+                        target.clear_held_parts();
+                    }
+                }
             }
 
             /// An attribute of the summary, of CPython's generic lookup, and else the

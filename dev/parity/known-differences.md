@@ -494,26 +494,6 @@ requests of the unpickled object pickle as it is then. This case still differs:
   and reports it, so a reference cycle through such an object and any of its holders, one or
   several, is collected, as PySpark collects it (see `docs/compatibility.md`). These cases still
   differ:
-  - The objects of the native classes of `pyspark.ml.connect` report the Python objects that they
-    hold in Rust, as PySpark's objects hold them as attributes: a model its training summary
-    (PySpark's `_summary`), its cached members (`trees`), its own defaults, the `RemoteModelRef` of
-    its object (PySpark's `_java_obj`, of which a copy holds a reference of its own) and the
-    `RemoteModelRef` that it was made of while no transform, writer or call holds its object; an
-    estimator, a transformer, a Pipeline, a PipelineModel, a OneVsRest and its model, a validator
-    and its model the Python values of their params and their attributes (stages, classifier,
-    models, best model, metrics); a `fitMultiple` iterator its estimator, dataset and param maps.
-    So a cycle through a model and its summary (`model.summary.model = model`) is collected, and the
-    model's object is deleted from the server's ML cache, as PySpark's. The DataFrames that a model,
-    its training summary or a `OneVsRestModel` keeps in Rust of its fit (the summary dataset of the
-    training summary, which PySpark's summary keeps as its `_summary_dataset`, and the training
-    dataset and the datasets of the classes of a `OneVsRestModel`) hold references to the parts of
-    their plans that no holder reports, and a `SharedPart` reports its references only while every
-    reference to its part is of a `SharedPart` or an object of the binding that reports it: so the
-    parts of those plans report nothing, and the collector never frees an object that they reach. A
-    cycle through such a dataset alone is collected once the model is freed; one through the dataset
-    and the model, such as a function of a UDF of the training DataFrame that keeps the model
-    (`job.model = model` of a UDF of `job.f`), is never collected: the model is never freed, nor its
-    object in the server's ML cache, where PySpark collects the cycle.
   - While a call of the binding runs without the GIL, a collection frees no cycle through the parts
     that the call may clone or drop, which the call keeps alive anyway; it frees the others, as
     PySpark's collector does. The collector must get the same references of an object in each of

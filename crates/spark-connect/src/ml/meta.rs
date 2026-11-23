@@ -1280,6 +1280,25 @@ impl Model for PipelineModel {
         Box::new(self.clone())
     }
 
+    /// Of the models among the stages, of their training summaries.
+    fn held_parts(&self) -> Vec<crate::gc::PartRef<'_>> {
+        self.stages
+            .iter()
+            .flat_map(|stage| match stage {
+                PipelineStage::Model(model) => model.held_parts(),
+                PipelineStage::Estimator(_) | PipelineStage::Transformer(_) => Vec::new(),
+            })
+            .collect()
+    }
+
+    fn clear_held_parts(&mut self) {
+        for stage in &mut self.stages {
+            if let PipelineStage::Model(model) = stage {
+                model.clear_held_parts();
+            }
+        }
+    }
+
     fn write(&self) -> Result<MlWriter> {
         Ok(MlWriter::meta(Arc::new(StagesSave {
             class: PIPELINE_MODEL_CLASS,

@@ -99,7 +99,7 @@ fn kmeans_summary(
     _model: &object::ModelCore,
     target: spark_connect::ml::MlTarget,
 ) -> PyResult<Py<PyAny>> {
-    Ok(crate::ml::object::new_py(py, PyKMeansSummary::from(target))?.into_any())
+    Ok(crate::ml::object::new_py(py, PyKMeansSummary::from(py, target))?.into_any())
 }
 
 native_model! {
@@ -197,7 +197,7 @@ fn bisecting_kmeans_summary(
     _model: &object::ModelCore,
     target: spark_connect::ml::MlTarget,
 ) -> PyResult<Py<PyAny>> {
-    Ok(crate::ml::object::new_py(py, PyBisectingKMeansSummary::from(target))?.into_any())
+    Ok(crate::ml::object::new_py(py, PyBisectingKMeansSummary::from(py, target))?.into_any())
 }
 
 native_summary! {
@@ -295,7 +295,7 @@ fn gaussian_mixture_summary(
     _model: &object::ModelCore,
     target: spark_connect::ml::MlTarget,
 ) -> PyResult<Py<PyAny>> {
-    Ok(crate::ml::object::new_py(py, PyGaussianMixtureSummary::from(target))?.into_any())
+    Ok(crate::ml::object::new_py(py, PyGaussianMixtureSummary::from(py, target))?.into_any())
 }
 
 native_summary! {

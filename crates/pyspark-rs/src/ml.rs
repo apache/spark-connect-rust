@@ -683,9 +683,26 @@ where
 /// A fitted ML model (result of `Estimator.fit`), wrapping a boxed core `Model`.
 #[pyclass(subclass, name = "MLModel", module = "pyspark.ml.connect")]
 pub struct PyMLModel {
+    /// The references of `model` to the parts of plans, of its training summary (see
+    /// `Model::held_parts`), which `__traverse__` reports.
+    parts: crate::gc::Parts,
     model: Box<dyn Model>,
     /// The session of the DataFrame that the model was fitted on.
     session_id: String,
+    /// Whether the value is written, which `__traverse__` checks first (see `crate::gc::GcReady`).
+    gc_ready: crate::gc::GcReady,
+}
+
+impl PyMLModel {
+    /// The model of the core model `model`, fitted on a DataFrame of the session `session_id`.
+    pub(crate) fn new(py: Python<'_>, model: Box<dyn Model>, session_id: String) -> Self {
+        Self {
+            parts: crate::gc::Parts::of(py, model.held_parts()),
+            model,
+            session_id,
+            gc_ready: crate::gc::GcReady::new(),
+        }
+    }
 }
 
 // Of no helpers, of no Python object.
@@ -707,6 +724,24 @@ impl PyMLModel {
         check_params(params)?;
         let input = dataset_of(dataset, "transform")?;
         Ok(PyDataFrame::new(self.transform_dataframe(py, &input)?))
+    }
+
+    /// Visit the parts of the plans of the training summary of the model, of Python's garbage
+    /// collector (see `crate::gc::Parts`).
+    fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
+        if !self.gc_ready.get() {
+            return Ok(());
+        }
+        self.parts.visit(&visit)
+    }
+
+    /// Break a reference cycle that the garbage collector found unreachable: the model drops its
+    /// training summary.
+    fn __clear__(&mut self) {
+        if self.gc_ready.get() {
+            self.parts.release();
+            self.model.clear_held_parts();
+        }
     }
 }
 
@@ -732,8 +767,11 @@ impl PyMLModel {
             };
             DataFrame::from_relation(session, relation, None).to_pyerr()
         } else {
-            // Of the plan of `df`, which the transform is built over.
-            crate::gc::detach_of_values(py, df.held_parts(), || {
+            // Of the plan of `df`, which the transform is built over, and of the summary datasets
+            // that the copy of the model holds (see `ModelCore::transform_job`).
+            let parts = df.held_parts().into_iter().chain(model.held_parts());
+            let _in_use = crate::gc::in_use_of_values(py, parts);
+            crate::gc::run_detached(py, crate::gc::take_counting(), || {
                 model.transform(df).map_err(Box::new)
             })
             .to_pyerr()

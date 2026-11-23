@@ -150,13 +150,16 @@ impl Part {
     /// The references that the part holds to other shared parts, each of its fields once: the
     /// inputs, the expressions, the picklers and the owners of a plan node; the expressions below
     /// the node of an expression, its pickler, the plans of its subqueries and the owner of its
-    /// errors. A pickler and an owner hold none.
+    /// errors; the plans that the owner of the relation of a method of an ML object keeps, of the
+    /// summary dataset of its target and of the DataFrames of its arguments (see
+    /// `ml::owner_parts`). A pickler and the other owners hold none.
     pub fn held(&self) -> Vec<PartRef<'_>> {
         let mut held = Vec::new();
         match self {
             Part::Plan(plan) => plan_parts(plan, &mut held),
             Part::Expression(expression) => expression_parts(expression.node(), &mut held),
-            Part::Pickler(_) | Part::Owner(_) => {}
+            Part::Owner(owner) => crate::ml::owner_parts(owner.as_ref(), &mut held),
+            Part::Pickler(_) => {}
         }
         held
     }

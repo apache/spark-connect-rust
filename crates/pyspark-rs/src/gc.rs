@@ -20,8 +20,9 @@
 //! reaches it, and frees a reference cycle through any of them, as PySpark's.
 //!
 //! A part may also be held by what the collector does not see: a value that a Rust structure of
-//! the binding keeps, such as the dataset of the summary of a model, a clone that a request
-//! holds while it runs, or a node that an object of the binding holds without a [`Parts`] of it.
+//! the binding keeps, such as the copy of a model that the transform of a native ML model holds
+//! while it runs, a clone that a request holds while it runs, or a node that an object of the
+//! binding holds without a [`Parts`] of it.
 //! A reference to a [`SharedPart`] is reported only when every reference to its part is one that
 //! the [`SharedPart`]s and the objects of the binding hold ([`SharedPart::covered`]); else it is
 //! not, which keeps the part and what it holds alive, as a reference from outside: the collector
@@ -1245,8 +1246,8 @@ impl Walked {
 /// deallocated: its last reference is gone, and its drop, which forgets it, has not run yet.
 /// Python code runs in between, on the thread that deallocates it, as PyO3 first drops the
 /// references that threads dropped without the GIL, whose finalizers may make holders of its part
-/// through a holder that the collector does not see, as the core of a native model keeps its
-/// dataset. Of the lock of the known parts and with the GIL.
+/// through a holder that the collector does not see, as a value of the core that Python code gives
+/// a Rust structure of the binding. Of the lock of the known parts and with the GIL.
 fn being_deallocated(object: usize) -> bool {
     // SAFETY: a known SharedPart is not freed while the lock of the known parts is held, which its
     // drop takes first, and its count of references changes only with the GIL.
@@ -1997,8 +1998,8 @@ mod tests {
             let parts = Parts::of(py, [PartRef::Expression(&udf)]);
             let root = parts.shared[0].clone_ref(py);
             let pickler = root.get().held[0].clone_ref(py);
-            // A value that a Rust structure holds, over the expression of a holder, as the dataset
-            // of the summary of a model: its own node has no SharedPart.
+            // A value that a Rust structure holds, over the expression of a holder, as the clone
+            // that a request holds while it runs: its own node has no SharedPart.
             let value = Expression::function("abs", vec![udf.clone()]);
             let address = PartRef::Expression(&value).address();
             {

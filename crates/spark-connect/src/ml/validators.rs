@@ -624,6 +624,29 @@ pub struct CrossValidatorModel {
 }
 
 impl CrossValidatorModel {
+    /// A model of `best_model` and of the models `sub_models` of each fold and param map, for the
+    /// tests of other modules.
+    #[cfg(test)]
+    pub(crate) fn of_models(
+        best_model: Box<dyn Model>,
+        sub_models: Option<Vec<Vec<Box<dyn Model>>>>,
+    ) -> Self {
+        Self {
+            operator: MlOperator::new(
+                "org.apache.spark.ml.tuning.CrossValidatorModel",
+                OperatorType::Model,
+            ),
+            params: Params::new(),
+            best_model,
+            avg_metrics: vec![0.5],
+            std_metrics: Vec::new(),
+            sub_models,
+            common: Common::new(0),
+            num_folds: 3,
+            fold_col: String::new(),
+        }
+    }
+
     /// The names of PySpark's params of the class.
     pub const PARAM_NAMES: &'static [&'static str] = &[
         "estimator",
@@ -807,6 +830,23 @@ fn copied_models(models: &[Box<dyn Model>]) -> Result<Vec<Box<dyn Model>>> {
 impl Model for CrossValidatorModel {
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
+    }
+
+    /// Of the best model and of the models of each fold and param map, of their training
+    /// summaries.
+    fn held_parts(&self) -> Vec<crate::gc::PartRef<'_>> {
+        let sub_models = self.sub_models.iter().flatten().flatten();
+        std::iter::once(&self.best_model)
+            .chain(sub_models)
+            .flat_map(|model| model.held_parts())
+            .collect()
+    }
+
+    fn clear_held_parts(&mut self) {
+        self.best_model.clear_held_parts();
+        for model in self.sub_models.iter_mut().flatten().flatten() {
+            model.clear_held_parts();
+        }
     }
 
     fn write(&self) -> Result<MlWriter> {
@@ -1077,6 +1117,27 @@ pub struct TrainValidationSplitModel {
 }
 
 impl TrainValidationSplitModel {
+    /// A model of `best_model` and of the models `sub_models` of each param map, for the tests of
+    /// other modules.
+    #[cfg(test)]
+    pub(crate) fn of_models(
+        best_model: Box<dyn Model>,
+        sub_models: Option<Vec<Box<dyn Model>>>,
+    ) -> Self {
+        Self {
+            operator: MlOperator::new(
+                "org.apache.spark.ml.tuning.TrainValidationSplitModel",
+                OperatorType::Model,
+            ),
+            params: Params::new(),
+            best_model,
+            validation_metrics: vec![0.5],
+            sub_models,
+            common: Common::new(0),
+            train_ratio: 0.75,
+        }
+    }
+
     /// The names of PySpark's params of the class.
     pub const PARAM_NAMES: &'static [&'static str] = &[
         "estimator",
@@ -1203,6 +1264,22 @@ impl Transformer for TrainValidationSplitModel {
 impl Model for TrainValidationSplitModel {
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
+    }
+
+    /// Of the best model and of the models of each param map, of their training summaries.
+    fn held_parts(&self) -> Vec<crate::gc::PartRef<'_>> {
+        let sub_models = self.sub_models.iter().flatten();
+        std::iter::once(&self.best_model)
+            .chain(sub_models)
+            .flat_map(|model| model.held_parts())
+            .collect()
+    }
+
+    fn clear_held_parts(&mut self) {
+        self.best_model.clear_held_parts();
+        for model in self.sub_models.iter_mut().flatten() {
+            model.clear_held_parts();
+        }
     }
 
     fn write(&self) -> Result<MlWriter> {

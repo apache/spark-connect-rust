@@ -3981,23 +3981,28 @@ of its plan, such as its plan object (`df.p = df._plan`) or its stream writer
 (`df.w = df.writeStream`): the plan object of `df._plan` holds the plan of the core and its parts,
 in its native base, and no DataFrame, as PySpark's plan object holds none; its `__dict__` holds
 the fields of PySpark's `LogicalPlan`, and its copies are of its class and its fields. A
-`SharedPart` reports nothing while a
-reference to its part is of a holder that the collector does not see, such as the DataFrames that a
-native model of `pyspark.ml.connect` keeps of its fit: the summary dataset of its training summary,
-which the summary keeps too, and the training dataset and the datasets of the classes of a
-OneVsRestModel. So the collector frees no object that such a holder reaches, and a cycle through one
-is collected once the holder is gone. A cycle through the holder and what it keeps never is: a
-function of a UDF of the training DataFrame of a model that keeps the model, or a Python plan of
-that DataFrame that keeps it, keeps the model alive, and its object in the server's ML cache, where
-PySpark collects them (see `dev/parity/known-differences.md`). The objects of the native ML classes
-report the other Python objects that they hold, as PySpark's hold them as attributes: a model its
-training summary, its cached members (`trees`), its own defaults and its `RemoteModelRef`, of which
-a copy holds a reference of its own, and the one that it was made of while no transform, writer or
-call holds its object; an estimator, a transformer, a Pipeline, a PipelineModel, a OneVsRest and its
-model, and a validator and its model the values of their params and their attributes (stages,
-classifier, models, best model, metrics); a `fitMultiple` iterator its estimator, dataset and param
-maps. So a model and its summary in a cycle (`model.summary.model = model`) are collected, fit after
-fit, and the model's object is deleted from the ML cache of the server, as PySpark's. Nor does a
+`SharedPart` reports nothing while a reference to its part is of a holder that the collector does
+not see, such as a request that holds a clone of a plan while it runs: so the collector frees no
+object that such a holder reaches, and a cycle through one is collected once the holder is gone. The
+objects of the native ML classes of `pyspark.ml.connect` report the parts of the plans of the
+DataFrames that they keep in Rust, as PySpark's summary holds its `_summary_dataset` and the plan of
+a DataFrame of a method of an ML object the object and the plans of its arguments: a model and its
+training summary those of the summary dataset (the training dataset, or its transform by a
+clustering model), a OneVsRestModel those of the binary training sets of the models of its classes,
+and a DataFrame of a method of an ML object or of an ML helper (of a summary, a model's
+`gaussiansDF` or `describeTopics`, `ChiSquareTest.test`, an `FPGrowthModel`'s,
+`PowerIterationClustering.assignClusters`) those of the object's summary dataset and of the
+DataFrames of its arguments. So a cycle through a function of a UDF of the training DataFrame of a
+model that keeps the model, or a Python plan of that DataFrame that keeps it, is collected, and the
+model's object is deleted from the ML cache of the server, as PySpark's. They report the other
+Python objects that they hold, as PySpark's hold them as attributes: a model its training summary,
+its cached members (`trees`), its own defaults and its `RemoteModelRef`, of which a copy holds a
+reference of its own, and the one that it was made of while no transform, writer or call holds its
+object; an estimator, a transformer, a Pipeline, a PipelineModel, a OneVsRest and its model, and a
+validator and its model the values of their params and their attributes (stages, classifier, models,
+best model, metrics); a `fitMultiple` iterator its estimator, dataset and param maps. So a model and
+its summary in a cycle (`model.summary.model = model`) are collected, fit after fit, and the model's
+object is deleted from the ML cache of the server, as PySpark's. Nor does a
 `SharedPart` report anything while a call of the binding that may clone or drop its part runs
 without the GIL, on any thread: a call that builds a request of the plans of the objects that it is
 given, such as an action of a DataFrame or a fit of `pyspark.ml.connect`, clones and drops the parts

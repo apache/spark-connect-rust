@@ -16653,6 +16653,37 @@ def test_no_part_that_the_collector_sees_is_cloned_without_the_gil_by_a_call(moc
     # and the releases of the `RemoteModelRef`s that they are made of, of no part.
     model = connect.regression.LinearRegressionModel(RemoteModelRef("gc-watch-model"))
     forest = connect.regression.RandomForestRegressionModel(RemoteModelRef("gc-watch-forest"))
+    # Fitted models, of training summaries over `features`, whose parts their objects and their
+    # summaries report: a LinearRegressionModel, and a OneVsRestModel, whose transform runs those of
+    # its models of the classes, of the summaries of their binary training sets.
+    import pyarrow as pa
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.sql.connect.types import pyspark_types_to_proto_types
+
+    service.execute_payload = pb2.ExecutePlanResponse(
+        ml_command_result=pb2.MlCommandResult(
+            operator_info=pb2.MlCommandResult.MlOperatorInfo(
+                obj_ref=pb2.ObjectRef(id="gc-watch-fitted")
+            )
+        )
+    ).SerializeToString()
+    fitted = connect.regression.LinearRegression(labelCol="id", maxIter=1).fit(features)
+    labels = pa.table({"max(id)": pa.array([1.0], pa.float64())})
+    sink = pa.BufferOutputStream()
+    with pa.ipc.new_stream(sink, labels.schema) as stream:
+        stream.write_table(labels)
+    service.query_payload = pb2.ExecutePlanResponse(
+        schema=pyspark_types_to_proto_types(T.StructType([T.StructField("max(id)", T.DoubleType())])),
+        arrow_batch=pb2.ExecutePlanResponse.ArrowBatch(
+            row_count=1, data=sink.getvalue().to_pybytes()
+        ),
+    ).SerializeToString()
+    one_vs_rest = connect.classification.OneVsRest(
+        classifier=connect.classification.LinearSVC(maxIter=1), labelCol="id"
+    ).fit(features)
+    service.query_payload = None
+    service.execute_payload = b""
+    assert fitted.hasSummary and len(one_vs_rest.models) == 2
     # Calls of a few milliseconds each, as of a server of a network, so that the parts that a call
     # clones are held while the watch reads them; the first plan of a session waits for the lookup
     # of its compression before it is built, so that its clones are made once the watch reads.
@@ -16743,6 +16774,12 @@ def test_no_part_that_the_collector_sees_is_cloned_without_the_gil_by_a_call(moc
         lambda: connect.regression.LinearRegression(labelCol="id", maxIter=1).fit(features),
         lambda: model.transform(features).collect(),
         lambda: model.copy().transform(features).schema,
+        lambda: fitted.transform(features).collect(),
+        lambda: fitted.copy().transform(features).schema,
+        lambda: fitted.summary.r2,
+        lambda: fitted.summary.predictions.collect(),
+        lambda: one_vs_rest.transform(features).collect(),
+        lambda: one_vs_rest.copy().transform(features).schema,
         lambda: model.numFeatures,
         lambda: forest.trees,
         lambda: pickle.dumps(model.transform(features)),
