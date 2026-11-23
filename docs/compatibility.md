@@ -2509,19 +2509,19 @@ the two is a self-join, whose condition of their columns the server rejects as
 `AMBIGUOUS_COLUMN_REFERENCE`, as PySpark's. Its requests build the plan, as PySpark's do, so they
 pickle the functions of its UDFs, of the `PicklingError` of one that does not pickle, and raise the
 error of an option that UTF-8 cannot encode, at each request; the DataFrame is made. Of another
-plan, the DataFrame is of the relation of `plan.to_proto(session.client)` when it is made (see
-"What a plan build does for a pickle" in `dev/parity/known-differences.md`), and of a plan whose
-build raises an `Exception`, the DataFrame is made, and each of its requests raises a new exception
-of the one of that build, of its class, its arguments, its state, and of copies of its cause and
-its context, as each of PySpark's requests builds the plan and raises an exception of its own: the
-DataFrame keeps the exception and its chain of no traceback, so that it keeps no frame of the build
-alive, and each exception of a request keeps the frames of that request alone. Another exception
-of the build, such as the `KeyboardInterrupt` of a Ctrl-C while it runs, or a `SystemExit`, is
-raised by `DataFrame(plan, session)` itself, as it is where PySpark's program is when it comes,
-and a later `DataFrame(plan, session)` builds the plan again; PySpark's DataFrame, which builds
-its plan at its requests, raises the exception of a plan that raises it there. A pickle of the
-DataFrame, of a Column of its subquery, of its table argument or of a DataFrame over it carries
-the plan, as PySpark's pickle carries its plan objects, and the unpickle builds it again, as
+plan, which the DataFrame keeps as its `_plan`, as PySpark's, the DataFrame is of the relation of
+`plan.to_proto(session.client)` that its first request builds (see "What a plan build does for a
+pickle" in `dev/parity/known-differences.md`), and of a plan whose build raises an `Exception`,
+each of its requests raises a new exception of the one of that build, of its class, its
+arguments, its state, and of copies of its cause and its context, as each of PySpark's requests
+builds the plan and raises an exception of its own: the DataFrame keeps the exception and its chain
+of no traceback, so that it keeps no frame of the build alive, and each exception of a request
+keeps the frames of that request alone. Another exception of the build, such as the
+`KeyboardInterrupt` of a Ctrl-C while it runs, or a `SystemExit`, is raised by the request, as
+PySpark's request raises it, and the next request builds the plan again. A pickle of the
+DataFrame, of PySpark's reduce of its `_plan` and its `_session`, of a Column of its subquery, of
+its table argument or of a DataFrame over it carries the plan, as PySpark's pickle carries its plan
+objects, and the unpickle builds it again, as
 PySpark's builds them when the unpickled object is used, of the error of that build, of the class,
 the arguments, the state and the chain that it gives then: the unpickle of the DataFrame raises
 it, as PySpark's, which builds the plan to read the columns of the new DataFrame, but for an
@@ -2551,8 +2551,8 @@ plan objects do. The unpickled plan has copies of the Observations (`observation
 PySpark's, which an execution of the client that is given them sets; an execution of a DataFrame
 of a plan over it on the client does not set them, where PySpark's does, as the core takes the
 Observations of the DataFrames whose plans a plan holds, and the unpickled plan holds the relation
-alone. The `_plan` of a `DataFrame(plan, session)` is the plan of its relation, not `plan`, as
-PySpark's is, and a new plan at each read.
+alone. The `_plan` of a `DataFrame(plan, session)` is `plan` itself, one object, as PySpark's is,
+which the DataFrame builds at its first request after it is set, as above.
 
 ## SparkSession.client
 
@@ -3679,7 +3679,8 @@ list of Columns of that time too, where PySpark gives it the call site of each r
 it, as it does in the drop-in otherwise. A copy of a DataFrame, in its session or another, builds
 its plan at each request, and warns then, as PySpark's.
 A request that PySpark builds in `functools`, as of `isStreaming`, a `functools.cached_property`,
-gives that `and` the call site of `functools.py`, where the drop-in gives the user's.
+gives that `and` the call site of `functools.py`, as the drop-in's, whose `isStreaming` is one
+too.
 
 The `FutureWarning` of `BisectingKMeansModel.computeCost` is attributed as PySpark's is, to the
 line of its `warnings.warn` in `pyspark/ml/clustering.py` and to the module
@@ -3920,10 +3921,13 @@ relation keeps, also through the subqueries of the expressions of a plan, the pl
 Column of the subquery of a DataFrame of a plan that did not build keeps, to build it at its
 requests, the plan and the exception of a build that failed, which a plan keeps, and the Python
 Observations of `observe`. Each object that holds a reference to such a part holds a reference to
-its `SharedPart` and reports it, as each of PySpark's objects holds its plan objects: a DataFrame, a
-generator of `toLocalIterator`, which holds its DataFrame until it ends, as PySpark's generator
-holds `self`, and the expressions of the client, the `_expr` of a Column, the `_subquery_expr` of a
-table argument and the entries of the lists of a window specification, which `copy.copy` and
+its `SharedPart` and reports it, as each of PySpark's objects holds its plan objects: the plan
+object of a DataFrame (`df._plan`), which the DataFrame holds in its `__dict__`, and its copies,
+the plan object that a DataFrame makes of a `_plan` of the Python client or of the plan object of
+a DataFrame of another session, which the DataFrame reports with that `_plan`, a generator of
+`toLocalIterator`, which holds its DataFrame until it ends, as PySpark's generator holds `self`,
+and the expressions of the client, the `_expr` of a Column, the `_subquery_expr` of a table
+argument and the entries of the lists of a window specification, which `copy.copy` and
 `copy.deepcopy` copy as they copy a Column, and which the `__dict__` of the Column, the table
 argument and the window holds, as PySpark's hold their expressions, so the collector sees them
 through it, and a Column of an expression that it replaced holds the parts of the new one only. So
@@ -3940,13 +3944,14 @@ DataFrames, and the merge writer and its clauses their Columns and the messages 
 PySpark's, which the collector sees, so a cycle through the DataFrame alone, such as
 `df.back = df.groupBy("id")`, is collected.
 The DataFrames of the plan of another,
-`DataFrame(df._plan, session)`, `copy.copy(df)` and a `copy.deepcopy(df)` that copies no function or
-Observation of the plan, hold the plan of `df` and not `df`, as PySpark's hold its plan object, so
-`df` is freed at its last reference, its attributes with it. The plan object of `df._plan` holds
-`df`, where PySpark's does not: so a DataFrame that keeps its stream writer, of that plan object
-(`df.w = df.writeStream`), is a reference cycle, which the collector frees, where PySpark frees the
-DataFrame at its last reference (see `dev/parity/known-differences.md`). A `SharedPart` reports
-nothing while a
+`DataFrame(df._plan, session)` and `copy.copy(df)`, hold the plan object of `df` (`_plan`) and not
+`df`, as PySpark's do, and a `copy.deepcopy(df)` holds a deep copy of it, so `df` is freed at its
+last reference, its attributes with it. So is a DataFrame that keeps an object
+of its plan, such as its plan object (`df.p = df._plan`) or its stream writer
+(`df.w = df.writeStream`): the plan object of `df._plan` holds the plan of the core and its parts,
+in its native base, and no DataFrame, as PySpark's plan object holds none; its `__dict__` holds
+the fields of PySpark's `LogicalPlan`, and its copies are of its class and its fields. A
+`SharedPart` reports nothing while a
 reference to its part is of a holder that the collector does not see, such as the DataFrames that a
 native model of `pyspark.ml.connect` keeps of its fit: the summary dataset of its training summary,
 which the summary keeps too, and the training dataset and the datasets of the classes of a
@@ -4251,6 +4256,23 @@ of grouped data makes, a value of the core, of the state at the call: a later ch
 of the state, such as `gd._grouping_cols.clear()` after `agg = gd.count()`, is not of `agg`, where
 PySpark's plan holds the list and builds its message of it at each request.
 
+The DataFrame of `pyspark.sql.connect.dataframe` keeps its state in its `__dict__`, as PySpark
+Connect's: its `__init__`, of `DataFrame(plan, session)`, sets `_plan` and `_session` as they are
+given, of PySpark's checks (`MISSING_VALID_PLAN`, `NO_ACTIVE_SESSION`), and then
+`_support_repr_html`, `_cached_schema`, `_cached_schema_serialized` and `_execution_info`, which its
+methods read and set where PySpark's do: its requests read `_plan` and `_session` at each call,
+`_schema` requests the schema while `_cached_schema` is None and keeps it with its pickle, which
+`schema` loads, the methods that keep the schema of their input share their `_cached_schema`, the
+actions set `_execution_info`, which `executionInfo` gives, as the callbacks of the writers set
+it, and `_repr_html_` sets `_support_repr_html`. `isStreaming` is PySpark's
+`functools.cached_property`, of the `__dict__`. `df._plan` is one object, the plan object of the
+drop-in (`_DataFramePlan`), which `DataFrame(df._plan, session)` and `copy.copy(df)` keep, and of
+which the methods make their DataFrames with the GIL held, of the plan IDs that the plans take when
+they are made, in their order, as PySpark's. A `_plan` of the Python client, or the plan object of
+a DataFrame of another session, is built at the first request after it is set. What differs is that
+the methods resolve the session of `_session` as they are called, also those that only make a plan
+(see `dev/parity/known-differences.md`).
+
 The `DataFrameReader` and the `DataStreamReader` of `pyspark.sql.connect` are PySpark Connect's
 classes, adapted from the source of PySpark 4.3.0 (`pyspark/sql/connect/readwriter.py` and
 `pyspark/sql/connect/streaming/readwriter.py`), whose code is PySpark's but for the plans of their
@@ -4263,8 +4285,9 @@ a schema, a path or a predicate that is not a str, and of an option of a key or 
 not one, but of a value of None, which it leaves out), and fails the requests of its DataFrame with
 the errors of the arguments that it cannot send, as PySpark's plan raises them when it is sent: a
 str that UTF-8 cannot encode, and an option of None, or of a key or a value that is not a str or
-bytes, of `table` and `changes`. The DataFrame of a read is of the session of the reader's
-`_client`, which the read resolves (see `dev/parity/known-differences.md`).
+bytes, of `table` and `changes`. The DataFrame of a read keeps the reader's `_client` as its
+`_session`, as PySpark's `_df` makes it, which its requests resolve (see
+`dev/parity/known-differences.md`).
 
 So are the `DataFrameWriter` and the `DataFrameWriterV2` of `pyspark.sql.connect`, adapted from the
 same source, with PySpark's `WriteOperation` and `WriteOperationV2` of
@@ -4274,9 +4297,8 @@ same source, with PySpark's `WriteOperation` and `WriteOperationV2` of
 fields of its `_write`, over the relation of the plan of its `_df`, the placeholder of the relation
 that the core builds of the DataFrame, as `df._plan.plan(client)` gives it, and the
 `execute_command` of the client of its `_spark` executes it, whose `ExecutionInfo` the callback of
-`df.write` and `df.writeTo` makes the `executionInfo` of the DataFrame. The `_df` of a writer is the
-plan object that `df._plan` gave when `write` was read, of which the drop-in's DataFrame makes a new
-one at each read (see `dev/parity/known-differences.md`).
+`df.write` and `df.writeTo` makes the `executionInfo` of the DataFrame. The `_df` of a writer is
+`df._plan`, the plan object of the DataFrame, as PySpark's.
 
 So is the `DataStreamWriter` of `pyspark.sql.connect.streaming.readwriter`, adapted from the same
 source, with PySpark's `WriteStreamOperation`: its state is its `__dict__`, of the `_session`,
@@ -4286,8 +4308,8 @@ are PySpark's. A start builds PySpark's command of its `_write_proto`, over the 
 of the `_write_stream`, which the `execute_command` of the client of its `_session` executes, makes
 the `StreamingQuery` of its result, and posts the started event of the query, decoded as PySpark
 decodes it, to what `self._session.streams._sqlb.post_to_all` is then, as PySpark's writer posts it
-(see the listener bus below). The `_write_stream._child` of a stream writer is the plan object that
-`df._plan` gave when `writeStream` was read.
+(see the listener bus below). The `_write_stream._child` of a stream writer is `df._plan`, as
+PySpark's.
 
 So is the `MergeIntoWriter` of `pyspark.sql.connect.merge`, with its clauses `WhenMatched`,
 `WhenNotMatched` and `WhenNotMatchedBySource`, adapted from `pyspark/sql/connect/merge.py`: its
@@ -4298,7 +4320,7 @@ are PySpark's. A clause builds its `MergeAction` when it is added, of the messag
 Columns, and the merge builds PySpark's command over the relation of the plan of its `_source_plan`,
 which the `execute_command` of its `_client` executes, whose `ExecutionInfo` the callback of
 `df.mergeInto` makes the `executionInfo` of the DataFrame. The `_source_plan` of a merge writer is
-the plan object that `df._plan` gave when `mergeInto` was called.
+`df._plan`, as PySpark's.
 
 The `Column`, the `WindowSpec` and the `TableArg` of `pyspark.sql.connect` keep their state in their
 `__dict__` too, as PySpark's: the `_expr` of a Column, the `_partitionSpec`, `_orderSpec` and

@@ -918,7 +918,7 @@ macro_rules! native_model {
                     // Of no borrow while the transform runs (see `ModelCore::transform_job`).
                     let job = slf.try_borrow()?.core.transform_job(slf.py(), &input)?;
                     let df = job.run(slf.py(), &input)?;
-                    Ok(Py::new(slf.py(), PyDataFrame::new(df))?.into_any())
+                    Ok(PyDataFrame::new(df).into_py(slf.py())?.into_any())
                 }
 
                 /// As `JavaParams.clear` over Spark Connect, which does nothing: its
@@ -988,7 +988,7 @@ macro_rules! native_model {
                 $(
                     #[getter]
                     #[pyo3(name = $r_py)]
-                    fn $r(slf: &Bound<'_, Self>) -> PyResult<PyDataFrame> {
+                    fn $r(slf: &Bound<'_, Self>) -> PyResult<crate::dataframe::NewDataFrame> {
                         let target = slf.try_borrow()?.core.target()?;
                         $crate::ml::object::attribute_relation_py(&target, $r_method, &[])
                     }
@@ -1005,7 +1005,7 @@ macro_rules! native_model {
                         slf: &Bound<'_, Self>,
                         args: &Bound<'_, pyo3::types::PyTuple>,
                         _kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
-                    ) -> PyResult<PyDataFrame> {
+                    ) -> PyResult<crate::dataframe::NewDataFrame> {
                         let target = slf.try_borrow()?.core.target()?;
                         let args: Vec<Bound<'_, PyAny>> = args.iter().collect();
                         $crate::ml::object::attribute_relation_py(&target, $rm_method, &args)
@@ -1281,7 +1281,7 @@ macro_rules! native_summary {
             $(
                 #[getter]
                 #[pyo3(name = $r_py)]
-                fn $r(slf: &Bound<'_, Self>) -> PyResult<PyDataFrame> {
+                fn $r(slf: &Bound<'_, Self>) -> PyResult<crate::dataframe::NewDataFrame> {
                     let target = Self::summary_target(slf)?;
                     $crate::ml::object::attribute_relation_py(&target, $r_method, &[])
                 }
@@ -1298,7 +1298,7 @@ macro_rules! native_summary {
                     slf: &Bound<'_, Self>,
                     args: &Bound<'_, pyo3::types::PyTuple>,
                     _kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
-                ) -> PyResult<PyDataFrame> {
+                ) -> PyResult<crate::dataframe::NewDataFrame> {
                     let target = Self::summary_target(slf)?;
                     let args: Vec<Bound<'_, PyAny>> = args.iter().collect();
                     $crate::ml::object::attribute_relation_py(&target, $rm_method, &args)

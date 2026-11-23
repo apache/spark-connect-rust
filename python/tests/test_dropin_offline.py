@@ -12,7 +12,6 @@ import contextlib
 import copyreg
 import datetime
 import decimal
-import importlib.util
 import io
 import json
 import os
@@ -14755,12 +14754,15 @@ def test_plans_over_the_plan_of_a_dataframe_pickle_with_no_session_as_pyspark(
         loaded = pickle.loads(dumps(SubqueryAlias(observed._plan, "s")))
         ((name, copied),) = loaded.observations.items()
         assert name == "o" and type(copied) is type(observation) and copied is not observation
-    # A copy of the plan, as copy copies PySpark's plan object, of its fields: of the DataFrame
-    # itself, and of a deep copy of it and of its Observations.
+    # A copy of the plan, as copy copies PySpark's plan object, of its class and its fields: of the
+    # same plan, of the Observation itself, and of a deep copy of it and of its Observations. The
+    # plan object holds no DataFrame, as PySpark's holds none.
     shallow = copy.copy(observed._plan)
-    assert type(shallow) is type(observed._plan) and shallow._df is observed
+    assert type(shallow) is type(observed._plan) and vars(shallow) == vars(observed._plan)
+    assert "_df" not in vars(shallow) and shallow.observations == {"o": observation}
     deep = copy.deepcopy(SubqueryAlias(observed._plan, "s"))
-    assert type(deep._child) is type(observed._plan) and deep._child._df is not observed
+    assert type(deep._child) is type(observed._plan)
+    assert vars(deep._child) == vars(observed._plan)
     ((name, copied),) = deep.observations.items()
     assert name == "o" and copied is not observation
 
@@ -14945,30 +14947,36 @@ def test_a_dataframe_of_a_failed_plan_keeps_no_frame_of_its_build_as_pyspark(moc
         assert raised[0].__context__ is not raised[1].__context__
 
 
-def test_dataframes_of_plans_raise_the_base_exceptions_of_their_builds_when_they_are_made(
-        mock_connect):
-    # A DataFrame(plan, session) builds its plan when it is made: an exception of the build that
-    # is not an Exception, as the KeyboardInterrupt of a Ctrl-C while it runs or a SystemExit, is
-    # raised there, where it comes, as PySpark's program raises it where it is then, and a later
-    # DataFrame of the plan builds it again; an Exception is kept, for each request to raise.
+def test_dataframes_of_plans_build_them_at_their_requests_as_pyspark(mock_connect):
+    # As PySpark's DataFrame(plan, session), which keeps the plan as it is and builds it at its
+    # requests: an exception of the build that is not an Exception, as the KeyboardInterrupt of a
+    # Ctrl-C while it runs or a SystemExit, is raised by the request, where it comes, as PySpark's
+    # program raises it where it is then, and the next request builds the plan again; an Exception
+    # is raised by each request.
     from pyspark.sql.connect.dataframe import DataFrame
     from pyspark.sql.connect.plan import LogicalPlan, Range
 
     spark, _ = mock_connect
     raising = []
+    builds = []
 
     class Interrupted(Range):
         def plan(self, session):
+            builds.append(1)
             if raising:
                 raise raising.pop()
             return super().plan(session)
 
     for error in (KeyboardInterrupt(), SystemExit(3), GeneratorExit()):
         plan = Interrupted(0, 3, 1)
+        df = DataFrame(plan, spark)
+        assert df._plan is plan and builds == []
         raising.append(error)
         with pytest.raises(type(error)):
-            DataFrame(plan, spark)
-        assert DataFrame(plan, spark)._relation_placeholder()
+            df.isLocal()
+        assert builds == [1]
+        assert df.isLocal() is False and builds == [1, 1]
+        del builds[:]
 
     class Failing(LogicalPlan):
         def __init__(self):
@@ -16593,20 +16601,21 @@ def test_cycles_are_collected_while_calls_run_that_clone_no_part_of_them(mock_co
     def shared_parts(of):
         return [r for r in gc.get_referents(of) if type(r).__name__ == "SharedPart"]
 
+    # Of the plan object of the DataFrame, which holds the parts of its plan.
     frame = spark.range(1).select(F.udf(lambda x: x, "long")("id"))
     writer = frame.writeTo("gc_of_the_write")
-    assert shared_parts(frame)
+    assert shared_parts(frame._plan)
     kept = cycles()
     service.block_execute = True
     started = service.execute_started
     try:
         write = in_flight(writer.append, lambda: service.execute_started > started)
         assert alive(kept) == 0
-        assert shared_parts(frame)
+        assert shared_parts(frame._plan)
     finally:
         service.release_response()
     write.join(10)
-    assert shared_parts(frame)
+    assert shared_parts(frame._plan)
 
 
 def test_no_part_that_the_collector_sees_is_cloned_without_the_gil_by_a_call(mock_connect):
@@ -16859,16 +16868,200 @@ def test_a_dataframe_of_the_plan_of_another_does_not_keep_it_as_pyspark(mock_con
         gc.enable()
 
 
-@pytest.mark.xfail(
-    importlib.util.find_spec("pyspark._pyspark") is not None,
-    strict=True,
-    reason="SPARK-62218: the plan object of `df._plan` holds `df`, where PySpark's does not",
-)
+def test_a_plan_object_holds_the_plan_and_not_its_dataframe_as_pyspark(mock_connect):
+    # As PySpark's plan object of a DataFrame, which holds the plan objects of its inputs and the
+    # functions of its UDFs, and no DataFrame: its `__dict__` has the fields of LogicalPlan, a
+    # DataFrame that keeps its plan object is freed at its last reference, and a cycle through the
+    # plan object and the function of a UDF of its plan is freed by a collection.
+    import gc
+    import weakref
+
+    from pyspark.sql import functions as F
+
+    spark, _ = mock_connect
+    fields = vars(spark.range(3)._plan)
+    assert "_df" not in fields
+    assert {"_child", "_root_plan_id", "_references", "_plan_id_with_rel"} <= set(fields)
+    gc.disable()
+    try:
+        df = spark.range(3)
+        df.keep = df._plan
+        freed = weakref.ref(df)
+        del df
+        assert freed() is None
+    finally:
+        gc.enable()
+
+    def f(x):
+        return x
+
+    plan = spark.range(1).select(F.udf(f, "long")("id"))._plan
+    f.plan = plan
+    freed = [weakref.ref(plan), weakref.ref(f)]
+    del plan, f
+    gc.collect()
+    assert [ref() for ref in freed] == [None, None]
+
+
+def test_the_plan_and_the_session_of_a_dataframe_are_its_dict_as_pyspark(mock_connect):
+    # As PySpark's DataFrame, whose `__init__` sets `_plan` and `_session` in its `__dict__`, which
+    # its methods read at each call: `df._plan` is one object, which `DataFrame(df._plan, session)`
+    # and a copy keep as they are; the requests are of the `_plan` and the `_session` that are set
+    # then, a plan of the Python client too, which they build; and the plan objects of the methods
+    # take their plan IDs when they are made, in their order, as PySpark's `LogicalPlan.__init__`.
+    import copy
+
+    from pyspark.sql import SparkSession
+    from pyspark.sql.connect.dataframe import DataFrame
+    from pyspark.sql.connect.plan import SubqueryAlias
+    from pyspark.sql.connect.proto import base_pb2
+
+    spark, service = mock_connect
+
+    def explained(df):
+        # The plan of the request of `explain`, which PySpark builds of `self._plan` at each call.
+        df._explain_string()
+        return base_pb2.AnalyzePlanRequest.FromString(service.analyze_requests[-1])
+
+    df = spark.range(3)
+    assert df._plan is df._plan
+    assert list(vars(df))[:2] == ["_plan", "_session"]
+    assert vars(df)["_plan"] is df._plan and df._session is spark and df.sparkSession is spark
+    assert DataFrame(df._plan, spark)._plan is df._plan
+    assert copy.copy(df)._plan is df._plan
+    assert copy.copy(df)._session is spark
+    other = spark.range(5)
+    df._plan = other._plan
+    root = explained(df).explain.plan.root
+    assert root.common.plan_id == other._plan._plan_id and root.range.end == 5
+    df._plan = SubqueryAlias(other._plan, "s")
+    root = explained(df).explain.plan.root
+    assert root.subquery_alias.alias == "s" and root.subquery_alias.input.range.end == 5
+    elsewhere = SparkSession.builder.remote(service.remote).create()
+    try:
+        df = spark.range(2)
+        df._session = elsewhere
+        request = explained(df)
+        assert request.session_id == elsewhere.client._session_id != spark.client._session_id
+        assert request.explain.plan.root.common.plan_id == df._plan._plan_id
+    finally:
+        elsewhere.stop()
+    first, second = spark.range(1), spark.range(1)
+    later = first.select("id")
+    # Read in the reverse of the order in which they were made.
+    ids = [later._plan._plan_id, second._plan._plan_id, first._plan._plan_id]
+    assert ids == sorted(ids, reverse=True)
+
+
+def test_the_state_of_a_dataframe_is_its_dict_as_pyspark(mock_connect):
+    # As PySpark's DataFrame, whose `__init__` sets `_support_repr_html`, `_cached_schema`,
+    # `_cached_schema_serialized` and `_execution_info` after `_plan` and `_session`, which its
+    # methods read and set: `_schema` requests the schema once, while `_cached_schema` is None, and
+    # keeps it with its pickle, of which `schema` gives a new object; the methods that keep the
+    # schema of their input share its `_cached_schema`, and `to` sets its schema; `isStreaming` is a
+    # `functools.cached_property`, of the `__dict__`; an action sets `_execution_info`, of which
+    # `executionInfo` is the object, and so does the callback of a writer; `_repr_html_` sets
+    # `_support_repr_html`.
+    import copy
+
+    from pyspark.sql import types as T
+    from pyspark.sql.connect.proto import base_pb2
+
+    spark, service = mock_connect
+
+    def analyses():
+        return [base_pb2.AnalyzePlanRequest.FromString(request).WhichOneof("analyze")
+                for request in service.analyze_requests]
+
+    df = spark.range(3)
+    assert list(vars(df)) == [
+        "_plan", "_session", "_support_repr_html", "_cached_schema", "_cached_schema_serialized",
+        "_execution_info",
+    ]
+    assert [df._support_repr_html, df._cached_schema, df._cached_schema_serialized,
+            df._execution_info] == [False, None, None, None]
+    before = len(analyses())
+    schema = df.schema
+    assert analyses()[before:] == ["schema"]
+    assert isinstance(df._cached_schema, T.StructType) and df._cached_schema == schema
+    assert df._cached_schema is not schema and isinstance(df._cached_schema_serialized, bytes)
+    assert df.schema is not df.schema and df.schema == schema and df._schema is df._cached_schema
+    assert df.columns == ["id"] and df.dtypes == [("id", "bigint")]
+    assert analyses()[before:] == ["schema"]
+    assert df.filter("id > 0")._cached_schema is df._cached_schema
+    assert df.select("id")._cached_schema is None
+    to = T.StructType([T.StructField("id", T.LongType())])
+    assert df.to(to)._cached_schema is to
+    # A reset of the cached schema is requested again, and one that is set is the schema.
+    df._cached_schema = None
+    assert df.schema == schema and analyses()[before:] == ["schema", "schema"]
+    other = T.StructType([T.StructField("x", T.StringType())])
+    df._cached_schema, df._cached_schema_serialized = other, None
+    assert df.columns == ["x"] and df.schema == other and df.schema is not other
+    assert analyses()[before:] == ["schema", "schema"]
+    # The copies of the state of PySpark's reduce.
+    copied = copy.copy(df)
+    assert copied._cached_schema is other and copied._support_repr_html is False
+    assert copy.deepcopy(df)._cached_schema == other
+    df = spark.range(3)
+    assert "isStreaming" not in vars(df)
+    assert df.isStreaming is False and vars(df)["isStreaming"] is False
+    df.isStreaming
+    assert analyses().count("is_streaming") == 1
+    # Set before the settings of the eager evaluation are read, which the mock server has none
+    # of, as PySpark's.
+    with pytest.raises(Exception, match="SQL_CONF_NOT_FOUND"):
+        df._repr_html_()
+    assert df._support_repr_html is True
+    # The callback of a writer sets the `_execution_info` of its DataFrame, which `executionInfo`
+    # gives as it is.
+    writer = df.write.format("noop").mode("overwrite")
+    writer.save()
+    assert df._execution_info is not None and df.executionInfo is df._execution_info
+    marker = object()
+    df._execution_info = marker
+    assert df.executionInfo is marker
+
+
+def test_a_dataframe_whose_session_is_deleted_raises_at_its_requests_as_pyspark(mock_connect):
+    # As PySpark's, whose requests read `self._session.client`: of the `__getattr__` of the
+    # DataFrame, the Column of `_session`, whose `client` is no client of a session, of a
+    # TypeError, and whose `_col` reads `_plan` alone.
+    spark, _ = mock_connect
+    df = spark.range(3)
+    del df._session
+    for request in (df.isLocal, lambda: df.schema, lambda: df.columns):
+        with pytest.raises(TypeError):
+            request()
+    assert repr(df.id) == "Column<'id'>" and repr(df["id"]) == "Column<'id'>"
+    assert df.executionInfo is None
+
+
+def test_the_request_of_is_streaming_takes_the_call_site_of_functools_as_pyspark(
+    mock_connect, monkeypatch
+):
+    # As PySpark's `isStreaming`, a `functools.cached_property`, whose request builds the plan in
+    # the `__get__` of `functools`: the `and` of the conditions of a join of a list of Columns
+    # takes the call site of `functools.py`, of the frames of the user's code too, of the capture
+    # of the origins on (see `origin_capture`).
+    import pyspark.errors.utils as utils
+    from pyspark.sql import functions as F
+
+    monkeypatch.setattr(utils, "_enable_debugging_cache", True)
+    spark, service = mock_connect
+    a, b = spark.range(3).alias("a"), spark.range(3).alias("b")
+    joined = a.join(b, [F.col("a.id") == F.col("b.id"), F.col("a.id") > 0])
+    before = len(service.analyze_requests)
+    assert joined.isStreaming is False
+    request = service.analyze_requests[before]
+    assert b"functools.py" in request and b"test_dropin_offline.py" in request
+
+
 def test_a_stream_writer_does_not_keep_its_dataframe_as_pyspark(mock_connect):
     # As PySpark's stream writer, which holds the plan object of `df` and not `df`: `df` is freed at
     # its last reference, its attributes with it, while the writer lives, and a DataFrame that keeps
-    # its stream writer is freed at its last reference too. The drop-in's stream writer is
-    # PySpark's, of the plan object that `df._plan` gives, which holds `df` until SPARK-62218.
+    # its stream writer is freed at its last reference too. The plan object of `df._plan` holds the
+    # plan of the core and no DataFrame, as PySpark's plan object holds none.
     import gc
     import weakref
 
@@ -19706,7 +19899,8 @@ def test_the_attributes_of_an_observation_are_those_of_its_dict_as_pyspark(mock_
 
 def test_observe_gives_the_dataframe_of_the_on_of_an_observation_as_pyspark(mock_connect):
     # As PySpark's DataFrame.observe, which checks its Columns and then gives what the _on of the
-    # Observation gives, of a subclass too.
+    # Observation gives, of a subclass too, after it sets `res._cached_schema` of its own: an
+    # object that takes no attribute, as a str, raises the AttributeError of that.
     from pyspark.errors import PySparkValueError
     from pyspark.sql import functions as F
     from pyspark.sql.connect.observation import Observation
@@ -19714,20 +19908,38 @@ def test_observe_gives_the_dataframe_of_the_on_of_an_observation_as_pyspark(mock
     spark, _ = mock_connect
     calls = []
 
+    class Result:
+        pass
+
+    result = Result()
+
     class Mine(Observation):
+        def _on(self, df, *exprs):
+            calls.append((df, exprs))
+            return result
+
+    observation = Mine("m")
+    df = spark.range(3)
+    df.schema
+    column = F.count(F.lit(1)).alias("c")
+    assert df.observe(observation, column) is result
+    assert result._cached_schema is df._cached_schema
+    ((seen, exprs),) = calls
+    assert seen is df and len(exprs) == 1 and exprs[0] is column
+    del calls[:]
+
+    class OfStr(Observation):
         def _on(self, df, *exprs):
             calls.append((df, exprs))
             return "of _on"
 
-    observation = Mine("m")
-    df = spark.range(3)
-    column = F.count(F.lit(1)).alias("c")
-    assert df.observe(observation, column) == "of _on"
-    ((seen, exprs),) = calls
-    assert seen is df and len(exprs) == 1 and exprs[0] is column
+    with pytest.raises(AttributeError, match="_cached_schema"):
+        df.observe(OfStr("s"), column)
+    assert len(calls) == 1
+    del calls[:]
     with pytest.raises(PySparkValueError) as error:
         df.observe(observation)
-    assert error.value.getCondition() == "CANNOT_BE_EMPTY" and len(calls) == 1
+    assert error.value.getCondition() == "CANNOT_BE_EMPTY" and calls == []
     assert vars(observation) == {"_name": "m", "_result": None, "_error": None}
 
 
@@ -20082,7 +20294,7 @@ def test_deep_copies_into_another_session_hold_the_functions_of_their_udfs_as_py
         assert root.project.expressions[0].unresolved_attribute.plan_id == refers_to
         df.explain()
         assert b"<old>" not in service.analyze_requests[-1]
-        assert copied._observations() == {"o": copied_observation}
+        assert copied._plan.observations == {"o": copied_observation}
     finally:
         other.stop()
 
@@ -27561,7 +27773,8 @@ def test_objects_traversed_while_they_are_created_do_not_crash(mock_connect):
     # grouped data, the cogroups, the table arguments, the window specifications, the null and
     # statistics functions, the merge clauses, the stream writers, the data source registrations
     # and the session builders, and their copies, the rows of toLocalIterator, the expressions
-    # of Columns and table arguments, and their copies, the array, map, field and struct types,
+    # of Columns and table arguments, and their copies, the plan objects of DataFrames
+    # (`df._plan`) and their copies, the array, map, field and struct types,
     # which a schema of the server makes too, and the sessions, the catalogs and the registrations
     # of a Python subclass, which keeps its __dict__, and the objects that an unpickle makes
     # without arguments.
@@ -27629,6 +27842,7 @@ def test_objects_traversed_while_they_are_created_do_not_crash(mock_connect):
         lambda: DataSourceRegistration.__new__(DataSourceRegistration),
         lambda: type(reader).__new__(type(reader)),
         lambda: type(stream_reader).__new__(type(stream_reader)),
+        lambda: df._plan, lambda: copy.copy(df._plan), lambda: copy.deepcopy(df._plan),
     ]
     # The objects whose parts hold the function of a UDF, which make the Python objects of the
     # parts that they share as they are created (see `crate::gc`).
@@ -27641,7 +27855,8 @@ def test_objects_traversed_while_they_are_created_do_not_crash(mock_connect):
         lambda: of_udf.writeTo("t").partitionedBy(udf), lambda: of_udf.na, lambda: of_udf.stat,
         lambda: of_udf.mergeInto("t", udf > 0).whenMatched(udf > 1), lambda: udf._expr,
         lambda: copy.copy(of_udf), lambda: of_udf.toLocalIterator(),
-        lambda: of_udf.groupBy("v").cogroup(of_udf.groupBy("id")),
+        lambda: of_udf.groupBy("v").cogroup(of_udf.groupBy("id")), lambda: of_udf._plan,
+        lambda: copy.deepcopy(of_udf._plan),
     ]
     thresholds = gc.get_threshold()
     gc.collect()
@@ -31005,15 +31220,18 @@ def test_responses_take_upbs_limit_of_set_allow_oversize_protos():
 
             # AnalyzePlanResponse.schema (2) -> Schema.schema (1): of 340 structs, the Long of
             # the DataType at level 2 is at level 1023; of 341, a StructField is at 1025.
+            # Of `_schema`, the schema of the response as the DataFrame keeps it: its `schema`
+            # copies it, of a pickle and else of `copy.deepcopy`, as PySpark's, which raise the
+            # RecursionError of Python at such a depth.
             for structs in (340, 341):
                 service.data_type = schema(structs)
-                out[f"schema of {structs} structs"] = outcome(lambda: spark.range(1).schema)
+                out[f"schema of {structs} structs"] = outcome(lambda: spark.range(1)._schema)
                 plan = pb2.Plan()
                 plan.root.CopyFrom(spark.range(1)._plan.plan(spark.client))
                 out[f"client.schema of {structs} structs"] = outcome(
                     lambda: spark.client.schema(plan))
             try:
-                spark.range(1).schema
+                spark.range(1)._schema
             except RecursionError as error:
                 out["message"] = str(error)
         print(json.dumps(out))
@@ -31042,8 +31260,10 @@ def test_calls_on_threads_of_small_stacks_read_responses_to_the_bound():
     # the conversions of toPandas(), of many frames of Python. After
     # SetAllowOversizeProtos(True), the responses whose messages nest to the bound of 1024 levels
     # are read on a thread of 256 KiB: their decodes, copies and conversions, which recurse over
-    # the levels, run on stacks with room for them. Of the schemas of DataFrame.schema (and of its
-    # copy that the DataFrame keeps), dtypes, SparkSession.client.schema, to_table_as_iterator and
+    # the levels, run on stacks with room for them. Of the schemas of DataFrame._schema (the
+    # `_cached_schema` of the DataFrame, which its `schema` copies, of a pickle and else of
+    # `copy.deepcopy`, as PySpark's, which raise the RecursionError of Python at such a depth),
+    # dtypes, SparkSession.client.schema, to_table_as_iterator and
     # collect(), of structs, of arrays and of user-defined types that the client fills, and of
     # observed metrics. collect() of the schema of user-defined types may raise the RecursionError
     # of the Python converters of their rows, as PySpark's, by the frames that a Python takes of
@@ -31184,8 +31404,8 @@ def test_calls_on_threads_of_small_stacks_read_responses_to_the_bound():
                 service.data_type = data_type
                 service.execute_payload = message_field(7, data_type)
                 df = spark.range(1)
-                out[f"{name}: schema"] = on_thread(256, lambda: levels(df.schema))
-                out[f"{name}: schema again"] = on_thread(256, lambda: levels(df.schema))
+                out[f"{name}: schema"] = on_thread(256, lambda: levels(df._schema))
+                out[f"{name}: schema again"] = on_thread(256, lambda: levels(df._schema))
                 out[f"{name}: dtypes"] = on_thread(256, lambda: spark.range(1).dtypes[0][1])
                 out[f"{name}: client.schema"] = on_thread(
                     256, lambda: levels(spark.client.schema(plan)))
@@ -31193,7 +31413,7 @@ def test_calls_on_threads_of_small_stacks_read_responses_to_the_bound():
                     256, lambda: [levels(item)
                                   for item in spark.client.to_table_as_iterator(plan, {})])
                 out[f"{name}: collect"] = on_thread(256, lambda: spark.range(1).collect())
-                out[f"{name}: ops"] = ops_on_thread(256, lambda: spark.range(1).schema)
+                out[f"{name}: ops"] = ops_on_thread(256, lambda: spark.range(1)._schema)
             service.execute_payload = b""
             # ExecutePlanResponse.observed_metrics (6) -> ObservedMetrics (1): name=1, values=2,
             # keys=3, plan_id=4 -> the Literal at level 2, of 510 arrays (Literal.array=22:
@@ -35116,7 +35336,8 @@ def test_a_conf_or_a_client_kept_apart_from_its_session_is_closed_with_it_as_pys
     # its DataFrames, whose drop closes PySpark's client (`SparkSession.__del__`), a kept conf
     # raises NO_ACTIVE_SESSION, and so do the requests of a kept client, which is closed, and
     # keeps its attributes; set open, its requests raise the ValueError of a closed channel, and
-    # its newSession is of a channel of its own. While a DataFrame of the session lives, both work.
+    # its newSession is of a channel of its own. While a DataFrame of the session lives, which
+    # holds the session as its `_session`, as PySpark's, both work.
     import gc
     import weakref
 
@@ -35133,11 +35354,12 @@ def test_a_conf_or_a_client_kept_apart_from_its_session_is_closed_with_it_as_pys
     gone = weakref.ref(other)
     del other
     gc.collect()
-    assert gone() is None
+    assert gone() is df._session
     assert conf.get("spark.sql.shuffle.partitions", "200") == "200"
     assert client.is_closed is False and df.filter("id > 0").schema is not None
     del df
     gc.collect()
+    assert gone() is None
     for call in (
         lambda: conf.get("spark.sql.shuffle.partitions", "200"),
         lambda: conf.set("spark.sql.shuffle.partitions", "7"),

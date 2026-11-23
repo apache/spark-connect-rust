@@ -3878,7 +3878,10 @@ def test_public_dataframe_base_factory_and_native_dispatch(ml_mock):
     assert DataFrame.__module__ == "pyspark.sql.dataframe"
     assert ConnectDataFrame.__module__ == "pyspark.sql.connect.dataframe"
     assert DataFrame.__doc__ == ConnectDataFrame.__doc__
-    assert inspect.signature(DataFrame) == inspect.signature(ConnectDataFrame)
+    # As PySpark Connect's class, of its `__new__(cls, *args, **kwargs)`.
+    assert [p.kind for p in inspect.signature(ConnectDataFrame).parameters.values()] == [
+        inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD,
+    ]
     assert inspect.signature(DataFrame.select) == inspect.signature(ConnectDataFrame.select)
     assert DataFrame.select.__doc__ == ConnectDataFrame.select.__doc__
     assert {
@@ -3919,6 +3922,7 @@ def test_public_dataframe_base_factory_and_native_dispatch(ml_mock):
 
     class NativeFrame(ConnectDataFrame):
         def __init__(self, plan, session):
+            super().__init__(plan, session)
             self.marker = "native-subclass-state"
 
     native_subclass = NativeFrame(plan=SQLPlan(), session=spark)
@@ -3947,7 +3951,6 @@ def test_public_dataframe_patches_reach_native_frames_as_pyspark_frames_see_them
     original_native_count = vars(ConnectDataFrame)["count"]
     original_public_schema = vars(DataFrame)["schema"]
     original_native_schema = vars(ConnectDataFrame)["schema"]
-    original_native_session = vars(ConnectDataFrame)["_session"]
     missing = object()
 
     class LocalFrame(DataFrame):
@@ -4085,20 +4088,21 @@ def test_public_dataframe_patches_reach_native_frames_as_pyspark_frames_see_them
                 delattr(ConnectDataFrame, "compatibility_helper")
 
     # PySpark's Connect frames set _session in their __init__, which hides a patch of the base,
-    # but for a data descriptor, which Python's lookup takes first. Removing that patch must
-    # recover the native getter rather than delete it.
+    # but for a data descriptor, which Python's lookup takes first: the native frames keep it in
+    # their `__dict__` too, of no descriptor of the native class.
     assert "_session" not in vars(DataFrame)
+    assert "_session" not in vars(ConnectDataFrame)
     with monkeypatch.context() as patch:
         patch.setattr(DataFrame, "_session", "custom-session", raising=False)
         assert frame._session is spark
-        assert vars(ConnectDataFrame)["_session"] is original_native_session
+        assert "_session" not in vars(ConnectDataFrame)
         patch.setattr(DataFrame, "_session", property(lambda self: "custom-session"))
         assert frame._session == "custom-session"
         patch.setattr(DataFrame, "_session", "custom-session")
         assert frame._session is spark
         patch.setattr(DataFrame, "_session", property(lambda self: "custom-session"))
     assert "_session" not in vars(DataFrame)
-    assert vars(ConnectDataFrame)["_session"] is original_native_session
+    assert "_session" not in vars(ConnectDataFrame)
     assert frame._session is spark
 
     def set_custom_value(self, value):

@@ -311,18 +311,18 @@ difference is intentional or tracked for a fix.
   The `plan` of `DataFrame._plan` builds the relation, and warns, as PySpark's does, and a
   `DataFrame(df._plan, session)` is a DataFrame of the plan of `df`, which its requests build, as
   PySpark's is of the plan object of `df`. A `DataFrame(plan, session)` of another plan, such as a
-  plan of `pyspark.ml` or `SubqueryAlias(df._plan, "s")`, is of the relation of
-  `plan.to_proto(session.client)` that it builds when it is made, as the core keeps the relation
-  that it built then: it warns then, once, where PySpark's warns at each request, which builds the
-  plan, and of a plan whose build raises an `Exception`, each request raises a new exception of the
-  one of that build, where each of PySpark's builds the plan again, and so runs its code again and
-  prints again the traceback of a function of a UDF that does not pickle, as
+  plan of `pyspark.ml` or `SubqueryAlias(df._plan, "s")`, keeps `plan` as its `_plan`, as
+  PySpark's, and is of the relation of `plan.to_proto(session.client)` that its first request
+  builds, as the core keeps the relation that it built then, while its `_plan` and the session of
+  its `_session` are the same: it warns then, once, where PySpark's warns at each request, which
+  builds the plan, and of a plan whose build raises an `Exception`, each request raises a new
+  exception of the one of that build, where each of PySpark's builds the plan again, and so runs
+  its code again and prints again the traceback of a function of a UDF that does not pickle, as
   `CloudPickleSerializer.dumps` prints it, and raises an exception of its own. Another exception of
-  the build, such as the `KeyboardInterrupt` of a Ctrl-C while it runs, is raised by
-  `DataFrame(plan, session)` itself, where PySpark's DataFrame, which does not build the plan then,
-  raises a `KeyboardInterrupt` or a `SystemExit` that its plan raises at its requests. A pickle of
-  such a DataFrame carries its plan, as PySpark's does, which the unpickle builds again, of its
-  error then; an unpickled Column of its subquery builds it at each request, of the session of the
+  the build, such as the `KeyboardInterrupt` of a Ctrl-C while it runs, is raised by the request,
+  as PySpark's, and the next request builds the plan again. A pickle of such a DataFrame carries
+  its plan, as PySpark's does, of PySpark's reduce, which the unpickle builds again, of its error
+  then; an unpickled Column of its subquery builds it at each request, of the session of the
   request, and a build of a plan over it of the client that the build is given, as
   `df._plan.plan(client)` of a DataFrame over it, as PySpark's Column does; its `to_plan(client)`
   raises the error of the build, where PySpark's gives the expression, as PySpark builds the plans
@@ -1240,37 +1240,36 @@ requests of the unpickled object pickle as it is then. This case still differs:
   or `SparkSession(connection=...)`): its `SparkSession.__del__` closes the client in the teardown
   of the interpreter, whose grpcio `Channel.close()` waits forever. That is a bug of PySpark, which
   the drop-in does not reproduce: it exits.
-- **The `__dict__` of the objects of a session** (intentional; the state is native). The
-  objects of a session or a DataFrame of the native classes hold their state in the Rust core:
-  their `__dict__` holds the attributes that a user sets on them,
-  which their copies and pickles keep as PySpark's do, but not their state, which PySpark's
-  holds there (`vars(df)` is empty, where PySpark's has `_plan`, `_session`,
-  `_support_repr_html`, `_cached_schema`, `_cached_schema_serialized` and `_execution_info`).
-  These are not of them, and hold their state in their `__dict__`, as PySpark's:
-  the `DataFrameReader` and the `DataStreamReader` of `spark.read` and `spark.readStream`, PySpark
+- **The `__dict__` of the objects of a session** (intentional; the plans are the core's). The
+  objects of a session and of a DataFrame hold their state in their `__dict__`, as PySpark's: the
+  DataFrame, of its `_plan`,
+  `_session`, `_support_repr_html`, `_cached_schema`, `_cached_schema_serialized` and
+  `_execution_info`, which its `__init__` and its methods set and read where PySpark's do, and of
+  `isStreaming`, PySpark's `functools.cached_property`, whose `_plan` is the plan object of the
+  drop-in (see "Plans of a DataFrame's relation"), whose `_schema` requests the schema while
+  `_cached_schema` is None and keeps it with its pickle, which `schema` loads, and whose methods
+  that keep the schema of their input share its `_cached_schema`, as PySpark's (see
+  `docs/compatibility.md`); the `DataFrameReader` and the `DataStreamReader` of `spark.read` and
+  `spark.readStream`, PySpark
   Connect's classes, of their `_client`, `_format`, `_schema` and `_options` (and `_source_name`),
   whose code is PySpark's, adapted to the plans of the Rust core; the `DataFrameWriter` and the
   `DataFrameWriterV2` of `df.write` and `df.writeTo`, PySpark Connect's classes, of their `_df`,
   `_spark`, `_write` (PySpark's `WriteOperation` and `WriteOperationV2`, whose fields their setters
   set), `_callback` (and `_table_name`), whose writes send PySpark's command, over the relation of
-  the DataFrame, which the client executes, and whose `_df` is the plan object that `df._plan` gave
-  at `write`, of which the drop-in's DataFrame makes a new one at each read, where PySpark's is one
-  object (see `docs/compatibility.md`); the `DataStreamWriter` of `df.writeStream`, PySpark
+  the DataFrame, which the client executes, and whose `_df` is `df._plan`, as PySpark's; the
+  `DataStreamWriter` of `df.writeStream`, PySpark
   Connect's class, of its `_session`, `_write_stream` (PySpark's `WriteStreamOperation`) and
   `_write_proto` (its `WriteStreamOperationStart`, which the setters set), whose start sends
   PySpark's command, over the relation of the DataFrame, which the client executes, and posts the
   started event of the query to the `post_to_all` of the listener bus of its session, as
-  PySpark's (below), and whose `_write_stream._child` is the plan object that `df._plan` gave at
-  `writeStream`, which holds the DataFrame, where PySpark's plan object does not: so a DataFrame
-  that keeps its stream writer (`df.w = df.writeStream`) is a reference cycle, which the collector
-  frees, where PySpark frees it at its last reference; the `MergeIntoWriter` of `df.mergeInto`,
+  PySpark's (below), and whose `_write_stream._child` is `df._plan`; the `MergeIntoWriter` of
+  `df.mergeInto`,
   PySpark Connect's class, of its `_client`, `_target_table`, `_source_plan`, `_condition`,
   `_callback`, `_schema_evolution_enabled` and the lists of the `MergeAction`s of its clauses,
   `WhenMatched`, `WhenNotMatched` and `WhenNotMatchedBySource`, of their `writer` and
   `_condition`, which build the `MergeAction` of the messages of their conditions and assignments
   when they are added, and whose merge sends PySpark's command, over the relation of the
-  DataFrame, which the client executes, and whose `_source_plan` is the plan object that `df._plan`
-  gave at `mergeInto`; an
+  DataFrame, which the client executes, and whose `_source_plan` is `df._plan`; an
   `Observation`, of its `_name`, `_result` and `_error`; the `Catalog`, the `TableValuedFunction`,
   the `DataSourceRegistration` and the `RuntimeConf` of a session, of the session of their
   `_sparkSession` (`sparkSession` of a registration) and of the client of their `_client`; the
@@ -1342,11 +1341,15 @@ requests of the unpickled object pickle as it is then. This case still differs:
   while that is the own client of the session), or, of another object, as a proxy of a session, of
   its `client`, where PySpark's call the methods of that client, such as its `to_table` and its
   `execute_command`. So the methods that a subclass of the drop-in's client overrides are not called
-  by them, a client of another class raises a `TypeError` of it, and the DataFrames that the
-  session, a reader, a catalog and the table-valued functions make are of that session at the call,
-  which a DataFrame holds natively (above), where PySpark's are of the object that they hold, whose
-  client they read at each request: so the session of a reader of another object than a session is
-  resolved when its read makes its DataFrame, where PySpark's DataFrame resolves it at a request.
+  by them, and a client of another class raises a `TypeError` of it. The DataFrames that a reader
+  and the table-valued functions make keep the object that they hold as their `_session`, as
+  PySpark's, which their requests resolve; the methods of a DataFrame resolve the session of its
+  `_session` as they are called, also those that only make a plan, as the plans are the core's,
+  where PySpark's read `self._session.client` at its requests: so a `_session` that is not a
+  session, as of a deleted one, of the Column of `__getattr__`, raises at the method, where
+  PySpark's raises at the request. A `_plan` of the Python client is built at the first request
+  after it is set, of its session, and not again at each, as the core keeps the relation of that
+  build (see "What a plan build does for a pickle").
   The plan of a read is the core's, which takes the options of the reader when it is made, where
   PySpark's `Read` plan of `table` keeps the dict of the reader's options, of which a later `option`
   changes its requests. A
@@ -1373,28 +1376,28 @@ requests of the unpickled object pickle as it is then. This case still differs:
   PySpark's classes, which construct and subclass as PySpark's. The catalog, the table-valued
   functions, the registration, the runtime configuration, the streaming queries, their manager and
   its listener bus, the grouped data, the cogrouped data, the null and statistics functions, the
-  session, the Column, the window specification and the table argument keep their state in their
-  `__dict__`, as PySpark's (see the row above): their `__init__` keeps any object, which their
-  first use reads, but for the assertions of the `__init__` of `GroupedData` (a DataFrame, a
-  grouping and a list of Columns) and of `WindowSpec` (a list of expressions, a list of sort
-  orders and a `WindowFrame` or None), the `NOT_EXPECTED_TYPE` of `Column(expr)` of an object
-  that is not an `Expression` and the `_check_same_session` of the `_df` of the grouped data of
-  `PandasCogroupedOps`, which raise as PySpark's, and the `connection` of a session, of which its
+  session, the DataFrame, the Column, the window specification and the table argument keep their
+  state in their `__dict__`, as PySpark's (see the row above): their `__init__` keeps any object,
+  which their first use reads, but for the assertions of the `__init__` of `GroupedData` (a
+  DataFrame, a grouping and a list of Columns) and of `WindowSpec` (a list of expressions, a list
+  of sort orders and a `WindowFrame` or None), the `NOT_EXPECTED_TYPE` of `Column(expr)` of an
+  object that is not an `Expression` and the `_check_same_session` of the `_df` of the grouped data
+  of `PandasCogroupedOps`, which raise as PySpark's, and the `connection` of a session, of which its
   `__init__` makes its client as PySpark's does, and one whose `__init__` never ran raises the
   `AttributeError` of the first attribute that PySpark's method reads (`_sparkSession`,
   `sparkSession`, `_client`, `_query_id`, `_session`, `_lock`, `_df`, `_gd1`, `df`,
   `_partitionSpec`, `_orderSpec`, `_subquery_expr`), or of a Column the `RecursionError` of its
-  `__getattr__`, which reads `_expr` again, as PySpark's, and so do the readers and the writers,
-  PySpark's classes. The message of that `RecursionError` is CPython's of the check of the
-  recursion that stops it, which is not always PySpark's: `repr` of such a Column raises
-  `maximum recursion depth exceeded`, where PySpark's raises it `while calling a Python object`,
-  as the recursion of the drop-in's `__repr__` goes through native calls, which a check of their
-  own stops. The other native classes are not subclassable (`TypeError: type '...' is not
-  an acceptable base type`), and do not construct (`cannot create '...' instances`): their objects
-  are of the native state of a plan, an expression or a query, which the arguments of PySpark's
-  constructors, the Python objects of its client, do not give, as the drop-in's native state
-  replaces those objects, so a subclass would have no `__init__` to call (see
-  `docs/compatibility.md`).
+  `__getattr__`, which reads `_expr` again, and of a DataFrame that of its `__getattr__` of `_plan`,
+  as PySpark's, and so do the readers and the writers, PySpark's classes. The message of that
+  `RecursionError` is CPython's of the check of the recursion that stops it, which is not always
+  PySpark's: `repr` of such a Column raises `maximum recursion depth exceeded`, where PySpark's
+  raises it `while calling a Python object`, as the recursion of the drop-in's `__repr__` goes
+  through native calls, which a check of their own stops. The other native classes are not
+  subclassable (`TypeError: type '...' is not an acceptable base type`), and do not construct
+  (`cannot create '...' instances`): their objects are of the native state of a plan, an expression
+  or a query, which the arguments of PySpark's constructors, the Python objects of its client, do
+  not give, as the drop-in's native state replaces those objects, so a subclass would have no
+  `__init__` to call (see `docs/compatibility.md`).
 
   A Python subclass of a data type (`StringType`, `DecimalType`, `ArrayType`, `StructField`,
   `StructType` and the others) is of the core type of its class, and runs its own methods where

@@ -8099,53 +8099,6 @@ fn has_converted_values_level(data_type: &DataType) -> bool {
     }
 }
 
-/// The `simpleString()` of `data_type` as PySpark's: of the Python class of each of its
-/// user-defined types, such as `vector` of a `VectorUDT`, which the Rust core does not know.
-pub(crate) fn simple_string_with_udts(py: Python<'_>, data_type: &DataType) -> PyResult<String> {
-    // A level of a type of many levels, such as the schema of a response, on a stack with room.
-    crate::pbmsg::grow(|| simple_string_with_udts_level(py, data_type))
-}
-
-/// [`simple_string_with_udts`] of one level of a type.
-fn simple_string_with_udts_level(py: Python<'_>, data_type: &DataType) -> PyResult<String> {
-    Ok(match data_type {
-        DataType::Udt { .. } => data_type_to_py(py, data_type)?
-            .bind(py)
-            .call_method0("simpleString")?
-            .extract()?,
-        DataType::Unparsed { data_type_string } => match lowered_object(py, data_type_string)? {
-            Some(object) => object.call_method0("simpleString")?.extract()?,
-            None => data_type.simple_string(),
-        },
-        DataType::Array { element_type, .. } => {
-            format!("array<{}>", simple_string_with_udts(py, element_type)?)
-        }
-        DataType::Map {
-            key_type,
-            value_type,
-            ..
-        } => format!(
-            "map<{},{}>",
-            simple_string_with_udts(py, key_type)?,
-            simple_string_with_udts(py, value_type)?
-        ),
-        DataType::Struct { fields } => {
-            let fields = fields
-                .iter()
-                .map(|field| {
-                    Ok(format!(
-                        "{}:{}",
-                        field.name,
-                        simple_string_with_udts(py, &field.data_type)?
-                    ))
-                })
-                .collect::<PyResult<Vec<_>>>()?;
-            format!("struct<{}>", fields.join(","))
-        }
-        _ => data_type.simple_string(),
-    })
-}
-
 /// The stack that the decoder and the encoder of Python's `json` take of the JSON of a type of
 /// many levels, which they recurse over in C, once per level, up to Python's recursion limit
 /// (about 1,000 levels, of a few hundred KiB), and the segment that a call with less room left

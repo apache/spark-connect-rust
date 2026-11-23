@@ -1943,10 +1943,8 @@ impl PyColumn {
         let _origin = crate::origin::with_origin("isin")?;
         // As pyspark's, a single DataFrame makes an IN subquery of it.
         if let [only] = cols.as_slice() {
-            if let Ok(df) = only
-                .bind(py)
-                .extract::<PyRef<'_, crate::dataframe::PyDataFrame>>()
-            {
+            if let Ok(df) = only.bind(py).cast::<crate::dataframe::PyDataFrame>() {
+                let df = crate::dataframe::Frame::of(df)?;
                 return Ok(ColumnOut::new(
                     this.get()?.clone().isin_subquery(&df.dataframe),
                 ));

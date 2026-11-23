@@ -23,7 +23,7 @@
 # its Rust payload cannot be initialized by Python's object allocator.
 
 from abc import ABCMeta
-from functools import wraps
+from functools import cached_property, wraps
 from inspect import signature
 from types import (
     ClassMethodDescriptorType,
@@ -72,6 +72,25 @@ _public_dataframe = None
 _initial_public_attributes = {}
 _native_overrides = {}
 _missing = object()
+
+
+# As PySpark Connect's `DataFrame.isStreaming`, a `functools.cached_property` of the class body of
+# its pyspark.sql.connect.dataframe: the first access keeps the answer in the `__dict__` of the
+# DataFrame, which the next ones read, of the request of the native class. It is installed on
+# the native class here, before the public base reads the attributes of that class.
+def isStreaming(self: Any) -> bool:
+    return self._is_streaming()
+
+
+isStreaming.__qualname__ = "DataFrame.isStreaming"
+isStreaming.__module__ = "pyspark.sql.connect.dataframe"
+if not isinstance(vars(_NativeDataFrame).get("isStreaming"), cached_property):
+    _cached_is_streaming = cached_property(isStreaming)
+    _cached_is_streaming.__set_name__(_NativeDataFrame, "isStreaming")
+    _NativeDataFrame.isStreaming = _cached_is_streaming
+    del _cached_is_streaming
+del isStreaming
+
 # The native class's own attributes, which a patch of the public base may replace.
 _native_originals = dict(vars(_NativeDataFrame))
 
@@ -393,9 +412,9 @@ for _name, _attribute in vars(_NativeDataFrame).items():
         "__reduce__", "__reduce_ex__", "__getstate__", "__hash__", "__sizeof__",
     }:
         continue
-    if _name in {"_session", "_plan", "is_cached"}:
-        # These getters access native storage. Independent Python subclasses can
-        # assign ordinary instance attributes instead of inheriting those descriptors.
+    if _name in {"is_cached", "_schema", "_is_streaming"}:
+        # These access native storage, of no member of PySpark's public base. Independent Python
+        # subclasses can assign ordinary instance attributes instead of inheriting them.
         continue
     if _name in {"__getattr__", "_get_column_by_attribute"}:
         # The explicit public hook above owns the special-method dispatch. Its
@@ -412,7 +431,7 @@ for _name, _attribute in vars(_NativeDataFrame).items():
         raise TypeError(
             f"Native DataFrame classmethod requires an explicit public binding: {_name}"
         )
-    elif isinstance(_attribute, GetSetDescriptorType):
+    elif isinstance(_attribute, (GetSetDescriptorType, cached_property)):
         _public_attribute = _empty_property(_name, _attribute)
     elif isinstance(_attribute, (FunctionType, MethodDescriptorType, WrapperDescriptorType)):
         _public_attribute = _dispatch_method(_name, _attribute)

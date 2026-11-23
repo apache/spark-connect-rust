@@ -612,8 +612,8 @@ fn core_of<T: Native + PyClass>(slf: &Bound<'_, T>, subclass_params: bool) -> Py
 /// of its plan and session (`DataFrame(plan, session)`), as PySpark sends the relation of the plan
 /// (`dataset._plan.plan(client)`), of the error of a plan of none.
 fn dataset_of(dataset: &Bound<'_, PyAny>, method: &str) -> PyResult<DataFrame> {
-    if let Ok(df) = dataset.extract::<PyRef<'_, PyDataFrame>>() {
-        return Ok(df.dataframe.clone());
+    if let Ok(df) = dataset.cast::<PyDataFrame>() {
+        return Ok(crate::dataframe::Frame::of(df)?.dataframe.clone());
     }
     let py = dataset.py();
     let session = dataset.getattr(pyo3::intern!(py, "sparkSession"))?;
@@ -623,7 +623,9 @@ fn dataset_of(dataset: &Bound<'_, PyAny>, method: &str) -> PyResult<DataFrame> {
     session.getattr(pyo3::intern!(py, "client"))?;
     let plan = dataset.getattr(pyo3::intern!(py, "_plan"))?;
     let df = py.get_type::<PyDataFrame>().call1((plan, session))?;
-    let df = df.cast::<PyDataFrame>()?.borrow().dataframe.clone();
+    let df = crate::dataframe::Frame::of(df.cast::<PyDataFrame>()?)?
+        .dataframe
+        .clone();
     Ok(df)
 }
 
@@ -701,7 +703,7 @@ impl PyMLModel {
         py: Python<'_>,
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<PyDataFrame> {
+    ) -> PyResult<crate::dataframe::NewDataFrame> {
         check_params(params)?;
         let input = dataset_of(dataset, "transform")?;
         Ok(PyDataFrame::new(self.transform_dataframe(py, &input)?))
@@ -2279,8 +2281,7 @@ fn fit_one_vs_rest(
         let mut core = slf.try_borrow()?.inner.clone();
         core = core.set_classifier(native_classifier(classifier, true)?);
         core.ensure_operator();
-        let training = cached
-            .extract::<PyRef<'_, PyDataFrame>>()?
+        let training = crate::dataframe::Frame::of(cached.cast::<PyDataFrame>()?)?
             .dataframe
             .clone();
         let weight = weight.map(|name| name.extract::<String>()).transpose()?;
@@ -6487,7 +6488,7 @@ native_pymethods! {
     /// another value as a literal, which the server rejects when the result is analyzed or
     /// collected (a value that cannot be one raises PySpark's error of its conversion).
     #[pyo3(name = "assignClusters")]
-    fn assign_clusters(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+    fn assign_clusters(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<crate::dataframe::NewDataFrame> {
         use spark_connect::ml::{attribute_relation, FetchArg, MlTarget};
         let py = slf.py();
         let algorithm = core_of(slf, false)?;

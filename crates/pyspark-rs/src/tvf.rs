@@ -33,13 +33,33 @@ impl PyTableValuedFunction {
         Ok(tvf)
     }
 
-    /// The table-valued functions of the core of the session of `_sparkSession`, which PySpark's
-    /// `_fn` reads as it makes its DataFrame, `DataFrame(plan, self._sparkSession)`, of the client
-    /// of its requests (see `state::session_of_value`).
+    /// The table-valued functions of the core of the session of `_sparkSession`, of whose plans
+    /// they make their DataFrames, of the client of their requests (see `state::session_of_value`):
+    /// of an object of no session of the drop-in, of the session of no server, as PySpark's `_fn`
+    /// makes `DataFrame(plan, self._sparkSession)` of it as it is, whose requests then raise the
+    /// error of its client (see `frame`).
     fn tvf_of(slf: &Bound<'_, Self>) -> PyResult<TableValuedFunction> {
         let py = slf.py();
         let session = crate::state::attr(slf.as_any(), pyo3::intern!(py, "_sparkSession"))?;
-        Ok(crate::state::session_of_value(&session, pyo3::intern!(py, "client"))?.tvf())
+        match crate::state::session_of_value(&session, pyo3::intern!(py, "client")) {
+            Ok(session) => Ok(session.tvf()),
+            Err(err) if err.is_instance_of::<pyo3::exceptions::PyException>(py) => {
+                Ok(crate::session::unconnected_session()?.tvf())
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    /// `new`, the DataFrame of a function of these, as PySpark's `_fn` makes it,
+    /// `DataFrame(plan, self._sparkSession)`: of `_sparkSession` as it is, as its `_session`,
+    /// which its requests resolve (see `dataframe::Frame::of`).
+    fn frame(
+        slf: &Bound<'_, Self>,
+        new: crate::dataframe::NewDataFrame,
+    ) -> PyResult<crate::dataframe::NewDataFrame> {
+        let py = slf.py();
+        let session = crate::state::attr(slf.as_any(), pyo3::intern!(py, "_sparkSession"))?;
+        Ok(new.with_session(session.unbind()))
     }
 }
 
@@ -114,9 +134,15 @@ impl PyTableValuedFunction {
     }
 
     #[doc = connect_doc!(TableValuedFunction.explode)]
-    fn explode(slf: &Bound<'_, Self>, collection: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+    fn explode(
+        slf: &Bound<'_, Self>,
+        collection: &Bound<'_, PyAny>,
+    ) -> PyResult<crate::dataframe::NewDataFrame> {
         let c = column_or_name(collection)?;
-        Ok(PyDataFrame::new(Self::tvf_of(slf)?.explode(&c).to_pyerr()?))
+        Self::frame(
+            slf,
+            PyDataFrame::new(Self::tvf_of(slf)?.explode(&c).to_pyerr()?),
+        )
     }
 
     #[pyo3(name = "explode_outer")]
@@ -124,26 +150,37 @@ impl PyTableValuedFunction {
     fn explode_outer(
         slf: &Bound<'_, Self>,
         collection: &Bound<'_, PyAny>,
-    ) -> PyResult<PyDataFrame> {
+    ) -> PyResult<crate::dataframe::NewDataFrame> {
         let c = column_or_name(collection)?;
-        Ok(PyDataFrame::new(
-            Self::tvf_of(slf)?.explode_outer(&c).to_pyerr()?,
-        ))
+        Self::frame(
+            slf,
+            PyDataFrame::new(Self::tvf_of(slf)?.explode_outer(&c).to_pyerr()?),
+        )
     }
 
     #[doc = connect_doc!(TableValuedFunction.inline)]
-    fn inline(slf: &Bound<'_, Self>, input: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+    fn inline(
+        slf: &Bound<'_, Self>,
+        input: &Bound<'_, PyAny>,
+    ) -> PyResult<crate::dataframe::NewDataFrame> {
         let c = column_or_name(input)?;
-        Ok(PyDataFrame::new(Self::tvf_of(slf)?.inline(&c).to_pyerr()?))
+        Self::frame(
+            slf,
+            PyDataFrame::new(Self::tvf_of(slf)?.inline(&c).to_pyerr()?),
+        )
     }
 
     #[pyo3(name = "inline_outer")]
     #[doc = connect_doc!(TableValuedFunction.inline_outer)]
-    fn inline_outer(slf: &Bound<'_, Self>, input: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+    fn inline_outer(
+        slf: &Bound<'_, Self>,
+        input: &Bound<'_, PyAny>,
+    ) -> PyResult<crate::dataframe::NewDataFrame> {
         let c = column_or_name(input)?;
-        Ok(PyDataFrame::new(
-            Self::tvf_of(slf)?.inline_outer(&c).to_pyerr()?,
-        ))
+        Self::frame(
+            slf,
+            PyDataFrame::new(Self::tvf_of(slf)?.inline_outer(&c).to_pyerr()?),
+        )
     }
 
     #[pyo3(name = "json_tuple", signature = (input, *fields))]
@@ -152,7 +189,7 @@ impl PyTableValuedFunction {
         slf: &Bound<'_, Self>,
         input: &Bound<'_, PyAny>,
         fields: Vec<Bound<'_, PyAny>>,
-    ) -> PyResult<PyDataFrame> {
+    ) -> PyResult<crate::dataframe::NewDataFrame> {
         let py = slf.py();
         // As PySpark's, which asks for fields before it takes the arguments.
         if fields.is_empty() {
@@ -165,17 +202,22 @@ impl PyTableValuedFunction {
         }
         let inp = column_or_name(input)?;
         let fs = cols(fields)?;
-        Ok(PyDataFrame::new(
-            Self::tvf_of(slf)?.json_tuple(&inp, fs).to_pyerr()?,
-        ))
+        Self::frame(
+            slf,
+            PyDataFrame::new(Self::tvf_of(slf)?.json_tuple(&inp, fs).to_pyerr()?),
+        )
     }
 
     #[doc = connect_doc!(TableValuedFunction.posexplode)]
-    fn posexplode(slf: &Bound<'_, Self>, collection: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+    fn posexplode(
+        slf: &Bound<'_, Self>,
+        collection: &Bound<'_, PyAny>,
+    ) -> PyResult<crate::dataframe::NewDataFrame> {
         let c = column_or_name(collection)?;
-        Ok(PyDataFrame::new(
-            Self::tvf_of(slf)?.posexplode(&c).to_pyerr()?,
-        ))
+        Self::frame(
+            slf,
+            PyDataFrame::new(Self::tvf_of(slf)?.posexplode(&c).to_pyerr()?),
+        )
     }
 
     #[pyo3(name = "posexplode_outer")]
@@ -183,11 +225,12 @@ impl PyTableValuedFunction {
     fn posexplode_outer(
         slf: &Bound<'_, Self>,
         collection: &Bound<'_, PyAny>,
-    ) -> PyResult<PyDataFrame> {
+    ) -> PyResult<crate::dataframe::NewDataFrame> {
         let c = column_or_name(collection)?;
-        Ok(PyDataFrame::new(
-            Self::tvf_of(slf)?.posexplode_outer(&c).to_pyerr()?,
-        ))
+        Self::frame(
+            slf,
+            PyDataFrame::new(Self::tvf_of(slf)?.posexplode_outer(&c).to_pyerr()?),
+        )
     }
 
     #[pyo3(signature = (n, *fields))]
@@ -196,38 +239,49 @@ impl PyTableValuedFunction {
         slf: &Bound<'_, Self>,
         n: &Bound<'_, PyAny>,
         fields: Vec<Bound<'_, PyAny>>,
-    ) -> PyResult<PyDataFrame> {
+    ) -> PyResult<crate::dataframe::NewDataFrame> {
         let nc = column_or_name(n)?;
         let fs = cols(fields)?;
-        Ok(PyDataFrame::new(
-            Self::tvf_of(slf)?.stack(&nc, fs).to_pyerr()?,
-        ))
+        Self::frame(
+            slf,
+            PyDataFrame::new(Self::tvf_of(slf)?.stack(&nc, fs).to_pyerr()?),
+        )
     }
 
     #[doc = connect_doc!(TableValuedFunction.collations)]
-    fn collations(slf: &Bound<'_, Self>) -> PyResult<PyDataFrame> {
+    fn collations(slf: &Bound<'_, Self>) -> PyResult<crate::dataframe::NewDataFrame> {
         let tvf = Self::tvf_of(slf)?;
-        Ok(PyDataFrame::new(
-            crate::gc::detach_without_parts(slf.py(), || tvf.collations()).to_pyerr()?,
-        ))
+        Self::frame(
+            slf,
+            PyDataFrame::new(
+                crate::gc::detach_without_parts(slf.py(), || tvf.collations()).to_pyerr()?,
+            ),
+        )
     }
 
     #[pyo3(name = "sql_keywords")]
     #[doc = connect_doc!(TableValuedFunction.sql_keywords)]
-    fn sql_keywords(slf: &Bound<'_, Self>) -> PyResult<PyDataFrame> {
+    fn sql_keywords(slf: &Bound<'_, Self>) -> PyResult<crate::dataframe::NewDataFrame> {
         let tvf = Self::tvf_of(slf)?;
-        Ok(PyDataFrame::new(
-            crate::gc::detach_without_parts(slf.py(), || tvf.sql_keywords()).to_pyerr()?,
-        ))
+        Self::frame(
+            slf,
+            PyDataFrame::new(
+                crate::gc::detach_without_parts(slf.py(), || tvf.sql_keywords()).to_pyerr()?,
+            ),
+        )
     }
 
     #[pyo3(name = "variant_explode")]
     #[doc = connect_doc!(TableValuedFunction.variant_explode)]
-    fn variant_explode(slf: &Bound<'_, Self>, input: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+    fn variant_explode(
+        slf: &Bound<'_, Self>,
+        input: &Bound<'_, PyAny>,
+    ) -> PyResult<crate::dataframe::NewDataFrame> {
         let c = column_or_name(input)?;
-        Ok(PyDataFrame::new(
-            Self::tvf_of(slf)?.variant_explode(&c).to_pyerr()?,
-        ))
+        Self::frame(
+            slf,
+            PyDataFrame::new(Self::tvf_of(slf)?.variant_explode(&c).to_pyerr()?),
+        )
     }
 
     #[pyo3(name = "variant_explode_outer")]
@@ -235,19 +289,24 @@ impl PyTableValuedFunction {
     fn variant_explode_outer(
         slf: &Bound<'_, Self>,
         input: &Bound<'_, PyAny>,
-    ) -> PyResult<PyDataFrame> {
+    ) -> PyResult<crate::dataframe::NewDataFrame> {
         let c = column_or_name(input)?;
-        Ok(PyDataFrame::new(
-            Self::tvf_of(slf)?.variant_explode_outer(&c).to_pyerr()?,
-        ))
+        Self::frame(
+            slf,
+            PyDataFrame::new(Self::tvf_of(slf)?.variant_explode_outer(&c).to_pyerr()?),
+        )
     }
 
     #[pyo3(name = "python_worker_logs")]
     #[doc = connect_doc!(TableValuedFunction.python_worker_logs)]
-    fn python_worker_logs(slf: &Bound<'_, Self>) -> PyResult<PyDataFrame> {
+    fn python_worker_logs(slf: &Bound<'_, Self>) -> PyResult<crate::dataframe::NewDataFrame> {
         let tvf = Self::tvf_of(slf)?;
-        Ok(PyDataFrame::new(
-            crate::gc::detach_without_parts(slf.py(), || tvf.python_worker_logs()).to_pyerr()?,
-        ))
+        Self::frame(
+            slf,
+            PyDataFrame::new(
+                crate::gc::detach_without_parts(slf.py(), || tvf.python_worker_logs())
+                    .to_pyerr()?,
+            ),
+        )
     }
 }

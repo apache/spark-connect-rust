@@ -182,6 +182,7 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
             .setattr("__qualname__", format!("SparkSession.{name}"))?;
     }
     m.add_class::<PyDataFrame>()?;
+    m.add_class::<dataframe::PyNativePlan>()?;
     m.add_class::<PyDataFrameNaFunctions>()?;
     m.add_class::<PyColumn>()?;
     column::install_getattr(m)?;

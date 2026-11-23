@@ -524,8 +524,10 @@ pub(crate) fn new_py<T: PyClass>(
 /// the literal of `LiteralExpression._from_value`, which raises PySpark's error of a value that
 /// cannot be one.
 pub(super) fn fetch_arg_of(value: &Bound<'_, PyAny>) -> PyResult<FetchArg> {
-    if let Ok(df) = value.extract::<PyRef<'_, PyDataFrame>>() {
-        return Ok(FetchArg::Input(df.dataframe.clone()));
+    if let Ok(df) = value.cast::<PyDataFrame>() {
+        return Ok(FetchArg::Input(
+            crate::dataframe::Frame::of(df)?.dataframe.clone(),
+        ));
     }
     if let Some(literal) = crate::functions::typed_pair_literal(value)? {
         return Ok(FetchArg::Literal(literal.to_literal_proto()));
@@ -619,7 +621,7 @@ pub(super) fn attribute_relation_py(
     target: &MlTarget,
     method: &str,
     args: &[Bound<'_, PyAny>],
-) -> PyResult<PyDataFrame> {
+) -> PyResult<crate::dataframe::NewDataFrame> {
     let args = args
         .iter()
         .map(fetch_arg_of)
@@ -768,16 +770,14 @@ impl SummaryObject {
         let dataset = slf.getattr(pyo3::intern!(py, "_summary_dataset"))?;
         let plan = dataset.getattr(pyo3::intern!(py, "_plan"))?;
         let dataset = match dataset.cast::<PyDataFrame>() {
-            Ok(dataset) => dataset.borrow().dataframe.clone(),
+            Ok(dataset) => crate::dataframe::Frame::of(dataset)?.dataframe.clone(),
             // Another object of a plan: the DataFrame of the plan, as PySpark's `AttributeRelation`
             // takes the plan as its child.
             Err(_) => {
                 let session = crate::session::active_session(py)
                     .ok_or_else(|| pyo3::exceptions::PyAssertionError::new_err(()))?;
-                py.get_type::<PyDataFrame>()
-                    .call1((plan, session))?
-                    .cast::<PyDataFrame>()?
-                    .borrow()
+                let dataset = py.get_type::<PyDataFrame>().call1((plan, session))?;
+                crate::dataframe::Frame::of(dataset.cast::<PyDataFrame>()?)?
                     .dataframe
                     .clone()
             }
@@ -899,7 +899,7 @@ fn reached_objects<'py>(
         .filter_map(|pickler| crate::udf_command::pickler_object(py, pickler))
         .collect();
     if let MlPickleBlock::SummarySession(dataset) = block {
-        let dataset = Py::new(py, crate::dataframe::PyDataFrame::new(dataset.clone()))?;
+        let dataset = crate::dataframe::PyDataFrame::new(dataset.clone()).into_py(py)?;
         objects.push(dataset.into_bound(py).into_any());
     }
     objects.push(py.import("threading")?.call_method0("Lock")?);
@@ -988,9 +988,8 @@ fn python_plan_reach(
         return Ok(PickleReach::default());
     }
     let plans = py.import("pyspark.sql.connect.plan")?;
-    if plan.is_instance(&plans.getattr("_DataFramePlan")?)? {
-        let df = plan.getattr(pyo3::intern!(py, "_df"))?;
-        let df = df.cast::<PyDataFrame>()?.borrow().dataframe.clone();
+    if let Ok(native) = plan.cast::<crate::dataframe::PyNativePlan>() {
+        let df = native.borrow().dataframe.clone();
         return reach_in(py, visited, |owned| {
             spark_connect::ml::pickle_reach_with(&df, owned)
         });
@@ -1072,7 +1071,7 @@ fn object_block(
         let block = if value.is_instance(&reference)? {
             Some(MlPickleBlock::ModelLock)
         } else if let Ok(df) = value.cast::<PyDataFrame>() {
-            let df = df.borrow().dataframe.clone();
+            let df = crate::dataframe::Frame::of(df)?.dataframe.clone();
             let block = reach_in(py, visited, |owned| {
                 spark_connect::ml::pickle_reach_with(&df, owned)
             })?
@@ -1168,7 +1167,7 @@ fn training_summary_object(
         if let Some(dataset) = target.summary_dataset() {
             attributes.set_item(
                 "_summary_dataset",
-                Py::new(py, PyDataFrame::new(dataset.clone()))?,
+                PyDataFrame::new(dataset.clone()).into_py(py)?,
             )?;
         }
         if target.root().is_some() {

@@ -2191,7 +2191,7 @@ impl PySparkSession {
         data: &Bound<'_, PyAny>,
         schema: &Bound<'_, PyAny>,
         options: &spark_connect::ArrowInputOptions,
-    ) -> PyResult<PyDataFrame> {
+    ) -> PyResult<crate::dataframe::NewDataFrame> {
         // As PySpark's, which reads the number of the fields first.
         let expected = schema.getattr(pyo3::intern!(py, "fields"))?.len()?;
         let arrow_input = py.import("pyspark.sql._arrow_input")?;
@@ -2238,7 +2238,7 @@ impl PySparkSession {
         schema: &Bound<'_, PyAny>,
         pandas: bool,
         error: PyErr,
-    ) -> PyResult<PyDataFrame> {
+    ) -> PyResult<crate::dataframe::NewDataFrame> {
         let Some(converted) = self.convert_of_unlowered_schema(py, data, schema, pandas)? else {
             return Err(error);
         };
@@ -2445,7 +2445,7 @@ impl PySparkSession {
         checks: LocalChecks,
         options: Option<spark_connect::ArrowInputOptions>,
         schema: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<PyDataFrame> {
+    ) -> PyResult<crate::dataframe::NewDataFrame> {
         use crate::infer;
 
         let atomic = matches!(spec, Spec::Atomic(_));
@@ -2750,7 +2750,7 @@ impl PySparkSession {
         schema: &Bound<'_, PyAny>,
         fields: &[StructField],
         options: Option<&spark_connect::ArrowInputOptions>,
-    ) -> PyResult<Option<PyDataFrame>> {
+    ) -> PyResult<Option<crate::dataframe::NewDataFrame>> {
         if data.len()? == 0 {
             return Ok(None);
         }
@@ -2845,7 +2845,7 @@ impl PySparkSession {
         spec: &Spec,
         options: Option<&spark_connect::ArrowInputOptions>,
         at_build: &mut crate::plan_args::PlanArgs,
-    ) -> PyResult<Option<PyDataFrame>> {
+    ) -> PyResult<Option<crate::dataframe::NewDataFrame>> {
         let names = match spec {
             Spec::None => None,
             Spec::Names(names) => Some(names),
@@ -2922,7 +2922,7 @@ impl PySparkSession {
         data: &Bound<'_, PyAny>,
         spec: Spec,
         schema_object: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<PyDataFrame> {
+    ) -> PyResult<crate::dataframe::NewDataFrame> {
         let ndim: usize = data.getattr("ndim")?.extract()?;
         if ndim != 1 && ndim != 2 {
             return Err(crate::column::raise_pyspark(
@@ -3048,7 +3048,7 @@ impl PySparkSession {
         schema_object: Option<&Bound<'_, PyAny>>,
         options: &spark_connect::ArrowInputOptions,
         at_build: crate::plan_args::PlanArgs,
-    ) -> PyResult<PyDataFrame> {
+    ) -> PyResult<crate::dataframe::NewDataFrame> {
         let struct_object =
             schema_object.filter(|schema| schema.is_instance_of::<crate::types::PyStructType>());
         let schema = match struct_object {
@@ -3120,7 +3120,7 @@ impl PySparkSession {
         options: Option<spark_connect::ArrowInputOptions>,
         mut at_build: crate::plan_args::PlanArgs,
         schema_object: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<PyDataFrame> {
+    ) -> PyResult<crate::dataframe::NewDataFrame> {
         // As PySpark, which has no Arrow type of an atomic schema of a frame of rows, and reads
         // none of them.
         if let Spec::Atomic(atomic) = &spec {
@@ -3411,7 +3411,9 @@ impl PySparkSession {
         let schema = DataType::Struct { fields };
         let df = match (options, schema_json) {
             // Of no rows, as an empty frame, of no settings: the schema alone.
-            (None, Some(json)) => schema_text_dataframe(&self.session, json)?.dataframe,
+            (None, Some(json)) => schema_text_dataframe(&self.session, json)?
+                .dataframe()
+                .clone(),
             (options, json) => {
                 crate::interrupt::interruptible_without_parts(py, &self.session, || {
                     match options.map(|options| with_schema_json(options, json)) {
@@ -3681,7 +3683,7 @@ pub(crate) fn with_schema_json(
 pub(crate) fn schema_text_dataframe(
     session: &spark_connect::session::SparkSession,
     json: String,
-) -> PyResult<PyDataFrame> {
+) -> PyResult<crate::dataframe::NewDataFrame> {
     let relation = spark_connect_proto::Relation {
         rel_type: Some(spark_connect_proto::relation::RelType::LocalRelation(
             spark_connect_proto::LocalRelation {
@@ -3813,7 +3815,7 @@ impl PySparkSession {
         end: Option<&Bound<'_, PyAny>>,
         step: RangeStep,
         numPartitions: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<PyDataFrame> {
+    ) -> PyResult<crate::dataframe::NewDataFrame> {
         let mut args = crate::plan_args::PlanArgs::new();
         let (start, end, step, num_partitions) =
             range_arguments(&mut args, start, end, step, numPartitions)?;
@@ -3841,7 +3843,7 @@ impl PySparkSession {
         sqlQuery: &Bound<'_, PyAny>,
         args: Option<Bound<'_, PyAny>>,
         kwargs: Option<Bound<'_, PyDict>>,
-    ) -> PyResult<PyDataFrame> {
+    ) -> PyResult<crate::dataframe::NewDataFrame> {
         fn to_lit(v: &Bound<'_, PyAny>) -> PyResult<spark_connect::expression::Expression> {
             use spark_connect::expression::{Expression, LiteralExpression};
             if let Ok(sv) = v.extract::<String>() {
@@ -3889,8 +3891,8 @@ impl PySparkSession {
                 .call1((slf,))?;
             query = formatter.call_method("format", (sqlQuery,), Some(&kwargs))?;
             for view in formatter.getattr("_temp_views")?.try_iter()? {
-                let (df, name): (PyRef<'_, PyDataFrame>, String) = view?.extract()?;
-                references.push((df.dataframe.clone(), name));
+                let (df, name): (Bound<'_, PyDataFrame>, String) = view?.extract()?;
+                references.push((crate::dataframe::Frame::of(&df)?.dataframe.clone(), name));
             }
         }
         let query = crate::str_argument(&query)?;
@@ -3938,7 +3940,7 @@ impl PySparkSession {
         schema: Option<&Bound<'_, PyAny>>,
         samplingRatio: Option<&Bound<'_, PyAny>>,
         verifySchema: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<PyDataFrame> {
+    ) -> PyResult<crate::dataframe::NewDataFrame> {
         if data.is_none() {
             return Err(pyo3::exceptions::PyAssertionError::new_err(()));
         }
@@ -4100,7 +4102,7 @@ impl PySparkSession {
                 return Ok(match &spec {
                     Spec::Struct(fields) if !fields.is_empty() && table.len()? > 0 => {
                         PyDataFrame::new(
-                            frame.dataframe.to_df(
+                            frame.dataframe().to_df(
                                 pandas_column_names(schema, fields)?
                                     .iter()
                                     .map(String::as_str)
@@ -4141,7 +4143,7 @@ impl PySparkSession {
                     return Ok(match &spec {
                         Spec::Struct(fields) if !fields.is_empty() && table.len()? > 0 => {
                             PyDataFrame::new(
-                                frame.dataframe.to_df(
+                                frame.dataframe().to_df(
                                     pandas_column_names(schema, fields)?
                                         .iter()
                                         .map(String::as_str)
@@ -4210,7 +4212,7 @@ impl PySparkSession {
                 return Ok(match &spec {
                     Spec::Struct(fields) if !fields.is_empty() && ipc.len()? > 0 => {
                         PyDataFrame::new(
-                            frame.dataframe.to_df(
+                            frame.dataframe().to_df(
                                 pandas_column_names(schema, fields)?
                                     .iter()
                                     .map(String::as_str)
@@ -4272,7 +4274,7 @@ impl PySparkSession {
                 return Ok(match &spec {
                     Spec::Struct(fields) if !fields.is_empty() && table.len()? > 0 => {
                         PyDataFrame::new(
-                            frame.dataframe.to_df(
+                            frame.dataframe().to_df(
                                 pandas_column_names(schema, fields)?
                                     .iter()
                                     .map(String::as_str)

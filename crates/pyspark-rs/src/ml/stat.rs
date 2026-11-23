@@ -26,7 +26,7 @@ fn helper_relation(
     method: &str,
     args: &[&Bound<'_, PyAny>],
     typed: Option<proto::expression::Literal>,
-) -> PyResult<PyDataFrame> {
+) -> PyResult<crate::dataframe::NewDataFrame> {
     let py = args[0].py();
     let session = crate::session::active_session(py)
         .ok_or_else(|| PyAssertionError::new_err(()))?
@@ -81,7 +81,7 @@ impl PyChiSquareTest {
         featuresCol: &Bound<'_, PyAny>,
         labelCol: &Bound<'_, PyAny>,
         flatten: DefaultedOption,
-    ) -> PyResult<PyDataFrame> {
+    ) -> PyResult<crate::dataframe::NewDataFrame> {
         let flatten = flatten.or_bool(py, false);
         helper_relation(
             "chiSquareTest",
@@ -124,7 +124,7 @@ impl PyCorrelation {
         dataset: &Bound<'_, PyAny>,
         column: &Bound<'_, PyAny>,
         method: DefaultedOption,
-    ) -> PyResult<PyDataFrame> {
+    ) -> PyResult<crate::dataframe::NewDataFrame> {
         let method = match method {
             DefaultedOption::Omitted => pyo3::types::PyString::new(py, "pearson").into_any(),
             DefaultedOption::Given(method) => method.into_bound(py),
@@ -169,7 +169,7 @@ impl PyKolmogorovSmirnovTest {
         sampleCol: &Bound<'_, PyAny>,
         distName: &Bound<'_, PyAny>,
         params: &Bound<'_, PyTuple>,
-    ) -> PyResult<PyDataFrame> {
+    ) -> PyResult<crate::dataframe::NewDataFrame> {
         use proto::expression::literal::{Array, LiteralType};
         // PySpark deliberately uses float(), accepting numeric strings as well as numbers, and
         // converts the params first: its list of them is an argument of the helper call, whose

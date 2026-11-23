@@ -106,7 +106,7 @@ fn grouping_of(
     grouping_cols: &Bound<'_, PyAny>,
 ) -> PyResult<RustGroupedData> {
     Ok(RustGroupedData::from_parts(
-        dataframe.borrow().dataframe.clone(),
+        crate::dataframe::Frame::of(dataframe)?.dataframe.clone(),
         columns_of(grouping_cols, true)?,
         AggregateGroupType::GroupBy,
         None,
@@ -188,7 +188,7 @@ fn check_same_session(this: &Bound<'_, PyAny>, other: &Bound<'_, PyAny>) -> PyRe
     match frame.cast::<PyDataFrame>() {
         Ok(frame) => {
             let other = attr(other, pyo3::intern!(py, "_df"))?;
-            frame.borrow().same_session(&other)?;
+            crate::dataframe::Frame::of(frame)?.same_session(&other)?;
         }
         Err(_) => {
             let check = frame.getattr(pyo3::intern!(py, "_check_same_session"))?;
@@ -259,14 +259,14 @@ impl PyGroupedData {
 
     /// `sum`, `avg`, `mean`, `min` and `max`, as PySpark's `_numeric_agg`: of column names,
     /// which it asserts, every numeric column without any, and `NOT_NUMERIC_COLUMNS` for a
-    /// column that is not numeric, of the columns of `self._df.schema`, which of a copy or an
-    /// unpickle is the schema that it requested (see `PyDataFrame::copy_schema`), and of the
-    /// state of the grouped data, which its `Aggregate` reads then.
+    /// column that is not numeric, of the columns of `self._df.schema`, the load of its
+    /// `_cached_schema_serialized` or a copy of its `_schema` (see `Frame::schema_read`), and of
+    /// the state of the grouped data, which its `Aggregate` reads then.
     fn numeric_agg(
         slf: &Bound<'_, Self>,
         function: &str,
         cols: Vec<Bound<'_, PyAny>>,
-    ) -> PyResult<PyDataFrame> {
+    ) -> PyResult<crate::dataframe::NewDataFrame> {
         let py = slf.py();
         let mut names = Vec::with_capacity(cols.len());
         for col in &cols {
@@ -280,12 +280,9 @@ impl PyGroupedData {
         // arguments.
         let frame = frame_of(attr(slf.as_any(), pyo3::intern!(py, "_df"))?)?;
         let dataframe = {
-            let frame = frame.borrow();
-            frame.check_schema_read(py)?;
-            match frame.copy_schema() {
-                Some(schema) => frame.dataframe.with_known_schema(Some(schema)),
-                None => frame.dataframe.clone(),
-            }
+            let frame = crate::dataframe::Frame::of(&frame)?;
+            let schema = frame.schema_read(py)?;
+            frame.dataframe.with_known_schema(Some(schema))
         };
         let grouped = aggregation_of(slf.as_any(), dataframe)?;
         let session = grouped.spark_session();
@@ -521,7 +518,10 @@ impl PyGroupedData {
     // PySpark's `Aggregate` reads then.
     #[pyo3(signature = (*exprs))]
     #[doc = connect_doc!(GroupedData.agg)]
-    fn agg(slf: &Bound<'_, Self>, exprs: Vec<Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
+    fn agg(
+        slf: &Bound<'_, Self>,
+        exprs: Vec<Bound<'_, PyAny>>,
+    ) -> PyResult<crate::dataframe::NewDataFrame> {
         // As PySpark's, which asserts that it has expressions.
         if exprs.is_empty() {
             return Err(pyo3::exceptions::PyAssertionError::new_err(
@@ -546,7 +546,7 @@ impl PyGroupedData {
         }
         let py = slf.py();
         let frame = frame_of(attr(slf.as_any(), pyo3::intern!(py, "_df"))?)?;
-        let dataframe = frame.borrow().dataframe.clone();
+        let dataframe = crate::dataframe::Frame::of(&frame)?.dataframe.clone();
         let grouped = aggregation_of(slf.as_any(), dataframe)?;
         Ok(PyDataFrame::new(grouped.agg(agg_exprs)))
     }
@@ -641,35 +641,50 @@ impl PyGroupedData {
     // Sum values in each group.
     #[pyo3(signature = (*cols))]
     #[doc = connect_doc!(GroupedData.sum)]
-    fn sum(slf: &Bound<'_, Self>, cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
+    fn sum(
+        slf: &Bound<'_, Self>,
+        cols: Vec<Bound<'_, PyAny>>,
+    ) -> PyResult<crate::dataframe::NewDataFrame> {
         Self::numeric_agg(slf, "sum", cols)
     }
 
     // Average values in each group.
     #[pyo3(signature = (*cols))]
     #[doc = connect_doc!(GroupedData.avg)]
-    fn avg(slf: &Bound<'_, Self>, cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
+    fn avg(
+        slf: &Bound<'_, Self>,
+        cols: Vec<Bound<'_, PyAny>>,
+    ) -> PyResult<crate::dataframe::NewDataFrame> {
         Self::numeric_agg(slf, "avg", cols)
     }
 
     // Minimum values in each group.
     #[pyo3(signature = (*cols))]
     #[doc = connect_doc!(GroupedData.min)]
-    fn min(slf: &Bound<'_, Self>, cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
+    fn min(
+        slf: &Bound<'_, Self>,
+        cols: Vec<Bound<'_, PyAny>>,
+    ) -> PyResult<crate::dataframe::NewDataFrame> {
         Self::numeric_agg(slf, "min", cols)
     }
 
     // Maximum values in each group.
     #[pyo3(signature = (*cols))]
     #[doc = connect_doc!(GroupedData.max)]
-    fn max(slf: &Bound<'_, Self>, cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
+    fn max(
+        slf: &Bound<'_, Self>,
+        cols: Vec<Bound<'_, PyAny>>,
+    ) -> PyResult<crate::dataframe::NewDataFrame> {
         Self::numeric_agg(slf, "max", cols)
     }
 
     // Mean (alias for avg).
     #[pyo3(signature = (*cols))]
     #[doc = connect_doc!(GroupedData.mean)]
-    fn mean(slf: &Bound<'_, Self>, cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
+    fn mean(
+        slf: &Bound<'_, Self>,
+        cols: Vec<Bound<'_, PyAny>>,
+    ) -> PyResult<crate::dataframe::NewDataFrame> {
         Self::numeric_agg(slf, "avg", cols)
     }
 
@@ -681,7 +696,7 @@ impl PyGroupedData {
         slf: &Bound<'_, Self>,
         func: Bound<'_, PyAny>,
         schema: Bound<'_, PyAny>,
-    ) -> PyResult<PyDataFrame> {
+    ) -> PyResult<crate::dataframe::NewDataFrame> {
         let py = slf.py();
         let eval_type_id = infer_group_map_eval_type(
             py,
@@ -694,15 +709,17 @@ impl PyGroupedData {
         validate_map_function(py, &func, eval_type_id)?;
         // As PySpark's: a DDL string is parsed before the columns of the input are read.
         let frame = frame_of(attr(slf.as_any(), pyo3::intern!(py, "_df"))?)?;
-        let session = frame.borrow().dataframe.spark_session();
+        let session = crate::dataframe::Frame::of(&frame)?
+            .dataframe
+            .spark_session();
         let return_type = resolve_datatype(py, &session, &schema)?;
         let grouped = grouping_of(
             &frame,
             &attr(slf.as_any(), pyo3::intern!(py, "_grouping_cols"))?,
         )?;
-        let cols = frame.borrow().column_names(py)?;
+        let cols = crate::dataframe::Frame::of(&frame)?.column_names(py)?;
         let udf = map_udf_of(py, &func, &schema, return_type, eval_type_id, &cols)?;
-        Ok(map_result_of(&schema, grouped.apply_in_pandas(udf)))
+        map_result_of(&schema, grouped.apply_in_pandas(udf))
     }
 
     // Deprecated grouped-map apply: `apply(udf)` where `udf` is a
@@ -750,7 +767,7 @@ impl PyGroupedData {
         slf: &Bound<'_, Self>,
         func: Bound<'_, PyAny>,
         schema: Bound<'_, PyAny>,
-    ) -> PyResult<PyDataFrame> {
+    ) -> PyResult<crate::dataframe::NewDataFrame> {
         let py = slf.py();
         // The reference client's warning, with its trailing space.
         let eval_type_id = infer_group_map_eval_type(
@@ -764,15 +781,17 @@ impl PyGroupedData {
         validate_map_function(py, &func, eval_type_id)?;
         // As PySpark's: a DDL string is parsed before the columns of the input are read.
         let frame = frame_of(attr(slf.as_any(), pyo3::intern!(py, "_df"))?)?;
-        let session = frame.borrow().dataframe.spark_session();
+        let session = crate::dataframe::Frame::of(&frame)?
+            .dataframe
+            .spark_session();
         let return_type = resolve_datatype(py, &session, &schema)?;
         let grouped = grouping_of(
             &frame,
             &attr(slf.as_any(), pyo3::intern!(py, "_grouping_cols"))?,
         )?;
-        let cols = frame.borrow().column_names(py)?;
+        let cols = crate::dataframe::Frame::of(&frame)?.column_names(py)?;
         let udf = map_udf_of(py, &func, &schema, return_type, eval_type_id, &cols)?;
-        Ok(map_result_of(&schema, grouped.apply_in_arrow(udf)))
+        map_result_of(&schema, grouped.apply_in_arrow(udf))
     }
 
     // `GroupedData.cogroup`, as PySpark's `PandasCogroupedOps(self, other)`, which checks
@@ -808,7 +827,7 @@ impl PyGroupedData {
         stateStructType: Bound<'_, PyAny>,
         outputMode: Bound<'_, PyAny>,
         timeoutConf: Bound<'_, PyAny>,
-    ) -> PyResult<PyDataFrame> {
+    ) -> PyResult<crate::dataframe::NewDataFrame> {
         let py = slf.py();
         validate_map_function(py, &func, eval_type::SQL_GROUPED_MAP_PANDAS_UDF_WITH_STATE)?;
         check_return_type_argument(&outputStructType)?;
@@ -820,7 +839,7 @@ impl PyGroupedData {
             &attr(slf.as_any(), pyo3::intern!(py, "_grouping_cols"))?,
         )?;
         let session = grouped.spark_session();
-        let cols = frame.borrow().column_names(py)?;
+        let cols = crate::dataframe::Frame::of(&frame)?.column_names(py)?;
         let udf = build_map_udf(
             py,
             &session,
@@ -871,7 +890,7 @@ impl PyGroupedData {
         timeMode: Bound<'_, PyAny>,
         initialState: Option<Bound<'_, PyAny>>,
         eventTimeColumnName: DefaultedOption,
-    ) -> PyResult<PyDataFrame> {
+    ) -> PyResult<crate::dataframe::NewDataFrame> {
         transform_with_state_of(
             slf,
             &statefulProcessor,
@@ -901,7 +920,7 @@ impl PyGroupedData {
         timeMode: Bound<'_, PyAny>,
         initialState: Option<Bound<'_, PyAny>>,
         eventTimeColumnName: DefaultedOption,
-    ) -> PyResult<PyDataFrame> {
+    ) -> PyResult<crate::dataframe::NewDataFrame> {
         transform_with_state_of(
             slf,
             &statefulProcessor,
@@ -936,7 +955,7 @@ fn transform_with_state_of(
     initial_state: Option<&Bound<'_, PyAny>>,
     event_time_column_name: &DefaultedOption,
     pandas: bool,
-) -> PyResult<PyDataFrame> {
+) -> PyResult<crate::dataframe::NewDataFrame> {
     let py = this.py();
     let (func, et) = twus_func(py, processor, time_mode, initial_state.is_some(), pandas)?;
     if let Some(state) = initial_state {
@@ -957,7 +976,7 @@ fn transform_with_state_of(
         &attr(this.as_any(), pyo3::intern!(py, "_grouping_cols"))?,
     )?;
     let session = grouped.spark_session();
-    let cols = frame.borrow().column_names(py)?;
+    let cols = crate::dataframe::Frame::of(&frame)?.column_names(py)?;
     let udf = build_map_udf(py, &session, &func, output_struct_type, et, &cols)?;
     // As PySpark's, which sends a DDL string as an `UnparsedDataType`, for the server to parse. A
     // struct whose fields hold an element that is not a `StructField` stands as the types that
@@ -1123,12 +1142,14 @@ impl PyCoGroupedData {
             &spark_connect::group::CoGroupedData,
             spark_connect::udf::CommonInlineUserDefinedFunctionExpression,
         ) -> spark_connect::dataframe::DataFrame,
-    ) -> PyResult<PyDataFrame> {
+    ) -> PyResult<crate::dataframe::NewDataFrame> {
         let py = slf.py();
         validate_map_function(py, func, eval_type_id)?;
         let left = attr(slf.as_any(), pyo3::intern!(py, "_gd1"))?;
         let left_frame = frame_of(attr(&left, pyo3::intern!(py, "_df"))?)?;
-        let session = left_frame.borrow().dataframe.spark_session();
+        let session = crate::dataframe::Frame::of(&left_frame)?
+            .dataframe
+            .spark_session();
         let return_type = resolve_datatype(py, &session, schema)?;
         let udf = map_udf_of(py, func, schema, return_type, eval_type_id, &[])?;
         let left = grouping_of(
@@ -1141,7 +1162,7 @@ impl PyCoGroupedData {
             &right_frame,
             &attr(&right, pyo3::intern!(py, "_grouping_cols"))?,
         )?;
-        Ok(map_result_of(schema, apply(&left.cogroup(&right), udf)))
+        map_result_of(schema, apply(&left.cogroup(&right), udf))
     }
 }
 
@@ -1195,7 +1216,7 @@ impl PyCoGroupedData {
         slf: &Bound<'_, Self>,
         func: Bound<'_, PyAny>,
         schema: Bound<'_, PyAny>,
-    ) -> PyResult<PyDataFrame> {
+    ) -> PyResult<crate::dataframe::NewDataFrame> {
         Self::map_cogroups(
             slf,
             &func,
@@ -1212,7 +1233,7 @@ impl PyCoGroupedData {
         slf: &Bound<'_, Self>,
         func: Bound<'_, PyAny>,
         schema: Bound<'_, PyAny>,
-    ) -> PyResult<PyDataFrame> {
+    ) -> PyResult<crate::dataframe::NewDataFrame> {
         Self::map_cogroups(
             slf,
             &func,

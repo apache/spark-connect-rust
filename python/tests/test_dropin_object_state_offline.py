@@ -58,71 +58,9 @@ except ImportError:
 # The objects and the classes whose state, in the drop-in, is not PySpark's for a test, by the
 # change that makes them PySpark's, which the rows "The `__dict__` of the objects of a session"
 # and "Subclasses" of dev/parity/known-differences.md say: each change removes its own, and a test
-# of one of them that passes fails the run (strict).
-_DIFFERS_BY_CHANGE = {
-    "the DataFrame": {
-        "vars": [
-            # The writers of `df.write` and `df.writeTo`, PySpark's classes, whose `_df` is the
-            # `df._plan` of their making: the drop-in's DataFrame gives a new plan object at each
-            # read of its `_plan`, where PySpark's is one object.
-            "DataFrameWriter",
-            "DataFrameWriter of its setters",
-            "DataFrameWriterV2",
-            "DataFrameWriterV2 of its setters",
-            # And the stream writer of `df.writeStream`, the `_child` of whose `_write_stream` is the
-            # `df._plan` of its making.
-            "DataStreamWriter",
-            "DataStreamWriter of its setters",
-            # And the merge writer of `df.mergeInto`, whose `_source_plan` is the `df._plan` of its
-            # making.
-            "MergeIntoWriter",
-            "MergeIntoWriter of its clauses",
-            "DataFrame",
-            "DataFrame of schema and isStreaming",
-            "DataFrame of select",
-            "DataFrame of filter of a cached schema",
-        ],
-        "attributes": [
-            "DataFrame",
-            "DataFrame of schema and isStreaming",
-            "DataFrame of select",
-            "DataFrame of filter of a cached schema",
-        ],
-        "copies": [
-            "DataFrame: copy",
-            "DataFrame: deepcopy",
-            "DataFrame: cloudpickle",
-            "DataFrame of schema and isStreaming: copy",
-            "DataFrame of schema and isStreaming: deepcopy",
-            "DataFrame of schema and isStreaming: cloudpickle",
-            "DataFrame of select: copy",
-            "DataFrame of select: deepcopy",
-            "DataFrame of select: cloudpickle",
-            "DataFrame of filter of a cached schema: copy",
-            "DataFrame of filter of a cached schema: deepcopy",
-            "DataFrame of filter of a cached schema: cloudpickle",
-        ],
-        "construct": [
-            "pyspark.sql.connect.dataframe.DataFrame",
-        ],
-        "uninit": [
-            "pyspark.sql.connect.dataframe.DataFrame",
-        ],
-        "foreign": [
-            "pyspark.sql.connect.dataframe.DataFrame",
-            # The DataFrame of the plan of a stream reader of an object that is not a session,
-            # which PySpark's DataFrame holds until a request reads its client: the drop-in's
-            # DataFrame is of the native session, which its `_df` reads.
-            "pyspark.sql.connect.streaming.readwriter.DataStreamReader",
-        ],
-        "specific": [
-            "test_the_private_state_of_a_dataframe_is_not_a_column",
-            # Of `writer._write._child is df._plan`, as the cases above.
-            "test_the_write_operation_of_a_writer_is_what_its_save_builds",
-            "test_the_message_of_a_stream_writer_is_the_message_of_its_operation",
-        ],
-    },
-}
+# of one of them that passes fails the run (strict). Of SPARK-62207, all of them are made, so none
+# differs.
+_DIFFERS_BY_CHANGE: dict[str, dict[str, list[str]]] = {}
 
 _DIFFERS = {}
 for _change in _DIFFERS_BY_CHANGE.values():

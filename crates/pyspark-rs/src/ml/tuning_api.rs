@@ -576,8 +576,8 @@ fn copy_values<F: Validator, T: Validator>(
 /// The DataFrame of `dataset`, of which a validator's split reads `select`: an object without it
 /// raises its AttributeError, as the split of PySpark does (of a pandas DataFrame).
 fn split_dataframe(dataset: &Bound<'_, PyAny>) -> PyResult<DataFrame> {
-    if let Ok(df) = dataset.extract::<PyRef<'_, PyDataFrame>>() {
-        return Ok(df.dataframe.clone());
+    if let Ok(df) = dataset.cast::<PyDataFrame>() {
+        return Ok(crate::dataframe::Frame::of(df)?.dataframe.clone());
     }
     dataset.getattr("select")?;
     Err(PyTypeError::new_err(format!(
@@ -605,7 +605,7 @@ fn split_seed<T: Validator>(slf: &Bound<'_, T>) -> PyResult<Option<i64>> {
 
 /// The Python DataFrame of `df`.
 fn py_dataframe<'py>(py: Python<'py>, df: DataFrame) -> PyResult<Bound<'py, PyAny>> {
-    Ok(Bound::new(py, PyDataFrame::new(df))?.into_any())
+    Ok(PyDataFrame::new(df).into_pyobject(py)?.into_any())
 }
 
 /// The result of a split of the core, whose errors of values (an empty fold) are PySpark's

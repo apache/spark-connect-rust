@@ -98,7 +98,7 @@ native_model! {
         slf: &Bound<'_, Self>,
         args: &Bound<'_, PyTuple>,
         _kwargs: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<PyDataFrame> {
+    ) -> PyResult<crate::dataframe::NewDataFrame> {
         let target = slf.try_borrow()?.core.target()?;
         let args: Vec<Bound<'_, PyAny>> = args.iter().collect();
         object::attribute_relation_py(&target, "approxNearestNeighbors", &args)
@@ -111,7 +111,7 @@ native_model! {
         slf: &Bound<'_, Self>,
         args: &Bound<'_, PyTuple>,
         _kwargs: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<PyDataFrame> {
+    ) -> PyResult<crate::dataframe::NewDataFrame> {
         let target = slf.try_borrow()?.core.target()?;
         let args: Vec<Bound<'_, PyAny>> = args.iter().collect();
         object::attribute_relation_py(&target, "approxSimilarityJoin", &args)
@@ -325,7 +325,7 @@ native_model! {
         slf: &Bound<'_, Self>,
         args: &Bound<'_, PyTuple>,
         _kwargs: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<PyDataFrame> {
+    ) -> PyResult<crate::dataframe::NewDataFrame> {
         let target = slf.try_borrow()?.core.target()?;
         let args: Vec<Bound<'_, PyAny>> = args.iter().collect();
         object::attribute_relation_py(&target, "approxNearestNeighbors", &args)
@@ -338,7 +338,7 @@ native_model! {
         slf: &Bound<'_, Self>,
         args: &Bound<'_, PyTuple>,
         _kwargs: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<PyDataFrame> {
+    ) -> PyResult<crate::dataframe::NewDataFrame> {
         let target = slf.try_borrow()?.core.target()?;
         let args: Vec<Bound<'_, PyAny>> = args.iter().collect();
         object::attribute_relation_py(&target, "approxSimilarityJoin", &args)
@@ -743,7 +743,7 @@ native_model! {
         let py = slf.py();
         let target = slf.try_borrow()?.core.target()?;
         let df = object::attribute_relation_py(&target, "categoryMapsDF", &[])?;
-        let rows = Py::new(py, df)?.bind(py).call_method0("collect")?;
+        let rows = df.into_pyobject(py)?.call_method0("collect")?;
         let maps = PyDict::new(py);
         for row in rows.try_iter()? {
             let row = row?;
@@ -804,7 +804,7 @@ native_model! {
         slf: &Bound<'_, Self>,
         args: &Bound<'_, PyTuple>,
         _kwargs: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<PyDataFrame> {
+    ) -> PyResult<crate::dataframe::NewDataFrame> {
         let target = slf.try_borrow()?.core.target()?;
         let args: Vec<Bound<'_, PyAny>> = args.iter().collect();
         object::attribute_relation_py(&target, "findSynonyms", &args)
@@ -819,7 +819,7 @@ native_model! {
         slf: &Bound<'_, Self>,
         args: &Bound<'_, PyTuple>,
         _kwargs: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<PyDataFrame> {
+    ) -> PyResult<crate::dataframe::NewDataFrame> {
         let target = slf.try_borrow()?.core.target()?;
         let args: Vec<Bound<'_, PyAny>> = args.iter().collect();
         object::attribute_relation_py(&target, "getVectors", &args)
