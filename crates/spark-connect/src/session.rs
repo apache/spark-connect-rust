@@ -14,7 +14,7 @@ use spark_connect_core::thread_entries::forget_when_thread_ends;
 use spark_connect_proto as proto;
 
 use crate::dataframe::DataFrame;
-use crate::plan::{LogicalPlan, PlanIds};
+use crate::plan::{LogicalPlan, PlanIds, SharedPlan};
 use crate::profiler::PythonAccumulators;
 use crate::progress::{ExecutionStream, ProgressTracker, ProgressUpdate};
 use crate::row::{Row, Value};
@@ -1042,12 +1042,12 @@ impl SparkSession {
             return sql;
         }
         Arc::new(LogicalPlan::WithRelations {
-            root: sql,
+            root: sql.into(),
             references: references
                 .into_iter()
                 .map(|(df, alias)| {
-                    Arc::new(LogicalPlan::SubqueryAlias {
-                        input: df.plan,
+                    SharedPlan::new(LogicalPlan::SubqueryAlias {
+                        input: df.shared_plan(),
                         alias,
                     })
                 })

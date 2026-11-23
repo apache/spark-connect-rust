@@ -558,6 +558,9 @@ fn shared_parts_of<'a>(
     let mut objects = false;
     let mut pending: Vec<Part> = Vec::new();
     let mut meet = |reference: PartRef<'_>, pending: &mut Vec<Part>| {
+        if !reference.holds_objects() {
+            return;
+        }
         let address = reference.address();
         match known_as(py, known, address) {
             Some(Resolved::Shared(shared)) => {
@@ -1126,12 +1129,14 @@ fn drop_in_turn(held: Box<[Py<SharedPart>]>) {
 }
 
 /// What the binding knows of a part, by its address: the [`SharedPart`] of a part of Python
-/// objects while it lives, and a part of none that objects of the binding hold, of the number of
-/// their references to it, so that the parts of values made of it do not walk it again.
+/// objects while it lives, and a part of none, of a pickler or an owner below it, that objects of
+/// the binding hold, of the number of their references to it, so that the parts of values made of
+/// it do not walk it again.
 enum Known {
     /// The [`SharedPart`], of the addresses of its Python object and of its value.
     Shared { object: usize, value: usize },
-    /// A part of no Python object, of the number of the [`Parts`] that hold it.
+    /// A part of a pickler or an owner, of no Python object, of the number of the [`Parts`] that
+    /// hold it.
     Plain(usize),
 }
 
@@ -1309,12 +1314,16 @@ fn resolve(py: Python<'_>, known: &KnownParts, root: Part) -> Walk {
                 } else {
                     // The parts that it holds, in order: those that are known as they are, and
                     // the others walked of handles of their own, which keep them for the time of
-                    // the walk. A part known as of no Python object, as most are, is resolved
-                    // again by its address wherever the walk meets it.
+                    // the walk. A part of no pickler and no owner below it, as most are, is of no
+                    // Python object, as its node tells; one known as of none is resolved again by
+                    // its address wherever the walk meets it.
                     let held: Vec<Step> = part
                         .held()
                         .into_iter()
                         .map(|reference| {
+                            if !reference.holds_objects() {
+                                return Step::Known(Resolved::Plain { holds: false });
+                            }
                             let address = reference.address();
                             match walk.walked.get(address) {
                                 Some(resolved) => Step::Known(resolved.again(py)),
@@ -1413,8 +1422,10 @@ fn make(py: Python<'_>, creations: Vec<Creation>) -> Option<Vec<Py<SharedPart>>>
 /// The references of an object of the binding to the parts of its value, which it holds as
 /// PySpark's objects hold their plan objects (see the module): a reference to the [`SharedPart`]
 /// of each part of Python objects, of which it is a holder, which its `__traverse__` reports
-/// ([`Parts::visit`]), and the address of each other part that holds parts, which the binding
-/// remembers while it is held, so that the parts of values made of it do not walk it again. The
+/// ([`Parts::visit`]), and the address of each other part that holds a pickler or an owner, of no
+/// Python object, which the binding remembers while it is held, so that the parts of values made
+/// of it do not walk it again; a part of no pickler and no owner below it, as its node tells
+/// (`spark_connect::gc::PartRef::holds_objects`), is neither walked nor remembered. The
 /// object holds the references to the parts that it gives to [`Parts::of`] for as long as it holds
 /// these, and drops these when it drops those, or before ([`Parts::release`]): its references keep
 /// the parts at those addresses. One that it drops first, as a field of an object that its drop
@@ -1453,6 +1464,11 @@ impl Parts {
         let mut shared_parts: Vec<Py<SharedPart>> = Vec::new();
         let mut plain_parts: Vec<usize> = Vec::new();
         for reference in references {
+            // A part of no object of the binding below it has no SharedPart, nor one below it,
+            // which the walk would find: of the fields of its node, as the core makes it.
+            if !reference.holds_objects() {
+                continue;
+            }
             let address = reference.address();
             let walk = {
                 let mut known = known();
@@ -1668,24 +1684,47 @@ mod tests {
     }
 
     #[test]
-    fn a_plan_of_no_python_object_has_no_shared_part_and_is_known_while_it_is_held() {
+    fn a_part_of_no_object_below_it_is_neither_walked_nor_known() {
         let _alone = super::tests_of_the_state_alone();
         Python::initialize();
         Python::attach(|py| {
             let plain = Expression::function("upper", vec![Expression::column("y")]);
+            assert!(!PartRef::Expression(&plain).holds_objects());
             let parts = Parts::of(py, [PartRef::Expression(&plain)]);
+            assert!(parts.shared.is_empty() && parts.plain.is_empty());
+            let address = PartRef::Expression(&plain).address();
+            assert!(known().get(&address).is_none());
+            drop(parts);
+            // A part of a pickler whose object is not a Python object is walked, has no
+            // SharedPart, and is known as of none while it is held, so that the parts of values
+            // made of it do not walk it again.
+            let pickler =
+                spark_connect::udf::CommandPickler::new("rust", |tag| Ok(tag.as_bytes().to_vec()));
+            let rust: Expression = ExpressionNode::CommonInlineUserDefinedFunction(Box::new(
+                CommonInlineUserDefinedFunctionExpression::new(
+                    "f".to_string(),
+                    true,
+                    vec![Expression::column("x")],
+                    PythonUDFPayload::pickled_at_build(
+                        spark_connect::types::DataType::Long,
+                        100,
+                        pickler,
+                        "3.11".to_string(),
+                    ),
+                ),
+            ))
+            .into();
+            let over = Expression::function("abs", vec![rust]);
+            assert!(PartRef::Expression(&over).holds_objects());
+            let parts = Parts::of(py, [PartRef::Expression(&over)]);
             assert!(parts.shared.is_empty());
             assert_eq!(parts.plain.len(), 1);
-            let address = PartRef::Expression(&plain).address();
+            let address = PartRef::Expression(&over).address();
             assert!(matches!(known().get(&address), Some(Known::Plain(1))));
-            let again = Parts::of(py, [PartRef::Expression(&plain)]);
+            let again = Parts::of(py, [PartRef::Expression(&over)]);
             assert!(matches!(known().get(&address), Some(Known::Plain(2))));
             drop((parts, again));
             assert!(known().get(&address).is_none());
-            // A leaf is not remembered: its walk is of itself.
-            let leaf = Expression::column("z");
-            let parts = Parts::of(py, [PartRef::Expression(&leaf)]);
-            assert!(parts.shared.is_empty() && parts.plain.is_empty());
         });
     }
 
@@ -2154,6 +2193,30 @@ mod tests {
             assert!(violations_of(counted).is_empty());
             // A clone with the GIL: none.
             drop(udf.clone());
+            // A clone of the input of a plan node of a holder, which has a SharedPart, without the
+            // GIL: logged too, as the input tells the check of the clones.
+            use spark_connect::plan::{LogicalPlan, SharedPlan};
+            let input = SharedPlan::new(LogicalPlan::Filter {
+                input: spark_connect::plan::range(0, 1, 1).into(),
+                condition: spark_connect::Column::new(udf.clone()),
+            });
+            let root = std::sync::Arc::new(LogicalPlan::Limit { input, limit: 1 });
+            let plan_parts = Parts::of(py, [PartRef::Plan(&root)]);
+            assert_eq!(plan_parts.shared.len(), 1);
+            let LogicalPlan::Limit { input, .. } = root.as_ref() else {
+                unreachable!()
+            };
+            let input = input.clone();
+            let of_input = "planted-clone-of-the-input-of-a-plan";
+            let thread = std::thread::Builder::new()
+                .name(of_input.to_string())
+                .spawn(move || drop(input.clone()))
+                .unwrap();
+            join(py, thread);
+            let logs = violations_of(of_input);
+            assert_eq!(logs.len(), 1, "{logs:?}");
+            assert!(logs[0].contains("of a plan that has a SharedPart"));
+            drop((plan_parts, root));
             drop(parts);
         });
     }

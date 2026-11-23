@@ -51,6 +51,102 @@ impl std::fmt::Debug for RelationOwner {
     }
 }
 
+/// A plan node that a plan node holds as its input: a shared, immutable node, with whether an
+/// object of a binding is below it, which the binding needs not to look for below a node of none
+/// (see [`crate::gc`]). Made of the node, as a node is made of its inputs and expressions, each
+/// of which tells it, so it is told at once. Cloning it shares the node, of which the check of
+/// the clones of a binding is told (see [`crate::gc::check_clones_with`]).
+pub struct SharedPlan {
+    node: Arc<LogicalPlan>,
+    objects: bool,
+}
+
+impl SharedPlan {
+    /// The node `plan`, to share.
+    pub fn new(plan: LogicalPlan) -> Self {
+        SharedPlan::from(Arc::new(plan))
+    }
+
+    /// The node `node`, of whether an object of a binding is at or below it as its holder keeps
+    /// it, as the plan of a DataFrame does.
+    pub(crate) fn of_node(node: Arc<LogicalPlan>, objects: bool) -> Self {
+        SharedPlan { node, objects }
+    }
+
+    /// The node, as the plan of a DataFrame holds it.
+    pub fn arc(&self) -> &Arc<LogicalPlan> {
+        &self.node
+    }
+
+    /// The node, of this reference to it.
+    pub fn into_arc(self) -> Arc<LogicalPlan> {
+        self.node
+    }
+
+    /// Whether an object of a binding is below the node, or the node holds one: a pickler or an
+    /// owner, which may hold one (see [`crate::gc::PartRef::holds_objects`]).
+    pub fn holds_objects(&self) -> bool {
+        self.objects
+    }
+
+    /// The node of a dropped node in place of this one, as it drops its inputs in turn (see the
+    /// `Drop` of [`LogicalPlan`]).
+    fn take(&mut self) -> Arc<LogicalPlan> {
+        self.objects = false;
+        std::mem::replace(&mut self.node, Arc::clone(&DROPPED_INPUT))
+    }
+}
+
+/// A node shared: of whether an object of a binding is below it, of its fields.
+impl From<Arc<LogicalPlan>> for SharedPlan {
+    fn from(node: Arc<LogicalPlan>) -> Self {
+        let objects = crate::gc::PartRef::Plan(&node).holds_objects();
+        SharedPlan { node, objects }
+    }
+}
+
+impl From<LogicalPlan> for SharedPlan {
+    fn from(plan: LogicalPlan) -> Self {
+        SharedPlan::new(plan)
+    }
+}
+
+impl From<Box<LogicalPlan>> for SharedPlan {
+    fn from(plan: Box<LogicalPlan>) -> Self {
+        SharedPlan::from(Arc::<LogicalPlan>::from(plan))
+    }
+}
+
+impl Clone for SharedPlan {
+    fn clone(&self) -> Self {
+        crate::gc::cloned(Arc::as_ptr(&self.node) as usize);
+        SharedPlan {
+            node: Arc::clone(&self.node),
+            objects: self.objects,
+        }
+    }
+}
+
+impl std::ops::Deref for SharedPlan {
+    type Target = LogicalPlan;
+
+    fn deref(&self) -> &LogicalPlan {
+        &self.node
+    }
+}
+
+impl AsRef<LogicalPlan> for SharedPlan {
+    fn as_ref(&self) -> &LogicalPlan {
+        &self.node
+    }
+}
+
+impl std::fmt::Debug for SharedPlan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&*self.node, f)
+    }
+}
+
 #[derive(Debug, Clone)]
 // `GroupMap` is the largest variant; boxing its fields would change the public fields of the
 // variant, and each plan node is shared in an `Arc`, so its size is paid once per node.
@@ -71,17 +167,17 @@ pub enum LogicalPlan {
     },
     /// A projection (select): `df.select(cols...)`.
     Project {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         columns: Vec<Column>,
     },
     /// A filter: `df.filter(condition)`.
     Filter {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         condition: Column,
     },
     /// An aggregation: `df.groupBy(...).agg(...)`.
     Aggregate {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         group_type: AggregateGroupType,
         grouping_expressions: Vec<Expression>,
         aggregate_expressions: Vec<Expression>,
@@ -93,42 +189,39 @@ pub enum LogicalPlan {
     },
     /// A join: `df.join(other, on)`.
     Join {
-        left: Arc<LogicalPlan>,
-        right: Arc<LogicalPlan>,
+        left: SharedPlan,
+        right: SharedPlan,
         join_type: JoinType,
         on: Option<Column>,
         using_columns: Vec<String>,
     },
     /// A lateral join (`LATERAL` correlated subquery join).
     LateralJoin {
-        left: Arc<LogicalPlan>,
-        right: Arc<LogicalPlan>,
+        left: SharedPlan,
+        right: SharedPlan,
         join_type: JoinType,
         on: Option<Column>,
     },
     /// A set operation (union, intersect, except).
     SetOperation {
-        left: Arc<LogicalPlan>,
-        right: Arc<LogicalPlan>,
+        left: SharedPlan,
+        right: SharedPlan,
         set_op_type: SetOpType,
         is_all: bool,
         by_name: bool,
         allow_missing_columns: bool,
     },
     /// Limit: `df.limit(n)`.
-    Limit { input: Arc<LogicalPlan>, limit: i32 },
+    Limit { input: SharedPlan, limit: i32 },
     /// Offset: `df.offset(n)`.
-    Offset {
-        input: Arc<LogicalPlan>,
-        offset: i32,
-    },
+    Offset { input: SharedPlan, offset: i32 },
     /// Tail: `df.tail(n)` - returns last n rows.
-    Tail { input: Arc<LogicalPlan>, limit: i32 },
+    Tail { input: SharedPlan, limit: i32 },
     /// ShowString: the table of `df.show(...)`, which the server formats as one string:
     /// `num_rows` rows, values truncated to `truncate` characters (0 for none), vertical
     /// with a line per value.
     ShowString {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         num_rows: i32,
         truncate: i32,
         vertical: bool,
@@ -136,7 +229,7 @@ pub enum LogicalPlan {
     /// HtmlString: the HTML table of `df._repr_html_()`, which the server formats as one
     /// string: `num_rows` rows, values truncated to `truncate` characters (0 for none).
     HtmlString {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         num_rows: i32,
         truncate: i32,
     },
@@ -161,20 +254,20 @@ pub enum LogicalPlan {
     },
     /// Deduplicate: `df.distinct()` or `df.dropDuplicates()`.
     Deduplicate {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         all_columns_as_keys: bool,
         column_names: Vec<String>,
         within_watermark: bool,
     },
     /// Sort: `df.sort(cols...)`.
     Sort {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         order: Vec<Expression>,
         is_global: bool,
     },
     /// Sample: `df.sample(fraction)` or `df.sample(num_rows)`.
     Sample {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         lower_bound: f64,
         upper_bound: f64,
         with_replacement: bool,
@@ -185,19 +278,19 @@ pub enum LogicalPlan {
     },
     /// Repartition: `df.repartition(num_partitions)`.
     Repartition {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         num_partitions: i32,
         shuffle: bool,
     },
     /// RepartitionByExpression: `df.repartitionByRange()` or similar.
     RepartitionByExpression {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         num_partitions: i32,
         expressions: Vec<Expression>,
     },
     /// WithColumns: `df.withColumn(name, col)` or `df.withColumns(...)`.
     WithColumns {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         column_names: Vec<String>,
         columns: Vec<Column>,
     },
@@ -205,7 +298,7 @@ pub enum LogicalPlan {
     /// Mirrors `DataFrame.withMetadata` - a `WithColumns` whose one alias re-aliases
     /// the column to itself, carrying the metadata JSON.
     WithColumnMetadata {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         column_name: String,
         /// The column as a reference to the input's plan ID, as PySpark's `self[columnName]`.
         column: Expression,
@@ -214,24 +307,24 @@ pub enum LogicalPlan {
     /// WithColumnsRenamed: `df.withColumnRenamed(old, new)` or `df.withColumnsRenamed(...)`,
     /// of the renames in their order, in which the server applies them, as PySpark sends them.
     WithColumnsRenamed {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         renames: Vec<(String, String)>,
     },
     /// Drop: `df.drop(column_names...)`.
     Drop {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         columns: Vec<String>,
         /// The columns to drop as expressions, as PySpark's `Drop` of Columns sends them.
         expressions: Vec<Expression>,
     },
     /// ToDF: `df.toDF(*column_names)`.
     ToDF {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         column_names: Vec<String>,
     },
     /// ToSchema: set schema to match the provided type.
     ToSchema {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         schema: DataType,
         /// The reader of the schema of a client, which a request calls when it builds the plan,
         /// in place of `schema`, as PySpark's `ToSchema` converts the type object of its schema
@@ -248,12 +341,12 @@ pub enum LogicalPlan {
     /// [`crate::expression::Expression::unbuildable`]): a request raises the first error of
     /// either kind, in the order in which PySpark builds the plan, its inputs before itself.
     Unbuildable {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         error: SparkError,
     },
     /// Hint: `df.hint(name, parameters...)`.
     Hint {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         name: String,
         /// The parameters, literal expressions or columns, as PySpark's `lit` of them.
         parameters: Vec<Expression>,
@@ -261,14 +354,14 @@ pub enum LogicalPlan {
     /// Parse: a DataFrame of one string column parsed into a structured DataFrame, as
     /// PySpark's `Parse` of `spark.read.json`, `csv` and `xml` of a DataFrame.
     Parse {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         format: ParseFormat,
         schema: Option<DataType>,
         options: HashMap<String, String>,
     },
     /// Unpivot: `df.unpivot(...)`.
     Unpivot {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         ids: Vec<Column>,
         values: Option<Vec<Column>>,
         variable_column_name: String,
@@ -276,19 +369,19 @@ pub enum LogicalPlan {
     },
     /// NAFill: `df.fillna(value, subset)`.
     NAFill {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         fill_value: crate::row::Value,
         columns: Vec<String>,
     },
     /// NAFill with a per-column value: `df.fillna({col: value, ...})`.
     NAFillColumns {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         cols: Vec<String>,
         values: Vec<crate::row::Value>,
     },
     /// NADrop: `df.dropna(how, thresh, subset)`.
     NADrop {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         how: String,
         min_non_null: Option<i32>,
         columns: Vec<String>,
@@ -296,36 +389,30 @@ pub enum LogicalPlan {
     /// NAReplace: `df.replace(to_replace, value, subset)`, each replacement a literal and
     /// the literal that replaces it.
     NAReplace {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         replacements: Vec<(LiteralExpression, LiteralExpression)>,
         columns: Vec<String>,
     },
     /// Describe: `df.describe(cols...)`.
     Describe {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         columns: Vec<String>,
     },
     /// Summary: `df.summary(percentiles...)`.
     Summary {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         percentiles: Vec<String>,
     },
     /// ColRegex: column selection by regex.
-    ColRegex {
-        input: Arc<LogicalPlan>,
-        col_name: String,
-    },
+    ColRegex { input: SharedPlan, col_name: String },
     /// SubqueryAlias: `df.as(alias)`.
-    SubqueryAlias {
-        input: Arc<LogicalPlan>,
-        alias: String,
-    },
+    SubqueryAlias { input: SharedPlan, alias: String },
     /// WithRelations: a plan with the plans that it refers to, such as a SQL query with the
     /// DataFrames that `SparkSession.sql` takes as keyword arguments, each a `SubqueryAlias`
     /// whose alias the query names.
     WithRelations {
-        root: Arc<LogicalPlan>,
-        references: Vec<Arc<LogicalPlan>>,
+        root: SharedPlan,
+        references: Vec<SharedPlan>,
     },
     /// LocalRelation: data supplied locally.
     LocalRelation {
@@ -362,58 +449,58 @@ pub enum LogicalPlan {
     },
     /// WithWatermark: `df.withWatermark(timeColumn, delayThreshold)`.
     WithWatermark {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         time_column: String,
         delay_threshold: String,
     },
     /// RepartitionByRange: `df.repartitionByRange(numPartitions, *cols)`.
     RepartitionByRange {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         num_partitions: Option<i32>,
         partition_exprs: Vec<Expression>,
     },
     /// StatCrosstab: `df.stat.crosstab(col1, col2)`.
     StatCrosstab {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         col1: String,
         col2: String,
     },
     /// StatFreqItems: `df.stat.freqItems(columns, support)`.
     StatFreqItems {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         columns: Vec<String>,
         support: f64,
     },
     /// StatApproxQuantile: `df.stat.approxQuantile(columns, probabilities, relativeError)`.
     StatApproxQuantile {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         columns: Vec<String>,
         probabilities: Vec<f64>,
         relative_error: f64,
     },
     /// StatCorr: `df.stat.corr(col1, col2, method)`, of the method that PySpark sends, "pearson".
     StatCorr {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         col1: String,
         col2: String,
         method: String,
     },
     /// StatCov: `df.stat.cov(col1, col2)`.
     StatCov {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         col1: String,
         col2: String,
     },
     /// StatSampleBy: `df.stat.sampleBy(col, fractions, seed)`.
     StatSampleBy {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         col: Expression,
         fractions: Vec<(Expression, f64)>,
         seed: Option<i64>,
     },
     /// Observe: `df.observe(name, exprs)` - collect metrics.
     Observe {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         name: String,
         exprs: Vec<Expression>,
         /// The Observation that the metrics that the server observes for this relation set,
@@ -426,10 +513,7 @@ pub enum LogicalPlan {
         arguments: Vec<Expression>,
     },
     /// Zip: `df.zip(other)` - combine two DataFrames column-wise.
-    Zip {
-        left: Arc<LogicalPlan>,
-        right: Arc<LogicalPlan>,
-    },
+    Zip { left: SharedPlan, right: SharedPlan },
     /// ML Transformation: wraps an MlRelation proto directly. The proto carries the input
     /// inline, so `input` keeps the input plan, and the owners in it, alive; `owner` keeps
     /// the cached model that the relation refers to alive, if any.
@@ -445,13 +529,13 @@ pub enum LogicalPlan {
     /// Transpose: swap rows and columns. `index_columns` optionally names the
     /// column(s) used as the transposed header (empty = server default).
     Transpose {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         index_columns: Vec<Expression>,
     },
     /// MapPartitions: `DataFrame.mapInPandas` / `mapInArrow` (also backs foreach), of the id
     /// of the resource profile of its stage, if any.
     MapPartitions {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         func: CommonInlineUserDefinedFunctionExpression,
         is_barrier: bool,
         profile_id: Option<i32>,
@@ -466,12 +550,12 @@ pub enum LogicalPlan {
     /// GroupMap: `GroupedData.applyInPandas` / `applyInArrow`, and the stateful
     /// `transformWithState[InPandas]`.
     GroupMap {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         grouping_expressions: Vec<Expression>,
         func: CommonInlineUserDefinedFunctionExpression,
         sorting_expressions: Vec<Expression>,
         // Stateful fields (all default to None/empty for plain applyInPandas/applyInArrow).
-        initial_input: Option<Arc<LogicalPlan>>,
+        initial_input: Option<SharedPlan>,
         initial_grouping_expressions: Vec<Expression>,
         is_map_groups_with_state: Option<bool>,
         output_mode: Option<String>,
@@ -482,7 +566,7 @@ pub enum LogicalPlan {
     /// ApplyInPandasWithState: `GroupedData.applyInPandasWithState`. The schemas are the
     /// strings that it sends, a DDL string or the JSON of a type, which the server parses.
     ApplyInPandasWithState {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         grouping_expressions: Vec<Expression>,
         func: CommonInlineUserDefinedFunctionExpression,
         output_schema: String,
@@ -492,16 +576,16 @@ pub enum LogicalPlan {
     },
     /// CoGroupMap: `GroupedData.cogroup(...).applyInPandas` / `applyInArrow`.
     CoGroupMap {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         input_grouping_expressions: Vec<Expression>,
-        other: Arc<LogicalPlan>,
+        other: SharedPlan,
         other_grouping_expressions: Vec<Expression>,
         func: CommonInlineUserDefinedFunctionExpression,
     },
     /// AsOfJoin: `DataFrame._joinAsOf`, which pandas-on-Spark's `merge_asof` calls.
     AsOfJoin {
-        left: Arc<LogicalPlan>,
-        right: Arc<LogicalPlan>,
+        left: SharedPlan,
+        right: SharedPlan,
         left_as_of: Column,
         right_as_of: Column,
         on: Option<Column>,
@@ -513,8 +597,8 @@ pub enum LogicalPlan {
     },
     /// NearestByJoin: `DataFrame.nearestByJoin`.
     NearestByJoin {
-        left: Arc<LogicalPlan>,
-        right: Arc<LogicalPlan>,
+        left: SharedPlan,
+        right: SharedPlan,
         ranking_expression: Expression,
         num_results: i32,
         join_type: String,
@@ -543,7 +627,9 @@ pub enum LogicalPlan {
 /// A part of a plan node, of [`LogicalPlan::parts_mut`]: an input, an expression, a UDF, the
 /// pickler of a UDTF, the Observation of an `Observe` of its name, or the Observations of a `Raw`.
 pub(crate) enum PlanPart<'a> {
-    Input(&'a mut Arc<LogicalPlan>),
+    Input(&'a mut SharedPlan),
+    /// The input of an `MlTransform`, which holds it as a DataFrame holds its plan.
+    ArcInput(&'a mut Arc<LogicalPlan>),
     Expression(&'a mut Expression),
     Udf(&'a mut CommonInlineUserDefinedFunctionExpression),
     Pickler(&'a mut Option<crate::udf::CommandPickler>),
@@ -2388,7 +2474,6 @@ macro_rules! inputs_of {
             | LogicalPlan::StatCov { input, .. }
             | LogicalPlan::StatSampleBy { input, .. }
             | LogicalPlan::Observe { input, .. }
-            | LogicalPlan::MlTransform { input, .. }
             | LogicalPlan::Transpose { input, .. }
             | LogicalPlan::MapPartitions { input, .. }
             | LogicalPlan::ApplyInPandasWithState { input, .. } => inputs.push(input),
@@ -2428,7 +2513,9 @@ macro_rules! inputs_of {
             | LogicalPlan::RelationChanges { .. }
             | LogicalPlan::UnresolvedTableValuedFunction { .. }
             | LogicalPlan::Catalog { .. }
-            | LogicalPlan::CommonInlineUdtf { .. } => {}
+            | LogicalPlan::CommonInlineUdtf { .. }
+            // Of an input of its own type (see `LogicalPlan::inputs`).
+            | LogicalPlan::MlTransform { .. } => {}
         }
         inputs
     }};
@@ -2451,9 +2538,14 @@ impl Drop for LogicalPlan {
     fn drop(&mut self) {
         let mut pending: Vec<Arc<LogicalPlan>> = Vec::new();
         let take_inputs = |plan: &mut LogicalPlan, pending: &mut Vec<Arc<LogicalPlan>>| {
-            for input in inputs_of!(plan) {
+            if let LogicalPlan::MlTransform { input, .. } = plan {
                 if !Arc::ptr_eq(input, &DROPPED_INPUT) {
                     pending.push(std::mem::replace(input, Arc::clone(&DROPPED_INPUT)));
+                }
+            }
+            for input in inputs_of!(plan) {
+                if !Arc::ptr_eq(input.arc(), &DROPPED_INPUT) {
+                    pending.push(input.take());
                 }
             }
         };
@@ -2469,7 +2561,10 @@ impl Drop for LogicalPlan {
 impl LogicalPlan {
     /// The plans that this one reads directly.
     pub(crate) fn inputs(&self) -> Vec<&Arc<LogicalPlan>> {
-        inputs_of!(self)
+        match self {
+            LogicalPlan::MlTransform { input, .. } => vec![input],
+            _ => inputs_of!(self).into_iter().map(SharedPlan::arc).collect(),
+        }
     }
 
     /// The inputs of this node, then its expressions, UDFs, the pickler of its UDTF and its
@@ -2703,8 +2798,8 @@ impl LogicalPlan {
             | LogicalPlan::StatFreqItems { input, .. }
             | LogicalPlan::StatApproxQuantile { input, .. }
             | LogicalPlan::StatCorr { input, .. }
-            | LogicalPlan::StatCov { input, .. }
-            | LogicalPlan::MlTransform { input, .. } => parts.push(Input(input)),
+            | LogicalPlan::StatCov { input, .. } => parts.push(Input(input)),
+            LogicalPlan::MlTransform { input, .. } => parts.push(PlanPart::ArcInput(input)),
             // A deep copy copies the schema object of the reader, as PySpark's copies the schema.
             LogicalPlan::ToSchema {
                 input,
@@ -3149,7 +3244,7 @@ impl LogicalPlan {
 
             LogicalPlan::Project { input, columns } => {
                 let mut project = proto::Project::default();
-                project.input = Some(Box::new(relation_of(input, plan_ids)));
+                project.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 for col in columns {
                     project.expressions.push(col.to_proto());
                 }
@@ -3158,7 +3253,7 @@ impl LogicalPlan {
 
             LogicalPlan::Filter { input, condition } => {
                 let mut filter = proto::Filter::default();
-                filter.input = Some(Box::new(relation_of(input, plan_ids)));
+                filter.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 filter.condition = Some(condition.to_proto());
                 relation.rel_type = Some(proto::relation::RelType::Filter(Box::new(filter)));
             }
@@ -3173,7 +3268,7 @@ impl LogicalPlan {
                 grouping_sets,
             } => {
                 let mut agg = proto::Aggregate::default();
-                agg.input = Some(Box::new(relation_of(input, plan_ids)));
+                agg.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 agg.group_type = match group_type {
                     AggregateGroupType::GroupBy => proto::aggregate::GroupType::Groupby as i32,
                     AggregateGroupType::Rollup => proto::aggregate::GroupType::Rollup as i32,
@@ -3224,8 +3319,8 @@ impl LogicalPlan {
                 using_columns,
             } => {
                 let mut join = proto::Join::default();
-                join.left = Some(Box::new(relation_of(left, plan_ids)));
-                join.right = Some(Box::new(relation_of(right, plan_ids)));
+                join.left = Some(Box::new(relation_of(left.arc(), plan_ids)));
+                join.right = Some(Box::new(relation_of(right.arc(), plan_ids)));
                 join.join_type = match join_type {
                     JoinType::Inner => proto::join::JoinType::Inner as i32,
                     JoinType::LeftOuter => proto::join::JoinType::LeftOuter as i32,
@@ -3255,8 +3350,8 @@ impl LogicalPlan {
                 direction,
             } => {
                 let aj = proto::AsOfJoin {
-                    left: Some(Box::new(relation_of(left, plan_ids))),
-                    right: Some(Box::new(relation_of(right, plan_ids))),
+                    left: Some(Box::new(relation_of(left.arc(), plan_ids))),
+                    right: Some(Box::new(relation_of(right.arc(), plan_ids))),
                     left_as_of: Some(left_as_of.to_proto()),
                     right_as_of: Some(right_as_of.to_proto()),
                     join_expr: on.as_ref().map(|condition| condition.to_proto()),
@@ -3276,8 +3371,8 @@ impl LogicalPlan {
                 on,
             } => {
                 let mut lj = proto::LateralJoin::default();
-                lj.left = Some(Box::new(relation_of(left, plan_ids)));
-                lj.right = Some(Box::new(relation_of(right, plan_ids)));
+                lj.left = Some(Box::new(relation_of(left.arc(), plan_ids)));
+                lj.right = Some(Box::new(relation_of(right.arc(), plan_ids)));
                 lj.join_type = match join_type {
                     JoinType::Inner => proto::join::JoinType::Inner as i32,
                     JoinType::LeftOuter => proto::join::JoinType::LeftOuter as i32,
@@ -3302,8 +3397,8 @@ impl LogicalPlan {
                 allow_missing_columns,
             } => {
                 let mut set_op = proto::SetOperation::default();
-                set_op.left_input = Some(Box::new(relation_of(left, plan_ids)));
-                set_op.right_input = Some(Box::new(relation_of(right, plan_ids)));
+                set_op.left_input = Some(Box::new(relation_of(left.arc(), plan_ids)));
+                set_op.right_input = Some(Box::new(relation_of(right.arc(), plan_ids)));
                 set_op.set_op_type = match set_op_type {
                     SetOpType::Union => proto::set_operation::SetOpType::Union as i32,
                     SetOpType::Intersect => proto::set_operation::SetOpType::Intersect as i32,
@@ -3317,21 +3412,21 @@ impl LogicalPlan {
 
             LogicalPlan::Limit { input, limit } => {
                 let mut lim = proto::Limit::default();
-                lim.input = Some(Box::new(relation_of(input, plan_ids)));
+                lim.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 lim.limit = *limit;
                 relation.rel_type = Some(proto::relation::RelType::Limit(Box::new(lim)));
             }
 
             LogicalPlan::Offset { input, offset } => {
                 let mut off = proto::Offset::default();
-                off.input = Some(Box::new(relation_of(input, plan_ids)));
+                off.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 off.offset = *offset;
                 relation.rel_type = Some(proto::relation::RelType::Offset(Box::new(off)));
             }
 
             LogicalPlan::Tail { input, limit } => {
                 let mut tail = proto::Tail::default();
-                tail.input = Some(Box::new(relation_of(input, plan_ids)));
+                tail.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 tail.limit = *limit;
                 relation.rel_type = Some(proto::relation::RelType::Tail(Box::new(tail)));
             }
@@ -3343,7 +3438,7 @@ impl LogicalPlan {
                 vertical,
             } => {
                 let show = proto::ShowString {
-                    input: Some(Box::new(relation_of(input, plan_ids))),
+                    input: Some(Box::new(relation_of(input.arc(), plan_ids))),
                     num_rows: *num_rows,
                     truncate: *truncate,
                     vertical: *vertical,
@@ -3357,7 +3452,7 @@ impl LogicalPlan {
                 truncate,
             } => {
                 let html = proto::HtmlString {
-                    input: Some(Box::new(relation_of(input, plan_ids))),
+                    input: Some(Box::new(relation_of(input.arc(), plan_ids))),
                     num_rows: *num_rows,
                     truncate: *truncate,
                 };
@@ -3406,7 +3501,7 @@ impl LogicalPlan {
                 within_watermark,
             } => {
                 let mut dedup = proto::Deduplicate::default();
-                dedup.input = Some(Box::new(relation_of(input, plan_ids)));
+                dedup.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 dedup.all_columns_as_keys = Some(*all_columns_as_keys);
                 dedup.column_names.extend(column_names.clone());
                 dedup.within_watermark = Some(*within_watermark);
@@ -3422,7 +3517,7 @@ impl LogicalPlan {
                 // numbers, so a future proto reorder can't silently change meaning.
                 use proto::expression::sort_order::{NullOrdering as PbNulls, SortDirection};
                 let mut sort = proto::Sort::default();
-                sort.input = Some(Box::new(relation_of(input, plan_ids)));
+                sort.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 for expr in order {
                     // Extract SortOrder from Expression if it's SortOrder type
                     if let ExpressionNode::SortOrder(so) = expr.node() {
@@ -3472,7 +3567,7 @@ impl LogicalPlan {
                 deterministic_order,
             } => {
                 let mut sample = proto::Sample::default();
-                sample.input = Some(Box::new(relation_of(input, plan_ids)));
+                sample.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 sample.lower_bound = *lower_bound;
                 sample.upper_bound = *upper_bound;
                 sample.with_replacement = Some(*with_replacement);
@@ -3489,7 +3584,7 @@ impl LogicalPlan {
                 shuffle,
             } => {
                 let mut repart = proto::Repartition::default();
-                repart.input = Some(Box::new(relation_of(input, plan_ids)));
+                repart.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 repart.num_partitions = *num_partitions;
                 repart.shuffle = Some(*shuffle);
                 relation.rel_type = Some(proto::relation::RelType::Repartition(Box::new(repart)));
@@ -3506,7 +3601,7 @@ impl LogicalPlan {
                 for expr in expressions {
                     repart.partition_exprs.push(expr.to_proto());
                 }
-                repart.input = Some(Box::new(relation_of(input, plan_ids)));
+                repart.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 // num_partitions is optional in the proto: <= 0 means "unset" so the
                 // server uses the default (the `df.repartition(*cols)` column-only form,
                 // where no partition count is given). A real count is always positive.
@@ -3526,7 +3621,7 @@ impl LogicalPlan {
                 columns,
             } => {
                 let mut wc = proto::WithColumns::default();
-                wc.input = Some(Box::new(relation_of(input, plan_ids)));
+                wc.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 for (name, col) in column_names.iter().zip(columns.iter()) {
                     // Create an Alias expression for each column
                     let mut alias = proto::expression::Alias::default();
@@ -3544,7 +3639,7 @@ impl LogicalPlan {
                 metadata_json,
             } => {
                 let mut wc = proto::WithColumns::default();
-                wc.input = Some(Box::new(relation_of(input, plan_ids)));
+                wc.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 wc.aliases.push(proto::expression::Alias {
                     expr: Some(Box::new(column.to_proto())),
                     name: vec![column_name.clone()],
@@ -3555,7 +3650,7 @@ impl LogicalPlan {
 
             LogicalPlan::WithColumnsRenamed { input, renames } => {
                 let mut wcr = proto::WithColumnsRenamed::default();
-                wcr.input = Some(Box::new(relation_of(input, plan_ids)));
+                wcr.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 for (old_name, new_name) in renames.iter() {
                     let mut rename = proto::with_columns_renamed::Rename::default();
                     rename.col_name = old_name.clone();
@@ -3572,7 +3667,7 @@ impl LogicalPlan {
                 expressions,
             } => {
                 let mut drop = proto::Drop::default();
-                drop.input = Some(Box::new(relation_of(input, plan_ids)));
+                drop.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 drop.columns
                     .extend(expressions.iter().map(|e| e.to_proto()));
                 drop.column_names.extend(columns.clone());
@@ -3584,7 +3679,7 @@ impl LogicalPlan {
                 column_names,
             } => {
                 let mut to_df = proto::ToDf::default();
-                to_df.input = Some(Box::new(relation_of(input, plan_ids)));
+                to_df.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 to_df.column_names.extend(column_names.clone());
                 relation.rel_type = Some(proto::relation::RelType::ToDf(Box::new(to_df)));
             }
@@ -3592,7 +3687,7 @@ impl LogicalPlan {
             LogicalPlan::Unbuildable { input, error } => {
                 // The input, as PySpark builds it first, and then the error, which the request
                 // raises; the relation is not sent.
-                relation.rel_type = relation_of(input, plan_ids).rel_type;
+                relation.rel_type = relation_of(input.arc(), plan_ids).rel_type;
                 crate::expression::record_unbuildable(error);
             }
 
@@ -3602,7 +3697,7 @@ impl LogicalPlan {
                 schema_reader,
             } => {
                 let mut to_schema = proto::ToSchema::default();
-                to_schema.input = Some(Box::new(relation_of(input, plan_ids)));
+                to_schema.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 // As PySpark's, which converts the schema once it built the input: of the reader,
                 // the schema that it gives, else `schema`, as before the reader gives one.
                 let read = schema_reader
@@ -3623,7 +3718,7 @@ impl LogicalPlan {
                 parameters,
             } => {
                 let mut hint = proto::Hint::default();
-                hint.input = Some(Box::new(relation_of(input, plan_ids)));
+                hint.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 hint.name = name.clone();
                 hint.parameters
                     .extend(parameters.iter().map(|p| p.to_proto()));
@@ -3637,7 +3732,7 @@ impl LogicalPlan {
                 options,
             } => {
                 relation.rel_type = Some(proto::relation::RelType::Parse(Box::new(proto::Parse {
-                    input: Some(Box::new(relation_of(input, plan_ids))),
+                    input: Some(Box::new(relation_of(input.arc(), plan_ids))),
                     format: format.to_proto() as i32,
                     schema: schema.as_ref().map(|s| s.to_proto()),
                     options: options.clone(),
@@ -3652,7 +3747,7 @@ impl LogicalPlan {
                 value_column_name,
             } => {
                 let mut unpivot = proto::Unpivot::default();
-                unpivot.input = Some(Box::new(relation_of(input, plan_ids)));
+                unpivot.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 for col in ids {
                     unpivot.ids.push(col.to_proto());
                 }
@@ -3674,7 +3769,7 @@ impl LogicalPlan {
                 columns,
             } => {
                 let mut na_fill = proto::NaFill::default();
-                na_fill.input = Some(Box::new(relation_of(input, plan_ids)));
+                na_fill.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 na_fill.cols.extend(columns.clone());
                 na_fill.values.push(value_to_proto_literal(fill_value));
                 relation.rel_type = Some(proto::relation::RelType::FillNa(Box::new(na_fill)));
@@ -3688,7 +3783,7 @@ impl LogicalPlan {
                 // Per-column fill: cols[i] is filled with values[i] (Spark aligns them
                 // positionally when both are non-empty).
                 let mut na_fill = proto::NaFill::default();
-                na_fill.input = Some(Box::new(relation_of(input, plan_ids)));
+                na_fill.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 na_fill.cols.extend(cols.clone());
                 na_fill
                     .values
@@ -3703,7 +3798,7 @@ impl LogicalPlan {
                 columns,
             } => {
                 let mut na_drop = proto::NaDrop::default();
-                na_drop.input = Some(Box::new(relation_of(input, plan_ids)));
+                na_drop.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 na_drop.cols.extend(columns.clone());
                 // Mirror pyspark: an explicit `thresh` (min_non_null) wins; otherwise
                 // `how="all"` -> min_non_nulls=1 and `how="any"` -> unset (server default).
@@ -3723,7 +3818,7 @@ impl LogicalPlan {
                 columns,
             } => {
                 let mut na_replace = proto::NaReplace::default();
-                na_replace.input = Some(Box::new(relation_of(input, plan_ids)));
+                na_replace.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 for (old_val, new_val) in replacements.iter() {
                     na_replace
                         .replacements
@@ -3738,14 +3833,14 @@ impl LogicalPlan {
 
             LogicalPlan::Describe { input, columns } => {
                 let mut describe = proto::StatDescribe::default();
-                describe.input = Some(Box::new(relation_of(input, plan_ids)));
+                describe.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 describe.cols.extend(columns.clone());
                 relation.rel_type = Some(proto::relation::RelType::Describe(Box::new(describe)));
             }
 
             LogicalPlan::Summary { input, percentiles } => {
                 let mut summary = proto::StatSummary::default();
-                summary.input = Some(Box::new(relation_of(input, plan_ids)));
+                summary.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 summary.statistics.extend(percentiles.clone());
                 relation.rel_type = Some(proto::relation::RelType::Summary(Box::new(summary)));
             }
@@ -3753,7 +3848,7 @@ impl LogicalPlan {
             LogicalPlan::ColRegex { input, col_name } => {
                 // ColRegex is implemented as a Project with UnresolvedRegex expressions
                 let mut project = proto::Project::default();
-                project.input = Some(Box::new(relation_of(input, plan_ids)));
+                project.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 let mut expr = proto::Expression::default();
                 expr.expr_type = Some(proto::expression::ExprType::UnresolvedRegex(
                     proto::expression::UnresolvedRegex {
@@ -3767,7 +3862,7 @@ impl LogicalPlan {
 
             LogicalPlan::SubqueryAlias { input, alias } => {
                 let mut sq_alias = proto::SubqueryAlias::default();
-                sq_alias.input = Some(Box::new(relation_of(input, plan_ids)));
+                sq_alias.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 sq_alias.alias = alias.clone();
                 relation.rel_type =
                     Some(proto::relation::RelType::SubqueryAlias(Box::new(sq_alias)));
@@ -3775,10 +3870,10 @@ impl LogicalPlan {
 
             LogicalPlan::WithRelations { root, references } => {
                 let with_relations = proto::WithRelations {
-                    root: Some(Box::new(relation_of(root, plan_ids))),
+                    root: Some(Box::new(relation_of(root.arc(), plan_ids))),
                     references: references
                         .iter()
-                        .map(|reference| relation_of(reference, plan_ids))
+                        .map(|reference| relation_of(reference.arc(), plan_ids))
                         .collect(),
                 };
                 relation.rel_type = Some(proto::relation::RelType::WithRelations(Box::new(
@@ -3887,7 +3982,7 @@ impl LogicalPlan {
                 delay_threshold,
             } => {
                 let mut watermark = proto::WithWatermark::default();
-                watermark.input = Some(Box::new(relation_of(input, plan_ids)));
+                watermark.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 watermark.event_time = time_column.clone();
                 watermark.delay_threshold = delay_threshold.clone();
                 relation.rel_type =
@@ -3904,7 +3999,7 @@ impl LogicalPlan {
                 for expr in partition_exprs {
                     repart.partition_exprs.push(expr.to_proto());
                 }
-                repart.input = Some(Box::new(relation_of(input, plan_ids)));
+                repart.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 if let Some(n) = num_partitions {
                     repart.num_partitions = Some(*n);
                 }
@@ -3915,7 +4010,7 @@ impl LogicalPlan {
 
             LogicalPlan::StatCrosstab { input, col1, col2 } => {
                 let mut stat = proto::StatCrosstab::default();
-                stat.input = Some(Box::new(relation_of(input, plan_ids)));
+                stat.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 stat.col1 = col1.clone();
                 stat.col2 = col2.clone();
                 relation.rel_type = Some(proto::relation::RelType::Crosstab(Box::new(stat)));
@@ -3927,7 +4022,7 @@ impl LogicalPlan {
                 support,
             } => {
                 let mut stat = proto::StatFreqItems::default();
-                stat.input = Some(Box::new(relation_of(input, plan_ids)));
+                stat.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 stat.cols.extend(columns.clone());
                 stat.support = Some(*support);
                 relation.rel_type = Some(proto::relation::RelType::FreqItems(Box::new(stat)));
@@ -3940,7 +4035,7 @@ impl LogicalPlan {
                 relative_error,
             } => {
                 let mut stat = proto::StatApproxQuantile::default();
-                stat.input = Some(Box::new(relation_of(input, plan_ids)));
+                stat.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 stat.cols.extend(columns.clone());
                 stat.probabilities.extend(probabilities.clone());
                 stat.relative_error = *relative_error;
@@ -3954,7 +4049,7 @@ impl LogicalPlan {
                 method,
             } => {
                 let mut stat = proto::StatCorr::default();
-                stat.input = Some(Box::new(relation_of(input, plan_ids)));
+                stat.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 stat.col1 = col1.clone();
                 stat.col2 = col2.clone();
                 stat.method = Some(method.clone());
@@ -3963,7 +4058,7 @@ impl LogicalPlan {
 
             LogicalPlan::StatCov { input, col1, col2 } => {
                 let mut stat = proto::StatCov::default();
-                stat.input = Some(Box::new(relation_of(input, plan_ids)));
+                stat.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 stat.col1 = col1.clone();
                 stat.col2 = col2.clone();
                 relation.rel_type = Some(proto::relation::RelType::Cov(Box::new(stat)));
@@ -3976,7 +4071,7 @@ impl LogicalPlan {
                 seed,
             } => {
                 let mut stat = proto::StatSampleBy::default();
-                stat.input = Some(Box::new(relation_of(input, plan_ids)));
+                stat.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 stat.col = Some(col.to_proto());
                 // As PySpark's: each stratum, a literal, with its fraction.
                 for (expr, fraction) in fractions {
@@ -4002,7 +4097,7 @@ impl LogicalPlan {
                 observation,
             } => {
                 let mut collect_metrics = proto::CollectMetrics::default();
-                collect_metrics.input = Some(Box::new(relation_of(input, plan_ids)));
+                collect_metrics.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 // As PySpark's `CollectMetrics`, which sets the `str` of the `_name` of its
                 // Observation when it builds the plan, after its input: its error fails the
                 // request.
@@ -4033,8 +4128,8 @@ impl LogicalPlan {
 
             LogicalPlan::Zip { left, right } => {
                 let mut zip = proto::Zip::default();
-                zip.left = Some(Box::new(relation_of(left, plan_ids)));
-                zip.right = Some(Box::new(relation_of(right, plan_ids)));
+                zip.left = Some(Box::new(relation_of(left.arc(), plan_ids)));
+                zip.right = Some(Box::new(relation_of(right.arc(), plan_ids)));
                 relation.rel_type = Some(proto::relation::RelType::Zip(Box::new(zip)));
             }
 
@@ -4050,7 +4145,7 @@ impl LogicalPlan {
                 index_columns,
             } => {
                 let mut transpose = proto::Transpose::default();
-                transpose.input = Some(Box::new(relation_of(input, plan_ids)));
+                transpose.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 transpose.index_columns = index_columns.iter().map(|e| e.to_proto()).collect();
                 relation.rel_type = Some(proto::relation::RelType::Transpose(Box::new(transpose)));
                 return relation;
@@ -4063,7 +4158,7 @@ impl LogicalPlan {
                 profile_id_reader,
             } => {
                 let mut mp = proto::MapPartitions::default();
-                mp.input = Some(Box::new(relation_of(input, plan_ids)));
+                mp.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 mp.func = Some(func.to_proto());
                 mp.is_barrier = Some(*is_barrier);
                 // As PySpark's, which reads `profile.id` once it set the function and the flag.
@@ -4089,14 +4184,14 @@ impl LogicalPlan {
                 transform_with_state_info,
             } => {
                 let mut gm = proto::GroupMap::default();
-                gm.input = Some(Box::new(relation_of(input, plan_ids)));
+                gm.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 for e in grouping_expressions {
                     gm.grouping_expressions.push(e.to_proto());
                 }
                 // As PySpark's transformWithState plan, which builds the initial state before the
                 // function, whose command it pickles then.
                 if let Some(ii) = initial_input {
-                    gm.initial_input = Some(Box::new(relation_of(ii, plan_ids)));
+                    gm.initial_input = Some(Box::new(relation_of(ii.arc(), plan_ids)));
                 }
                 for e in initial_grouping_expressions {
                     gm.initial_grouping_expressions.push(e.to_proto());
@@ -4133,7 +4228,7 @@ impl LogicalPlan {
                 timeout_conf,
             } => {
                 let apply = proto::ApplyInPandasWithState {
-                    input: Some(Box::new(relation_of(input, plan_ids))),
+                    input: Some(Box::new(relation_of(input.arc(), plan_ids))),
                     grouping_expressions: grouping_expressions
                         .iter()
                         .map(|e| e.to_proto())
@@ -4156,11 +4251,11 @@ impl LogicalPlan {
                 func,
             } => {
                 let mut cg = proto::CoGroupMap::default();
-                cg.input = Some(Box::new(relation_of(input, plan_ids)));
+                cg.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 for e in input_grouping_expressions {
                     cg.input_grouping_expressions.push(e.to_proto());
                 }
-                cg.other = Some(Box::new(relation_of(other, plan_ids)));
+                cg.other = Some(Box::new(relation_of(other.arc(), plan_ids)));
                 for e in other_grouping_expressions {
                     cg.other_grouping_expressions.push(e.to_proto());
                 }
@@ -4177,8 +4272,8 @@ impl LogicalPlan {
                 direction,
             } => {
                 let mut nbj = proto::NearestByJoin::default();
-                nbj.left = Some(Box::new(relation_of(left, plan_ids)));
-                nbj.right = Some(Box::new(relation_of(right, plan_ids)));
+                nbj.left = Some(Box::new(relation_of(left.arc(), plan_ids)));
+                nbj.right = Some(Box::new(relation_of(right.arc(), plan_ids)));
                 nbj.ranking_expression = Some(ranking_expression.to_proto());
                 nbj.num_results = *num_results;
                 nbj.join_type = join_type.clone();
@@ -4305,7 +4400,7 @@ pub fn sql(query: impl Into<String>) -> LogicalPlan {
 
 /// Create a Project plan.
 pub fn project<C: Into<Column>>(
-    input: impl Into<Arc<LogicalPlan>>,
+    input: impl Into<SharedPlan>,
     columns: impl IntoIterator<Item = C>,
 ) -> LogicalPlan {
     LogicalPlan::Project {
@@ -4315,7 +4410,7 @@ pub fn project<C: Into<Column>>(
 }
 
 /// Create a Filter plan.
-pub fn filter(input: impl Into<Arc<LogicalPlan>>, condition: Column) -> LogicalPlan {
+pub fn filter(input: impl Into<SharedPlan>, condition: Column) -> LogicalPlan {
     LogicalPlan::Filter {
         input: input.into(),
         condition,
@@ -4324,7 +4419,7 @@ pub fn filter(input: impl Into<Arc<LogicalPlan>>, condition: Column) -> LogicalP
 
 /// Create an Aggregate plan.
 pub fn aggregate(
-    input: impl Into<Arc<LogicalPlan>>,
+    input: impl Into<SharedPlan>,
     group_type: AggregateGroupType,
     grouping_expressions: Vec<Expression>,
     aggregate_expressions: Vec<Expression>,
@@ -4342,7 +4437,7 @@ pub fn aggregate(
 
 /// Create an Aggregate plan with pivot.
 pub fn aggregate_with_pivot(
-    input: impl Into<Arc<LogicalPlan>>,
+    input: impl Into<SharedPlan>,
     group_type: AggregateGroupType,
     grouping_expressions: Vec<Expression>,
     aggregate_expressions: Vec<Expression>,
@@ -4362,7 +4457,7 @@ pub fn aggregate_with_pivot(
 
 /// Create an Aggregate plan with explicit grouping sets.
 pub fn aggregate_with_grouping_sets(
-    input: impl Into<Arc<LogicalPlan>>,
+    input: impl Into<SharedPlan>,
     grouping_expressions: Vec<Expression>,
     aggregate_expressions: Vec<Expression>,
     grouping_sets: Vec<Vec<Expression>>,
@@ -4380,8 +4475,8 @@ pub fn aggregate_with_grouping_sets(
 
 /// Create a Join plan.
 pub fn join(
-    left: impl Into<Arc<LogicalPlan>>,
-    right: impl Into<Arc<LogicalPlan>>,
+    left: impl Into<SharedPlan>,
+    right: impl Into<SharedPlan>,
     join_type: JoinType,
     on: Option<Column>,
     using_columns: Vec<String>,
@@ -4397,8 +4492,8 @@ pub fn join(
 
 /// Create a SetOperation plan.
 pub fn set_operation(
-    left: impl Into<Arc<LogicalPlan>>,
-    right: impl Into<Arc<LogicalPlan>>,
+    left: impl Into<SharedPlan>,
+    right: impl Into<SharedPlan>,
     set_op_type: SetOpType,
     is_all: bool,
     by_name: bool,
@@ -4415,7 +4510,7 @@ pub fn set_operation(
 }
 
 /// Create a Limit plan.
-pub fn limit(input: impl Into<Arc<LogicalPlan>>, limit: i32) -> LogicalPlan {
+pub fn limit(input: impl Into<SharedPlan>, limit: i32) -> LogicalPlan {
     LogicalPlan::Limit {
         input: input.into(),
         limit,
@@ -4423,7 +4518,7 @@ pub fn limit(input: impl Into<Arc<LogicalPlan>>, limit: i32) -> LogicalPlan {
 }
 
 /// Create an Offset plan.
-pub fn offset(input: impl Into<Arc<LogicalPlan>>, offset: i32) -> LogicalPlan {
+pub fn offset(input: impl Into<SharedPlan>, offset: i32) -> LogicalPlan {
     LogicalPlan::Offset {
         input: input.into(),
         offset,
@@ -4431,7 +4526,7 @@ pub fn offset(input: impl Into<Arc<LogicalPlan>>, offset: i32) -> LogicalPlan {
 }
 
 /// Create a Tail plan.
-pub fn tail(input: impl Into<Arc<LogicalPlan>>, limit: i32) -> LogicalPlan {
+pub fn tail(input: impl Into<SharedPlan>, limit: i32) -> LogicalPlan {
     LogicalPlan::Tail {
         input: input.into(),
         limit,
@@ -4440,7 +4535,7 @@ pub fn tail(input: impl Into<Arc<LogicalPlan>>, limit: i32) -> LogicalPlan {
 
 /// Create a Deduplicate plan.
 pub fn deduplicate(
-    input: impl Into<Arc<LogicalPlan>>,
+    input: impl Into<SharedPlan>,
     all_columns_as_keys: bool,
     column_names: Vec<String>,
     within_watermark: bool,
@@ -4454,11 +4549,7 @@ pub fn deduplicate(
 }
 
 /// Create a Sort plan.
-pub fn sort(
-    input: impl Into<Arc<LogicalPlan>>,
-    order: Vec<Expression>,
-    is_global: bool,
-) -> LogicalPlan {
+pub fn sort(input: impl Into<SharedPlan>, order: Vec<Expression>, is_global: bool) -> LogicalPlan {
     LogicalPlan::Sort {
         input: input.into(),
         order,
@@ -4468,7 +4559,7 @@ pub fn sort(
 
 /// Create a Sample plan.
 pub fn sample(
-    input: impl Into<Arc<LogicalPlan>>,
+    input: impl Into<SharedPlan>,
     lower_bound: f64,
     upper_bound: f64,
     with_replacement: bool,
@@ -4486,7 +4577,7 @@ pub fn sample(
 
 /// Create a Repartition plan.
 pub fn repartition(
-    input: impl Into<Arc<LogicalPlan>>,
+    input: impl Into<SharedPlan>,
     num_partitions: i32,
     shuffle: bool,
 ) -> LogicalPlan {
@@ -4499,7 +4590,7 @@ pub fn repartition(
 
 /// Create a RepartitionByExpression plan.
 pub fn repartition_by_expression(
-    input: impl Into<Arc<LogicalPlan>>,
+    input: impl Into<SharedPlan>,
     num_partitions: i32,
     expressions: Vec<Expression>,
 ) -> LogicalPlan {
@@ -4512,7 +4603,7 @@ pub fn repartition_by_expression(
 
 /// Create a WithColumns plan.
 pub fn with_columns(
-    input: impl Into<Arc<LogicalPlan>>,
+    input: impl Into<SharedPlan>,
     column_names: Vec<String>,
     columns: Vec<Column>,
 ) -> LogicalPlan {
@@ -4526,7 +4617,7 @@ pub fn with_columns(
 /// Create a WithColumnsRenamed plan of `renames`, of old and new names, in their order, in
 /// which the server applies them.
 pub fn with_columns_renamed(
-    input: impl Into<Arc<LogicalPlan>>,
+    input: impl Into<SharedPlan>,
     renames: impl IntoIterator<Item = (String, String)>,
 ) -> LogicalPlan {
     LogicalPlan::WithColumnsRenamed {
@@ -4536,7 +4627,7 @@ pub fn with_columns_renamed(
 }
 
 /// Create a Drop plan.
-pub fn drop(input: impl Into<Arc<LogicalPlan>>, columns: Vec<String>) -> LogicalPlan {
+pub fn drop(input: impl Into<SharedPlan>, columns: Vec<String>) -> LogicalPlan {
     LogicalPlan::Drop {
         input: input.into(),
         columns,
@@ -4545,7 +4636,7 @@ pub fn drop(input: impl Into<Arc<LogicalPlan>>, columns: Vec<String>) -> Logical
 }
 
 /// Create a ToDF plan.
-pub fn to_df(input: impl Into<Arc<LogicalPlan>>, column_names: Vec<String>) -> LogicalPlan {
+pub fn to_df(input: impl Into<SharedPlan>, column_names: Vec<String>) -> LogicalPlan {
     LogicalPlan::ToDF {
         input: input.into(),
         column_names,
@@ -4553,7 +4644,7 @@ pub fn to_df(input: impl Into<Arc<LogicalPlan>>, column_names: Vec<String>) -> L
 }
 
 /// Create a ToSchema plan.
-pub fn to_schema(input: impl Into<Arc<LogicalPlan>>, schema: DataType) -> LogicalPlan {
+pub fn to_schema(input: impl Into<SharedPlan>, schema: DataType) -> LogicalPlan {
     LogicalPlan::ToSchema {
         input: input.into(),
         schema,
@@ -4584,7 +4675,7 @@ impl ParseFormat {
 /// Long literal is rejected as a partitionNum by e.g. the REBALANCE hint, which expects an
 /// integral int.)
 pub fn hint(
-    input: impl Into<Arc<LogicalPlan>>,
+    input: impl Into<SharedPlan>,
     name: impl Into<String>,
     parameters: Vec<String>,
 ) -> LogicalPlan {
@@ -4606,7 +4697,7 @@ pub(crate) fn hint_parameter(parameter: &str) -> Expression {
 
 /// Create an Unpivot plan.
 pub fn unpivot(
-    input: impl Into<Arc<LogicalPlan>>,
+    input: impl Into<SharedPlan>,
     ids: Vec<Column>,
     values: Option<Vec<Column>>,
     variable_column_name: impl Into<String>,
@@ -4623,7 +4714,7 @@ pub fn unpivot(
 
 /// Create a NAFill plan.
 pub fn na_fill(
-    input: impl Into<Arc<LogicalPlan>>,
+    input: impl Into<SharedPlan>,
     fill_value: crate::row::Value,
     columns: Vec<String>,
 ) -> LogicalPlan {
@@ -4681,7 +4772,7 @@ fn value_to_proto_literal(v: &crate::row::Value) -> proto::expression::Literal {
 
 /// Create a NADrop plan.
 pub fn na_drop(
-    input: impl Into<Arc<LogicalPlan>>,
+    input: impl Into<SharedPlan>,
     how: impl Into<String>,
     min_non_null: Option<i32>,
     columns: Vec<String>,
@@ -4699,7 +4790,7 @@ pub fn na_drop(
 /// string that reads as a number too. A `LogicalPlan::NAReplace` of other literals replaces
 /// booleans, numbers or nulls.
 pub fn na_replace(
-    input: impl Into<Arc<LogicalPlan>>,
+    input: impl Into<SharedPlan>,
     replacements: Vec<(String, String)>,
     columns: Vec<String>,
 ) -> LogicalPlan {
@@ -4719,7 +4810,7 @@ pub fn na_replace(
 }
 
 /// Create a Describe plan.
-pub fn describe(input: impl Into<Arc<LogicalPlan>>, columns: Vec<String>) -> LogicalPlan {
+pub fn describe(input: impl Into<SharedPlan>, columns: Vec<String>) -> LogicalPlan {
     LogicalPlan::Describe {
         input: input.into(),
         columns,
@@ -4727,7 +4818,7 @@ pub fn describe(input: impl Into<Arc<LogicalPlan>>, columns: Vec<String>) -> Log
 }
 
 /// Create a Summary plan.
-pub fn summary(input: impl Into<Arc<LogicalPlan>>, percentiles: Vec<String>) -> LogicalPlan {
+pub fn summary(input: impl Into<SharedPlan>, percentiles: Vec<String>) -> LogicalPlan {
     LogicalPlan::Summary {
         input: input.into(),
         percentiles,
@@ -4735,7 +4826,7 @@ pub fn summary(input: impl Into<Arc<LogicalPlan>>, percentiles: Vec<String>) -> 
 }
 
 /// Create a ColRegex plan.
-pub fn col_regex(input: impl Into<Arc<LogicalPlan>>, col_name: impl Into<String>) -> LogicalPlan {
+pub fn col_regex(input: impl Into<SharedPlan>, col_name: impl Into<String>) -> LogicalPlan {
     LogicalPlan::ColRegex {
         input: input.into(),
         col_name: col_name.into(),
@@ -4743,7 +4834,7 @@ pub fn col_regex(input: impl Into<Arc<LogicalPlan>>, col_name: impl Into<String>
 }
 
 /// Create a SubqueryAlias plan.
-pub fn subquery_alias(input: impl Into<Arc<LogicalPlan>>, alias: impl Into<String>) -> LogicalPlan {
+pub fn subquery_alias(input: impl Into<SharedPlan>, alias: impl Into<String>) -> LogicalPlan {
     LogicalPlan::SubqueryAlias {
         input: input.into(),
         alias: alias.into(),
@@ -4799,7 +4890,7 @@ mod argfix_tests {
     #[test]
     fn dropna_how_all_any_thresh_are_distinct() {
         let mk = |how: &str, thresh: Option<i32>| LogicalPlan::NADrop {
-            input: Arc::new(base()),
+            input: Arc::new(base()).into(),
             how: how.to_string(),
             min_non_null: thresh,
             columns: vec![],
@@ -4843,7 +4934,7 @@ mod argfix_tests {
         // As PySpark's: a bool, a double, a string, or a null replacement, as a literal of its
         // type.
         let p = LogicalPlan::NAReplace {
-            input: Arc::new(base()),
+            input: Arc::new(base()).into(),
             replacements: vec![
                 (
                     LiteralExpression::boolean(true),
@@ -4947,7 +5038,7 @@ mod argfix_tests {
     #[test]
     fn fillna_double_literal() {
         let p = LogicalPlan::NAFill {
-            input: Arc::new(base()),
+            input: Arc::new(base()).into(),
             fill_value: crate::row::Value::Double(1.5),
             columns: vec![],
         };
@@ -4974,8 +5065,8 @@ mod with_relations_tests {
         let ids = PlanIds::new();
         let df = Arc::new(range(0, 3, 1));
         let plan = Arc::new(LogicalPlan::WithRelations {
-            root: Arc::new(sql("SELECT * FROM v")),
-            references: vec![Arc::new(subquery_alias(df.clone(), "v"))],
+            root: Arc::new(sql("SELECT * FROM v")).into(),
+            references: vec![Arc::new(subquery_alias(df.clone(), "v")).into()],
         });
         let relation = relation_with_ids(&plan, &ids).unwrap();
         let Some(proto::relation::RelType::WithRelations(with)) = &relation.rel_type else {
@@ -5213,7 +5304,7 @@ mod inline_udtf_tests {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let group_map = |initial_fails: bool| {
             let initial = LogicalPlan::Project {
-                input: Arc::new(range(0, 1, 1)),
+                input: Arc::new(range(0, 1, 1)).into(),
                 columns: vec![Column::new(
                     ExpressionNode::CommonInlineUserDefinedFunction(Box::new(pickled_udf(
                         recording_pickler(&calls, "initial", initial_fails),
@@ -5222,11 +5313,11 @@ mod inline_udtf_tests {
                 )],
             };
             LogicalPlan::GroupMap {
-                input: Arc::new(range(0, 1, 1)),
+                input: Arc::new(range(0, 1, 1)).into(),
                 grouping_expressions: vec![Expression::column("id")],
                 func: pickled_udf(recording_pickler(&calls, "function", false)),
                 sorting_expressions: vec![],
-                initial_input: Some(Arc::new(initial)),
+                initial_input: Some(Arc::new(initial).into()),
                 initial_grouping_expressions: vec![Expression::column("id")],
                 is_map_groups_with_state: None,
                 output_mode: Some("append".to_string()),
@@ -5285,7 +5376,7 @@ mod placeholder_tests {
             let mut node = Arc::new(range(0, 3, 1));
             for _ in 0..200 {
                 node = Arc::new(LogicalPlan::Limit {
-                    input: node,
+                    input: node.into(),
                     limit: 3,
                 });
             }
@@ -6502,8 +6593,8 @@ mod deep_plan_tests {
         assert_eq!(chain(1).depth(), 1);
         assert_eq!(chain(5).depth(), 5);
         let with = LogicalPlan::WithRelations {
-            root: chain(3),
-            references: vec![chain(2), chain(7)],
+            root: chain(3).into(),
+            references: vec![chain(2).into(), chain(7).into()],
         };
         assert_eq!(with.depth(), 8);
     }
@@ -6514,8 +6605,8 @@ mod deep_plan_tests {
         let mut plan = Arc::new(range(0, 10, 1));
         for _ in 0..64 {
             plan = Arc::new(LogicalPlan::WithRelations {
-                root: Arc::clone(&plan),
-                references: vec![plan],
+                root: Arc::clone(&plan).into(),
+                references: vec![plan.into()],
             });
         }
         assert_eq!(plan.depth(), 65);
@@ -6561,7 +6652,7 @@ mod deep_plan_tests {
             );
         }
         Arc::new(LogicalPlan::Project {
-            input: chain(plan_levels),
+            input: chain(plan_levels).into(),
             columns: vec![crate::column::Column::new(expr)],
         })
     }
@@ -6602,7 +6693,7 @@ mod deep_plan_tests {
             crate::expression::SubqueryType::Exists,
         );
         let mut plan = Arc::new(LogicalPlan::Filter {
-            input: Arc::new(range(0, 10, 1)),
+            input: Arc::new(range(0, 10, 1)).into(),
             condition: crate::column::Column::new(Expression::new(ExpressionNode::Subquery(
                 Box::new(subquery),
             ))),
@@ -6743,7 +6834,7 @@ mod deep_plan_tests {
                 crate::expression::SubqueryType::Exists,
             );
             let filter = Arc::new(LogicalPlan::Filter {
-                input: Arc::new(range(0, 10, 1)),
+                input: Arc::new(range(0, 10, 1)).into(),
                 condition: crate::column::Column::new(Expression::new(ExpressionNode::Subquery(
                     Box::new(subquery),
                 ))),
@@ -6807,7 +6898,10 @@ mod deep_plan_tests {
             "UNSUPPORTED_OPERATION",
             &[("operation", &format!("data type {value}"))],
         );
-        Arc::new(LogicalPlan::Unbuildable { input, error })
+        Arc::new(LogicalPlan::Unbuildable {
+            input: input.into(),
+            error,
+        })
     }
 
     #[test]
@@ -6828,8 +6922,8 @@ mod deep_plan_tests {
         let left = unbuildable(Arc::new(range(0, 10, 1)), "left");
         let right = unbuildable(Arc::new(range(0, 10, 1)), "right");
         let both = LogicalPlan::SetOperation {
-            left: unbuildable(Arc::clone(&left), "outer left"),
-            right,
+            left: unbuildable(Arc::clone(&left), "outer left").into(),
+            right: right.into(),
             set_op_type: SetOpType::Union,
             is_all: true,
             by_name: true,
@@ -6860,7 +6954,7 @@ mod deep_plan_tests {
         };
         let filter = |input: Arc<LogicalPlan>, name: &str| {
             Arc::new(LogicalPlan::Filter {
-                input,
+                input: input.into(),
                 condition: unbuildable_column(name),
             })
         };
@@ -6883,7 +6977,7 @@ mod deep_plan_tests {
 
         let ids = Arc::new(PlanIds::new());
         let inner = Arc::new(LogicalPlan::Project {
-            input: Arc::new(range(0, 5, 1)),
+            input: Arc::new(range(0, 5, 1)).into(),
             columns: vec![crate::column::Column::new(Expression::function(
                 "max",
                 vec![Expression::column("id")],
@@ -6902,7 +6996,7 @@ mod deep_plan_tests {
         );
         let project = |expression: &Expression| {
             Arc::new(LogicalPlan::Project {
-                input: Arc::new(range(0, 3, 1)),
+                input: Arc::new(range(0, 3, 1)).into(),
                 columns: vec![crate::column::Column::new(expression.clone())],
             })
         };
@@ -6956,7 +7050,7 @@ mod deep_plan_tests {
             crate::expression::SubqueryType::Scalar,
         );
         let plan = Arc::new(LogicalPlan::Project {
-            input: Arc::new(range(0, 1, 1)),
+            input: Arc::new(range(0, 1, 1)).into(),
             columns: vec![crate::column::Column::new(Expression::new(
                 ExpressionNode::Subquery(Box::new(subquery)),
             ))],

@@ -973,6 +973,17 @@ relations. The doc-hidden `DataFrame::from_relation`, `SparkSession::execute_pla
 message passed as before is read everywhere, as it was; and the doc-hidden `plan::resolve_request`
 takes one and returns the request, where it changed a request in place.
 
+The input fields of the `LogicalPlan` variants (`input`, `left`, `right`, `other`, `root`,
+`references` and `initial_input`) are `plan::SharedPlan`s, where they were `Arc<LogicalPlan>`s,
+but for the `input` of `MlTransform`, which is an `Arc<LogicalPlan>`, as the plan of a DataFrame is.
+A `SharedPlan` shares its node as the `Arc` did, and tells whether a pickler or an owner of a
+relation is at or below it (`SharedPlan::holds_objects`), as `Expression::holds_objects` tells of an
+expression, which a binding of another language reads to skip the parts of plans and expressions
+of none of its objects. When constructing variants directly, write `SharedPlan::new(child)` or
+`.into()` of a `LogicalPlan` or of an `Arc<LogicalPlan>`; `arc` and `into_arc` give the `Arc`, and
+the node dereferences as the `Arc` did. The plan-building helpers take `impl Into<SharedPlan>`, so
+they accept an owned `LogicalPlan`, a `Box<LogicalPlan>` or an `Arc<LogicalPlan>`, as before.
+
 ## Native ML objects: fetch, summaries, save and load (Rust API)
 
 `spark_connect::ml` reads and writes the server-side objects of Spark Connect ML as PySpark 4.3.0

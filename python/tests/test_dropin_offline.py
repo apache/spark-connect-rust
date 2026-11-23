@@ -3602,8 +3602,9 @@ def test_pickled_deep_dataframes_and_columns_of_udfs_pickle_their_functions_as_p
         thread = threading.Thread(target=requests)
     finally:
         threading.stack_size(size)
-    thread.start()
-    thread.join()
+    with _watching_reported_parts():
+        thread.start()
+        thread.join()
     assert errors == []
     _PICKLING["tag"] = "<at the pickle>"
 
@@ -4295,12 +4296,17 @@ def test_writers_shared_by_threads_run_their_requests_as_pyspark(mock_connect):
     # As PySpark's: a writer is a plain Python object, so threads may call its methods while
     # a request waits for the server, which releases the GIL. Two threads save with one
     # DataFrameWriter and one thread appends with a DataFrameWriterV2, while the main thread
-    # sets the format and the provider of the writers meanwhile.
+    # sets the format and the provider of the writers meanwhile. The plans of the writers hold the
+    # function of a UDF, whose parts the collector sees: no write clones one that it does not
+    # name.
+    from pyspark.sql import functions as F
+
     spark, service = mock_connect
-    writer = spark.range(1).write.mode("overwrite")
-    writer_v2 = spark.range(1).writeTo("shared_writer")
+    frame = spark.range(1).select("id", F.udf(lambda x: x, "long")("id").alias("u"))
+    writer = frame.write.mode("overwrite")
+    writer_v2 = frame.writeTo("shared_writer")
     service.block_execute = True
-    with ThreadPoolExecutor(max_workers=3) as pool:
+    with _watching_reported_parts(), ThreadPoolExecutor(max_workers=3) as pool:
         requests = [pool.submit(writer.parquet, f"/tmp/shared_writer/p{i}") for i in range(2)]
         requests.append(pool.submit(writer_v2.append))
         try:
@@ -16334,6 +16340,38 @@ def test_the_expression_of_a_column_of_no_python_object_is_not_tracked_by_the_co
     assert freed() is None
 
 
+@contextlib.contextmanager
+def _watching_reported_parts():
+    # Watch the parts that the collector sees, on a thread of its own, while the threads of the
+    # body run their calls: a part that a call clones without the GIL, which it does not name,
+    # changes while the watch holds the GIL (see
+    # test_no_part_that_the_collector_sees_is_cloned_without_the_gil_by_a_call).
+    import threading
+
+    from pyspark._pyspark import _watch_reported_parts
+
+    stop = threading.Event()
+    watch = {"calls": 0, "changes": 0, "logs": []}
+
+    def run_watch():
+        while not stop.is_set():
+            _, _, changes, logs = _watch_reported_parts(300)
+            watch["calls"] += 1
+            watch["changes"] += changes
+            watch["logs"].extend(logs)
+            time.sleep(0.0002)
+
+    watcher = threading.Thread(target=run_watch)
+    watcher.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        watcher.join(60)
+    assert watch["calls"] > 0
+    assert watch["changes"] == 0, "\n".join(watch["logs"][:20])
+
+
 def test_holders_that_share_a_plan_are_made_and_freed_on_threads_as_the_collector_runs(
         mock_connect):
     # Threads that make and drop holders that share plans of the functions of UDFs and of plans
@@ -16396,10 +16434,11 @@ def test_holders_that_share_a_plan_are_made_and_freed_on_threads_as_the_collecto
 
     threads = [threading.Thread(target=worker) for _ in range(3)]
     threads.append(threading.Thread(target=collector))
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join()
+    with _watching_reported_parts():
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
     assert not problems
     gc.collect()
     assert jobs and all(job() is None for job in jobs)
@@ -16491,12 +16530,13 @@ def test_requests_that_build_plans_without_the_gil_keep_their_functions_as_the_c
         corrupted = None
         deadline = time.monotonic() + 4
         try:
-            while time.monotonic() < deadline and corrupted is None:
-                gc.collect()
-                collections += 1
-                if not alive():
-                    corrupted = collections
-                time.sleep(random.random() * 0.004)
+            with _watching_reported_parts():
+                while time.monotonic() < deadline and corrupted is None:
+                    gc.collect()
+                    collections += 1
+                    if not alive():
+                        corrupted = collections
+                    time.sleep(random.random() * 0.004)
         finally:
             stop.set()
             for thread in threads:

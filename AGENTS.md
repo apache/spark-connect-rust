@@ -549,7 +549,10 @@ For every method matching a pyspark name:
   reference to its part is of a holder that reports it), which is safe but leaves its cycles
   uncollected. A field of the core that holds a part goes in `spark_connect::gc` (`Part::held`),
   whose tests check that the references that it gives are every reference to each part: a
-  reference given twice would let the collector free what a holder still uses.
+  reference given twice would let the collector free what a holder still uses. Of the same walk,
+  each node tells, as it is made, whether a pickler or an owner is at or below it
+  (`PartRef::holds_objects`, of the inputs of plan nodes, `plan::SharedPlan`, and of the nodes of
+  expressions), so that the binding neither walks nor remembers a part of none.
   The collector must get the same references of an object in each of its passes, and the Rust code
   that runs without the GIL clones and drops parts meanwhile (a request builds its plan without
   it), which changes whether a part is covered: so every release of the GIL is counted for the

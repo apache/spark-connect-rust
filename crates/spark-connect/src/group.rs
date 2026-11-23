@@ -2,8 +2,6 @@
 //!
 //! Mirroring `pyspark.sql.GroupedData`.
 
-use std::sync::Arc;
-
 use spark_connect_core::error::{Result, SparkError, SparkErrorKind};
 
 use crate::column::{expressions_of, Column};
@@ -359,7 +357,7 @@ impl GroupedData {
     fn group_map(&self, func: CommonInlineUserDefinedFunctionExpression) -> DataFrame {
         let schema = func.python_udf.output_type.clone();
         let plan = LogicalPlan::GroupMap {
-            input: Arc::clone(&self.dataframe.plan),
+            input: self.dataframe.shared_plan(),
             grouping_expressions: self.grouping_expressions(),
             func,
             sorting_expressions: vec![],
@@ -410,7 +408,7 @@ impl GroupedData {
         timeout_conf: &str,
     ) -> DataFrame {
         let plan = LogicalPlan::ApplyInPandasWithState {
-            input: Arc::clone(&self.dataframe.plan),
+            input: self.dataframe.shared_plan(),
             grouping_expressions: self.grouping_expressions(),
             func,
             output_schema: output_schema.to_string(),
@@ -477,14 +475,11 @@ impl GroupedData {
         output_schema: Option<DataType>,
     ) -> DataFrame {
         let (initial_input, initial_grouping_expressions) = match initial_state {
-            Some(gd) => (
-                Some(Arc::clone(&gd.dataframe.plan)),
-                gd.grouping_expressions(),
-            ),
+            Some(gd) => (Some(gd.dataframe.shared_plan()), gd.grouping_expressions()),
             None => (None, vec![]),
         };
         let plan = LogicalPlan::GroupMap {
-            input: Arc::clone(&self.dataframe.plan),
+            input: self.dataframe.shared_plan(),
             grouping_expressions: self.grouping_expressions(),
             func,
             sorting_expressions: vec![],
@@ -529,7 +524,7 @@ impl GroupedData {
             .collect();
 
         let plan = LogicalPlan::Aggregate {
-            input: Arc::clone(&self.dataframe.plan),
+            input: self.dataframe.shared_plan(),
             group_type: self.group_type,
             grouping_expressions,
             aggregate_expressions: expressions_of(expressions),
@@ -777,7 +772,7 @@ impl StatFunctions {
     /// Compute a cross-tabulation of two columns.
     pub fn crosstab(&self, col1: &str, col2: &str) -> DataFrame {
         let plan = LogicalPlan::StatCrosstab {
-            input: Arc::clone(&self.dataframe.plan),
+            input: self.dataframe.shared_plan(),
             col1: col1.to_string(),
             col2: col2.to_string(),
         };
@@ -791,7 +786,7 @@ impl StatFunctions {
         support: f64,
     ) -> DataFrame {
         let plan = LogicalPlan::StatFreqItems {
-            input: Arc::clone(&self.dataframe.plan),
+            input: self.dataframe.shared_plan(),
             columns: columns.into_iter().map(Into::into).collect(),
             support,
         };
@@ -832,7 +827,7 @@ impl StatFunctions {
             None
         };
         let plan = LogicalPlan::StatApproxQuantile {
-            input: Arc::clone(&self.dataframe.plan),
+            input: self.dataframe.shared_plan(),
             columns: columns.into_iter().map(Into::into).collect(),
             probabilities,
             relative_error,
@@ -861,7 +856,7 @@ impl StatFunctions {
             ));
         }
         let plan = LogicalPlan::StatCorr {
-            input: Arc::clone(&self.dataframe.plan),
+            input: self.dataframe.shared_plan(),
             col1: col1.to_string(),
             col2: col2.to_string(),
             method: method.to_string(),
@@ -878,7 +873,7 @@ impl StatFunctions {
     /// Executes the stat aggregation and returns the resulting `f64`.
     pub fn cov(&self, col1: &str, col2: &str) -> Result<f64> {
         let plan = LogicalPlan::StatCov {
-            input: Arc::clone(&self.dataframe.plan),
+            input: self.dataframe.shared_plan(),
             col1: col1.to_string(),
             col2: col2.to_string(),
         };
@@ -948,7 +943,7 @@ impl StatFunctions {
             ));
         }
         let plan = LogicalPlan::StatSampleBy {
-            input: Arc::clone(&self.dataframe.plan),
+            input: self.dataframe.shared_plan(),
             col: col.into().expression().clone(),
             fractions,
             seed: Some(seed.unwrap_or_else(crate::dataframe::random_seed)),
@@ -1079,9 +1074,9 @@ impl CoGroupedData {
     fn cogroup_map(&self, func: CommonInlineUserDefinedFunctionExpression) -> DataFrame {
         let schema = func.python_udf.output_type.clone();
         let plan = LogicalPlan::CoGroupMap {
-            input: Arc::clone(&self.left.dataframe.plan),
+            input: self.left.dataframe.shared_plan(),
             input_grouping_expressions: self.left.grouping_expressions(),
-            other: Arc::clone(&self.right.dataframe.plan),
+            other: self.right.dataframe.shared_plan(),
             other_grouping_expressions: self.right.grouping_expressions(),
             func,
         };
@@ -1093,6 +1088,7 @@ impl CoGroupedData {
 mod tests {
     use super::*;
     use crate::session::SparkSession;
+    use std::sync::Arc;
 
     fn session() -> SparkSession {
         SparkSession::builder()
@@ -1256,7 +1252,7 @@ mod tests {
         let LogicalPlan::Aggregate { input, .. } = count.plan.as_ref() else {
             panic!("expected aggregate");
         };
-        assert!(Arc::ptr_eq(input, &df.plan));
+        assert!(Arc::ptr_eq(input.arc(), &df.plan));
 
         let stat = df.stat();
         assert!(Arc::ptr_eq(&stat.dataframe.plan, &df.plan));
@@ -1264,7 +1260,7 @@ mod tests {
         let LogicalPlan::StatCrosstab { input, .. } = result.plan.as_ref() else {
             panic!("expected crosstab");
         };
-        assert!(Arc::ptr_eq(input, &df.plan));
+        assert!(Arc::ptr_eq(input.arc(), &df.plan));
     }
 
     #[test]
@@ -1523,7 +1519,7 @@ mod tests {
             ]
         };
         let before = LogicalPlan::Aggregate {
-            input: Arc::clone(&df.plan),
+            input: df.shared_plan(),
             group_type: AggregateGroupType::GroupBy,
             grouping_expressions: vec![col("id").expression().clone()],
             aggregate_expressions: expressions(),

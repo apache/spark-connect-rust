@@ -38,7 +38,7 @@ fn udf() -> CommonInlineUserDefinedFunctionExpression {
 #[test]
 fn map_partitions_to_proto() {
     let p = LogicalPlan::MapPartitions {
-        input: Arc::new(base()),
+        input: Arc::new(base()).into(),
         func: udf(),
         is_barrier: true,
         profile_id: None,
@@ -55,7 +55,7 @@ fn map_partitions_reads_the_id_of_its_profile_reader_when_it_is_built() {
     // the place of `profile_id`; a reader that fails sends no id.
     let sent_id = |reader: spark_connect::udf::CommandPickler| {
         let p = LogicalPlan::MapPartitions {
-            input: Arc::new(base()),
+            input: Arc::new(base()).into(),
             func: udf(),
             is_barrier: false,
             profile_id: Some(1),
@@ -78,7 +78,7 @@ fn map_partitions_reads_the_id_of_its_profile_reader_when_it_is_built() {
 fn group_map_to_proto_plain_and_stateful() {
     // Plain applyInPandas shape: every optional/stateful field empty (the `None` branches).
     let plain = LogicalPlan::GroupMap {
-        input: Arc::new(base()),
+        input: Arc::new(base()).into(),
         grouping_expressions: vec![col_expr("g")],
         func: udf(),
         sorting_expressions: vec![],
@@ -95,11 +95,11 @@ fn group_map_to_proto_plain_and_stateful() {
     // Fully-stateful shape: exercise the `Some(...)` branches for initial_input,
     // state_schema, and transform_with_state_info.
     let stateful = LogicalPlan::GroupMap {
-        input: Arc::new(base()),
+        input: Arc::new(base()).into(),
         grouping_expressions: vec![col_expr("g")],
         func: udf(),
         sorting_expressions: vec![col_expr("s")],
-        initial_input: Some(Arc::new(base())),
+        initial_input: Some(Arc::new(base()).into()),
         initial_grouping_expressions: vec![col_expr("ig")],
         is_map_groups_with_state: Some(true),
         output_mode: Some("append".to_string()),
@@ -117,9 +117,9 @@ fn group_map_to_proto_plain_and_stateful() {
 #[test]
 fn co_group_map_to_proto() {
     let p = LogicalPlan::CoGroupMap {
-        input: Arc::new(base()),
+        input: Arc::new(base()).into(),
         input_grouping_expressions: vec![col_expr("a")],
-        other: Arc::new(base()),
+        other: Arc::new(base()).into(),
         other_grouping_expressions: vec![col_expr("b")],
         func: udf(),
     };
@@ -129,8 +129,8 @@ fn co_group_map_to_proto() {
 #[test]
 fn nearest_by_join_to_proto() {
     let p = LogicalPlan::NearestByJoin {
-        left: Arc::new(base()),
-        right: Arc::new(base()),
+        left: Arc::new(base()).into(),
+        right: Arc::new(base()).into(),
         ranking_expression: col_expr("dist"),
         num_results: 5,
         join_type: "inner".to_string(),
