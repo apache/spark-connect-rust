@@ -37617,8 +37617,9 @@ def test_a_command_expression_too_deep_to_send_raises_recursion_error_as_pyspark
     # about 1,000 levels as a merge condition, a condition or an assignment of a merge clause (as
     # the clause method adds the clause, which is not added then), a partitioning column or an
     # overwrite condition, and as it pickles a Column or builds its to_plan; 20,000 levels killed
-    # the process, and pickling took minutes. 744 additions, the 745 levels of the bound, are sent,
-    # but as a partitioning column of writeTo, whose command is PySpark's (see below).
+    # the process, and pickling took minutes. 744 additions, the 745 levels of the bound, are sent
+    # as an overwrite condition: the partitioning columns of writeTo and the merges are of PySpark's
+    # commands, which refuse a message of more than 100 levels (see below).
     import pickle
 
     from pyspark.sql import functions as F
@@ -37660,19 +37661,29 @@ def test_a_command_expression_too_deep_to_send_raises_recursion_error_as_pyspark
     merge = parse_message(parse_message(plan[2][0])[16][0])
     assert [len(merge.get(field, [])) for field in [4, 5, 6]] == [1, 0, 0]
     at_bound = chained(744)
-    df.mergeInto("t", at_bound).whenMatched(at_bound).update({"v": at_bound}).merge()
     df.writeTo("t").overwrite(at_bound)
-    assert len(service.execute_requests) == 3
-    # The command of DataFrameWriterV2 is PySpark's, which extends its repeated field with the
-    # messages of the partitioning columns: protobuf copies each of its parse, which refuses one of
-    # more than 100 levels, of about 50 additions, with its DecodeError, as PySpark's does.
+    assert len(service.execute_requests) == 2
+    # The commands of DataFrameWriterV2 and of MergeIntoWriter are PySpark's, which extend their
+    # repeated fields with the messages of the partitioning columns, and make the messages of the
+    # merge of those of its conditions and assignments: protobuf copies each of its parse, which
+    # refuses one of more than 100 levels, of about 50 additions, with its DecodeError, as PySpark's
+    # does.
     from google.protobuf.message import DecodeError
 
-    df.writeTo("t").partitionedBy(chained(40)).create()
+    shallow = chained(40)
+    df.writeTo("t").partitionedBy(shallow).create()
+    df.mergeInto("t", shallow).whenMatched(shallow).update({"v": shallow}).merge()
     assert len(service.execute_requests) == 4
     for additions in [60, 744]:
-        with pytest.raises(DecodeError, match="Exceeded upb_DecodeOptions_MaxDepth"):
-            df.writeTo("t").partitionedBy(chained(additions)).create()
+        deep = chained(additions)
+        for call in [
+            lambda: df.writeTo("t").partitionedBy(deep).create(),
+            lambda: df.mergeInto("t", deep).whenMatched().delete().merge(),
+            lambda: df.mergeInto("t", F.col("id")).whenMatched(deep).delete().merge(),
+            lambda: df.mergeInto("t", F.col("id")).whenMatched().update({"v": deep}).merge(),
+        ]:
+            with pytest.raises(DecodeError, match="Exceeded upb_DecodeOptions_MaxDepth"):
+                call()
     assert len(service.execute_requests) == 4
     assert pickle.dumps(at_bound)
 

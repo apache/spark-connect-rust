@@ -44,8 +44,8 @@
 //! ([`SharedPart::reported`]):
 //! - a call that clones and drops only the parts that the holders that it names hold, as a request
 //!   of a DataFrame builds its plan ([`in_use`], [`of_parts`]), or those that values of the core
-//!   that it holds hold, such as the clone of the DataFrame that an ML fit is of, or the copy of
-//!   the state of a writer that a write runs on ([`in_use_of_values`], [`of_values`]): the
+//!   that it holds hold, such as the clone of the DataFrame that an ML fit is of
+//!   ([`in_use_of_values`], [`of_values`]): the
 //!   [`SharedPart`]s that those reach are busy while it runs ([`Busy`]), and report nothing, and so
 //!   is one that is made meanwhile for a part of the values that had none; the others report as
 //!   they would. A call marks the [`SharedPart`]s of the parts that it names, whatever the parts
@@ -1518,17 +1518,6 @@ impl Parts {
 impl Drop for Parts {
     fn drop(&mut self) {
         self.release();
-    }
-}
-
-/// Release the GIL until no call of the binding without the GIL is counted, as one of another
-/// test may be: none starts or ends while the calling thread holds the GIL. For tests of what the
-/// collector sees.
-#[cfg(test)]
-#[allow(clippy::disallowed_methods)]
-pub(crate) fn wait_for_no_counted_call(py: Python<'_>) {
-    while DETACHED.load(Ordering::SeqCst) != 0 {
-        py.detach(|| std::thread::sleep(std::time::Duration::from_millis(1)));
     }
 }
 

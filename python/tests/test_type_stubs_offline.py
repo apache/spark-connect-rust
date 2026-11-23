@@ -45,8 +45,8 @@ UNDECLARED = {"TYPE_CHECKING"}
 UNDECLARED_OF = {
     "pyspark.sql.types": {"dt", "size"},
     # The classic readers and writers, of the aliases under which PySpark Connect's modules, which
-    # the drop-in's readers and writers are adapted from, import them for their docstrings, which
-    # the stubs do not re-export.
+    # the drop-in's readers and writers (and merge writer) are adapted from, import them for their
+    # docstrings, which the stubs do not re-export.
     "pyspark.sql.connect.readwriter": {
         "PySparkDataFrameReader",
         "PySparkDataFrameWriter",
@@ -56,6 +56,7 @@ UNDECLARED_OF = {
         "PySparkDataStreamReader",
         "PySparkDataStreamWriter",
     },
+    "pyspark.sql.connect.merge": {"PySparkMergeIntoWriter"},
 }
 
 # Private functions of PySpark's modules that applications and libraries use, which the stubs

@@ -65,10 +65,7 @@ mod window;
 use catalog::PyCatalog;
 use column::PyColumn;
 use conf::PyRuntimeConf;
-use dataframe::{
-    PyDataFrame, PyDataFrameNaFunctions, PyLocalRowIterator, PyMergeIntoWriter, PyWhenMatched,
-    PyWhenNotMatched, PyWhenNotMatchedBySource,
-};
+use dataframe::{PyDataFrame, PyDataFrameNaFunctions, PyLocalRowIterator};
 use datasource::PyDataSourceRegistration;
 use group::{PyCoGroupedData, PyGroupedData};
 pub(crate) use options::str_argument;
@@ -186,15 +183,6 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     }
     m.add_class::<PyDataFrame>()?;
     m.add_class::<PyDataFrameNaFunctions>()?;
-    m.add_class::<PyMergeIntoWriter>()?;
-    m.add_class::<PyWhenMatched>()?;
-    m.add_class::<PyWhenNotMatched>()?;
-    m.add_class::<PyWhenNotMatchedBySource>()?;
-    // As PySpark Connect's classes nested in MergeIntoWriter, of which they are attributes.
-    for name in ["WhenMatched", "WhenNotMatched", "WhenNotMatchedBySource"] {
-        m.getattr(name)?
-            .setattr("__qualname__", format!("MergeIntoWriter.{name}"))?;
-    }
     m.add_class::<PyColumn>()?;
     column::install_getattr(m)?;
     row::register(m)?;
@@ -425,8 +413,8 @@ fn bare_type_names(m: &Bound<'_, PyModule>) -> PyResult<()> {
 /// expression of a Column (`Column._expr`), the attribute of a param of an ML class, the exit
 /// hook and the active session of the sessions (`SparkSession._active_session`), the handle of a
 /// session that a client holds, and the objects that the garbage collector sees of the parts of
-/// plans and expressions and of the states of the writers (see `gc`).
-fn classes_outside_module(py: Python<'_>) -> [Bound<'_, pyo3::types::PyType>; 7] {
+/// plans and expressions (see `gc`).
+fn classes_outside_module(py: Python<'_>) -> [Bound<'_, pyo3::types::PyType>; 6] {
     [
         py.get_type::<column::PyColumnExpression>(),
         py.get_type::<ml::params_api::PyParamAttribute>(),
@@ -434,6 +422,5 @@ fn classes_outside_module(py: Python<'_>) -> [Bound<'_, pyo3::types::PyType>; 7]
         py.get_type::<session::PyActiveSession>(),
         py.get_type::<session::PyWeakSession>(),
         py.get_type::<gc::SharedPart>(),
-        py.get_type::<dataframe::WriterParts>(),
     ]
 }
