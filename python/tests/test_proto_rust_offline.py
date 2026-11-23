@@ -703,6 +703,10 @@ class _Lockstep:
     def __init__(self, upb, seed):
         self.upb = upb
         self.rng = random.Random(seed)
+        # The objects of the fields read at a comparison (a message, a container, its first
+        # message), of either runtime, held so that each later comparison tells whether the field
+        # gives the same object still (see `compare_identities`).
+        self.kept = []
 
     def value(self, f):
         rng = self.rng
@@ -827,6 +831,29 @@ class _Lockstep:
         except KeyError:
             text = None
         assert text is None or str(b) == text, f"str() after {where}"
+        self.compare_identities(a, b, where)
+
+    def compare_identities(self, a, b, where):
+        """Whether each field of a message (a message field, a repeated message field and its first
+        message) gives the object that it gave at an earlier comparison, of either runtime alike;
+        the objects that it gives now are held for the later ones."""
+
+        def objects(m, f):
+            value = getattr(m, f.name)
+            if not f.is_repeated:
+                return [value]
+            return [value] + ([value[0]] if len(value) else [None])
+
+        for f in a.DESCRIPTOR.fields:
+            if f.type != f.TYPE_MESSAGE or f.message_type.GetOptions().map_entry:
+                continue
+            now_a, now_b = objects(a, f), objects(b, f)
+            for ka, kb, name, then_a, then_b in self.kept:
+                if ka is a and kb is b and name == f.name:
+                    same = [x is y for x, y in zip(then_a, now_a)], [x is y for x, y in zip(then_b, now_b)]
+                    assert same[0] == same[1], f"the objects of {name} (upb's, ours: {same}) after {where}"
+            if not any(ka is a and name == f.name for ka, _, name, _, _ in self.kept):
+                self.kept.append((a, b, f.name, now_a, now_b))
 
 
 @pytest.mark.parametrize("seed", range(8))
@@ -8383,3 +8410,212 @@ def test_unknown_field_pairs_of_a_collection_find_the_message():
         gc.callbacks.remove(callback)
     assert state["errors"] == [] and len(pairs) == 200
     assert b"".join(tag + value for tag, value in pairs) == unknown
+
+
+
+def test_threads_that_read_change_and_copy_the_same_copies_at_once_see_them_whole():
+    # Threads that read, change, replace and copy the same native copies at once, of a switch
+    # interval of a microsecond, so that one takes the GIL at the checkpoints of the making of
+    # the objects of a container of more than 1,024 messages: one container of the field, of
+    # every message of it and of both additions, and each copy of its own.
+    count = 3000
+    element = proto.Expression.Literal(integer=1)
+    source = proto.Expression.Literal.Array(elements=[element] * count)
+    other = proto.Expression.Literal.Array(elements=[proto.Expression.Literal(string="o")] * 7)
+    problems = []
+
+    def holder():
+        return proto.Expression.Literal(array=source)
+
+    def run_threads(*targets):
+        threads = [threading.Thread(target=target) for target in targets]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+    interval = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+    try:
+        for round_ in range(30):
+            h = holder()
+            seen = [None, None]
+
+            def reader(i, h=h, seen=seen):
+                seen[i] = h.array.elements
+
+            run_threads(lambda: reader(0), lambda: reader(1))
+            if seen[0] is not seen[1] or len(seen[0]) != count or seen[0] is not h.array.elements:
+                problems.append(("two readers", round_))
+
+            h = holder()
+
+            def adder(value, h=h):
+                h.array.elements.add().integer = value
+
+            run_threads(lambda: adder(5), lambda: adder(6))
+            values = [e.integer for e in h.array.elements]
+            if len(values) != count + 2 or sorted(values[-2:]) != [5, 6] or len(source.elements) != count:
+                problems.append(("two adders", round_, len(values)))
+
+            h = holder()
+            got = {}
+
+            def counter(h=h, got=got):
+                got["n"] = len(h.array.elements)
+
+            run_threads(counter, lambda h=h: h.array.CopyFrom(other))
+            if got["n"] not in (count, 7) or h.array.SerializeToString() != other.SerializeToString():
+                problems.append(("a reader and a CopyFrom", round_, got["n"]))
+
+            h = holder()
+            made = {}
+
+            def changer(h=h):
+                h.array.elements[0].integer = 9
+
+            def copier(h=h, made=made):
+                made["copy"] = proto.Expression(literal=h)
+
+            run_threads(changer, copier)
+            first = made["copy"].literal.array.elements[0].integer
+            made["copy"].literal.array.elements[1].integer = 4
+            if first not in (1, 9) or h.array.elements[0].integer != 9 or h.array.elements[1].integer != 1:
+                problems.append(("a change and a copy", round_, first))
+    finally:
+        sys.setswitchinterval(interval)
+    assert problems == [] and len(source.elements) == count and source.elements[1].integer == 1, problems
+
+
+def test_a_signal_during_the_first_read_of_a_copy_leaves_it_whole():
+    # The first read of a repeated message field of a copy of many messages makes their objects
+    # of checkpoints, every 1,024 messages: a signal there raises the exception of its handler
+    # from the read, as from the other operations of many steps, and the message stays whole, its
+    # field read again in full, of one object from then on.
+    import signal
+
+    count = 200_000
+    source = proto.Expression.Literal.Array(elements=[proto.Expression.Literal(integer=1)] * count)
+    data = source.SerializeToString()
+
+    class Stop(Exception):
+        pass
+
+    def handler(signum, frame):
+        raise Stop()
+
+    previous = signal.signal(signal.SIGALRM, handler)
+    outcomes = []
+    try:
+        for attempt in range(10):
+            h = proto.Expression.Literal(array=source)
+            array = h.array  # of one level: its elements stay native
+            signal.setitimer(signal.ITIMER_REAL, 0.0005 + attempt * 0.0002)
+            try:
+                len(array.elements)
+                outcomes.append("completed")
+            except Stop:
+                outcomes.append("interrupted")
+            finally:
+                signal.setitimer(signal.ITIMER_REAL, 0)
+            again = array.elements
+            assert len(again) == count and again is array.elements, attempt
+            assert array.SerializeToString() == data and h == proto.Expression.Literal(array=source), attempt
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+    assert "interrupted" in outcomes, outcomes
+
+
+def test_copies_of_copies_across_a_registration_are_of_the_classes_of_their_copy():
+    # A copy of a copy made after another class of its type is registered clones the native values
+    # that it shares at the new generation, so its objects, of any level, are of the new class,
+    # where those of the first copy stay of the class registered when it was made; of a message of
+    # thousands of levels, on a thread of a small stack.
+    script = """
+        import copy
+        import json
+        import threading
+
+        import pyspark.sql.connect.proto as proto
+        from pyspark import _pyspark
+        from pyspark.sql.connect.proto import _rust
+        from tests.test_proto_rust_offline import _relation_bytes
+
+        LEVELS = 3000
+        results = {}
+
+
+        def run():
+            data = _relation_bytes(LEVELS, lambda level: level % 7 == 0)
+            deep = _pyspark._proto_parse_deep(proto.Relation, data)
+            first = copy.deepcopy(deep)
+            other = type(
+                "Relation",
+                (_pyspark.ProtoMessage, _rust._MessageBase),
+                {"__slots__": (), "DESCRIPTOR": proto.Relation.DESCRIPTOR},
+            )
+            _pyspark._proto_register_classes({"spark.connect.Relation": other})
+            try:
+                second = copy.deepcopy(first)
+                third = proto.Relation()
+                third.CopyFrom(first)
+                results["copies"] = second.SerializeToString() == data and third == first
+                walk = second
+                for _ in range(LEVELS):
+                    walk = walk.limit.input
+                results["the bottom of the copy of the copy"] = type(walk) is other
+                walk = first
+                for _ in range(100):
+                    walk = walk.limit.input
+                results["the objects of the first copy"] = type(walk) is proto.Relation
+            finally:
+                _pyspark._proto_register_classes({"spark.connect.Relation": proto.Relation})
+            results["after"] = first == deep and second == deep and first.ByteSize() == len(data)
+
+
+        threading.stack_size(512 * 1024)
+        thread = threading.Thread(target=run)
+        thread.start()
+        thread.join()
+        print(json.dumps(results))
+        """
+    assert _run_script(script) == {
+        "copies": True,
+        "the bottom of the copy of the copy": True,
+        "the objects of the first copy": True,
+        "after": True,
+    }
+
+
+def _clear_field_of_a_member_cases(C):
+    """ClearField of a member of a oneof that the message does not hold, of an unset child of it
+    that Python holds or not."""
+    R = C("spark.connect.Relation")
+
+    def run(hold, change):
+        a = R()
+        if hold:
+            held = a.crosstab
+        else:
+            a.crosstab  # noqa: B018 (read, and dropped at once)
+            held = None
+        change(a)
+        a.ClearField("crosstab")
+        return [_hex(a), a.WhichOneof("rel_type"), held is not None and held is a.crosstab]
+
+    return {
+        "held, the other set by a read": _outcome(lambda: run(True, lambda a: setattr(a.show_string, "vertical", True))),
+        "held, the other of CopyFrom": _outcome(
+            lambda: run(True, lambda a: a.show_string.CopyFrom(C("spark.connect.ShowString")(num_rows=3)))
+        ),
+        "not held": _outcome(lambda: run(False, lambda a: setattr(a.show_string, "vertical", True))),
+        "held, none set": _outcome(lambda: run(True, lambda a: None)),
+    }
+
+
+def test_clear_field_of_a_member_of_an_unset_child_held_clears_its_oneof_as_upbs(upb):
+    # As upb's, whose ClearField sets an unset child of the field that Python holds in its message
+    # first (its `EnsureReified`), so the member of the oneof that the message holds is cleared;
+    # of one that Python no longer holds (upb holds its unset children weakly), it is not.
+    assert _clear_field_of_a_member_cases(ours) == _clear_field_of_a_member_cases(upb)

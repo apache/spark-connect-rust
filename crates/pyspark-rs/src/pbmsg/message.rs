@@ -2550,7 +2550,17 @@ impl PyMessage {
         if let Some(map) = map {
             map.bind(py).borrow_mut().new_version();
         }
-        slf.borrow_mut().clear_index(py, index);
+        let mut me = slf.borrow_mut();
+        // As upb's, which sets an unset child of the field that Python holds in the message first
+        // (its `EnsureReified`), then clears the field: so the member of its oneof that the
+        // message holds is cleared too. (upb holds its unset children weakly, so one that Python
+        // no longer holds is not: the message's own reference is the only one of it then.)
+        // SAFETY: the child is a live object, which the message holds.
+        let held = |child: &Py<PyMessage>| unsafe { pyo3::ffi::Py_REFCNT(child.as_ptr()) } > 1;
+        if me.lazy_child(index).is_some_and(held) {
+            me.clear_oneof_siblings(py, index);
+        }
+        me.clear_index(py, index);
         Ok(())
     }
 
