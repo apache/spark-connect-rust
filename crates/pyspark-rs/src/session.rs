@@ -13,7 +13,7 @@ use crate::datasource::PyDataSourceRegistration;
 use crate::errors::ResultExt;
 use crate::interrupt::interruptible;
 use crate::options::DefaultedOption;
-use crate::streaming::{PyDataStreamReader, PyStreamingQueryManager};
+use crate::streaming::PyStreamingQueryManager;
 
 // Python wrapper for a Spark session builder.
 //
@@ -1137,43 +1137,6 @@ fn registered_session_object(
                 .try_borrow()
                 .is_ok_and(|object| object.session.is_same_session(session))
         })
-}
-
-/// The session of the constructor `cls(client)` of an object of a session, as the `__new__` of
-/// a native class that takes the arguments of the `__init__` of a subclass too, as the
-/// `object.__new__` of PySpark's plain classes does: the first argument that is a session, of
-/// the keyword `name`, the positional arguments and the other keyword arguments, so that the
-/// `__init__` of a subclass names and orders its arguments as it likes. Without one, the session
-/// of no server ([`unconnected_session`]), until the `__init__` of the class gives the object a
-/// session, as PySpark's `__init__` sets it: so an unpickle, which makes the object of its class
-/// without arguments, makes one, and the `__init__` of the class, or that of a subclass, raises
-/// the errors of the arguments, as PySpark's (`DataFrameReader.__init__() missing 1 required
-/// positional argument: 'client'`).
-pub(crate) fn constructor_session(
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-    name: &str,
-) -> PyResult<SparkSession> {
-    let keyword = match kwargs {
-        Some(kwargs) => kwargs.get_item(name)?,
-        None => None,
-    };
-    let mut given: Vec<Bound<'_, PyAny>> = keyword.into_iter().collect();
-    given.extend(args.iter());
-    if let Some(kwargs) = kwargs {
-        for (key, value) in kwargs.iter() {
-            if !key.eq(name)? {
-                given.push(value);
-            }
-        }
-    }
-    match given
-        .into_iter()
-        .find_map(|value| value.cast_into::<PySparkSession>().ok())
-    {
-        Some(session) => Ok(session.borrow().session.clone()),
-        None => unconnected_session(),
-    }
 }
 
 /// The session of no server, of the objects that `__new__` makes before their `__init__` gives
@@ -4446,21 +4409,39 @@ impl PySparkSession {
             .unbind())
     }
 
-    // DataFrameReader for batch reads (`spark.read`).
+    // DataFrameReader for batch reads (`spark.read`): a new one at each access, as PySpark's
+    // `DataFrameReader(self)`, of PySpark Connect's class (`pyspark.sql.connect.readwriter`).
     #[getter]
     #[pyo3(name = "read")]
     #[doc = connect_doc!(SparkSession.read)]
-    fn read(&self) -> crate::readwriter::PyDataFrameReader {
-        crate::readwriter::PyDataFrameReader::new(self.session.read())
+    fn read<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        static READER: pyo3::sync::PyOnceLock<Py<pyo3::types::PyType>> =
+            pyo3::sync::PyOnceLock::new();
+        READER
+            .import(
+                slf.py(),
+                "pyspark.sql.connect.readwriter",
+                "DataFrameReader",
+            )?
+            .call1((slf,))
     }
 
-    // Get the DataStreamReader for reading streaming data (`spark.readStream`).
+    // Get the DataStreamReader for reading streaming data (`spark.readStream`): a new one at each
+    // access, as PySpark's `DataStreamReader(self)`, of PySpark Connect's class
+    // (`pyspark.sql.connect.streaming.readwriter`).
     #[getter]
     #[pyo3(name = "readStream")]
     #[doc = connect_doc!(SparkSession.readStream)]
-    fn read_stream(&self) -> PyDataStreamReader {
-        let reader = self.session.read_stream();
-        PyDataStreamReader::new(reader)
+    fn read_stream<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        static READER: pyo3::sync::PyOnceLock<Py<pyo3::types::PyType>> =
+            pyo3::sync::PyOnceLock::new();
+        READER
+            .import(
+                slf.py(),
+                "pyspark.sql.connect.streaming.readwriter",
+                "DataStreamReader",
+            )?
+            .call1((slf,))
     }
 
     // Get the StreamingQueryManager for managing active streaming queries (`spark.streams`):

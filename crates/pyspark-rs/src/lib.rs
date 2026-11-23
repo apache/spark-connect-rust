@@ -43,6 +43,7 @@ mod profiler;
 mod progress;
 mod pyarrow_export;
 mod pyarrow_import;
+mod reader_plans;
 mod readwriter;
 mod reduce;
 
@@ -72,12 +73,10 @@ use dataframe::{
 use datasource::PyDataSourceRegistration;
 use group::{PyCoGroupedData, PyGroupedData};
 pub(crate) use options::{coerce_option_value, str_argument};
-use readwriter::PyDataFrameReader;
 use session::{PyHook, PySparkSession, PySparkSessionBuilder};
 use stat::PyStatFunctions;
 use streaming::{
-    PyDataStreamReader, PyDataStreamWriter, PyListenerEventStream, PyStreamingQuery,
-    PyStreamingQueryManager, PyTrigger,
+    PyDataStreamWriter, PyListenerEventStream, PyStreamingQuery, PyStreamingQueryManager, PyTrigger,
 };
 use types::{
     PyAnsiIntervalType, PyAnyTimeType, PyArrayType, PyAtomicType, PyBinaryType, PyBooleanType,
@@ -213,7 +212,13 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("RustRpcError", m.py().get_type::<transport::RustRpcError>())?;
     m.add_class::<PyCatalog>()?;
     m.add_class::<PyRuntimeConf>()?;
-    m.add_class::<PyDataFrameReader>()?;
+    // The plans of the reads of PySpark's readers (see `reader_plans`).
+    m.add_class::<reader_plans::PyReadPlan>()?;
+    m.add_function(wrap_pyfunction!(reader_plans::data_source, m)?)?;
+    m.add_function(wrap_pyfunction!(reader_plans::read_table, m)?)?;
+    m.add_function(wrap_pyfunction!(reader_plans::relation_changes, m)?)?;
+    m.add_function(wrap_pyfunction!(reader_plans::parse, m)?)?;
+    m.add_function(wrap_pyfunction!(reader_plans::read_dataframe, m)?)?;
     m.add_class::<PyStatFunctions>()?;
     m.add_class::<storagelevel::PyStorageLevel>()?;
 
@@ -251,7 +256,6 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(pipelines::pipeline_start_run, m)?)?;
 
     // Streaming classes
-    m.add_class::<PyDataStreamReader>()?;
     m.add_class::<PyDataStreamWriter>()?;
     m.add_class::<PyTrigger>()?;
     m.add_class::<PyStreamingQuery>()?;

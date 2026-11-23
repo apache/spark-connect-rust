@@ -60,54 +60,6 @@ except ImportError:
 # and "Subclasses" of dev/parity/known-differences.md say: each change removes its own, and a test
 # of one of them that passes fails the run (strict).
 _DIFFERS_BY_CHANGE = {
-    "the readers": {
-        "vars": [
-            "DataFrameReader",
-            "DataFrameReader of its setters",
-            "DataFrameReader of a struct schema",
-            "DataStreamReader",
-            "DataStreamReader of its setters",
-        ],
-        "attributes": [
-            "DataFrameReader",
-            "DataFrameReader of its setters",
-            "DataFrameReader of a struct schema",
-            "DataStreamReader",
-            "DataStreamReader of its setters",
-        ],
-        "copies": [
-            "DataFrameReader: copy",
-            "DataFrameReader: deepcopy",
-            "DataFrameReader: cloudpickle",
-            "DataFrameReader of its setters: copy",
-            "DataFrameReader of its setters: deepcopy",
-            "DataFrameReader of its setters: cloudpickle",
-            "DataFrameReader of a struct schema: copy",
-            "DataFrameReader of a struct schema: deepcopy",
-            "DataFrameReader of a struct schema: cloudpickle",
-            "DataStreamReader: copy",
-            "DataStreamReader: deepcopy",
-            "DataStreamReader: cloudpickle",
-            "DataStreamReader of its setters: copy",
-            "DataStreamReader of its setters: deepcopy",
-            "DataStreamReader of its setters: cloudpickle",
-        ],
-        "construct": [
-            "pyspark.sql.connect.readwriter.DataFrameReader",
-            "pyspark.sql.connect.streaming.readwriter.DataStreamReader",
-        ],
-        "uninit": [
-            "pyspark.sql.connect.readwriter.DataFrameReader",
-            "pyspark.sql.connect.streaming.readwriter.DataStreamReader",
-        ],
-        "foreign": [
-            "pyspark.sql.connect.readwriter.DataFrameReader",
-            "pyspark.sql.connect.streaming.readwriter.DataStreamReader",
-        ],
-        "specific": [
-            "test_the_options_of_a_reader_are_the_dict_of_its_state",
-        ],
-    },
     "the writers": {
         "vars": [
             "DataFrameWriter",
@@ -310,6 +262,10 @@ _DIFFERS_BY_CHANGE = {
         ],
         "foreign": [
             "pyspark.sql.connect.dataframe.DataFrame",
+            # The DataFrame of the plan of a stream reader of an object that is not a session,
+            # which PySpark's DataFrame holds until a request reads its client: the drop-in's
+            # DataFrame is of the native session, which its `_df` reads.
+            "pyspark.sql.connect.streaming.readwriter.DataStreamReader",
         ],
         "specific": [
             "test_the_private_state_of_a_dataframe_is_not_a_column",
@@ -1211,3 +1167,156 @@ def test_the_methods_of_a_session_whose_init_never_ran_raise_pysparks_errors(obj
     ]
     assert [outcome(call) for call, _ in cases] == [expected for _, expected in cases]
     assert list(vars(session)) == ["catalog"]
+
+
+# The reads of the readers, as PySpark's plans check their arguments when they are made and when
+# they are sent, of PySpark 4.3.0: what the call raises, and else what the first request of its
+# DataFrame, its schema, raises.
+_BAD_STR = "a\udc80"
+
+
+def _read_cases(spark):
+    BAD = _BAD_STR
+    df = spark.range(1).selectExpr("'x' as v")
+    return {
+        "format(int).load()": lambda: spark.read.format(1).load(),
+        "format(bad).load()": lambda: spark.read.format(BAD).load(),
+        "format(None).load()": lambda: spark.read.format(None).load(),
+        "schema(int)": lambda: spark.read.schema(1),
+        "schema(bad).load()": lambda: spark.read.schema(BAD).load(),
+        "option(int key).load()": lambda: spark.read.option(1, "v").load(),
+        "option(key, None).load()": lambda: spark.read.option("k", None).load(),
+        "option(key, None).table()": lambda: spark.read.option("k", None).table("t"),
+        "option(bad key).load()": lambda: spark.read.option(BAD, "v").load(),
+        "option(bad value).table()": lambda: spark.read.option("k", BAD).table("t"),
+        "option(bytes key).table()": lambda: spark.read.option(b"k", "v").table("t"),
+        "option(bytes key).load()": lambda: spark.read.option(b"k", "v").load(),
+        "option(unhashable)": lambda: spark.read.option([1], "v"),
+        "_options[k]=5 load()": lambda: (lambda x: (x._options.__setitem__("k", 5), x.load())[1])(spark.read),
+        "_options[k]=5 table()": lambda: (lambda x: (x._options.__setitem__("k", 5), x.table("t"))[1])(spark.read),
+        "_schema=5 load()": lambda: (lambda x: (setattr(x, "_schema", 5), x.load())[1])(spark.read),
+        "load(path list)": lambda: spark.read.format("json").load(["/a", "/b"]),
+        "load(path tuple)": lambda: spark.read.format("json").load(("/a", "/b")),
+        "load(list of int)": lambda: spark.read.format("json").load(["/a", 1]),
+        "load(bad path)": lambda: spark.read.format("json").load(BAD),
+        "load(int path)": lambda: spark.read.format("json").load(5),
+        "load(path, schema=int)": lambda: spark.read.load("/a", schema=1),
+        "load(path, k=bad)": lambda: spark.read.format("json").load("/a", k=BAD),
+        "json(int)": lambda: spark.read.json(5),
+        "json(df)": lambda: spark.read.json(df),
+        "json(df, schema=ddl)": lambda: spark.read.json(df, schema="v STRING"),
+        "csv(int)": lambda: spark.read.csv(5),
+        "csv(tuple)": lambda: spark.read.csv(("/a",)),
+        "xml(int)": lambda: spark.read.xml(5),
+        "parquet(int)": lambda: spark.read.parquet(5),
+        "text(int)": lambda: spark.read.text(5),
+        "orc(None)": lambda: spark.read.orc(None),
+        "jdbc(column without bounds)": lambda: spark.read.jdbc("jdbc:x", "t", column="c"),
+        "jdbc(predicates)": lambda: spark.read.jdbc("jdbc:x", "t", predicates=["a > 1"]),
+        "jdbc(predicates tuple)": lambda: spark.read.jdbc("jdbc:x", "t", predicates=("a > 1",)),
+        "jdbc(predicates of int)": lambda: spark.read.jdbc("jdbc:x", "t", predicates=[1]),
+        "jdbc(properties int key)": lambda: spark.read.jdbc("jdbc:x", "t", properties={1: "v"}),
+        "jdbc(url None)": lambda: spark.read.jdbc(None, "t"),
+        "table(int)": lambda: spark.read.table(5),
+        "table(bad)": lambda: spark.read.table(BAD),
+        "table(bytes)": lambda: spark.read.table(b"t"),
+        "changes(schema)": lambda: spark.read.schema("a INT").changes("t"),
+        "stream format(int).load()": lambda: spark.readStream.format(1).load(),
+        "stream schema(int)": lambda: spark.readStream.schema(1),
+        "stream option(k, None)": lambda: spark.readStream.option("k", None)._options,
+        "stream option(k, True)": lambda: spark.readStream.option("k", True)._options,
+        "stream load(int)": lambda: spark.readStream.format("rate").load(5),
+        "stream load('  ')": lambda: spark.readStream.format("rate").load("  "),
+        "stream load(bad)": lambda: spark.readStream.format("json").load(BAD),
+        "stream name(int)": lambda: spark.readStream.name(5),
+        "stream name('a b')": lambda: spark.readStream.name("a b"),
+        "stream json(int)": lambda: spark.readStream.json(5),
+        "stream table(int)": lambda: spark.readStream.table(5),
+        "stream option(k, None).table()": lambda: spark.readStream.options(k=None).table("t"),
+        "stream changes(schema)": lambda: spark.readStream.schema("a INT").changes("t"),
+        "stream _source_name=5 load()": lambda: (lambda x: (setattr(x, "_source_name", 5), x.format("rate").load())[1])(spark.readStream),
+    }
+
+
+_READ_OUTCOMES = {
+    'format(int).load()': ('call', 'AssertionError', ''),
+    'format(bad).load()': ('request', 'UnicodeEncodeError', "'utf-8' codec can't encode character '\\udc80' in position 1: surrogates not allowed"),
+    'format(None).load()': ('ok',),
+    'schema(int)': ('call', 'PySparkTypeError', '[NOT_EXPECTED_TYPE] Argument `schema` should be str or struct type, got int.'),
+    'schema(bad).load()': ('request', 'UnicodeEncodeError', "'utf-8' codec can't encode character '\\udc80' in position 1: surrogates not allowed"),
+    'option(int key).load()': ('call', 'AssertionError', ''),
+    'option(key, None).load()': ('ok',),
+    'option(key, None).table()': ('request', 'TypeError', 'bad argument type for built-in operation'),
+    'option(bad key).load()': ('request', 'UnicodeEncodeError', "'utf-8' codec can't encode character '\\udc80' in position 1: surrogates not allowed"),
+    'option(bad value).table()': ('request', 'UnicodeEncodeError', "'utf-8' codec can't encode character '\\udc80' in position 1: surrogates not allowed"),
+    'option(bytes key).table()': ('ok',),
+    'option(bytes key).load()': ('call', 'AssertionError', ''),
+    'option(unhashable)': ('call', 'TypeError', "unhashable type: 'list'"),
+    '_options[k]=5 load()': ('call', 'AssertionError', ''),
+    '_options[k]=5 table()': ('request', 'TypeError', 'bad argument type for built-in operation'),
+    '_schema=5 load()': ('call', 'AssertionError', ''),
+    'load(path list)': ('ok',),
+    'load(path tuple)': ('call', 'AssertionError', ''),
+    'load(list of int)': ('call', 'AssertionError', ''),
+    'load(bad path)': ('request', 'UnicodeEncodeError', "'utf-8' codec can't encode character '\\udc80' in position 1: surrogates not allowed"),
+    'load(int path)': ('call', 'AssertionError', ''),
+    'load(path, schema=int)': ('call', 'PySparkTypeError', '[NOT_EXPECTED_TYPE] Argument `schema` should be str or struct type, got int.'),
+    'load(path, k=bad)': ('request', 'UnicodeEncodeError', "'utf-8' codec can't encode character '\\udc80' in position 1: surrogates not allowed"),
+    'json(int)': ('call', 'PySparkTypeError', '[NOT_EXPECTED_TYPE] Argument `path` should be str, list, or DataFrame, got int.'),
+    'json(df)': ('ok',),
+    'json(df, schema=ddl)': ('ok',),
+    'csv(int)': ('call', 'AssertionError', ''),
+    'csv(tuple)': ('call', 'AssertionError', ''),
+    'xml(int)': ('call', 'PySparkTypeError', '[NOT_EXPECTED_TYPE] Argument `path` should be str, list, or DataFrame, got int.'),
+    'parquet(int)': ('call', 'AssertionError', ''),
+    'text(int)': ('call', 'AssertionError', ''),
+    'orc(None)': ('ok',),
+    'jdbc(column without bounds)': ('call', 'AssertionError', 'lowerBound can not be None when ``column`` is specified'),
+    'jdbc(predicates)': ('ok',),
+    'jdbc(predicates tuple)': ('call', 'AssertionError', ''),
+    'jdbc(predicates of int)': ('call', 'AssertionError', ''),
+    'jdbc(properties int key)': ('call', 'TypeError', 'keywords must be strings'),
+    'jdbc(url None)': ('ok',),
+    'table(int)': ('request', 'TypeError', 'bad argument type for built-in operation'),
+    'table(bad)': ('request', 'UnicodeEncodeError', "'utf-8' codec can't encode character '\\udc80' in position 1: surrogates not allowed"),
+    'table(bytes)': ('ok',),
+    'changes(schema)': ('call', 'AnalysisException', '[_LEGACY_ERROR_TEMP_1189] User specified schema not supported with `changes`.'),
+    'stream format(int).load()': ('call', 'AssertionError', ''),
+    'stream schema(int)': ('call', 'PySparkTypeError', '[NOT_EXPECTED_TYPE] Argument `schema` should be str or struct type, got int.'),
+    'stream option(k, None)': ('value', '{}'),
+    'stream option(k, True)': ('value', "{'k': 'True'}"),
+    'stream load(int)': ('call', 'PySparkValueError', "[VALUE_NOT_NON_EMPTY_STR] Value for `path` must be a non-empty string, got '5'."),
+    "stream load('  ')": ('call', 'PySparkValueError', "[VALUE_NOT_NON_EMPTY_STR] Value for `path` must be a non-empty string, got '  '."),
+    'stream load(bad)': ('request', 'UnicodeEncodeError', "'utf-8' codec can't encode character '\\udc80' in position 1: surrogates not allowed"),
+    'stream name(int)': ('call', 'PySparkTypeError', '[NOT_EXPECTED_TYPE] Argument `source_name` should be str, got int.'),
+    "stream name('a b')": ('call', 'PySparkValueError', "[INVALID_STREAMING_SOURCE_NAME] Invalid streaming source name 'a b'. Source names must contain only ASCII letters, digit"),
+    'stream json(int)': ('call', 'PySparkTypeError', '[NOT_EXPECTED_TYPE] Argument `path` should be str, got int.'),
+    'stream table(int)': ('request', 'TypeError', 'bad argument type for built-in operation'),
+    'stream option(k, None).table()': ('ok',),
+    'stream changes(schema)': ('call', 'AnalysisException', '[_LEGACY_ERROR_TEMP_1189] User specified schema not supported with `changes`.'),
+    'stream _source_name=5 load()': ('call', 'AssertionError', ''),
+}
+
+
+def _read_outcome(call):
+    try:
+        df = call()
+    except BaseException as error:  # noqa: BLE001
+        return ("call", type(error).__name__, str(error)[:120])
+    if type(df).__name__ != "DataFrame":
+        return ("value", repr(df)[:80])
+    try:
+        df.schema
+    except BaseException as error:  # noqa: BLE001
+        return ("request", type(error).__name__, str(error)[:120])
+    return ("ok",)
+
+
+@pytest.mark.parametrize("case", list(_READ_OUTCOMES))
+def test_the_reads_raise_what_pysparks_plans_raise(objects, case):
+    # As PySpark's DataFrameReader and DataStreamReader, of whose source the drop-in's are adapted:
+    # the assertions of the plans of their reads (`DataSource`, `Read`, `RelationChanges` and
+    # `Parse`), made when the plan is made, and the errors of the arguments that the plan cannot
+    # send, which each request of its DataFrame raises, as PySpark's plan raises them when it is
+    # sent, in the same order.
+    assert _read_outcome(_read_cases(objects.spark)[case]) == _READ_OUTCOMES[case]

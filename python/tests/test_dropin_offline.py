@@ -3940,14 +3940,16 @@ def test_new_v420_methods_exposed():
     # Presence of the v4.2.0 parity methods on the drop-in classes (behaviour that
     # needs a live server is covered by the e2e tests).
     import pyspark._pyspark as p
+    from pyspark.sql.connect.readwriter import DataFrameReader
+    from pyspark.sql.connect.streaming.readwriter import DataStreamReader
 
     for cls, methods in [
         (p.DataFrame, ["repartitionById", "zipWithIndex"]),
         (p.Column, ["transform"]),
         (p.RuntimeConf, ["getAll"]),
         (p.DataFrameStatFunctions, ["sampleBy"]),
-        (p.DataFrameReader, ["changes"]),
-        (p.DataStreamReader, ["changes", "xml", "name"]),
+        (DataFrameReader, ["changes"]),
+        (DataStreamReader, ["changes", "xml", "name"]),
     ]:
         have = set(m for m in dir(cls) if not m.startswith("_"))
         missing = [m for m in methods if m not in have]
@@ -13598,7 +13600,7 @@ def test_option_keys_are_checked_as_the_dicts_and_the_plans_of_pyspark(mock_conn
         spark.read.option([1], None)
     reader = spark.read.option("k", "v")
     assert reader.option(1, None) is reader and reader.option(b"k", None) is reader
-    assert reader._options == {"k": "v"}
+    assert reader._options == {"k": "v", 1: None, b"k": None}
     assert stream.option(b"k", "v") is stream
     for call in [
         lambda: df.write.option(bytearray(b"k"), "v"),
@@ -41801,7 +41803,8 @@ def test_reader_setters_mutate_and_return_self(offline_spark):
     assert r.format("jdbc") is r
     assert r._format == "jdbc"
     assert r._schema == "x INT"
-    assert r._options == {"a": "b", "c": "d", "flag": "true"}
+    # As PySpark's `options`, whose `option` keeps a None as it is, which the plan leaves out.
+    assert r._options == {"a": "b", "c": "d", "skipped": None, "flag": "true"}
     assert type(r.load()).__name__ == "DataFrame"
 
 
@@ -41870,9 +41873,10 @@ def test_reader_reusable_after_failed_read(offline_spark):
         r.csv("/p", schema=object())
     with pytest.raises(Exception):
         r.json("/p", schema=12)
-    # A failed call leaves the reader as it was.
+    # As PySpark's: a failed call keeps the options of the reader, and the format that its `load`
+    # set before the schema failed, and the reader reads after it.
     assert r._options == {"a": "b"}
-    assert r._format is None
+    assert r._format == "json"
     assert type(r.format("csv").load("/p")).__name__ == "DataFrame"
 
 
@@ -45359,7 +45363,11 @@ def test_pyspark_pickles_of_readers_catalogs_and_registrations_load_as_pyspark(m
     reader = loaded(DataFrameReader, _client=spark, _format="csv", _schema="a INT",
                     _options={"k": "v", "n": None}, extra=[1])
     assert type(reader) is DataFrameReader and reader._client is spark
-    assert (reader._format, reader._schema, reader._options) == ("csv", "a INT", {"k": "v"})
+    assert (reader._format, reader._schema, reader._options) == (
+        "csv",
+        "a INT",
+        {"k": "v", "n": None},
+    )
     assert reader.extra == [1]
     reader.load("p").collect()
     # ExecutePlanRequest.plan=3, Plan.root=1, Relation.read=4, Read.data_source=2:
@@ -45389,31 +45397,22 @@ def test_pyspark_pickles_of_readers_catalogs_and_registrations_load_as_pyspark(m
     assert raised.value.getCondition() == "NO_ACTIVE_SESSION"
 
 
-def test_a_reader_subclass_pickle_is_of_its_class_on_a_worker_as_pyspark(monkeypatch):
-    # The pickle of a reader of a subclass names the subclass, which a worker without the
-    # extension, official PySpark's, resolves to a subclass of PySpark's reader: the reader that
-    # it builds of the state is of that subclass, as PySpark's pickle of it would be.
-    import sys
+def test_a_reader_subclass_pickle_is_of_its_class_as_pyspark(mock_connect):
+    # As PySpark's reader, a plain object: the reduce of a reader of a subclass is of the subclass
+    # and of its __dict__, which a worker resolves to its subclass of PySpark's reader.
+    import copyreg
 
-    import pyspark
-    from pyspark.sql.connect._state_reduce import reader_reduce
-
-    class PlainReader:
-        def __init__(self, *state):
-            self.state = state
-
-    class SubReader(PlainReader):
-        pass
-
-    monkeypatch.setattr("pyspark.sql.connect._state_reduce._worker_reader", PlainReader)
-    creator, args = reader_reduce("session", "json", "", {"a": "1"}, None, None, SubReader)
-    monkeypatch.delattr(pyspark, "_pyspark")
-    monkeypatch.setitem(sys.modules, "pyspark._pyspark", None)
-    with pytest.raises(ImportError):
-        from pyspark import _pyspark  # noqa: F401
-    reader = creator(*args)
-    assert type(reader) is SubReader
-    assert reader.state == ("session", "json", "", {"a": "1"}, None, None)
+    spark, _ = mock_connect
+    reader = _PathReader("p", spark).format("json").option("a", "1")
+    reduced = reader.__reduce_ex__(2)
+    assert reduced[:2] == (copyreg.__newobj__, (_PathReader,))
+    assert reduced[2] == {
+        "_client": spark,
+        "_format": "json",
+        "_schema": "",
+        "_options": {"a": "1"},
+        "path": "p",
+    }
 
 
 def test_a_reader_subclass_takes_its_session_where_its_init_has_it_as_pyspark(mock_connect):
@@ -45683,9 +45682,14 @@ def test_worker_reconstructors_rebuild_the_readers_writers_and_streams_as_pyspar
     writer = df.write.format("parquet").mode("overwrite").option("k", "v").partitionBy("id")
     stream_reader = spark.readStream.format("rate").option("b", "2").name("rate_src")
     stream_writer = df.writeStream.format("memory").outputMode("append").queryName("q")
-    # Each reduce gives a reconstructor of its state, not the drop-in's `_of_state` by name.
-    for obj in (reader, writer, stream_reader, stream_writer):
+    # Each reduce of a native object gives a reconstructor of its state, not the drop-in's
+    # `_of_state` by name; the readers, PySpark's classes, pickle as PySpark's plain objects.
+    import copyreg
+
+    for obj in (writer, stream_writer):
         assert obj.__reduce__()[0].__name__ == "creator"
+    for obj in (reader, stream_reader):
+        assert obj.__reduce_ex__(2)[0] is copyreg.__newobj__
     monkeypatch.delattr(pyspark, "_pyspark")
     monkeypatch.setitem(sys.modules, "pyspark._pyspark", None)
     rebuilt = cloudpickle.loads(cloudpickle.dumps(reader))
