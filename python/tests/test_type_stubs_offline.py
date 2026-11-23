@@ -52,7 +52,10 @@ UNDECLARED_OF = {
         "PySparkDataFrameWriter",
         "PySparkDataFrameWriterV2",
     },
-    "pyspark.sql.connect.streaming.readwriter": {"PySparkDataStreamReader"},
+    "pyspark.sql.connect.streaming.readwriter": {
+        "PySparkDataStreamReader",
+        "PySparkDataStreamWriter",
+    },
 }
 
 # Private functions of PySpark's modules that applications and libraries use, which the stubs

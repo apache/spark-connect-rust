@@ -1,5 +1,5 @@
-//! The conversions of the arguments of the readers and the writers of Spark Connect, as PySpark's
-//! plans and commands of them convert them when they are sent.
+//! The conversions of the arguments of the readers of Spark Connect, as PySpark's plans of them
+//! convert them when they are sent.
 
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyString};
@@ -42,25 +42,3 @@ pub(crate) fn table_name_of(name: &Bound<'_, PyAny>) -> PyResult<(String, Option
     Ok((String::new(), Some(crate::options::builtin_type_error())))
 }
 
-/// The path of a writer, as PySpark sets it in its protobuf string field, which the default
-/// (upb) backend converts as [`crate::str_argument`] does: a str, or bytes decoded as UTF-8, and
-/// the error of that conversion for another object.
-pub(crate) fn writer_path(path: &Bound<'_, PyAny>) -> PyResult<String> {
-    crate::str_argument(path)
-}
-
-/// The column items of `partitionBy(*cols)` and `clusterBy(*cols)` of a writer, as PySpark's take
-/// them: a list or tuple alone stands for its items, else the arguments are the items.
-pub(crate) fn writer_column_items<'py>(
-    cols: &[Bound<'py, PyAny>],
-) -> PyResult<Vec<Bound<'py, PyAny>>> {
-    match cols {
-        [only]
-            if only.is_instance_of::<pyo3::types::PyList>()
-                || only.is_instance_of::<pyo3::types::PyTuple>() =>
-        {
-            only.try_iter()?.collect::<PyResult<_>>()
-        }
-        _ => Ok(cols.to_vec()),
-    }
-}

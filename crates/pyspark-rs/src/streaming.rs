@@ -4,18 +4,14 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyString, PyTuple};
 
 use spark_connect::streaming::{
-    DataStreamWriter, ListenerEventStream, StreamingQuery, StreamingQueryListener,
-    StreamingQueryListenerEvent, StreamingQueryManager, Trigger,
+    ListenerEventStream, StreamingQuery, StreamingQueryListener, StreamingQueryListenerEvent,
+    StreamingQueryManager, Trigger,
 };
-use spark_connect::udf::PythonUDFPayload;
 use spark_connect_core::error::{Result as SparkResult, SparkError};
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use crate::dataframe::{PyDataFrame, WriterState};
 use crate::errors::spark_error_to_py_exception;
-use crate::interrupt::interruptible;
 
 /// One entry of the `_listener_bus` of a `StreamingQueryListenerBus`, registered in the native bus
 /// of its session, which keeps the subscription of the session to the events of the server while it
@@ -149,9 +145,9 @@ impl From<PyErr> for ListenerDispatchError {
 
 /// Decode before any callback, sharing one Python object across every registration, and post it
 /// once to each bus of the registrations, of its `post_to_all`, as PySpark's handler thread posts
-/// the events of its bus. The same path handles synchronous starts and asynchronous protocol
-/// events, including mixed native/Python snapshots. Keep native errors typed until the reporting
-/// boundary.
+/// the events of its bus. The same path handles the synchronous starts of the core's writer and
+/// asynchronous protocol events, including mixed native/Python snapshots (the starts of PySpark's
+/// writer are `_post_query_started`'s). Keep native errors typed until the reporting boundary.
 fn post_listener_event<'a>(
     py: Python<'_>,
     listeners: impl IntoIterator<Item = &'a dyn StreamingQueryListener>,
@@ -202,7 +198,8 @@ fn async_dispatch_error(py: Python<'_>, error: ListenerDispatchError) -> Box<Spa
 impl StreamingQueryListener for PyListenerAdapter {
     fn on_event(&self, event: &StreamingQueryListenerEvent) {
         // This infallible entry point is also used by the core's default synchronous
-        // start handler. Python writer calls use post_started_event to propagate errors.
+        // start handler. The starts of PySpark's writer use `_post_query_started`, which
+        // propagates errors.
         Python::attach(|py| {
             let _ = post_listener_event(
                 py,
@@ -284,55 +281,83 @@ impl StreamingQueryListener for PyListenerAdapter {
     }
 }
 
-/// Parse a synchronous started event once, including when there are no listeners, and
-/// dispatch its typed object before start/toTable returns. Preserve the original Python
-/// decoding exception across the detached core call.
-#[allow(clippy::result_large_err)] // The core started-event handler requires SparkResult.
-fn post_started_event(
-    manager: &StreamingQueryManager,
-    event: &StreamingQueryListenerEvent,
-) -> SparkResult<()> {
-    Python::attach(|py| {
-        let listeners = manager.listeners();
-        post_listener_event(py, listeners.iter().map(Arc::as_ref), event, true).map_err(|error| {
-            match error {
-                ListenerDispatchError::Python(error) => {
-                    Box::new(crate::errors::callback_error(error))
-                }
-                ListenerDispatchError::Native(error) => error,
-            }
-        })
-    })
-    .map_err(|error| *error)
+/// The `post_to_all` of the native `StreamingQueryListenerBus`, its method descriptor as the module
+/// adds the class, before any change of the class: the method that [`native_bus_of`] tells.
+static NATIVE_POST_TO_ALL: pyo3::sync::PyOnceLock<Py<PyAny>> = pyo3::sync::PyOnceLock::new();
+
+/// Keep the `post_to_all` of the native `StreamingQueryListenerBus`, as the module adds the class
+/// (see [`NATIVE_POST_TO_ALL`]).
+pub(crate) fn keep_native_post_to_all(py: Python<'_>) -> PyResult<()> {
+    let method = py
+        .get_type::<PyStreamingQueryListenerBus>()
+        .getattr(pyo3::intern!(py, "post_to_all"))?;
+    let _ = NATIVE_POST_TO_ALL.set(py, method.unbind());
+    Ok(())
 }
 
-/// The column names of a stream writer's `partitionBy` or `clusterBy`, which PySpark clears and then
-/// extends into its protobuf string field at the call, each one converted as [`crate::str_argument`]
-/// does. A list or tuple alone stands for its items. The extension is atomic, so a column that does
-/// not convert leaves none, and its error is raised.
-fn stream_column_names(cols: &[Bound<'_, PyAny>]) -> PyResult<Vec<String>> {
-    crate::readwriter::writer_column_items(cols)?
-        .iter()
-        .map(crate::str_argument)
-        .collect()
-}
-
-/// The name of a query, as PySpark's `queryName` checks it: a non-empty str, else
-/// `VALUE_NOT_NON_EMPTY_STR` of its `str()`.
-fn query_name_of(name: &Bound<'_, PyAny>) -> PyResult<String> {
-    if let Ok(text) = name.cast::<pyo3::types::PyString>() {
-        let text = text.to_cow()?;
-        if !text.trim().is_empty() {
-            return Ok(text.into_owned());
-        }
+/// The bus of `post_to_all` when it is the native bus's own method: the `post_to_all` of the
+/// native `StreamingQueryListenerBus`, as the module defines it, bound to a bus of that class and
+/// not of a subclass. So is the `post_to_all` of the `_sqlb` of a manager, unless the bus is
+/// replaced or of a subclass, or its method is patched, on the bus or on its class.
+fn native_bus_of<'py>(
+    post_to_all: &Bound<'py, PyAny>,
+) -> PyResult<Option<Bound<'py, PyStreamingQueryListenerBus>>> {
+    let py = post_to_all.py();
+    // A method of a method descriptor, which compares as its function and the identity of its
+    // `__self__`: no `__eq__` of another object runs.
+    if !post_to_all.is_instance_of::<pyo3::types::PyCFunction>() {
+        return Ok(None);
     }
-    let shown = name.str()?.to_cow()?.into_owned();
-    Err(crate::column::raise_pyspark(
-        name.py(),
-        "PySparkValueError",
-        "VALUE_NOT_NON_EMPTY_STR",
-        &[("arg_name", "queryName"), ("arg_value", &shown)],
-    ))
+    let Some(native) = NATIVE_POST_TO_ALL.get(py) else {
+        return Ok(None);
+    };
+    let bus = post_to_all.getattr(pyo3::intern!(py, "__self__"))?;
+    let Ok(bus) = bus.cast_exact::<PyStreamingQueryListenerBus>() else {
+        return Ok(None);
+    };
+    let own = native
+        .bind(py)
+        .call_method1(pyo3::intern!(py, "__get__"), (bus, bus.get_type()))?;
+    Ok(post_to_all.eq(own)?.then(|| bus.clone()))
+}
+
+/// Post the started event `event` of a query that PySpark's `DataStreamWriter` started, which it
+/// decoded of `event_json`, to `post_to_all`, the `post_to_all` of the listener bus of its session,
+/// as PySpark's writer calls it. Of the native bus's own method ([`native_bus_of`]), the call is a
+/// delivery of the started event in the native listener bus of the session of the bus, which also
+/// posts the event to its native listeners, and for which a removal of a listener from another
+/// thread waits, as for PySpark's bus, which holds its lock while it posts the event. The error of
+/// a listener that is not isolated is raised, as of PySpark's.
+#[pyfunction]
+#[pyo3(name = "_post_query_started")]
+pub fn post_query_started(
+    post_to_all: &Bound<'_, PyAny>,
+    event: &Bound<'_, PyAny>,
+    event_json: &str,
+) -> PyResult<()> {
+    let py = post_to_all.py();
+    let manager = match native_bus_of(post_to_all)? {
+        // Of a bus whose `_sqm` is not of a session, PySpark's call.
+        Some(bus) => PyStreamingQueryListenerBus::manager_of(&bus).ok(),
+        None => None,
+    };
+    let Some(manager) = manager else {
+        post_to_all.call1((event,))?;
+        return Ok(());
+    };
+    let started = StreamingQueryListenerEvent {
+        event_type: spark_connect::streaming::QUERY_STARTED_EVENT,
+        event_json: event_json.to_string(),
+    };
+    manager.post_started(|manager| {
+        post_to_all.call1((event,))?;
+        for listener in manager.listeners() {
+            if PyListenerAdapter::of(listener.as_ref()).is_none() {
+                crate::gc::detach(py, || listener.on_event(&started));
+            }
+        }
+        Ok(())
+    })
 }
 
 /// Python wrapper for Trigger.
@@ -376,592 +401,6 @@ impl PyTrigger {
     #[staticmethod]
     fn continuous(interval: &str) -> PyTrigger {
         PyTrigger::new(Trigger::Continuous(interval.to_string()))
-    }
-}
-
-/// The kind and the value of a trigger, which a pickle keeps as a pair of Python values.
-fn trigger_pair(trigger: &Trigger) -> (&'static str, Option<String>) {
-    match trigger {
-        Trigger::ProcessingTime(interval) => ("processingTime", Some(interval.clone())),
-        Trigger::Once => ("once", None),
-        Trigger::AvailableNow => ("availableNow", None),
-        Trigger::Continuous(interval) => ("continuous", Some(interval.clone())),
-        Trigger::RealTime(interval) => ("realTime", Some(interval.clone())),
-    }
-}
-
-/// The trigger of a kind and a value, as `trigger_pair` gives them.
-fn trigger_of(kind: &str, value: Option<String>) -> PyResult<Trigger> {
-    let value = value.unwrap_or_default();
-    match kind {
-        "processingTime" => Ok(Trigger::ProcessingTime(value)),
-        "once" => Ok(Trigger::Once),
-        "availableNow" => Ok(Trigger::AvailableNow),
-        "continuous" => Ok(Trigger::Continuous(value)),
-        "realTime" => Ok(Trigger::RealTime(value)),
-        _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
-            "unknown trigger: {kind}"
-        ))),
-    }
-}
-
-// Python wrapper for DataStreamWriter.
-#[pyclass(
-    name = "DataStreamWriter",
-    module = "pyspark.sql.connect.streaming.readwriter",
-    weakref,
-    dict
-)]
-pub struct PyDataStreamWriter {
-    /// The state of the writer, which a shallow copy of it shares, as PySpark's `_write_stream`.
-    /// It keeps the functions of `foreachBatch` and `foreach` as their pickles, as PySpark's
-    /// `WriteStreamOperationStart` does, and not the functions.
-    /// It holds the plan that is streamed, and not the DataFrame, as PySpark's writer holds the
-    /// plan of its DataFrame.
-    inner: Arc<WriterState<DataStreamWriter>>,
-    /// The object of the parts of the state, which the shallow copies of this writer share and
-    /// report, which reports them (see [`crate::dataframe::WriterParts`]).
-    parts: Option<Py<crate::dataframe::WriterParts>>,
-    /// Set once the value is written, as `__clear__` replaces `inner`, which is not valid while
-    /// the object is created (see [`crate::gc::GcReady`]).
-    gc_ready: crate::gc::GcReady,
-}
-
-impl PyDataStreamWriter {
-    pub fn new(writer: DataStreamWriter) -> Self {
-        let inner = Arc::new(WriterState::of_parts(writer, DataStreamWriter::held_parts));
-        PyDataStreamWriter {
-            parts: crate::dataframe::writer_parts(&inner),
-            inner,
-            gc_ready: crate::gc::GcReady::new(),
-        }
-    }
-
-    /// The steps of PySpark's `_start_internal` on the writer `w`, in its order: the options, the output
-    /// mode, the partitioning columns, the format and the query name. Each step sets its part of the
-    /// writer in place, so a step that fails keeps the steps before it, and the writer is returned with
-    /// the error of that step. The clear of the columns precedes their extension, which leaves none
-    /// when it fails.
-    fn start_steps(
-        mut w: DataStreamWriter,
-        format: Option<&Bound<'_, PyAny>>,
-        output_mode: Option<&Bound<'_, PyAny>>,
-        partition_by: Option<&Bound<'_, PyAny>>,
-        query_name: Option<&Bound<'_, PyAny>>,
-        options: Option<&Bound<'_, PyDict>>,
-    ) -> (DataStreamWriter, PyResult<()>) {
-        if options.is_some() {
-            match crate::options::kwargs_skip_none(options) {
-                Ok(opts) => w = w.options(opts),
-                Err(error) => return (w, Err(error)),
-            }
-        }
-        if let Some(m) = output_mode {
-            match crate::str_argument(m) {
-                Ok(mode) => w = w.output_mode(&mode),
-                Err(error) => return (w, Err(error)),
-            }
-        }
-        if let Some(pb) = partition_by {
-            match stream_column_names(std::slice::from_ref(pb)) {
-                Ok(names) => w = w.partition_by(names),
-                Err(error) => return (w.partition_by(Vec::<String>::new()), Err(error)),
-            }
-        }
-        if let Some(fmt) = format {
-            match crate::str_argument(fmt) {
-                Ok(source) => w = w.format(&source),
-                Err(error) => return (w, Err(error)),
-            }
-        }
-        if let Some(qn) = query_name {
-            match query_name_of(qn) {
-                Ok(name) => w = w.query_name(&name),
-                Err(error) => return (w, Err(error)),
-            }
-        }
-        (w, Ok(()))
-    }
-
-    /// Apply the one-shot writer options accepted by `start`/`toTable`
-    /// (`format`, `outputMode`, `partitionBy`, `queryName`, `**options`) before
-    /// terminating the stream. Mirrors the reference, where these are keyword args.
-    fn apply_write_opts(
-        &self,
-        format: Option<&Bound<'_, PyAny>>,
-        output_mode: Option<&Bound<'_, PyAny>>,
-        partition_by: Option<&Bound<'_, PyAny>>,
-        query_name: Option<&Bound<'_, PyAny>>,
-        options: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<DataStreamWriter> {
-        crate::options::check_keyword_keys(options)?;
-        let (w, applied) = Self::start_steps(
-            self.inner.get(),
-            format,
-            output_mode,
-            partition_by,
-            query_name,
-            options,
-        );
-        // PySpark's start/toTable set these on the writer itself before starting, and keep each
-        // step before a failing one.
-        self.inner.set(w.clone());
-        applied?;
-        Ok(w)
-    }
-}
-
-#[pymethods]
-impl PyDataStreamWriter {
-    /// The shallow copy of a stream writer, as PySpark's `copy.copy`: the copy shares the state
-    /// of this writer, as its `_write_stream` is the same object, with the pickles of its
-    /// functions.
-    fn __copy__(slf: &Bound<'_, Self>) -> PyResult<Py<Self>> {
-        let py = slf.py();
-        let this = slf.borrow();
-        let copy = Py::new(
-            py,
-            PyDataStreamWriter {
-                inner: Arc::clone(&this.inner),
-                parts: this.parts.as_ref().map(|parts| parts.clone_ref(py)),
-                gc_ready: crate::gc::GcReady::new(),
-            },
-        )?;
-        crate::reduce::copy_instance_dict(slf.as_any(), copy.bind(py).as_any())?;
-        Ok(copy)
-    }
-
-    /// As PySpark's stream writer, a Python object that holds the plan of its DataFrame, which
-    /// Python's garbage collector sees: the object of the parts of its state, which a shallow
-    /// copy shares, is reported, which reports the parts of the plan (see [`crate::gc`]). The
-    /// functions of `foreachBatch` and `foreach` are kept as their pickles, as PySpark keeps them,
-    /// so nothing else is held. Only an `Option<Py<_>>` is read, which is `None` while the object
-    /// is created.
-    fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
-        if let Some(parts) = &self.parts {
-            visit.call(parts)?;
-        }
-        Ok(())
-    }
-
-    /// Drop this writer's reference to its state, of which it keeps a cleared copy; a copy of the
-    /// writer keeps the state.
-    fn __clear__(&mut self) {
-        if self.gc_ready.get() {
-            self.parts = None;
-            self.inner = Arc::new(self.inner.cleared(DataStreamWriter::clear_plan));
-        }
-    }
-
-    /// The reduce of a stream writer, as PySpark's pickle of its DataFrame and its state, which
-    /// `_of_state` gives back, with the pickles of the functions that it applied, which PySpark's
-    /// pickle keeps in its `WriteStreamOperationStart`, and its instance attributes.
-    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
-        use crate::reduce::{state_reduce, str_dict};
-
-        let py = slf.py();
-        let this = slf.borrow();
-        let writer = this.inner.get();
-
-        let trigger = match writer.get_trigger() {
-            Some(trigger) => {
-                let (kind, value) = trigger_pair(trigger);
-                PyTuple::new(
-                    py,
-                    [
-                        kind.into_pyobject(py)?.into_any(),
-                        value.into_pyobject(py)?.into_any(),
-                    ],
-                )?
-                .into_any()
-            }
-            None => py.None().into_bound(py),
-        };
-        let commands = PyList::empty(py);
-        for (kind, payload) in [
-            ("foreachBatch", writer.get_foreach_batch_payload()),
-            ("foreach", writer.get_foreach_payload()),
-        ] {
-            if let Some(payload) = payload {
-                let command = pyo3::types::PyBytes::new(py, &payload.command);
-                commands.append((kind, command, payload.python_ver.as_str()))?;
-            }
-        }
-        // A DataFrame of the plan, which the pickle keeps as PySpark's keeps the plan.
-        let frame = Bound::new(py, PyDataFrame::new(writer.dataframe()))?;
-        let args = PyTuple::new(
-            py,
-            [
-                frame.into_any(),
-                writer.get_format().into_pyobject(py)?.into_any(),
-                writer.get_output_mode().into_pyobject(py)?.into_any(),
-                str_dict(py, writer.get_options())?.into_any(),
-                PyList::new(py, writer.get_partition_cols())?.into_any(),
-                PyList::new(py, writer.get_cluster_cols())?.into_any(),
-                writer.get_query_name().into_pyobject(py)?.into_any(),
-                trigger,
-                commands.into_any(),
-            ],
-        )?;
-        let reduced = state_reduce(py, "stream_writer_reduce", args)?;
-        crate::reduce::reduce_with_instance_dict(slf.as_any(), reduced)
-    }
-
-    /// A stream writer of its state, as `__reduce__` gives it: of the DataFrame `frame`, the
-    /// format, the output mode, the options, the partitioning and clustering columns, the query
-    /// name, the trigger (a kind and its value, or None), and the pickles of the functions of
-    /// `foreachBatch` and `foreach`, each of its kind and of the version of Python that pickled
-    /// it, which the writer keeps as they are, as PySpark's unpickled writer does.
-    #[staticmethod]
-    fn _of_state<'py>(
-        py: Python<'py>,
-        frame: Py<PyDataFrame>,
-        format: Option<String>,
-        output_mode: Option<String>,
-        options: HashMap<String, String>,
-        partition_cols: Vec<String>,
-        cluster_cols: Vec<String>,
-        query_name: Option<String>,
-        trigger: Option<(String, Option<String>)>,
-        commands: Vec<(String, Vec<u8>, String)>,
-    ) -> PyResult<Bound<'py, PyDataStreamWriter>> {
-        let mut writer = frame.borrow(py).dataframe.write_stream();
-        if let Some(format) = format {
-            writer = writer.format(&format);
-        }
-        if let Some(output_mode) = output_mode {
-            writer = writer.output_mode(&output_mode);
-        }
-        writer = writer.options(options);
-        if !partition_cols.is_empty() {
-            writer = writer.partition_by(partition_cols);
-        }
-        if !cluster_cols.is_empty() {
-            writer = writer.cluster_by(cluster_cols);
-        }
-        if let Some(query_name) = query_name {
-            writer = writer.query_name(&query_name);
-        }
-        if let Some((kind, value)) = trigger {
-            writer = writer.trigger(trigger_of(&kind, value)?);
-        }
-        for (kind, command, python_ver) in commands {
-            let payload = PythonUDFPayload::function(command, python_ver);
-            writer = match kind.as_str() {
-                "foreachBatch" => writer.foreach_batch(payload),
-                _ => writer.foreach(payload),
-            };
-        }
-        Bound::new(py, PyDataStreamWriter::new(writer))
-    }
-
-    // The output mode, which PySpark sets in its protobuf string field at once, as
-    // [`crate::str_argument`] converts it.
-    #[doc = connect_doc!(DataStreamWriter.outputMode)]
-    fn outputMode<'py>(
-        slf: &Bound<'py, Self>,
-        outputMode: &Bound<'_, PyAny>,
-    ) -> PyResult<Bound<'py, Self>> {
-        let outputMode = crate::str_argument(outputMode)?;
-        slf.borrow().inner.update(|w| w.output_mode(&outputMode));
-        Ok(slf.clone())
-    }
-
-    // The format, which PySpark sets in its protobuf string field at once, as
-    // [`crate::str_argument`] converts it.
-    #[doc = connect_doc!(DataStreamWriter.format)]
-    fn format<'py>(
-        slf: &Bound<'py, Self>,
-        source: &Bound<'_, PyAny>,
-    ) -> PyResult<Bound<'py, Self>> {
-        let source = crate::str_argument(source)?;
-        slf.borrow().inner.update(|w| w.format(&source));
-        Ok(slf.clone())
-    }
-
-    #[doc = connect_doc!(DataStreamWriter.option)]
-    fn option<'py>(
-        slf: &Bound<'py, Self>,
-        key: &Bound<'_, PyAny>,
-        value: &Bound<'_, PyAny>,
-    ) -> PyResult<Bound<'py, Self>> {
-        // None -> option left unset, before the key is looked at, as PySpark's returns at once;
-        // bools -> "true"/"false" (reference `to_str`). PySpark sets the option in the protobuf
-        // map of its command at once, with the key as it is.
-        if value.is_none() {
-            return Ok(slf.clone());
-        }
-        let key = crate::str_argument(key)?;
-        if let Some(v) = crate::coerce_option_value(value)? {
-            slf.borrow().inner.update(|w| w.option(&key, &v));
-        }
-        Ok(slf.clone())
-    }
-
-    // Mirrors reference `DataStreamWriter.options(**options)`: keyword args; None values
-    // skipped, booleans lowercased.
-    #[pyo3(signature = (**options))]
-    #[doc = connect_doc!(DataStreamWriter.options)]
-    fn options<'py>(
-        slf: &Bound<'py, Self>,
-        options: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<Bound<'py, Self>> {
-        let opts = crate::options::kwargs_skip_none(options)?;
-        slf.borrow().inner.update(|w| w.options(opts));
-        Ok(slf.clone())
-    }
-
-    // Partition by the column names, or a list or tuple of them alone, as PySpark's.
-    #[pyo3(signature = (*cols))]
-    #[doc = connect_doc!(DataStreamWriter.partitionBy)]
-    fn partitionBy<'py>(
-        slf: &Bound<'py, Self>,
-        cols: &Bound<'_, PyTuple>,
-    ) -> PyResult<Bound<'py, Self>> {
-        let items: Vec<Bound<'_, PyAny>> = cols.iter().collect();
-        let writer = slf.borrow();
-        let names = stream_column_names(&items);
-        writer
-            .inner
-            .update(|w| w.partition_by(names.as_deref().unwrap_or_default()));
-        names?;
-        Ok(slf.clone())
-    }
-
-    // Cluster by the column names, or a list or tuple of them alone, as PySpark's.
-    #[pyo3(signature = (*cols))]
-    #[doc = connect_doc!(DataStreamWriter.clusterBy)]
-    fn clusterBy<'py>(
-        slf: &Bound<'py, Self>,
-        cols: &Bound<'_, PyTuple>,
-    ) -> PyResult<Bound<'py, Self>> {
-        let items: Vec<Bound<'_, PyAny>> = cols.iter().collect();
-        let writer = slf.borrow();
-        let names = stream_column_names(&items);
-        writer
-            .inner
-            .update(|w| w.cluster_by(names.as_deref().unwrap_or_default()));
-        names?;
-        Ok(slf.clone())
-    }
-
-    // Name the query, a non-empty str, else `VALUE_NOT_NON_EMPTY_STR`, as PySpark's.
-    #[doc = connect_doc!(DataStreamWriter.queryName)]
-    fn queryName<'py>(
-        slf: &Bound<'py, Self>,
-        queryName: &Bound<'_, PyAny>,
-    ) -> PyResult<Bound<'py, Self>> {
-        let name = query_name_of(queryName)?;
-        slf.borrow().inner.update(|w| w.query_name(&name));
-        Ok(slf.clone())
-    }
-
-    // `DataStreamWriter.trigger(...)`, as PySpark's: exactly one of `processingTime`, `once`,
-    // `continuous`, `availableNow` and `realTime`, else `ONLY_ALLOW_SINGLE_TRIGGER`; an
-    // interval or duration is a non-empty string, which is stripped, else
-    // `VALUE_NOT_NON_EMPTY_STR`, and `once` and `availableNow` are True, else
-    // `VALUE_NOT_ALLOWED`.
-    #[pyo3(signature = (*, processingTime=None, once=None, continuous=None, availableNow=None, realTime=None))]
-    #[doc = connect_doc!(DataStreamWriter.trigger)]
-    fn trigger<'py>(
-        slf: &Bound<'py, Self>,
-        processingTime: Option<Bound<'py, PyAny>>,
-        once: Option<Bound<'py, PyAny>>,
-        continuous: Option<Bound<'py, PyAny>>,
-        availableNow: Option<Bound<'py, PyAny>>,
-        realTime: Option<Bound<'py, PyAny>>,
-    ) -> PyResult<Bound<'py, Self>> {
-        use crate::column::raise_pyspark;
-        let py = slf.py();
-        let given = [
-            &processingTime,
-            &once,
-            &continuous,
-            &availableNow,
-            &realTime,
-        ]
-        .iter()
-        .filter(|value| value.is_some())
-        .count();
-        if given != 1 {
-            return Err(raise_pyspark(
-                py,
-                "PySparkValueError",
-                "ONLY_ALLOW_SINGLE_TRIGGER",
-                &[],
-            ));
-        }
-        let interval = |value: &Bound<'py, PyAny>, name: &str| -> PyResult<String> {
-            let text = match value.cast::<pyo3::types::PyString>() {
-                Ok(text) => text.to_cow()?.trim().to_string(),
-                Err(_) => String::new(),
-            };
-            if text.is_empty() {
-                return Err(raise_pyspark(
-                    py,
-                    "PySparkValueError",
-                    "VALUE_NOT_NON_EMPTY_STR",
-                    &[("arg_name", name), ("arg_value", &value.str()?.to_string())],
-                ));
-            }
-            Ok(text)
-        };
-        // As PySpark's `once is not True`.
-        let true_flag = |value: &Bound<'py, PyAny>, name: &str| -> PyResult<()> {
-            if value.is(pyo3::types::PyBool::new(py, true)) {
-                Ok(())
-            } else {
-                Err(raise_pyspark(
-                    py,
-                    "PySparkValueError",
-                    "VALUE_NOT_ALLOWED",
-                    &[("arg_name", name), ("allowed_values", "[True]")],
-                ))
-            }
-        };
-        let trigger = if let Some(value) = &processingTime {
-            Trigger::ProcessingTime(interval(value, "processingTime")?)
-        } else if let Some(value) = &once {
-            true_flag(value, "once")?;
-            Trigger::Once
-        } else if let Some(value) = &continuous {
-            Trigger::Continuous(interval(value, "continuous")?)
-        } else if let Some(value) = &realTime {
-            Trigger::RealTime(interval(value, "realTime")?)
-        } else {
-            if let Some(value) = &availableNow {
-                true_flag(value, "availableNow")?;
-            }
-            Trigger::AvailableNow
-        };
-        slf.borrow().inner.update(|w| w.trigger(trigger));
-        Ok(slf.clone())
-    }
-
-    #[pyo3(signature = (path=None, format=None, outputMode=None, partitionBy=None, queryName=None, **options))]
-    #[allow(non_snake_case, clippy::too_many_arguments)]
-    #[doc = connect_doc!(DataStreamWriter.start)]
-    fn start<'py>(
-        &self,
-        py: Python<'py>,
-        path: Option<&Bound<'_, PyAny>>,
-        format: Option<&Bound<'_, PyAny>>,
-        outputMode: Option<&Bound<'_, PyAny>>,
-        partitionBy: Option<&Bound<'_, PyAny>>,
-        queryName: Option<&Bound<'_, PyAny>>,
-        options: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<Bound<'py, PyStreamingQuery>> {
-        let writer = self.apply_write_opts(format, outputMode, partitionBy, queryName, options)?;
-        // PySpark's start sets these on the writer before it checks the path, which it sets in
-        // its string field only `if path:`, so that a false one, such as 0, is no path.
-        let path = match path {
-            Some(path) if path.is_truthy()? => Some(crate::readwriter::writer_path(path)?),
-            _ => None,
-        };
-        // Memory/console/foreach sinks take no path; the core treats "" as unset. Of the plan and
-        // the picklers of the writer, which the command is built of.
-        let _in_use = crate::gc::in_use_of_values(py, writer.held_parts());
-        let query = interruptible(py, &writer.spark_session(), || {
-            writer
-                .start_with_event_handler(path.as_deref().unwrap_or(""), post_started_event)
-                .map_err(Box::new)
-        })?;
-        // As PySpark's `StreamingQuery(self._session, ...)`, of the session object of the writer.
-        let session = crate::session::session_object(py, &query.spark_session())?;
-        PyStreamingQuery::of_query(session.bind(py).as_any(), &query)
-    }
-
-    #[pyo3(signature = (tableName, format=None, outputMode=None, partitionBy=None, queryName=None, **options))]
-    #[allow(non_snake_case, clippy::too_many_arguments)]
-    #[doc = connect_doc!(DataStreamWriter.toTable)]
-    fn toTable<'py>(
-        &self,
-        py: Python<'py>,
-        tableName: &Bound<'_, PyAny>,
-        format: Option<&Bound<'_, PyAny>>,
-        outputMode: Option<&Bound<'_, PyAny>>,
-        partitionBy: Option<&Bound<'_, PyAny>>,
-        queryName: Option<&Bound<'_, PyAny>>,
-        options: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<Bound<'py, PyStreamingQuery>> {
-        let writer = self.apply_write_opts(format, outputMode, partitionBy, queryName, options)?;
-        // As the path of `start`, PySpark sets the table in its string field only `if
-        // tableName:`, so that a false one, such as "", starts the query as `start()` does.
-        let table = if tableName.is_truthy()? {
-            Some(crate::str_argument(tableName)?)
-        } else {
-            None
-        };
-        // Of the plan and the picklers of the writer, which the command is built of.
-        let _in_use = crate::gc::in_use_of_values(py, writer.held_parts());
-        let query = interruptible(py, &writer.spark_session(), || {
-            match &table {
-                Some(table) => writer.to_table_with_event_handler(table, post_started_event),
-                None => writer.start_with_event_handler("", post_started_event),
-            }
-            .map_err(Box::new)
-        })?;
-        let session = crate::session::session_object(py, &query.spark_session())?;
-        PyStreamingQuery::of_query(session.bind(py).as_any(), &query)
-    }
-
-    // `DataStreamWriter.foreachBatch(func)`: cloudpickle the `(batch_df, batch_id)`
-    // function (with PySpark's `CloudPickleSerializer`) and attach it as the
-    // foreach-batch sink. Pickling happens here so the Python skin can re-export this
-    // class directly rather than subclassing a (non-subclassable) PyO3 type. The writer keeps
-    // the pickle and not the function, as PySpark's `WriteStreamOperationStart` does.
-    #[doc = connect_doc!(DataStreamWriter.foreachBatch)]
-    fn foreachBatch<'py>(
-        slf: &Bound<'py, Self>,
-        py: Python<'_>,
-        func: &Bound<'_, PyAny>,
-    ) -> PyResult<Bound<'py, Self>> {
-        let command = streaming_function_command(py, func, "foreachBatch")?;
-        // As PySpark's, the function's command and Python version only.
-        let payload = PythonUDFPayload::function(command, crate::dataframe::py_version(py));
-        slf.borrow().inner.update(|w| w.foreach_batch(payload));
-
-        Ok(slf.clone())
-    }
-
-    // `DataStreamWriter.foreach(f)`, as PySpark's: the function of the partition and the
-    // rows of each partition of `_construct_foreach_function(f)`, which raises
-    // `ATTRIBUTE_NOT_CALLABLE` for an object without a callable `process`, in the command
-    // `(func, None, serializer, serializer)` of `AutoBatchedSerializer(CPickleSerializer())`,
-    // which the worker of the server deserializes with its own `pyspark.serializers`. Built
-    // here to avoid a Python subclass of the PyO3 class. The writer keeps the pickle and not
-    // `f`, as PySpark's `WriteStreamOperationStart` does.
-    #[doc = connect_doc!(DataStreamWriter.foreach)]
-    fn foreach<'py>(
-        slf: &Bound<'py, Self>,
-        py: Python<'_>,
-        f: &Bound<'_, PyAny>,
-    ) -> PyResult<Bound<'py, Self>> {
-        let func = py
-            .import("pyspark.sql.connect.streaming.readwriter")?
-            .getattr("_construct_foreach_function")?
-            .call1((f,))?;
-        let serializers = py.import("pyspark.serializers")?;
-        let cpickle = serializers.getattr("CPickleSerializer")?.call0()?;
-        let serializer = serializers
-            .getattr("AutoBatchedSerializer")?
-            .call1((cpickle,))?;
-        // (func, return_type=None, input_serializer, output_serializer) — the shape the
-        // worker's foreach runner expects; the same serializer instance is used twice.
-        let command_tuple = pyo3::types::PyTuple::new(
-            py,
-            [
-                func,
-                py.None().into_bound(py),
-                serializer.clone(),
-                serializer,
-            ],
-        )?;
-        let command = streaming_function_command(py, command_tuple.as_any(), "foreach")?;
-        let payload = PythonUDFPayload::function(command, crate::dataframe::py_version(py));
-        slf.borrow().inner.update(|w| w.foreach(payload));
-
-        Ok(slf.clone())
     }
 }
 
@@ -1064,34 +503,6 @@ pub(crate) fn proto_bool(obj: &Bound<'_, PyAny>) -> PyResult<bool> {
         }
     }
     Ok(obj.extract::<std::os::raw::c_long>()? != 0)
-}
-
-/// The command of the function of `foreach` or `foreachBatch`, as PySpark's: of
-/// `CloudPickleSerializer().dumps`, which raises a `pickle.PicklingError` for an object that
-/// does not pickle, as `STREAMING_CONNECT_SERIALIZATION_ERROR` of `name`.
-fn streaming_function_command(
-    py: Python<'_>,
-    function: &Bound<'_, PyAny>,
-    name: &str,
-) -> PyResult<Vec<u8>> {
-    let serializer = py
-        .import("pyspark.serializers")?
-        .getattr("CloudPickleSerializer")?
-        .call0()?;
-    match serializer.call_method1("dumps", (function,)) {
-        Ok(command) => command.extract(),
-        Err(error) if error.matches(py, py.import("pickle")?.getattr("PicklingError")?)? => {
-            let raised = crate::column::raise_pyspark(
-                py,
-                "PySparkPicklingError",
-                "STREAMING_CONNECT_SERIALIZATION_ERROR",
-                &[("name", name)],
-            );
-            raised.set_cause(py, Some(error));
-            Err(raised)
-        }
-        Err(error) => Err(error),
-    }
 }
 
 // Python wrapper for StreamingQuery. As PySpark's plain class, its state is its `__dict__`: the

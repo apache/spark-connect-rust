@@ -387,10 +387,11 @@ class RemoveRemoteCachedRelation(LogicalPlan):
 __all__ = ["LogicalPlan", "Read", "Range", "SQL", "SubqueryAlias", "CachedRemoteRelation"]
 
 
-# The write operations of PySpark Connect's writers, of Apache Spark v4.3.0
+# The write operations of PySpark Connect's writers and stream writer, of Apache Spark v4.3.0
 # (python/pyspark/sql/connect/plan.py), which the drop-in's writers, PySpark's classes, keep as their
-# `_write` and send the command of, as PySpark's: a command over the relation of the plan of the
-# DataFrame, the core's placeholder (see `_DataFramePlan`), which the client executes.
+# `_write` (and `_write_stream`) and send the command of, as PySpark's: a command over the relation
+# of the plan of the DataFrame, the core's placeholder (see `_DataFramePlan`), which the client
+# executes.
 
 
 class WriteOperation(LogicalPlan):
@@ -580,3 +581,16 @@ class WriteOperationV2(LogicalPlan):
                     messageParameters={"operation": self.mode},
                 )
         return plan
+
+
+class WriteStreamOperation(LogicalPlan):
+    def __init__(self, child: "LogicalPlan") -> None:
+        super().__init__(child)
+        self.write_op = proto.WriteStreamOperationStart()
+
+    def command(self, session: Any) -> proto.Command:
+        assert self._child is not None
+        self.write_op.input.CopyFrom(self._child.plan(session))
+        cmd = proto.Command()
+        cmd.write_stream_operation_start.CopyFrom(self.write_op)
+        return cmd

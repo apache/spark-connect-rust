@@ -188,6 +188,84 @@ class TestStreamingListenerLifecycle:
         finally:
             spark.streams.close()
 
+    @pytest.mark.parametrize("method", ["start", "toTable"])
+    @pytest.mark.parametrize("registered", [False, True], ids=["no-listener", "listener"])
+    @pytest.mark.parametrize("change", ["none", "instance", "class", "subclass", "replaced"])
+    def test_streaming_started_event_goes_to_the_post_to_all_of_the_bus(
+        self, mock_connect, monkeypatch, method, registered, change,
+    ):
+        # As PySpark's writer, which posts the started event to the `post_to_all` that
+        # `spark.streams._sqlb.post_to_all` resolves to: a patch of the method of the bus or of its
+        # class, the method of a subclass of the bus, and a bus of another class, get the decoded
+        # event, once, also of no listeners. The listeners of the session's bus get it only if
+        # what is called posts it to them: the original method, or the subclass's `super()`.
+        spark, service = mock_connect
+        service.listener_bus_enabled = True
+        manager = spark.streams
+        original_bus = manager._sqlb
+        posted, received = [], []
+
+        class StartedListener(IdleListener):
+            def onQueryStarted(self, event):
+                received.append(event)
+
+        class Recorder:
+            def post_to_all(self, event):
+                posted.append(event)
+
+            def close(self):
+                pass
+
+        class Bus(type(original_bus)):
+            def post_to_all(self, event):
+                posted.append(event)
+                super().post_to_all(event)
+
+        own = type(original_bus).__dict__["post_to_all"]
+
+        def post_to_all(self, event):
+            posted.append(event)
+            own(self, event)
+
+        listener = StartedListener()
+        try:
+            # The listener is of the session's bus, but of the subclass's that takes its place.
+            if registered and change != "subclass":
+                manager.addListener(listener)
+            if change == "instance":
+                original_bus.post_to_all = posted.append
+            elif change == "class":
+                monkeypatch.setattr(type(original_bus), "post_to_all", post_to_all)
+            elif change == "subclass":
+                manager._sqlb = Bus(manager)
+                if registered:
+                    manager.addListener(listener)
+            elif change == "replaced":
+                manager._sqlb = Recorder()
+            service.execute_payload = start_response(json.dumps({
+                "id": "00000000-0000-4000-8000-000000000001",
+                "runId": "00000000-0000-4000-8000-000000000002",
+                "name": "query", "timestamp": "started", "jobTags": ["tag"],
+            }))
+            writer = spark.readStream.format("rate").load().writeStream
+            query = getattr(writer, method)(*(["table"] if method == "toTable" else []))
+            assert query.id == "q"
+            if change == "none":
+                assert posted == []
+            else:
+                assert [type(event).__name__ for event in posted] == ["QueryStartedEvent"]
+                assert posted[0].timestamp == "started" and posted[0].jobTags == {"tag"}
+            delivered = registered and change in ("none", "class", "subclass")
+            assert [event.timestamp for event in received] == (["started"] if delivered else [])
+            if posted and delivered:
+                assert received[0] is posted[0]
+        finally:
+            if "post_to_all" in vars(original_bus):
+                del original_bus.post_to_all
+            manager.close()
+            manager._sqlb = original_bus
+            manager.close()
+
     @pytest.mark.parametrize("event_type, event_json", [
         (None, ""),
         (3, ""),

@@ -402,9 +402,7 @@ def sent_plan(
 # raises ``NOT_ITERABLE``. Of a plan of the Python client whose build raised, the description
 # carries the plan (``plan_of_error``), which the unpickle builds again, as PySpark's does, and
 # whose error the read of the columns raises, a new one, of ``NOT_ITERABLE`` for an
-# ``AttributeError`` so too. Without ``request_schema``, of an object that PySpark pickles of the
-# plan of the DataFrame and not of the DataFrame, such as a DataStreamWriter, the schema is not
-# requested.
+# ``AttributeError`` so too.
 #
 # On a Python worker of the server, whose PySpark has no Rust client, such as the worker of a
 # ``foreachBatch`` function, which has the active session of the query, it gives back PySpark
@@ -420,12 +418,11 @@ def dataframe_of(
     cached_schema: Any = None,
     build_error: Optional[tuple[str, str, Any]] = None,
     fill: Optional[Callable[..., bytes]] = None,
-    request_schema: bool = True,
 ) -> Any:
     of_plan = build_error is not None and build_error[0] == "plan"
     if build_error is not None and not of_plan:
         kind = build_error[0]
-        if request_schema and kind in ("AttributeError", "PySparkAttributeError"):
+        if kind in ("AttributeError", "PySparkAttributeError"):
             from pyspark.errors import PySparkTypeError
 
             raise PySparkTypeError(
@@ -439,22 +436,20 @@ def dataframe_of(
 
         df = ConnectDataFrame(sent_plan(relation, build_error, holes, fill), session)
         # Its columns, a request of its schema, and then the state, as PySpark's unpickle.
-        if request_schema:
-            _ = df.columns
+        _ = df.columns
         df._support_repr_html = support_repr_html
         df._cached_schema = cached_schema
         return df
 
     if not of_plan:
         return _pyspark.DataFrame._of_relation(
-            session, relation, levels, support_repr_html, cached_schema, request_schema, holes
+            session, relation, levels, support_repr_html, cached_schema, holes
         )
     # The DataFrame of the plan built again, as PySpark's unpickle builds its plan, and its
     # columns, which raise the error of its build again, if it raises.
     _, derived, plan = build_error
     df = _pyspark.DataFrame._of_python_plan(plan, session, bool(derived))
-    if request_schema:
-        _ = df.columns
+    _ = df.columns
     return df
 
 

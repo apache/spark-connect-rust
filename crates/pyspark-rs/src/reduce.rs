@@ -184,14 +184,3 @@ pub(crate) fn column_list<'py>(
     PyList::new(py, items)
 }
 
-/// The Python dict of the string pairs of `map`.
-pub(crate) fn str_dict<'py>(
-    py: Python<'py>,
-    map: &std::collections::HashMap<String, String>,
-) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
-    let dict = pyo3::types::PyDict::new(py);
-    for (key, value) in map {
-        dict.set_item(key, value)?;
-    }
-    Ok(dict)
-}

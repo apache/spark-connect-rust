@@ -18,43 +18,57 @@
 # The streaming readers and writers of Spark Connect, as PySpark Connect's
 # ``pyspark.sql.connect.streaming.readwriter``.
 #
-# ``DataStreamReader`` is adapted from PySpark Connect's, of Apache Spark v4.3.0
-# (python/pyspark/sql/connect/streaming/readwriter.py), whose state is the ``__dict__`` of the
-# reader, as PySpark's: its code is PySpark's, but for the plans of the reads, which are the native
-# plans of the Rust core (``_DataSource``, ``_Read`` and ``_RelationChanges``), which check their
-# arguments as PySpark's plans do when they are made, and ``_df``, which makes the DataFrame of the
-# core of a plan, of the session of the reader's ``_client``. The writer and its ``Trigger`` are
-# native. ``DataStreamWriter.foreachBatch`` and ``.foreach`` take a Python callable and cloudpickle
-# it inside the extension (with ``pyspark.serializers.CloudPickleSerializer``); ``.foreach`` sends
-# the function of ``_construct_foreach_function``, as PySpark does.
+# ``DataStreamReader`` and ``DataStreamWriter`` are adapted from PySpark Connect's, of Apache Spark
+# v4.3.0 (python/pyspark/sql/connect/streaming/readwriter.py), whose state is their ``__dict__``, as
+# PySpark's: their code is PySpark's, but for the plans of the reads, which are the native plans of
+# the Rust core (``_DataSource``, ``_Read`` and ``_RelationChanges``), which check their arguments as
+# PySpark's plans do when they are made, and the reader's ``_df``, which makes the DataFrame of the
+# core of a plan, of the session of its ``_client``; and the post of the started event of a query
+# that the writer starts to the ``post_to_all`` of the listener bus of the session, which, of the
+# native bus's own method, the native listener bus of the session makes (``_post_query_started``).
+# The writer's ``WriteStreamOperation`` is PySpark's (``pyspark.sql.connect.plan``), whose command,
+# of the relation of the plan of the DataFrame, the core's placeholder,
+# ``SparkConnectClient.execute_command`` executes. ``Trigger`` is native.
 
+import json
+import pickle
 import re
-from collections.abc import Iterator
-from typing import TYPE_CHECKING, Any, Callable, Optional, Union, cast
+import sys
+from typing import TYPE_CHECKING, Callable, Optional, Union, cast, overload
+
+import pyspark.sql.connect.proto as pb2
 
 # As PySpark Connect's module, which imports pyspark.sql.connect.readwriter: the official doctests
 # of the stream reader and writer take that module's namespace as their globals.
 import pyspark.sql.connect.readwriter  # noqa: F401
 from pyspark._pyspark import (
-    DataStreamWriter as _DataStreamWriter,
-)
-from pyspark._pyspark import (
     Trigger as _Trigger,
 )
-from pyspark._pyspark import _DataSource, _Read, _read_dataframe, _RelationChanges
+from pyspark._pyspark import (
+    _DataSource,
+    _post_query_started,
+    _Read,
+    _read_dataframe,
+    _RelationChanges,
+)
 from pyspark.errors import (
     AnalysisException,
-    PySparkAttributeError,
-    PySparkRuntimeError,
+    PySparkPicklingError,
     PySparkTypeError,
     PySparkValueError,
 )
-from pyspark.sql.connect.plan import LogicalPlan
+from pyspark.serializers import CloudPickleSerializer
+from pyspark.sql.connect.plan import LogicalPlan, WriteStreamOperation
 from pyspark.sql.connect.readwriter import OptionUtils, to_str
+from pyspark.sql.connect.streaming.query import StreamingQuery
+from pyspark.sql.connect.utils import get_python_ver
+from pyspark.sql.streaming.listener import QueryStartedEvent
 from pyspark.sql.streaming.readwriter import DataStreamReader as PySparkDataStreamReader
-from pyspark.sql.types import StructType
+from pyspark.sql.streaming.readwriter import DataStreamWriter as PySparkDataStreamWriter
+from pyspark.sql.types import Row, StructType
 
 if TYPE_CHECKING:
+    from pyspark.sql._typing import SupportsProcess
     from pyspark.sql.connect._typing import OptionalPrimitiveType
     from pyspark.sql.connect.dataframe import DataFrame
     from pyspark.sql.connect.session import SparkSession
@@ -478,97 +492,308 @@ class DataStreamReader(OptionUtils):
 DataStreamReader.__doc__ = PySparkDataStreamReader.__doc__
 
 
-DataStreamWriter = _DataStreamWriter
+class DataStreamWriter:
+    def __init__(self, plan: "LogicalPlan", session: "SparkSession") -> None:
+        self._session = session
+        self._write_stream = WriteStreamOperation(plan)
+        self._write_proto = self._write_stream.write_op
+
+    def outputMode(self, outputMode: str) -> "DataStreamWriter":
+        self._write_proto.output_mode = outputMode
+        return self
+
+    outputMode.__doc__ = PySparkDataStreamWriter.outputMode.__doc__
+
+    def format(self, source: str) -> "DataStreamWriter":
+        self._write_proto.format = source
+        return self
+
+    format.__doc__ = PySparkDataStreamWriter.format.__doc__
+
+    def option(self, key: str, value: "OptionalPrimitiveType") -> "DataStreamWriter":
+        if value is None:
+            return self
+        self._write_proto.options[key] = cast(str, to_str(value))
+        return self
+
+    option.__doc__ = PySparkDataStreamWriter.option.__doc__
+
+    def options(self, **options: "OptionalPrimitiveType") -> "DataStreamWriter":
+        for k in options:
+            self.option(k, options[k])
+        return self
+
+    options.__doc__ = PySparkDataStreamWriter.options.__doc__
+
+    @overload
+    def partitionBy(self, *cols: str) -> "DataStreamWriter": ...
+
+    @overload
+    def partitionBy(self, __cols: list[str]) -> "DataStreamWriter": ...
+
+    def partitionBy(self, *cols: str) -> "DataStreamWriter":  # type: ignore[misc]
+        if len(cols) == 1 and isinstance(cols[0], (list, tuple)):
+            cols = cols[0]
+        # Clear any existing columns (if any).
+        while len(self._write_proto.partitioning_column_names) > 0:
+            self._write_proto.partitioning_column_names.pop()
+        self._write_proto.partitioning_column_names.extend(cast(list[str], cols))
+        return self
+
+    partitionBy.__doc__ = PySparkDataStreamWriter.partitionBy.__doc__
+
+    @overload
+    def clusterBy(self, *cols: str) -> "DataStreamWriter": ...
+
+    @overload
+    def clusterBy(self, __cols: list[str]) -> "DataStreamWriter": ...
+
+    def clusterBy(self, *cols: str) -> "DataStreamWriter":  # type: ignore[misc]
+        if len(cols) == 1 and isinstance(cols[0], (list, tuple)):
+            cols = cols[0]
+        # Clear any existing columns (if any).
+        while len(self._write_proto.clustering_column_names) > 0:
+            self._write_proto.clustering_column_names.pop()
+        self._write_proto.clustering_column_names.extend(cast(list[str], cols))
+        return self
+
+    clusterBy.__doc__ = PySparkDataStreamWriter.clusterBy.__doc__
+
+    def queryName(self, queryName: str) -> "DataStreamWriter":
+        if not queryName or not isinstance(queryName, str) or len(queryName.strip()) == 0:
+            raise PySparkValueError(
+                errorClass="VALUE_NOT_NON_EMPTY_STR",
+                messageParameters={"arg_name": "queryName", "arg_value": str(queryName)},
+            )
+        self._write_proto.query_name = queryName
+        return self
+
+    queryName.__doc__ = PySparkDataStreamWriter.queryName.__doc__
+
+    @overload
+    def trigger(self, *, processingTime: str) -> "DataStreamWriter": ...
+
+    @overload
+    def trigger(self, *, once: bool) -> "DataStreamWriter": ...
+
+    @overload
+    def trigger(self, *, continuous: str) -> "DataStreamWriter": ...
+
+    @overload
+    def trigger(self, *, availableNow: bool) -> "DataStreamWriter": ...
+
+    @overload
+    def trigger(self, *, realTime: str) -> "DataStreamWriter": ...
+
+    def trigger(
+        self,
+        *,
+        processingTime: Optional[str] = None,
+        once: Optional[bool] = None,
+        continuous: Optional[str] = None,
+        availableNow: Optional[bool] = None,
+        realTime: Optional[str] = None,
+    ) -> "DataStreamWriter":
+        params = [processingTime, once, continuous, availableNow, realTime]
+
+        if params.count(None) == 5:
+            raise PySparkValueError(
+                errorClass="ONLY_ALLOW_SINGLE_TRIGGER",
+                messageParameters={},
+            )
+        elif params.count(None) < 4:
+            raise PySparkValueError(
+                errorClass="ONLY_ALLOW_SINGLE_TRIGGER",
+                messageParameters={},
+            )
+
+        if processingTime is not None:
+            if not isinstance(processingTime, str) or len(processingTime.strip()) == 0:
+                raise PySparkValueError(
+                    errorClass="VALUE_NOT_NON_EMPTY_STR",
+                    messageParameters={
+                        "arg_name": "processingTime",
+                        "arg_value": str(processingTime),
+                    },
+                )
+            self._write_proto.processing_time_interval = processingTime.strip()
+
+        elif once is not None:
+            if once is not True:
+                raise PySparkValueError(
+                    errorClass="VALUE_NOT_ALLOWED",
+                    messageParameters={"arg_name": "once", "allowed_values": "[True]"},
+                )
+            self._write_proto.once = True
+
+        elif continuous is not None:
+            if not isinstance(continuous, str) or len(continuous.strip()) == 0:
+                raise PySparkValueError(
+                    errorClass="VALUE_NOT_NON_EMPTY_STR",
+                    messageParameters={"arg_name": "continuous", "arg_value": str(continuous)},
+                )
+            self._write_proto.continuous_checkpoint_interval = continuous.strip()
+
+        elif realTime is not None:
+            if not isinstance(realTime, str) or len(realTime.strip()) == 0:
+                raise PySparkValueError(
+                    errorClass="VALUE_NOT_NON_EMPTY_STR",
+                    messageParameters={"arg_name": "realTime", "arg_value": str(realTime)},
+                )
+            self._write_proto.real_time_batch_duration = realTime.strip()
+
+        else:
+            if availableNow is not True:
+                raise PySparkValueError(
+                    errorClass="VALUE_NOT_ALLOWED",
+                    messageParameters={"arg_name": "availableNow", "allowed_values": "[True]"},
+                )
+            self._write_proto.available_now = True
+
+        return self
+
+    trigger.__doc__ = PySparkDataStreamWriter.trigger.__doc__
+
+    @overload
+    def foreach(self, f: Callable[[Row], None]) -> "DataStreamWriter": ...
+
+    @overload
+    def foreach(self, f: "SupportsProcess") -> "DataStreamWriter": ...
+
+    def foreach(self, f: Union[Callable[[Row], None], "SupportsProcess"]) -> "DataStreamWriter":
+        from pyspark.serializers import AutoBatchedSerializer, CPickleSerializer
+
+        func = PySparkDataStreamWriter._construct_foreach_function(f)
+        serializer = AutoBatchedSerializer(CPickleSerializer())
+        command = (func, None, serializer, serializer)
+        # Python ForeachWriter isn't really a PythonUDF. But we reuse it for simplicity.
+        try:
+            self._write_proto.foreach_writer.python_function.command = (
+                CloudPickleSerializer().dumps(command)
+            )
+        except pickle.PicklingError:
+            raise PySparkPicklingError(  # noqa: B904
+                errorClass="STREAMING_CONNECT_SERIALIZATION_ERROR",
+                messageParameters={"name": "foreach"},
+            )
+        self._write_proto.foreach_writer.python_function.python_ver = "%d.%d" % sys.version_info[:2]  # noqa: UP031
+        return self
+
+    foreach.__doc__ = PySparkDataStreamWriter.foreach.__doc__
+
+    def foreachBatch(self, func: Callable[["DataFrame", int], None]) -> "DataStreamWriter":
+        try:
+            self._write_proto.foreach_batch.python_function.command = CloudPickleSerializer().dumps(
+                func
+            )
+        except pickle.PicklingError:
+            raise PySparkPicklingError(  # noqa: B904
+                errorClass="STREAMING_CONNECT_SERIALIZATION_ERROR",
+                messageParameters={"name": "foreachBatch"},
+            )
+        self._write_proto.foreach_batch.python_function.python_ver = get_python_ver()
+        return self
+
+    foreachBatch.__doc__ = PySparkDataStreamWriter.foreachBatch.__doc__
+
+    def _start_internal(
+        self,
+        path: Optional[str] = None,
+        tableName: Optional[str] = None,
+        format: Optional[str] = None,
+        outputMode: Optional[str] = None,
+        partitionBy: Optional[Union[str, list[str]]] = None,
+        queryName: Optional[str] = None,
+        **options: "OptionalPrimitiveType",
+    ) -> StreamingQuery:
+        self.options(**options)
+        if outputMode is not None:
+            self.outputMode(outputMode)
+        if partitionBy is not None:
+            self.partitionBy(partitionBy)
+        if format is not None:
+            self.format(format)
+        if queryName is not None:
+            self.queryName(queryName)
+        if path:
+            self._write_proto.path = path
+        if tableName:
+            self._write_proto.table_name = tableName
+
+        cmd = self._write_stream.command(self._session.client)
+        _, properties, _ = self._session.client.execute_command(cmd)
+
+        start_result = cast(
+            pb2.WriteStreamOperationStartResult, properties["write_stream_operation_start_result"]
+        )
+        query = StreamingQuery(
+            session=self._session,
+            queryId=start_result.query_id.id,
+            runId=start_result.query_id.run_id,
+            # A Streaming Query cannot have empty string as name
+            # Spark throws error in that case, so this cast is safe
+            name=start_result.name if start_result.name != "" else None,
+        )
+
+        if start_result.HasField("query_started_event_json"):
+            start_event = QueryStartedEvent.fromJson(
+                json.loads(start_result.query_started_event_json)
+            )
+            # As PySpark's `self._session.streams._sqlb.post_to_all(start_event)`. Of the native
+            # bus's own method, the event is posted in the native listener bus of the session, to
+            # the registrations of its buses and its Rust listeners, and a removal of a listener
+            # waits for the delivery; any other `post_to_all` is called with the event.
+            _post_query_started(
+                self._session.streams._sqlb.post_to_all,
+                start_event,
+                start_result.query_started_event_json,
+            )
+
+        return query
+
+    def start(
+        self,
+        path: Optional[str] = None,
+        format: Optional[str] = None,
+        outputMode: Optional[str] = None,
+        partitionBy: Optional[Union[str, list[str]]] = None,
+        queryName: Optional[str] = None,
+        **options: "OptionalPrimitiveType",
+    ) -> "StreamingQuery":
+        return self._start_internal(
+            path=path,
+            tableName=None,
+            format=format,
+            outputMode=outputMode,
+            partitionBy=partitionBy,
+            queryName=queryName,
+            **options,
+        )
+
+    start.__doc__ = PySparkDataStreamWriter.start.__doc__
+
+    def toTable(
+        self,
+        tableName: str,
+        format: Optional[str] = None,
+        outputMode: Optional[str] = None,
+        partitionBy: Optional[Union[str, list[str]]] = None,
+        queryName: Optional[str] = None,
+        **options: "OptionalPrimitiveType",
+    ) -> "StreamingQuery":
+        return self._start_internal(
+            path=None,
+            tableName=tableName,
+            format=format,
+            outputMode=outputMode,
+            partitionBy=partitionBy,
+            queryName=queryName,
+            **options,
+        )
+
+    toTable.__doc__ = PySparkDataStreamWriter.toTable.__doc__
+
+
 Trigger = _Trigger
-
-
-def _construct_foreach_function(
-    f: Union[Callable[[Any], None], Any],
-) -> Callable[[Any, Iterator], Iterator]:
-    """
-    The function of the partition and the rows of each partition that ``foreach(f)`` sends,
-    which the Python worker of the server runs, as PySpark's
-    ``DataStreamWriter._construct_foreach_function``: for a function ``f``, one that calls ``f``
-    with each row, and for an object, one that calls its ``open(partition_id, epoch_id)``, its
-    ``process(row)`` with each row, and its ``close(error)``.
-
-    Ported from PySpark, but for ``TaskContext``, which the function imports on the worker.
-    """
-    if callable(f):
-        # The provided object is a callable function that is supposed to be called on each row.
-        # Construct a function that takes an iterator and calls the provided function on each
-        # row.
-        def func_without_process(_: Any, iterator: Iterator) -> Iterator:
-            for x in iterator:
-                f(x)
-            return iter([])
-
-        return func_without_process
-
-    else:
-        # The provided object is not a callable function. Then it is expected to have a
-        # 'process(row)' method, and optional 'open(partition_id, epoch_id)' and
-        # 'close(error)' methods.
-
-        if not hasattr(f, "process"):
-            raise PySparkAttributeError(
-                errorClass="ATTRIBUTE_NOT_CALLABLE",
-                messageParameters={"attr_name": "process", "obj_name": "f"},
-            )
-
-        if not callable(f.process):
-            raise PySparkAttributeError(
-                errorClass="ATTRIBUTE_NOT_CALLABLE",
-                messageParameters={"attr_name": "process", "obj_name": "f"},
-            )
-
-        def doesMethodExist(method_name: str) -> bool:
-            exists = hasattr(f, method_name)
-            if exists and not callable(getattr(f, method_name)):
-                raise PySparkAttributeError(
-                    errorClass="ATTRIBUTE_NOT_CALLABLE",
-                    messageParameters={"attr_name": method_name, "obj_name": "f"},
-                )
-            return exists
-
-        open_exists = doesMethodExist("open")
-        close_exists = doesMethodExist("close")
-
-        def func_with_open_process_close(partition_id: Any, iterator: Iterator) -> Iterator:
-            from pyspark.taskcontext import TaskContext
-
-            epoch_id = cast(TaskContext, TaskContext.get()).getLocalProperty(
-                "streaming.sql.batchId"
-            )
-            if epoch_id:
-                int_epoch_id = int(epoch_id)
-            else:
-                raise PySparkRuntimeError(
-                    errorClass="CANNOT_GET_BATCH_ID",
-                    messageParameters={"obj_name": "TaskContext"},
-                )
-
-            # Check if the data should be processed
-            should_process = True
-            if open_exists:
-                should_process = f.open(partition_id, int_epoch_id)
-
-            error = None
-
-            try:
-                if should_process:
-                    for x in iterator:
-                        f.process(x)
-            except Exception as ex:
-                error = ex
-            finally:
-                if close_exists:
-                    f.close(error)
-                if error:
-                    raise error
-
-            return iter([])
-
-        return func_with_open_process_close
 
 __all__ = ["DataStreamReader", "DataStreamWriter"]

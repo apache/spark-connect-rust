@@ -2885,8 +2885,8 @@ pysparkfuncs.col.__doc__`), which the test compares with those of `pyspark-clien
   the drop-in's module imports so too, in a block that does not run either: mypy takes them as
   `Any` and pyright reports their imports as of an unknown symbol, as with `pyspark-client`.
 - The classes that the drop-in implements in another way: the internal expressions and plans of
-  PySpark Connect, which annotate private attributes (`DataStreamWriter._write_stream`) and a few
-  internal constructors, and which are `Any`.
+  PySpark Connect, which annotate private attributes (`WindowSpec._orderSpec`) and a few internal
+  constructors, and which are `Any`.
 - The classes of `pyspark.ml.connect` are those of the drop-in, of PySpark's API of `pyspark.ml`
   (see "Native ML classes of the full pyspark.ml API"), where `pyspark-client`'s modules of these
   names are its ML API on PyTorch, so a type checker types `LogisticRegression` of
@@ -3837,22 +3837,27 @@ Column, a table argument, a window specification, a merge clause, the generator 
 `toLocalIterator`, which holds its DataFrame until it ends, as
 PySpark's generator holds `self`, and the expression of a Column (`Column._expr`) and of a table
 argument (`TableArg._subquery_expr`), which `copy.copy` and `copy.deepcopy` copy as they copy a
-Column; the writers of `write`, `writeTo`, `writeStream` and `mergeInto` and their shallow copies,
-which share their state, as PySpark's share the objects of their writes, hold a reference to the
-`WriterParts` of the state, which reports its parts. So a reference cycle through such an object and
-any of the objects that hold it, one or several, is collected, as PySpark collects it: through a
-bound method of an object that keeps a Column and a DataFrame of it, a DataFrame and one derived
-from it, or two shallow copies of a writer; through a plan of the Python client whose attribute
+Column; the merge writer of `mergeInto` and its shallow copies, which share its state, as PySpark's
+share the objects of its merge, hold a reference to the `WriterParts` of the state, which reports
+its parts. So a reference cycle through such an object and any of the objects that hold it, one or
+several, is collected, as PySpark collects it: through a bound method of an object that keeps a
+Column and a DataFrame of it, a DataFrame and one derived from it, or two shallow copies of a merge
+writer; through a plan of the Python client whose attribute
 keeps both its DataFrame and a Column of its subquery, or a table argument of it. A function or a
 plan that a live object reaches is kept as it is, and pickled at the requests of that object. Those
 that hold their DataFrame report it too, and grouped data, their cogroups, `na` and `stat` hold
-their DataFrames, Columns and grouped data in their `__dict__`, as PySpark's, which the collector
-sees, so a cycle through the DataFrame alone, such as `df.back = df.groupBy("id")`, is collected.
+their DataFrames, Columns and grouped data in their `__dict__`, and the writers of `write` and
+`writeTo` and the stream writer of `writeStream` the plans of their DataFrames, as PySpark's, which
+the collector sees, so a cycle through the DataFrame alone, such as `df.back = df.groupBy("id")`, is
+collected.
 The DataFrames of the plan of another,
 `DataFrame(df._plan, session)`, `copy.copy(df)` and a `copy.deepcopy(df)` that copies no function or
-Observation of the plan, and the stream writer of `df.writeStream`, hold the plan of `df` and not
-`df`, as PySpark's hold its plan object, so `df` is freed at its last reference, its attributes with
-it, and a DataFrame that keeps its stream writer too. A `SharedPart` reports nothing while a
+Observation of the plan, hold the plan of `df` and not `df`, as PySpark's hold its plan object, so
+`df` is freed at its last reference, its attributes with it. The plan object of `df._plan` holds
+`df`, where PySpark's does not: so a DataFrame that keeps its stream writer, of that plan object
+(`df.w = df.writeStream`), is a reference cycle, which the collector frees, where PySpark frees the
+DataFrame at its last reference (see `dev/parity/known-differences.md`). A `SharedPart` reports
+nothing while a
 reference to its part is of a holder that the collector does not see, such as the DataFrames that a
 native model of `pyspark.ml.connect` keeps of its fit: the summary dataset of its training summary,
 which the summary keeps too, and the training dataset and the datasets of the classes of a
@@ -3871,11 +3876,12 @@ maps. So a model and its summary in a cycle (`model.summary.model = model`) are 
 fit, and the model's object is deleted from the ML cache of the server, as PySpark's. Nor does a
 `SharedPart` report anything while a call of the binding that may clone or drop its part runs
 without the GIL, on any thread: a call that builds a request of the plans of the objects that it is
-given, such as an action of a DataFrame, a write, a stream's start or a fit of `pyspark.ml.connect`,
-clones and drops the parts of those plans, of what the call keeps alive anyway; the other calls,
+given, such as an action of a DataFrame, a merge or a fit of `pyspark.ml.connect`, clones and drops
+the parts of those plans, of what the call keeps alive anyway; the other calls,
 such as the waits of streaming queries, the calls of the configuration, the catalog and the session,
-and the messages that the Python client builds, whose DataFrames the binding replaces in them before
-the call, clone none. So the collector gets the same references of each object in each of its
+and the messages that the Python client builds, such as the commands of the writers and of the
+starts of the stream writer, whose DataFrames the binding replaces in them before the call, clone
+none. So the collector gets the same references of each object in each of its
 passes, and a cycle through parts that no call clones is collected whenever the collector runs, as
 PySpark's is, except while a listener of the Rust API of the session gets an event, which may clone
 any part. On a free-threaded build of CPython, the parts have no `SharedPart`, and a cycle through
@@ -3884,9 +3890,9 @@ An `ArrayType`, a `MapType`, a
 `StructField` and a `StructType` report the type objects, the flags and the metadata dict that they
 hold, and the lists of a struct, as PySpark's `__dict__` holds them, so a cycle through a type that
 one holds, such as a `DecimalType` with an attribute that keeps the struct, is collected. The
-functions of `foreachBatch` and `foreach` are kept as their pickles, as PySpark's stream writer
-keeps them, so a function that keeps its writer is freed with its last reference, and a copy or a
-pickle of the writer carries the pickle of the call. The registration of `dataSource` reports its
+stream writer, PySpark's, keeps the functions of `foreachBatch` and `foreach` as their pickles, so a
+function that keeps its writer is freed with its last reference, and a copy or a pickle of the
+writer carries the pickle of the call. The registration of `dataSource` reports its
 session, and the builder of `pyspark.sql.connect.session.SparkSession` holds the dict of its
 options, its channel builder and the list of its hook factories in its `__dict__`, which its shallow
 copies share, as PySpark's plain objects hold them, so a session that keeps its `dataSource`, or an
@@ -4015,8 +4021,9 @@ PySpark's classes are plain Python classes, which a user subclasses. So are thes
 the DataFrame, `Observation`, and the `SparkSession`, `Catalog`, `TableValuedFunction`,
 `DataSourceRegistration`, `RuntimeConf`, `StreamingQuery`, `StreamingQueryManager`,
 `StreamingQueryListenerBus`, `DataFrameReader`, `DataStreamReader`, `GroupedData`,
-`PandasCogroupedOps`, `DataFrameNaFunctions`, `DataFrameStatFunctions`, `DataFrameWriter` and
-`DataFrameWriterV2` of `pyspark.sql.connect`, which construct of their PySpark arguments
+`PandasCogroupedOps`, `DataFrameNaFunctions`, `DataFrameStatFunctions`, `DataFrameWriter`,
+`DataFrameWriterV2` and `DataStreamWriter` of `pyspark.sql.connect`, which construct of their
+PySpark arguments
 (`SparkSession(connection=...)`, `Catalog(spark)`, `RuntimeConf(spark.client)`,
 `StreamingQuery(spark, id, runId)`, `DataFrameReader(spark)`, `GroupedData(df, "groupby",
 [F.col("id")])`, `DataFrameNaFunctions(df)`), also a subclass of an
@@ -4100,7 +4107,13 @@ its `__init__`, to which `addListener` and `removeListener` add and remove the l
 entries of `_listener_bus`, in its order, which `append` and `remove` change as PySpark's do (of the
 first entry that is the listener or equal to it), and to which the events are posted, of
 `post_to_all`, as the list is then: so a listener that a user puts on the list gets the events too,
-and one of two entries gets each event twice. The bus subscribes the session to the events of the
+and one of two entries gets each event twice. The started event of a query that a `DataStreamWriter`
+starts goes to what `spark.streams._sqlb.post_to_all` is then, as PySpark's writer posts it: of the
+bus's own method, as a delivery of the native listener bus of the session, which also gets it to
+its native listeners, and for which a removal of a listener from another thread waits, as for
+PySpark's bus, which holds its lock while it posts the event; of a patch of the method, of the bus
+or of its class, of the method of a subclass of the bus and of a bus of another class, as PySpark
+calls it. The bus subscribes the session to the events of the
 server with the first listener of the native listener bus of the session, and ends the
 subscription with its last, whose thread posts the events: `_execution_thread` stays None, and the
 `_lock` is not held while the listeners are called, so that a listener may add or remove listeners
@@ -4163,6 +4176,17 @@ that the core builds of the DataFrame, as `df._plan.plan(client)` gives it, and 
 plan object that `df._plan` gave when `write` was read, of which the drop-in's DataFrame makes a new
 one at each read (see `dev/parity/known-differences.md`).
 
+So is the `DataStreamWriter` of `pyspark.sql.connect.streaming.readwriter`, adapted from the same
+source, with PySpark's `WriteStreamOperation`: its state is its `__dict__`, of the `_session`,
+`_write_stream` and `_write_proto` (the `WriteStreamOperationStart` of the `_write_stream`) of its
+`__init__`, whose setters set the fields of its `_write_proto` and whose errors, copies and pickles
+are PySpark's. A start builds PySpark's command of its `_write_proto`, over the relation of the plan
+of the `_write_stream`, which the `execute_command` of the client of its `_session` executes, makes
+the `StreamingQuery` of its result, and posts the started event of the query, decoded as PySpark
+decodes it, to what `self._session.streams._sqlb.post_to_all` is then, as PySpark's writer posts it
+(see the listener bus below). The `_write_stream._child` of a stream writer is the plan object that
+`df._plan` gave when `writeStream` was read.
+
 A pickle of PySpark, which makes an object of its class without arguments and then sets its
 `__dict__`, loads in the drop-in: a reader, a catalog and a registration, of their `__dict__`; and
 the drop-in's pickles of them load in PySpark, of their classes, as PySpark's own do: where the
@@ -4174,8 +4198,8 @@ constructors, the Python objects of its client, do not give, as the drop-in does
 subclass would have no `__init__` to call:
 - `Column` takes an `Expression` of `pyspark.sql.connect.expressions`; the drop-in's expressions
   are the Rust core's.
-- `DataStreamWriter` and `MergeIntoWriter` take the `LogicalPlan` of a DataFrame, which the
-  drop-in's `_plan` stands in for.
+- `MergeIntoWriter` takes the `LogicalPlan` of a DataFrame, which the drop-in's `_plan` stands in
+  for.
 - `WindowSpec` takes the expressions of its partitioning and ordering and a `WindowFrame`, and
   `TableArg` a `SubqueryExpression`, of the plan of the Rust core. A WindowSpec has PySpark's
   `_partitionSpec`, `_orderSpec` and `_frame` as properties of the native object, not in its
