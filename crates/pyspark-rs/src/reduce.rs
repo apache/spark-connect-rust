@@ -184,14 +184,6 @@ pub(crate) fn column_list<'py>(
     PyList::new(py, items)
 }
 
-/// The columns of the Python iterable `items`, each a Column, as `column_list` makes them.
-pub(crate) fn columns_of(items: &Bound<'_, PyAny>) -> PyResult<Vec<Column>> {
-    items
-        .try_iter()?
-        .map(|item| Ok(item?.extract::<PyRef<'_, PyColumn>>()?.column.clone()))
-        .collect()
-}
-
 /// The Python dict of the string pairs of `map`.
 pub(crate) fn str_dict<'py>(
     py: Python<'py>,
