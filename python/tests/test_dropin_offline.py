@@ -17037,6 +17037,76 @@ def test_a_dataframe_whose_session_is_deleted_raises_at_its_requests_as_pyspark(
     assert df.executionInfo is None
 
 
+def test_the_methods_of_a_dataframe_that_make_plans_resolve_no_session_as_pyspark(mock_connect):
+    # As PySpark's methods that make a plan, which read `self._plan` and give `self._session` to
+    # their DataFrame as it is, while its requests read `self._session.client`: of a `_session`
+    # that is no session, the DataFrames of the methods are of it, and their requests raise. The
+    # properties of the schema read the `_cached_schema` first, as PySpark's `_schema`, and the
+    # methods of two DataFrames compare the `session_id` of their sessions, as its
+    # `_check_same_session`.
+    from pyspark.errors import PySparkTypeError
+    from pyspark.sql import functions as F
+
+    class NotASession:
+        pass
+
+    class Proxy:
+        def __init__(self, session):
+            self._s = session
+
+        def __getattr__(self, name):
+            return getattr(self._s, name)
+
+    spark, _ = mock_connect
+    df = spark.range(3)
+    assert df.columns == ["id"]
+    other = spark.range(3)
+    not_a_session = NotASession()
+    df._session = not_a_session
+    made = [
+        df.select("id"),
+        df.filter("id > 0"),
+        df.withColumn("v", F.col("id") + 1),
+        df.withColumnsRenamed({"id": "x"}),
+        df.alias("a"),
+        df.limit(1),
+        df.offset(1),
+        df.sort("id"),
+        df.drop("id"),
+        df.distinct(),
+        df.dropDuplicates(["id"]),
+        df.hint("broadcast"),
+        df.repartition(2),
+        df.coalesce(1),
+        df.sample(0.5, seed=1),
+        df.toDF("x"),
+        df.agg(F.count("id")),
+        df.describe("id"),
+        df.observe("observed", F.count(F.lit(1))),
+        df.unpivot("id", ["id"], "variable", "value"),
+        df.transpose(),
+        df.withWatermark("id", "1 second"),
+        df.randomSplit([0.5, 0.5], 1)[0],
+    ]
+    assert all(result._session is not_a_session for result in made)
+    assert repr(df.id) == "Column<'id'>" and repr(df["id"]) == "Column<'id'>"
+    assert df.columns == ["id"] and df.dtypes == [("id", "bigint")]
+    assert df.schema.names == ["id"]
+    for request in (df.isLocal, made[0].collect):
+        with pytest.raises(AttributeError, match="client"):
+            request()
+    # Of the `AttributeError` of its `_schema`, the Column of `__getattr__`, as PySpark's property.
+    with pytest.raises(PySparkTypeError, match="NOT_ITERABLE"):
+        made[0].columns
+    with pytest.raises(AttributeError, match="session_id"):
+        df.union(other)
+    # A proxy of the session, whose `session_id` is the session's: the DataFrames of two are of it.
+    proxy = Proxy(spark)
+    df._session = proxy
+    assert df.join(other, "id")._session is proxy and df.union(other)._session is proxy
+    assert df.join(other, "id").columns == ["id"]
+
+
 def test_the_request_of_is_streaming_takes_the_call_site_of_functools_as_pyspark(
     mock_connect, monkeypatch
 ):

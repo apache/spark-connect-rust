@@ -126,7 +126,7 @@ impl PyObservation {
         df: &Bound<'_, PyDataFrame>,
         exprs: Vec<Bound<'_, PyColumn>>,
     ) -> PyResult<crate::dataframe::NewDataFrame> {
-        let df = crate::dataframe::Frame::of(df)?;
+        let df = crate::dataframe::PlanFrame::of(df)?;
         let exprs = exprs
             .iter()
             .map(|c| Ok(crate::column::column_of(c)?.expression().clone()))
@@ -481,11 +481,11 @@ fn copy_attributes(
 /// DataFrames of it set the metrics, as those of an Observation of their plans.
 pub(crate) fn observe(
     py: Python<'_>,
-    frame: &crate::dataframe::Frame<'_>,
+    frame: &crate::dataframe::PlanFrame<'_>,
     observation: &Bound<'_, PyObservation>,
     exprs: Vec<Expression>,
 ) -> PyResult<crate::dataframe::NewDataFrame> {
-    let df = &frame.dataframe;
+    let df = frame.plan();
     if !observation.getattr(intern!(py, "_result"))?.is_none() {
         return Err(raise_pyspark(
             py,

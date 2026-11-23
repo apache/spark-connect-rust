@@ -1345,13 +1345,16 @@ requests of the unpickled object pickle as it is then. This case still differs:
   `execute_command`. So the methods that a subclass of the drop-in's client overrides are not called
   by them, and a client of another class raises a `TypeError` of it. The DataFrames that a reader
   and the table-valued functions make keep the object that they hold as their `_session`, as
-  PySpark's, which their requests resolve; the methods of a DataFrame resolve the session of its
-  `_session` as they are called, also those that only make a plan, as the plans are the core's,
-  where PySpark's read `self._session.client` at its requests: so a `_session` that is not a
-  session, as of a deleted one, of the Column of `__getattr__`, raises at the method, where
-  PySpark's raises at the request. A `_plan` of the Python client is built at the first request
-  after it is set, of its session, and not again at each, as the core keeps the relation of that
-  build (see "What a plan build does for a pickle").
+  PySpark's, which their requests resolve; so do the methods of a DataFrame that make a plan, of
+  its `_plan`, which give its `_session` to their DataFrame as it is, and compare the `session_id`
+  of the sessions of two DataFrames, as PySpark's `_check_same_session`, and its properties of
+  the schema read its `_cached_schema` first, as PySpark's `_schema`: its requests resolve the
+  session of `_session`, as PySpark's read `self._session.client` then. But a `_plan` of the
+  Python client is built, of the client of `_session`, by the first method that reads the plan
+  after it is set, also one that only makes a plan, and not again at each request, as the plans of
+  the core are made of the plans of their inputs and the core keeps the relation of that build
+  (see "What a plan build does for a pickle"): so a `_session` that is not a session raises at
+  that method, where PySpark's raises at the request.
   The plan of a read is the core's, which takes the options of the reader when it is made, where
   PySpark's `Read` plan of `table` keeps the dict of the reader's options, of which a later `option`
   changes its requests. A

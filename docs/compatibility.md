@@ -4282,7 +4282,8 @@ The DataFrame of `pyspark.sql.connect.dataframe` keeps its state in its `__dict_
 Connect's: its `__init__`, of `DataFrame(plan, session)`, sets `_plan` and `_session` as they are
 given, of PySpark's checks (`MISSING_VALID_PLAN`, `NO_ACTIVE_SESSION`), and then
 `_support_repr_html`, `_cached_schema`, `_cached_schema_serialized` and `_execution_info`, which its
-methods read and set where PySpark's do: its requests read `_plan` and `_session` at each call,
+methods read and set where PySpark's do: its methods read `_plan` and `_session` at each call,
+those that make a plan give `_session` to their DataFrame as it is, which the requests resolve,
 `_schema` requests the schema while `_cached_schema` is None and keeps it with its pickle, which
 `schema` loads, the methods that keep the schema of their input share their `_cached_schema`, the
 actions set `_execution_info`, which `executionInfo` gives, as the callbacks of the writers set
@@ -4290,10 +4291,11 @@ it, and `_repr_html_` sets `_support_repr_html`. `isStreaming` is PySpark's
 `functools.cached_property`, of the `__dict__`. `df._plan` is one object, the plan object of the
 drop-in (`_DataFramePlan`), which `DataFrame(df._plan, session)` and `copy.copy(df)` keep, and of
 which the methods make their DataFrames with the GIL held, of the plan IDs that the plans take when
-they are made, in their order, as PySpark's. A `_plan` of the Python client, or the plan object of
-a DataFrame of another session, is built at the first request after it is set. What differs is that
-the methods resolve the session of `_session` as they are called, also those that only make a plan
-(see `dev/parity/known-differences.md`).
+they are made, in their order, as PySpark's. The plan object of a DataFrame of another session has
+its plan IDs in the session of a request, which gives them to it at the first request. What differs
+is that a `_plan` of the Python client is built, of the client of `_session`, by the first method
+that reads the plan after it is set, also one that only makes a plan (see
+`dev/parity/known-differences.md`).
 
 The `DataFrameReader` and the `DataStreamReader` of `pyspark.sql.connect` are PySpark Connect's
 classes, adapted from the source of PySpark 4.3.0 (`pyspark/sql/connect/readwriter.py` and
