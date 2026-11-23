@@ -948,34 +948,6 @@ fn reduce_after<'py>(
     Ok(PyTuple::new(py, items)?.into_any())
 }
 
-/// The reduce `reduce` of an object that holds the DataFrames `frames` (grouped data, cogrouped
-/// ops, a writer), whose reduce reaches its session first (a local function of its name,
-/// `SparkSession.__reduce__.<locals>.creator`), where PySpark's pickle of the object reaches its
-/// DataFrames first, each of its plan and then of its session: of frames of which one has a plan
-/// that keeps a model or a summary, the reduce of `_column_reduce.unpickled_after` of the frames
-/// up to that one, in their order, so that a pickle fails at the first of them that does not
-/// pickle, of its own error, as PySpark's does (the session of a plain one before them, a function
-/// of a UDF of it, the lock of the model; see `PyDataFrame::__reduce_ex__`), and a deep copy
-/// copies them, of their requests of their schemas, as PySpark's lookup of `__deepcopy__` of its
-/// DataFrames reads their columns; else `reduce`.
-pub(crate) fn frames_reduce<'py>(
-    py: Python<'py>,
-    frames: &[&Py<crate::dataframe::PyDataFrame>],
-    reduce: Bound<'py, PyAny>,
-) -> PyResult<Bound<'py, PyAny>> {
-    for (index, frame) in frames.iter().enumerate() {
-        let df = frame.bind(py).borrow().dataframe.clone();
-        if pickle_reach(py, &df)?.block.is_some() {
-            let reached = frames[..=index]
-                .iter()
-                .map(|frame| frame.bind(py).clone().into_any())
-                .collect();
-            return reduce_after(py, reached, reduce);
-        }
-    }
-    Ok(reduce)
-}
-
 /// The error of `copy.deepcopy` of an object of the reach `reach` with `memo`, of a reach of a
 /// block: the TypeError of the lock of the model, after the deep copies, with `memo`, of the
 /// objects that PySpark's deep copy reaches before it (see [`reached_objects`]), the functions of

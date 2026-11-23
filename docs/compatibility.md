@@ -2885,8 +2885,8 @@ pysparkfuncs.col.__doc__`), which the test compares with those of `pyspark-clien
   the drop-in's module imports so too, in a block that does not run either: mypy takes them as
   `Any` and pyright reports their imports as of an unknown symbol, as with `pyspark-client`.
 - The classes that the drop-in implements in another way: the internal expressions and plans of
-  PySpark Connect, which annotate private attributes (`DataFrameWriter._write`) and a few internal
-  constructors, and which are `Any`.
+  PySpark Connect, which annotate private attributes (`DataStreamWriter._write_stream`) and a few
+  internal constructors, and which are `Any`.
 - The classes of `pyspark.ml.connect` are those of the drop-in, of PySpark's API of `pyspark.ml`
   (see "Native ML classes of the full pyspark.ml API"), where `pyspark-client`'s modules of these
   names are its ML API on PyTorch, so a type checker types `LogisticRegression` of
@@ -3051,18 +3051,23 @@ the `debug_error_string` of an older grpcio (`UNKNOWN:Error received from peer {
 
 The drop-in also sends a plan that PySpark's client cannot encode: from about 50 nested expressions,
 PySpark raises upb's `DecodeError: Exceeded upb_DecodeOptions_MaxDepth` before it sends the plan,
-where the drop-in sends it, and the server runs it within its own limits. It parses a request of up
-to `spark.connect.grpc.marshallerRecursionLimit` nested messages (1024), so 508 nested `abs` of a
-`select` run and 509 fail, with the `SparkConnectGrpcException` of `UNKNOWN` (`Application error
-processing RPC`), and its analyzer resolves a plan in up to `spark.sql.analyzer.maxIterations` (100)
-iterations, so a chain of 98 `+` fails with its `AnalysisException` ("Max iterations (100) reached
-for batch Resolution"). A Column of more than 745 levels raises a `RecursionError` when it is
-pickled, of the drop-in's own message (`an expression may be at most 745 levels deep`). On Python
-3.11, PySpark's pickler raises one from about 200 levels, under Python's default recursion limit, so
-a Column of about 200 to 745 levels pickles in the drop-in only. `copy.copy` and `copy.deepcopy` of
-a Column share its expression, of which a deep copy makes again only the levels above the UDFs whose
-functions it copies, so they copy a Column of any depth, as PySpark's `copy.copy` does; PySpark's
-`copy.deepcopy` raises a `RecursionError` from about 165 levels.
+where the drop-in sends it, and the server runs it within its own limits. The command of
+`DataFrameWriterV2` is PySpark's, over the drop-in's message of each Column, which holds an
+expression of any depth, but PySpark's command extends its repeated field with the messages of the
+partitioning columns of `partitionedBy`, which protobuf copies of their parse: one of more than 100
+levels, such as a chain of about 50 `+`, raises that `DecodeError`, as PySpark's does. The server
+parses a request of up to `spark.connect.grpc.marshallerRecursionLimit` nested messages (1024), so
+508 nested `abs` of a `select` run and 509 fail, with the `SparkConnectGrpcException` of `UNKNOWN`
+(`Application error processing RPC`), and its analyzer resolves a plan in up to
+`spark.sql.analyzer.maxIterations` (100) iterations, so a chain of 98 `+` fails with its
+`AnalysisException` ("Max iterations (100) reached for batch Resolution"). A Column of more than 745
+levels raises a `RecursionError` when it is pickled, of the drop-in's own message
+(`an expression may be at most 745 levels deep`). On Python 3.11, PySpark's pickler raises one from
+about 200 levels, under Python's default recursion limit, so a Column of about 200 to 745 levels
+pickles in the drop-in only. `copy.copy` and `copy.deepcopy` of a Column share its expression, of
+which a deep copy makes again only the levels above the UDFs whose functions it copies, so they copy
+a Column of any depth, as PySpark's `copy.copy` does; PySpark's `copy.deepcopy` raises a
+`RecursionError` from about 165 levels.
 
 The frame bounds of `Window.rowsBetween` and `rangeBetween` are converted when the plan is built,
 as in PySpark: a bound of a row frame beyond an int, such as a start of `-2**40` or of
@@ -3886,13 +3891,13 @@ session, and the builder of `pyspark.sql.connect.session.SparkSession` holds the
 options, its channel builder and the list of its hook factories in its `__dict__`, which its shallow
 copies share, as PySpark's plain objects hold them, so a session that keeps its `dataSource`, or an
 option, a channel builder or a hook factory that keeps its builder or a copy of it, is collected.
-The readers and the writers report the keys and the values of their options that are objects, which
-PySpark's dicts of options keep as they are, such as a key that is not a str, and the format, the
-save mode, the partitioning and clustering columns and the provider that the writers keep as they
-are, through one object of them that their shallow copies share, as PySpark's copies share the dict
-of their options and the `_write` of a writer: so a cycle through one, such as a key of an option
-that keeps its reader, is collected, also with a copy of the reader, and freed with the last of the
-copies.
+The readers and the writers of `read`, `readStream`, `write` and `writeTo`, PySpark's classes, hold
+the dict of their options, whose keys and values may be any objects, such as a key that is not a
+str, and the writers the format, the save mode, the partitioning and clustering columns and the
+provider as they are, in their `__dict__` (a writer in its `_write`), which their shallow copies
+share, as PySpark's copies share the dict of their options and the `_write` of a writer: so a cycle
+through one, such as a key of an option that keeps its reader, is collected, also with a copy of the
+reader, and freed with the last of the copies.
 
 The condition and the assignments of a clause of `mergeInto` are built, and the functions of their
 UDFs pickled, when the clause is added, which raises there, and the merge sends them as they were
@@ -4003,18 +4008,18 @@ patched over such an attribute of the objects of a Column, a WindowSpec or a Tab
 `__init__` of a Connect object raises its `AttributeError`, where the drop-in's object reads the
 patch (the `__init__` of `na` and `stat` sets their `df`, and raises it as PySpark's). The readers
 and writers of PySpark Connect are subclasses of the `OptionUtils` of
-`pyspark.sql.connect.readwriter`, a class of private methods only: so are the drop-in's readers,
-PySpark's classes, and not its native writers, whose MRO is their class and `object`.
+`pyspark.sql.connect.readwriter`, a class of private methods only: so are the drop-in's readers and
+writers, PySpark's classes.
 
 PySpark's classes are plain Python classes, which a user subclasses. So are these of the drop-in:
 the DataFrame, `Observation`, and the `SparkSession`, `Catalog`, `TableValuedFunction`,
 `DataSourceRegistration`, `RuntimeConf`, `StreamingQuery`, `StreamingQueryManager`,
 `StreamingQueryListenerBus`, `DataFrameReader`, `DataStreamReader`, `GroupedData`,
-`PandasCogroupedOps`, `DataFrameNaFunctions` and `DataFrameStatFunctions` of
-`pyspark.sql.connect`, which construct of their PySpark arguments (`SparkSession(connection=...)`,
-`Catalog(spark)`, `RuntimeConf(spark.client)`, `StreamingQuery(spark, id, runId)`,
-`DataFrameReader(spark)`, `GroupedData(df, "groupby", [F.col("id")])`,
-`DataFrameNaFunctions(df)`), also a subclass of an
+`PandasCogroupedOps`, `DataFrameNaFunctions`, `DataFrameStatFunctions`, `DataFrameWriter` and
+`DataFrameWriterV2` of `pyspark.sql.connect`, which construct of their PySpark arguments
+(`SparkSession(connection=...)`, `Catalog(spark)`, `RuntimeConf(spark.client)`,
+`StreamingQuery(spark, id, runId)`, `DataFrameReader(spark)`, `GroupedData(df, "groupby",
+[F.col("id")])`, `DataFrameNaFunctions(df)`), also a subclass of an
 `__init__` of its own, and whose setters, copies and pickles are of the subclass (but those of a
 session, which are the active session of its ID, as PySpark's); `SparkSession.Builder`,
 `SparkSession.Hook`, `StorageLevel` and `PythonEvalType`; and the data types, from `StringType` and
@@ -4146,6 +4151,18 @@ str that UTF-8 cannot encode, and an option of None, or of a key or a value that
 bytes, of `table` and `changes`. The DataFrame of a read is of the session of the reader's
 `_client`, which the read resolves (see `dev/parity/known-differences.md`).
 
+So are the `DataFrameWriter` and the `DataFrameWriterV2` of `pyspark.sql.connect`, adapted from the
+same source, with PySpark's `WriteOperation` and `WriteOperationV2` of
+`pyspark/sql/connect/plan.py`: the state of a writer is its `__dict__`, of the `_df`, `_spark`,
+`_write` and `_callback` (and `_table_name`) of its `__init__`, whose setters set the fields of its
+`_write` and whose errors, copies and pickles are PySpark's. A write builds PySpark's command of the
+fields of its `_write`, over the relation of the plan of its `_df`, the placeholder of the relation
+that the core builds of the DataFrame, as `df._plan.plan(client)` gives it, and the
+`execute_command` of the client of its `_spark` executes it, whose `ExecutionInfo` the callback of
+`df.write` and `df.writeTo` makes the `executionInfo` of the DataFrame. The `_df` of a writer is the
+plan object that `df._plan` gave when `write` was read, of which the drop-in's DataFrame makes a new
+one at each read (see `dev/parity/known-differences.md`).
+
 A pickle of PySpark, which makes an object of its class without arguments and then sets its
 `__dict__`, loads in the drop-in: a reader, a catalog and a registration, of their `__dict__`; and
 the drop-in's pickles of them load in PySpark, of their classes, as PySpark's own do: where the
@@ -4157,8 +4174,8 @@ constructors, the Python objects of its client, do not give, as the drop-in does
 subclass would have no `__init__` to call:
 - `Column` takes an `Expression` of `pyspark.sql.connect.expressions`; the drop-in's expressions
   are the Rust core's.
-- `DataFrameWriter`, `DataFrameWriterV2`, `DataStreamWriter` and `MergeIntoWriter` take the
-  `LogicalPlan` of a DataFrame, which the drop-in's `_plan` stands in for.
+- `DataStreamWriter` and `MergeIntoWriter` take the `LogicalPlan` of a DataFrame, which the
+  drop-in's `_plan` stands in for.
 - `WindowSpec` takes the expressions of its partitioning and ordering and a `WindowFrame`, and
   `TableArg` a `SubqueryExpression`, of the plan of the Rust core. A WindowSpec has PySpark's
   `_partitionSpec`, `_orderSpec` and `_frame` as properties of the native object, not in its

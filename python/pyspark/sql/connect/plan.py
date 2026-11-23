@@ -30,9 +30,10 @@
 
 from collections.abc import Sequence
 from threading import Lock
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 import pyspark.sql.connect.proto as proto
+from pyspark.errors import PySparkValueError
 from pyspark.sql.column import Column
 from pyspark.sql.connect.logging import logger
 
@@ -384,3 +385,198 @@ class RemoveRemoteCachedRelation(LogicalPlan):
 
 
 __all__ = ["LogicalPlan", "Read", "Range", "SQL", "SubqueryAlias", "CachedRemoteRelation"]
+
+
+# The write operations of PySpark Connect's writers, of Apache Spark v4.3.0
+# (python/pyspark/sql/connect/plan.py), which the drop-in's writers, PySpark's classes, keep as their
+# `_write` and send the command of, as PySpark's: a command over the relation of the plan of the
+# DataFrame, the core's placeholder (see `_DataFramePlan`), which the client executes.
+
+
+class WriteOperation(LogicalPlan):
+    def __init__(self, child: "LogicalPlan") -> None:
+        super().__init__(child)
+        self.source: Optional[str] = None
+        self.path: Optional[str] = None
+        self.table_name: Optional[str] = None
+        self.table_save_method: Optional[str] = None
+        self.mode: Optional[str] = None
+        self.sort_cols: list[str] = []
+        self.partitioning_cols: list[str] = []
+        self.clustering_cols: list[str] = []
+        self.options: dict[str, Optional[str]] = {}
+        self.num_buckets: int = -1
+        self.bucket_cols: list[str] = []
+        self.with_schema_evolution: bool = False
+
+    def command(self, session: Any) -> proto.Command:
+        assert self._child is not None
+        plan = proto.Command()
+
+        plan.write_operation.input.CopyFrom(self._child.plan(session))
+        if self.source is not None:
+            plan.write_operation.source = self.source
+        plan.write_operation.sort_column_names.extend(self.sort_cols)
+        plan.write_operation.partitioning_columns.extend(self.partitioning_cols)
+        plan.write_operation.clustering_columns.extend(self.clustering_cols)
+        plan.write_operation.with_schema_evolution = self.with_schema_evolution
+
+        if self.num_buckets > 0:
+            plan.write_operation.bucket_by.bucket_column_names.extend(self.bucket_cols)
+            plan.write_operation.bucket_by.num_buckets = self.num_buckets
+
+        for k in self.options:
+            if self.options[k] is None:
+                plan.write_operation.options.pop(k, None)
+            else:
+                plan.write_operation.options[k] = cast(str, self.options[k])
+
+        if self.table_name is not None:
+            plan.write_operation.table.table_name = self.table_name
+            if self.table_save_method is not None:
+                tsm = self.table_save_method.lower()
+                if tsm == "save_as_table":
+                    plan.write_operation.table.save_method = proto.WriteOperation.SaveTable.TableSaveMethod.TABLE_SAVE_METHOD_SAVE_AS_TABLE
+                elif tsm == "insert_into":
+                    plan.write_operation.table.save_method = (
+                        proto.WriteOperation.SaveTable.TableSaveMethod.TABLE_SAVE_METHOD_INSERT_INTO
+                    )
+                else:
+                    raise PySparkValueError(
+                        errorClass="UNSUPPORTED_OPERATION",
+                        messageParameters={"operation": tsm},
+                    )
+        elif self.path is not None:
+            plan.write_operation.path = self.path
+
+        if self.mode is not None:
+            wm = self.mode.lower()
+            if wm == "append":
+                plan.write_operation.mode = proto.WriteOperation.SaveMode.SAVE_MODE_APPEND
+            elif wm == "overwrite":
+                plan.write_operation.mode = proto.WriteOperation.SaveMode.SAVE_MODE_OVERWRITE
+            elif wm == "error":
+                plan.write_operation.mode = proto.WriteOperation.SaveMode.SAVE_MODE_ERROR_IF_EXISTS
+            elif wm == "ignore":
+                plan.write_operation.mode = proto.WriteOperation.SaveMode.SAVE_MODE_IGNORE
+            else:
+                raise PySparkValueError(
+                    errorClass="UNSUPPORTED_OPERATION",
+                    messageParameters={"operation": self.mode},
+                )
+        return plan
+
+    def print(self, indent: int = 0) -> str:
+        # The docstring of PySpark Connect's `LogicalPlan.print`, which `inspect.getdoc` and `help()`
+        # find of its `WriteOperation.print`, of none of its own: the `LogicalPlan` here has no
+        # `print`.
+        """
+        Print the simple string representation of the current :class:`LogicalPlan`.
+
+        Parameters
+        ----------
+        indent : int
+            The number of leading spaces for the output string.
+
+        Returns
+        -------
+        str
+            Simple string representation of this :class:`LogicalPlan`.
+        """
+        i = " " * indent
+        return (
+            f"{i}"
+            f"<WriteOperation source='{self.source}' "
+            f"path='{self.path} "
+            f"table_name='{self.table_name}' "
+            f"table_save_method='{self.table_save_method}' "
+            f"mode='{self.mode}' "
+            f"sort_cols='{self.sort_cols}' "
+            f"partitioning_cols='{self.partitioning_cols}' "
+            f"clustering_cols='{self.clustering_cols}' "
+            f"num_buckets='{self.num_buckets}' "
+            f"bucket_cols='{self.bucket_cols}' "
+            f"options='{self.options}'>"
+        )
+
+    def _repr_html_(self) -> str:
+        return (
+            f"<uL><li>WriteOperation <br />source='{self.source}'<br />"
+            f"path: '{self.path}<br />"
+            f"table_name: '{self.table_name}' <br />"
+            f"table_save_method: '{self.table_save_method}' <br />"
+            f"mode: '{self.mode}' <br />"
+            f"sort_cols: '{self.sort_cols}' <br />"
+            f"partitioning_cols: '{self.partitioning_cols}' <br />"
+            f"clustering_cols: '{self.clustering_cols}' <br />"
+            f"num_buckets: '{self.num_buckets}' <br />"
+            f"bucket_cols: '{self.bucket_cols}' <br />"
+            f"options: '{self.options}'<br />"
+            f"</li></ul>"
+        )
+
+
+class WriteOperationV2(LogicalPlan):
+    def __init__(self, child: "LogicalPlan", table_name: str) -> None:
+        super().__init__(child)
+        self.table_name: Optional[str] = table_name
+        self.provider: Optional[str] = None
+        self.partitioning_columns: list[Column] = []
+        self.clustering_columns: list[str] = []
+        self.options: dict[str, Optional[str]] = {}
+        self.table_properties: dict[str, Optional[str]] = {}
+        self.mode: Optional[str] = None
+        self.overwrite_condition: Optional[Column] = None
+        self.with_schema_evolution: bool = False
+
+    def command(self, session: Any) -> proto.Command:
+        assert self._child is not None
+        plan = proto.Command()
+        plan.write_operation_v2.input.CopyFrom(self._child.plan(session))
+        if self.table_name is not None:
+            plan.write_operation_v2.table_name = self.table_name
+        if self.provider is not None:
+            plan.write_operation_v2.provider = self.provider
+
+        plan.write_operation_v2.partitioning_columns.extend(
+            [c.to_plan(session) for c in self.partitioning_columns]
+        )
+        plan.write_operation_v2.clustering_columns.extend(self.clustering_columns)
+        plan.write_operation_v2.with_schema_evolution = self.with_schema_evolution
+
+        for k in self.options:
+            if self.options[k] is None:
+                plan.write_operation_v2.options.pop(k, None)
+            else:
+                plan.write_operation_v2.options[k] = cast(str, self.options[k])
+
+        for k in self.table_properties:
+            if self.table_properties[k] is None:
+                plan.write_operation_v2.table_properties.pop(k, None)
+            else:
+                plan.write_operation_v2.table_properties[k] = cast(str, self.table_properties[k])
+
+        if self.mode is not None:
+            wm = self.mode.lower()
+            if wm == "create":
+                plan.write_operation_v2.mode = proto.WriteOperationV2.Mode.MODE_CREATE
+            elif wm == "overwrite":
+                plan.write_operation_v2.mode = proto.WriteOperationV2.Mode.MODE_OVERWRITE
+                if self.overwrite_condition is not None:
+                    plan.write_operation_v2.overwrite_condition.CopyFrom(
+                        self.overwrite_condition.to_plan(session)
+                    )
+            elif wm == "overwrite_partitions":
+                plan.write_operation_v2.mode = proto.WriteOperationV2.Mode.MODE_OVERWRITE_PARTITIONS
+            elif wm == "append":
+                plan.write_operation_v2.mode = proto.WriteOperationV2.Mode.MODE_APPEND
+            elif wm == "replace":
+                plan.write_operation_v2.mode = proto.WriteOperationV2.Mode.MODE_REPLACE
+            elif wm == "create_or_replace":
+                plan.write_operation_v2.mode = proto.WriteOperationV2.Mode.MODE_CREATE_OR_REPLACE
+            else:
+                raise PySparkValueError(
+                    errorClass="UNSUPPORTED_OPERATION",
+                    messageParameters={"operation": self.mode},
+                )
+        return plan

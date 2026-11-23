@@ -314,8 +314,6 @@ UNRESOLVED_IMPORTS = {
     "pyspark.sql.connect.plan.ChunkedCachedLocalRelation": _CONNECT,
     "pyspark.sql.connect.plan.CommonInlineUserDefinedTableFunction": _CONNECT,
     "pyspark.sql.connect.plan.LocalRelation": _CONNECT,
-    "pyspark.sql.connect.plan.WriteOperation": _CONNECT,
-    "pyspark.sql.connect.plan.WriteOperationV2": _CONNECT,
     "pyspark.sql.connect.plan.WriteStreamOperation": _CONNECT,
 }
 
