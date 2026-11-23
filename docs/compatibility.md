@@ -3053,16 +3053,16 @@ one on a thread of 256 KiB reads a response at that bound. So do the types that 
 and the types of as many levels that the user makes: they are made, compared, written, copied and
 lowered for the requests on stacks that grow with their levels, so that their `==`, `repr()`,
 `json()`, `jsonValue()`, `fromJson`, `simpleString()`, `treeString()`, `toNullable()`,
-`needConversion()`, `hash()` and pickling give on a thread of 128 KiB what they give on the main
-thread, and so do `copy.deepcopy` and unpickling, which convert the JSON of the type in Python,
-on one of 256 KiB (they overflow one of 128 KiB from about 200 nested structs, where
-PySpark's overflow it from about 100). On the main thread, `json()`, `jsonValue()` and `fromJson`
-raise the `RecursionError` of Python's `json` module of a JSON of more than about 1,000 levels (of
-about 330 nested structs), `copy.deepcopy` and unpickling raise one from about 250 nested structs,
-and the walks of the type objects raise theirs past Python's recursion limit of their levels, a
-level for each struct and each field: `==`, pickling, `treeString()`, `hash()` and `repr()` from
-about 500 nested structs, and `simpleString()` and `toNullable()` from about 1,000, of more of a
-higher limit (`sys.setrecursionlimit`), as PySpark's walks take. On Python 3.11, PySpark's raise
+`needConversion()` and `hash()` give on a thread of 128 KiB what they give on the main thread.
+`copy.deepcopy` and pickling copy and pickle the `__dict__`s of the types in Python, as PySpark's,
+of its frames: they raise their `RecursionError` from about 100 and 125 nested structs on the main
+thread and on a thread of 256 KiB, and overflow a thread of 128 KiB from there, as PySpark's do. On
+the main thread, `json()`, `jsonValue()` and `fromJson` raise the `RecursionError` of Python's
+`json` module of a JSON of more than about 1,000 levels (of about 330 nested structs), and the
+walks of the type objects raise theirs past Python's recursion limit of their levels, a level for
+each struct and each field: `==`, `treeString()`, `hash()` and `repr()` from about 500 nested
+structs, and `simpleString()` and `toNullable()` from about 1,000, of more of a higher limit
+(`sys.setrecursionlimit`), as PySpark's walks take. On Python 3.11, PySpark's raise
 their `RecursionError` from about 100 nested structs (`copy.deepcopy`), 125 (pickling), 145 (`==`),
 165 (`hash()` and `repr()`), 250 (`json()` and `simpleString()`) and 330 (`treeString()`), and its
 `repr()` overflows a thread of 256 KiB from about 150. The
@@ -3186,28 +3186,23 @@ and sets the attributes, so a pickled `df.schema` loads with its fields, names, 
 collations, nullable flags and parameters, as PySpark's types of them. At protocol 0 or 1 the
 drop-in raises `TypeError: object.__new__(DecimalType) is not safe, use DecimalType.__new__()`. A
 type of parameters (a decimal, a string, a char, a varchar, a time, an interval of fields or a
-spatial type), an array, a map and a field pickle, copy and deep-copy as PySpark's plain class
-does, as `copyreg.__newobj__(cls)` and their `__dict__`, which holds their parameters (see below),
-also at the protocols 0 and 1: the pickle of a type of parameters is PySpark's own, byte for byte.
-The drop-in's other types pickle, copy and deep-copy as `_parse_datatype_json_string` of their
-JSON, or, a struct with a user-defined type, a nullable flag that is not a bool or a field of
-metadata, of the types and flags it is made of, which the Python workers of the server load at every
-protocol. So the copies of a struct, and of an array or a map of one, keep the metadata dicts of
-its fields as they are, which JSON does not (a tuple, a key that
-is not a str, the order of the keys), and are equal to it, as PySpark's pickle of the `__dict__`
-is, and `toNullable()` makes each field of the dict of the field, as PySpark's
-`metadata=field.metadata`. A type of a state that its JSON does not keep, of an attribute that a
-user set, a `hasPrecisionInfo` that is not true, or the `names` and `_needConversion` of a
-`StructType` that an edit of its fields made differ, pickles and copies as its class and PySpark's
-`__dict__` of it, as a type of a Python subclass does (see below), also in the types that hold it:
-the pickle of a type of no types in it, such as a `DecimalType` of an attribute, is PySpark's own,
-byte for byte. A shallow copy (`copy.copy`) of a struct, an array, a map or a field is of its
-class and the same attribute objects, as PySpark's copy of the `__dict__`, at any depth: a struct's
-copy shares the list of its fields. The class's own types of no parameters and its structs
-compare without the attributes that a user set, where PySpark's comparison of the `__dict__`s holds
-them: a `VariantType()` of an attribute equals `VariantType()`, and so does a struct of a field of
-one, where a type of parameters, an array, a map, a field and a type of a Python subclass compare
-them, of their `__dict__`s (see below).
+spatial type), an array, a map, a field and a struct pickle, copy and deep-copy as PySpark's plain
+class does, as `copyreg.__newobj__(cls)` and their `__dict__`, which holds their parameters (see
+below), also at the protocols 0 and 1, which the Python workers of the server load at every
+protocol: the pickle of a type of parameters is PySpark's own, byte for byte. The drop-in's other
+types pickle, copy and deep-copy as `_parse_datatype_json_string` of their JSON. So the copies of a
+struct, and of an array or a map of one, keep the metadata dicts of its fields as they are, which
+JSON does not (a tuple, a key that is not a str, the order of the keys), and are equal to it, as
+PySpark's pickle of the `__dict__` is, and `toNullable()` makes each field of the dict of the
+field, as PySpark's `metadata=field.metadata`. A type of no parameters of an attribute that a user
+set pickles and copies as its class and PySpark's `__dict__` of it, as a type of a Python subclass
+does (see below), also in the types that hold it. A shallow copy (`copy.copy`) of a struct, an
+array, a map or a field is of its class and the same attribute objects, as PySpark's copy of the
+`__dict__`, at any depth: a struct's copy shares its `fields`, `names` and `_needConversion` lists.
+The class's own types of no parameters compare without the attributes that a user set, where
+PySpark's comparison of the `__dict__`s holds them: a `VariantType()` of an attribute equals
+`VariantType()`, where a type of parameters, an array, a map, a field, a struct and a type of a
+Python subclass compare them, of their `__dict__`s (see below).
 
 `createDataFrame` of a pandas DataFrame of rows under a struct converts it with PySpark's conversion
 where PyArrow is, also of a struct of a Python subclass that reads its fields of its own, and zips
@@ -3328,8 +3323,12 @@ not a type raises its `UNSUPPORTED_OPERATION`, a flag that is not an int raises 
 name that is not a str protobuf's `bad argument type for built-in operation` of its string field.
 A struct's `names` hold the name as it is, and its `treeString()` raises the error of its
 `replace`, as PySpark's `escape_meta_characters` does (`'int' object has no attribute
-'replace'`). The parameters of a `StructType` are not entries of its `__dict__`, so `vars(t)` is
-empty, where PySpark's has them (tracked: SPARK-62251). The type objects that an `ArrayType`, a
+'replace'`). The `fields`, `names`, `_needConversion` and `_needSerializeAnyField` of a
+`StructType` are entries of its `__dict__` too, which its `__init__` and `add` assign through
+`setattr`, as PySpark's, of a subclass's setters and their errors, and which its methods read as
+PySpark's: its iteration, length, items, `simpleString()`, repr, `jsonValue()` and
+`treeString()` of `self.fields`, of a property of a subclass too, and `fieldNames()` of
+`list(self.names)`. The type objects that an `ArrayType`, a
 `MapType`, a `StructField` and a `StructType` are given, by their constructors, `add` and
 assignments, are kept as they are, as PySpark's keep them, so a `UserDefinedType` whose
 `module()` or `sqlType()` is not implemented, such as `UserDefinedType()` itself, makes them: their
@@ -3467,18 +3466,6 @@ __slots__ without defining __getstate__ cannot be pickled` at the protocols 0 an
 and pickles of its slots at the protocols 2 and up, as PySpark's.
 
 What differs:
-- The parameters of a struct are not entries of the `__dict__` of the type, as for the class's own
-  types (`vars(t)` holds the attributes that a user set), and a subclass of it whose `__init__`
-  does not call the `__init__` of its class has the parameters of `cls.__new__(cls)`, of the
-  defaults of the class (a struct of no fields), where PySpark's has none of them and raises the
-  `AttributeError` of each that a method reads (tracked: SPARK-62251). Its native `__init__` sets
-  them, and not through the attributes of the class, as PySpark's assigns them (SPARK-62231), so a
-  property of a subclass whose getter reads the state that its setter writes reads it unwritten;
-  `json()` and the conversions read them so, as Python does. A struct whose `fields`, of a class
-  that defines `names` or `fields`, raise or are not as many as its `names`, as Python reads them,
-  is of the fields that its `__init__` was given, of its JSON and its relations. Its
-  `simpleString()`, `repr()` and `treeString()` read the native values of the `fields` that a
-  subclass overrides with a property, where PySpark's read the property (until SPARK-62251).
 - Python calls the `__init__` of a subclass of a singleton type at each call of the class, which
   returns the one instance, where PySpark's metaclass calls it on the first call, as the
   drop-in's `DataTypeSingleton` does of a class of it, such as of PySpark's cloudpickle of such a
@@ -3490,9 +3477,6 @@ What differs:
   each time the `__new__` gives an instance of the class: the extension makes its classes with
   `PyType_FromSpec`, of the stable ABI of Python 3.9, which has no `PyType_FromMetaclass` to make a
   class of another metaclass (see `dev/parity/known-differences.md`).
-- The repr of a struct that holds a type whose repr has a str that UTF-8 cannot encode, such as one
-  of a lone surrogate, raises its `UnicodeEncodeError`, and so do its `str()` and hash, of the
-  repr, where PySpark's make them.
 - A class of type classes of two branches of their hierarchy, such as
   `class X(StringType, IntegerType)` or `class Y(ArrayType, MapType)`, raises
   `TypeError: multiple bases have instance lay-out conflict` when it is made, where PySpark makes
@@ -3504,7 +3488,8 @@ What differs:
   (`"subinteger"`) and which the server then fails to parse (`PARSE_SYNTAX_ERROR`), so sending it
   would only bring back that failure; of data of no rows it sends the `json()` of the object, as
   PySpark, and so it does of any data under a struct that holds a type that overrides a read of
-  `jsonValue` (see above), which PySpark's conversion converts, as PySpark's. The readers,
+  `jsonValue` (see above), or a struct of a `names` of its own, which PySpark's conversion reads,
+  whose data PySpark's conversion converts, as PySpark's. The readers,
   `from_json`, `from_xml`, `applyInPandasWithState` and `toDDL` send the `json()` of the object,
   as PySpark's.
 

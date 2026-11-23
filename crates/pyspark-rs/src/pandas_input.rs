@@ -40,9 +40,10 @@ use crate::types::PyStructType;
 pub(crate) fn _pandas_string_ipc<'py>(
     py: Python<'py>,
     columns: Vec<Bound<'py, PyAny>>,
-    schema: PyRef<'py, PyStructType>,
+    schema: Bound<'py, PyStructType>,
 ) -> PyResult<Option<Bound<'py, PyBytes>>> {
-    let schema_fields = schema.current_fields(py)?;
+    let schema_fields =
+        crate::types::struct_core_fields(schema.as_any(), crate::types::MetadataOf::Strict)?;
     if columns.len() != schema_fields.len() {
         return Ok(None);
     }

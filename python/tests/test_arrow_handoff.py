@@ -2261,7 +2261,8 @@ def test_struct_subclasses_that_override_the_reads_of_the_conversion_keep_the_ro
             return {"__getattribute__" if name == "field_getattribute" else name: method}
         # Of a setter too, which the `__init__` of PySpark's field and the drop-in's assign
         # through, and of a value that the struct's `__init__` reads (`needConversion()`).
-        value = {"name": "i", "dataType": T.LongType(), "nullable": True, "metadata": {}}.get(name)
+        value = {"name": "i", "dataType": T.LongType(), "nullable": True, "metadata": {},
+                 "fields": [], "names": ["i"]}.get(name)
         return {name: property(lambda self: value, lambda self, value: None)}
 
     struct_reads = ("fields", "names", "__iter__", "__getattribute__")
@@ -2869,14 +2870,10 @@ _INTEGER_DESCRIPTORS = {
     ("StructType", "alias"): _integer_converts(
         error=["_to_table", "builtins.AssertionError", ""]),
 }
-# The known differences: the native `__init__` of a struct does not assign through a property
-# patched over its attributes (SPARK-62231), so the conversion goes on and reads the patch where
-# PySpark's reads the attribute, and so does the relation's schema, PySpark's `json()` of it; and
-# the drop-in's client is native. A field assigns its attributes as PySpark's does, of the
-# `AttributeError` of a property of no setter (SPARK-62251).
+# The known differences: the drop-in's client is native. A struct and a field assign their
+# attributes as PySpark's do, of the `AttributeError` of a property of no setter (SPARK-62231,
+# SPARK-62251).
 _INTEGER_DESCRIPTORS_OF_THE_DROP_IN = {
-    ("StructType", "fields"): _guard_converts([], {"fields": [], "type": "struct"}),
-    ("StructType", "names"): _integer_converts(name="changed"),
     ("StructType", "alias"): _integer_converts(),
 }
 
@@ -3600,8 +3597,6 @@ _TIMESTAMP_DESCRIPTORS = {
         error=["_to_table", "builtins.AssertionError", ""]),
 }
 _TIMESTAMP_DESCRIPTORS_OF_THE_DROP_IN = {
-    ("StructType", "fields"): _guard_converts([], {"fields": [], "type": "struct"}),
-    ("StructType", "names"): _timestamp_converts(name="changed"),
     ("StructType", "alias"): _timestamp_converts(),
 }
 
@@ -4260,9 +4255,6 @@ _FLOAT64_DESCRIPTORS = {
         error=["_to_table", "builtins.AssertionError", ""]),
 }
 _FLOAT64_DESCRIPTORS_OF_THE_DROP_IN = {
-    ("StructType", "fields"): _guard_converts([], {"fields": [], "type": "struct"}),
-    ("StructType", "names"): _float64_converts(name="changed",
-                                               relation_metadata={"source": "native"}),
     ("StructType", "alias"): _float64_converts(relation_metadata={"source": "native"}),
 }
 
@@ -6648,8 +6640,6 @@ _STRING_DESCRIPTORS = {
         "type": "struct"}),
 }
 _STRING_DESCRIPTORS_OF_THE_DROP_IN = {
-    ("StructType", "fields"): _guard_converts([], {"fields": [], "type": "struct"}),
-    ("StructType", "names"): _string_converts(name="changed"),
     ("StructType", "alias"): _string_converts(),
 }
 
@@ -7464,8 +7454,6 @@ _DATE_DESCRIPTORS = {
     ("StructField", "metadata"): _guard_raises(*_no_setter("StructField")),
 }
 _DATE_DESCRIPTORS_OF_THE_DROP_IN = {
-    ("StructType", "fields"): _guard_converts([], {"fields": [], "type": "struct"}),
-    ("StructType", "names"): _date_converts(name="changed"),
 }
 
 

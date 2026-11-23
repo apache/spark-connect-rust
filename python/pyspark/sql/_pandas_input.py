@@ -25,9 +25,7 @@ binds as PySpark Connect's module binds them (`_session_module`), so of a patche
 rebound type name too. The fast paths of this module take only plain frames of common columns, of
 intact names and classes, of which they make the tables that the conversion makes, faster; they
 decline the others, which take the conversion. The native row path of the session converts the
-rows of a frame only where the conversion does not run: without PyArrow, and of a struct of a
-class of its own `names` or `fields` that are not as many, which the native `__init__` does not
-set through its setters (SPARK-62231).
+rows of a frame only where the conversion does not run: without PyArrow.
 """
 
 
@@ -565,7 +563,7 @@ def prepare_int64_table(frame, schema):
     are left to PySpark's conversion.
     ``verifySchema`` is ignored for pandas Arrow input, as in Spark Connect.
     """
-    from types import GetSetDescriptorType, WrapperDescriptorType
+    from types import WrapperDescriptorType
 
     import numpy as np
     import pandas as pd
@@ -621,12 +619,12 @@ def prepare_int64_table(frame, schema):
                 or any("__class__" in vars(base) for base in cls.__mro__ if base is not object)):
             return None
     for cls, names, descriptor_type in (
-        (StructType, ("fields", "names"), GetSetDescriptorType),
+        (StructType, ("fields", "names"), None),
         (StructType, ("__iter__",), WrapperDescriptorType),
         (StructField, ("name", "dataType", "nullable", "metadata"), None),
     ):
         for name in names:
-            # A parameter of a field is an entry of the `__dict__` of the field, as PySpark's
+            # A parameter of a struct or a field is an entry of its `__dict__`, as PySpark's
             # (SPARK-62251), of no attribute of the class, which a patch of it would set.
             if descriptor_type is None:
                 if name in vars(cls):
@@ -687,7 +685,7 @@ def timestamp_columns(frame, schema):
     units and submicrosecond truncation are left to PySpark's conversion. Check the
     integer buffers separately so NaT's sentinel never participates in alignment tests.
     """
-    from types import FunctionType, GetSetDescriptorType, WrapperDescriptorType
+    from types import FunctionType, WrapperDescriptorType
 
     import numpy as np
     import pandas as pd
@@ -738,12 +736,12 @@ def timestamp_columns(frame, schema):
                 or any("__class__" in vars(base) for base in cls.__mro__ if base is not object)):
             return None
     for cls, names, descriptor_type in (
-        (NativeStructType, ("fields", "names"), GetSetDescriptorType),
+        (NativeStructType, ("fields", "names"), None),
         (NativeStructType, ("__iter__",), WrapperDescriptorType),
         (StructField, ("name", "dataType", "nullable", "metadata"), None),
     ):
         for name in names:
-            # A parameter of a field is an entry of the `__dict__` of the field, as PySpark's
+            # A parameter of a struct or a field is an entry of its `__dict__`, as PySpark's
             # (SPARK-62251), of no attribute of the class, which a patch of it would set.
             if descriptor_type is None:
                 if name in vars(cls):
@@ -836,7 +834,7 @@ def prepare_timestamp_table(columns, schema, timezone):
 
 def prepare_float64_table(frame, schema):
     """Keep explicit native double columns columnar without changing pandas nulls."""
-    from types import FunctionType, GetSetDescriptorType, WrapperDescriptorType
+    from types import FunctionType, WrapperDescriptorType
 
     import numpy as np
     import pandas as pd
@@ -903,12 +901,12 @@ def prepare_float64_table(frame, schema):
                 or any("__class__" in vars(base) for base in cls.__mro__ if base is not object)):
             return None
     for cls, names, descriptor_type in (
-        (native.StructType, ("fields", "names"), GetSetDescriptorType),
+        (native.StructType, ("fields", "names"), None),
         (native.StructType, ("__iter__",), WrapperDescriptorType),
         (native.StructField, ("name", "dataType", "nullable", "metadata"), None),
     ):
         for name in names:
-            # A parameter of a field is an entry of the `__dict__` of the field, as PySpark's
+            # A parameter of a struct or a field is an entry of its `__dict__`, as PySpark's
             # (SPARK-62251), of no attribute of the class, which a patch of it would set.
             if descriptor_type is None:
                 if name in vars(cls):
@@ -973,7 +971,7 @@ def prepare_string_input(frame, schema):
     conversion hooks, and pandas treats several other objects as missing values.
     Those cases are left to PySpark's conversion, with its values and errors.
     """
-    from types import GetSetDescriptorType, MethodDescriptorType, WrapperDescriptorType
+    from types import MethodDescriptorType, WrapperDescriptorType
 
     import numpy as np
     import pandas as pd
@@ -1010,13 +1008,13 @@ def prepare_string_input(frame, schema):
                 or any("__class__" in vars(base) for base in cls.__mro__ if base is not object)):
             return None
     for cls, names, descriptor_type in (
-        (NativeStructType, ("fields", "names"), GetSetDescriptorType),
+        (NativeStructType, ("fields", "names"), None),
         (NativeStructType, ("__iter__",), WrapperDescriptorType),
         (StructField, ("name", "dataType", "nullable", "metadata"), None),
         (StringType, ("isUTF8BinaryCollation",), MethodDescriptorType),
     ):
         for name in names:
-            # A parameter of a field is an entry of the `__dict__` of the field, as PySpark's
+            # A parameter of a struct or a field is an entry of its `__dict__`, as PySpark's
             # (SPARK-62251), of no attribute of the class, which a patch of it would set.
             if descriptor_type is None:
                 if name in vars(cls):
@@ -1150,7 +1148,7 @@ def prepare_date_table(frame, schema):
     Those cases are left to PySpark's conversion, with its values and errors.
     """
     from datetime import date
-    from types import FunctionType, GetSetDescriptorType, WrapperDescriptorType
+    from types import FunctionType, WrapperDescriptorType
 
     import numpy as np
     import pandas as pd
@@ -1205,12 +1203,12 @@ def prepare_date_table(frame, schema):
                 or any("__class__" in vars(base) for base in cls.__mro__ if base is not object)):
             return None
     for cls, names, descriptor_type in (
-        (NativeStructType, ("fields", "names"), GetSetDescriptorType),
+        (NativeStructType, ("fields", "names"), None),
         (NativeStructType, ("__iter__",), WrapperDescriptorType),
         (StructField, ("name", "dataType", "nullable", "metadata"), None),
     ):
         for name in names:
-            # A parameter of a field is an entry of the `__dict__` of the field, as PySpark's
+            # A parameter of a struct or a field is an entry of its `__dict__`, as PySpark's
             # (SPARK-62251), of no attribute of the class, which a patch of it would set.
             if descriptor_type is None:
                 if name in vars(cls):
@@ -1414,10 +1412,11 @@ def _reads_as(cls, base, names):
 
 def _native_struct_classes_intact():
     """Whether the native `StructType` and `StructField` keep their own reads: no class of them, or
-    a base, defines `__getattribute__` or `__class__`, their `fields`, `names` and `__iter__` are
-    their own descriptors, and `StructField` has no attribute `name`, `dataType`, `nullable` or
-    `metadata` of the class, which are entries of the `__dict__` of a field."""
-    from types import GetSetDescriptorType, WrapperDescriptorType
+    a base, defines `__getattribute__` or `__class__`, the `__iter__` of `StructType` is its own,
+    and neither class has an attribute of the class over its parameters (`fields` and `names`;
+    `name`, `dataType`, `nullable` and `metadata`), which are entries of the `__dict__` of its
+    objects."""
+    from types import WrapperDescriptorType
 
     from pyspark._pyspark import StructField, StructType
 
@@ -1426,12 +1425,12 @@ def _native_struct_classes_intact():
                 or any("__class__" in vars(base) for base in cls.__mro__ if base is not object)):
             return False
     for cls, names, descriptor_type in (
-        (StructType, ("fields", "names"), GetSetDescriptorType),
+        (StructType, ("fields", "names"), None),
         (StructType, ("__iter__",), WrapperDescriptorType),
         (StructField, ("name", "dataType", "nullable", "metadata"), None),
     ):
         for name in names:
-            # A parameter of a field is an entry of the `__dict__` of the field, as PySpark's
+            # A parameter of a struct or a field is an entry of its `__dict__`, as PySpark's
             # (SPARK-62251), of no attribute of the class, which a patch of it would set.
             if descriptor_type is None:
                 if name in vars(cls):
@@ -1474,9 +1473,7 @@ def accepts_pandas_schema(schema=None):
     struct type, with PySpark's conversion (`prepare_pandas_table`), of the relation of the struct
     that the core lowers: of a struct whose classes, and its fields', keep their own reads
     (`_canonical_struct`). The row path converts a frame under another struct with PySpark's
-    conversion too, where PyArrow is, of the relation of PySpark's `json()` of the struct, but of a
-    struct whose `names` and `fields`, as Python reads them of a class that defines either, are not
-    as many, whose rows it converts, of the relation of its native types (SPARK-62231).
+    conversion too, where PyArrow is, of the relation of PySpark's `json()` of the struct.
     """
     return schema is None or type(schema) is str or _canonical_struct(schema)
 

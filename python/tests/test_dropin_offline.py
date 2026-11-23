@@ -6994,15 +6994,12 @@ def test_types_give_back_and_pickle_their_user_defined_types_as_pyspark():
     field = pickle.loads(pickle.dumps(T.StructField("p", udt, True, {"k": 1})))
     assert type(field.dataType) is ExamplePointUDT and field.metadata == {"k": 1}
     # A type pickles of the class of pyspark.sql.types and its `__dict__`, as PySpark's, which the
-    # Python workers of the server rebuild; a struct with a user-defined type, of its class and the
-    # type objects, and one without, by its JSON.
+    # Python workers of the server rebuild.
     assert T.ArrayType(udt).__reduce_ex__(2)[:3] == (
         copyreg.__newobj__, (T.ArrayType,), {"elementType": udt, "containsNull": True}
     )
-    assert T.StructType([T.StructField("p", udt)]).__reduce__()[0] is T.StructType
-    assert T.StructType([T.StructField("i", T.IntegerType())]).__reduce__()[0] is (
-        T._parse_datatype_json_string
-    )
+    struct = T.StructType([T.StructField("p", udt)])
+    assert struct.__reduce_ex__(2)[:3] == (copyreg.__newobj__, (T.StructType,), vars(struct))
 
 
 
@@ -23637,9 +23634,10 @@ def test_create_dataframe_of_a_pandas_frame_of_another_width_zips_it_as_pyspark(
         frame = pd.DataFrame([[1] * len(labels)], columns=pd.Index(labels, dtype=object))
         assert sent(frame, st("a", cls=Iterated)) == ([{"a": 1}], ["a"])
 
-    # A struct of a Python subclass whose `names` is a property, which the native `__init__` does
-    # not assign through, so that its `names` are not as many as its `fields`, takes the row path
-    # of its rows (SPARK-62231), as before, where PySpark's conversion would raise IndexError.
+    # A struct of a Python subclass whose `names` is a property, which `__init__` assigns through,
+    # as PySpark's (SPARK-62231), converts with PySpark's conversion, whose table is of the names
+    # that the property reads, under the `json()` of the struct, as PySpark's: of the `typeName()`
+    # of its class too, which the server fails to parse of another name than "struct".
     class StructName(T.StructType):
         @property
         def names(self):
@@ -23649,8 +23647,13 @@ def test_create_dataframe_of_a_pandas_frame_of_another_width_zips_it_as_pyspark(
         def names(self, value):
             self.__dict__["_names"] = list(value)
 
+    class StructNameX(StructName):
+        pass
+
     assert sent(pd.DataFrame(a), StructName([T.StructField("a", T.LongType())])) == (
-        [{"a": 1}], ["a"])
+        [{"A": 1}], ["a"])
+    named = spark.createDataFrame(pd.DataFrame(a), StructNameX([T.StructField("a", T.LongType())]))
+    assert _local_rows_relation_of(service, named)[1]["type"] == "structn"
     # Of a class that defines neither `names` nor `fields`, as of a plain StructType, a `fields` or
     # `names` list changed in place takes PySpark's conversion: `_deduplicate_field_names` raises
     # the IndexError of a field past the cached names, of a field appended or a name removed, and
@@ -23722,9 +23725,8 @@ def test_create_dataframe_of_a_pandas_frame_sends_the_json_of_its_struct_as_pysp
     # reads them, as its conversion of the table reads them: of a field whose `dataType` reads
     # `StringType()`, a table of strings under a string field, also of no rows, of the schema
     # alone, and of a pyarrow Table, which is cast to the struct. A struct whose `fields` property
-    # reads none, as the native `__init__` does not assign through its setter (SPARK-62231),
-    # takes the row path, of the relation of the fields that it was given, as its rows are, as
-    # PySpark's are of the fields of its setter. Local rows convert with PySpark's conversion too
+    # reads the fields that its setter kept, which `__init__` assigns through (SPARK-62231), is
+    # of those fields, as PySpark's. Local rows convert with PySpark's conversion too
     # (see `test_create_dataframe_of_local_data_under_a_subclass_converts_it_as_pyspark`); the
     # relation of the rows that the native types convert, of a frame without PyArrow, is of those
     # types, as the rows are, which read the attributes of the field as Python reads them, as
@@ -23802,11 +23804,13 @@ def test_create_dataframe_of_local_data_under_a_subclass_converts_it_as_pyspark(
     # attributes as PySpark's (SPARK-62251): the names of a struct are those that the `name` of
     # each field reads, by which a dict is taken, a property whose getter reads the state that its
     # setter wrote reads what `__init__` gave it, and the field's own attributes shadow a class
-    # attribute over one. A struct whose `fields` property reads none, as the native `__init__`
-    # does not assign through its setter (SPARK-62231), and a struct of the native classes,
-    # convert by the native types, of the fields that they were given, as PySpark's are of them;
-    # and so does local data without PyArrow, which PySpark's conversion needs, whose native types
-    # read the attributes of the fields as Python reads them.
+    # attribute over one. A struct reads its attributes as PySpark's too (SPARK-62231): one whose
+    # `fields` property reads the fields that its setter kept, which `__init__` assigns through,
+    # converts with PySpark's conversion, of those fields, and of a `names` property that raises,
+    # of its error. A struct of the native classes converts by the native types, of the fields
+    # that it was given, as PySpark's is of them; and so does local data without PyArrow, which
+    # PySpark's conversion needs, whose native types read the attributes of the fields as Python
+    # reads them.
     np = pytest.importorskip("numpy")
     pa = pytest.importorskip("pyarrow")
     from pyspark.errors import PySparkValueError
@@ -23893,12 +23897,24 @@ def test_create_dataframe_of_local_data_under_a_subclass_converts_it_as_pyspark(
     with pytest.raises(PySparkValueError) as error:
         spark.createDataFrame([(1, 2)], strs)
     assert error.value.getCondition() == "AXIS_LENGTH_MISMATCH"
-    # The native types convert the rows of the native classes, and of a struct whose `fields`
-    # property reads none, of the fields that they were given, of their JSON.
+    # The native types convert the rows of the native classes, of their JSON, and PySpark's
+    # conversion those of a struct whose `fields` property reads the fields that its setter kept.
     flds = StructFlds([T.StructField("a", long_type)])
     for schema in (T.StructType([T.StructField("a", long_type)]), flds):
         assert sent(spark.createDataFrame([(1,)], schema)) == (
             [{"a": 1}], ["int64"], struct_of(("a", "long")))
+
+    class StructNamesRaise(T.StructType):
+        @property
+        def names(self):
+            raise RuntimeError("names of the struct")
+
+        @names.setter
+        def names(self, value):
+            self.__dict__["given"] = value
+
+    with pytest.raises(RuntimeError, match="^names of the struct$"):
+        spark.createDataFrame([(1,)], StructNamesRaise([T.StructField("a", long_type)]))
     with _pandas_row_path():
         assert sent(spark.createDataFrame([(1,)], strs)) == ([{"a": "1"}], ["string"], of_strs)
 

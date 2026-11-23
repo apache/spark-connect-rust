@@ -3106,13 +3106,10 @@ impl PySparkSession {
     /// PyArrow is, of a frame under a struct whose classes the conversion of a plain struct
     /// declines (`accepts_pandas_schema`), and of an empty frame or one of an atomic schema. Where
     /// PyArrow is, a frame under a struct converts with PySpark's conversion
-    /// (`create_from_pandas_table`), also of a patched native class and of a rebound type name,
-    /// but of a struct of a class that defines `names` or `fields` whose `names` and `fields`, as
-    /// Python reads them, are not as many, which the native `__init__` does not set through the
-    /// class's setters, as PySpark's does (SPARK-62231, `names_as_many_as_fields`). The path
-    /// converts the rows of the other frames: without PyArrow, which it does not need; of such a
-    /// struct; and of an empty frame, of which PySpark converts no data, or of an atomic schema,
-    /// of which it has no Arrow type. Its rows are lists with NaN and NaT as None, typed by the
+    /// (`create_from_pandas_table`), also of a patched native class and of a rebound type name.
+    /// The path converts the rows of the other frames: without PyArrow, which it does not need;
+    /// and of an empty frame, of which PySpark converts no data, or of an atomic schema, of which
+    /// it has no Arrow type. Its rows are lists with NaN and NaT as None, typed by the
     /// first non-null value of each column, and its column labels, as strings, or the given
     /// names, applied with `toDF`.
     fn create_from_pandas(
@@ -3152,7 +3149,6 @@ impl PySparkSession {
                     .getattr("pyarrow_available")?
                     .call0()?
                     .is_truthy()?
-                && names_as_many_as_fields(py, schema_object)?
             {
                 return self.create_from_pandas_table(
                     py,
@@ -3585,12 +3581,10 @@ fn pandas_column_names(
 
 /// Whether `createDataFrame` of local data under `schema` converts the data with PySpark's
 /// conversion (`create_from_local_of_pyspark`), as PySpark's does, where the native conversion
-/// reads the native types: of a struct that holds a type of a Python subclass that overrides an
-/// attribute that PySpark's conversion and its `json()` read, at any level, or of a native class
-/// patched over one (`types::holds_json_reads_otherwise`), where PyArrow is, which PySpark's
-/// conversion needs. Not of a struct whose `names` and `fields`, as Python reads them, may not be
-/// those that PySpark's `__init__` assigned (`local_fields_as_assigned`), whose rows the native
-/// conversion converts, of the fields that it was given, as of a pandas DataFrame.
+/// converts the rows by the core types of the struct: of a struct that holds a type of a Python
+/// subclass that overrides an attribute that PySpark's conversion and its `json()` read, at any
+/// level, or of a native class patched over one (`types::holds_json_reads_otherwise`), where
+/// PyArrow is, which PySpark's conversion needs.
 fn converts_local_data_of_pyspark(py: Python<'_>, schema: &Bound<'_, PyAny>) -> PyResult<bool> {
     Ok(schema.is_instance_of::<crate::types::PyStructType>()
         && crate::types::holds_json_reads_otherwise(py, schema)?
@@ -3598,83 +3592,7 @@ fn converts_local_data_of_pyspark(py: Python<'_>, schema: &Bound<'_, PyAny>) -> 
             .import("pyspark.sql._pandas_input")?
             .getattr("pyarrow_available")?
             .call0()?
-            .is_truthy()?
-        && local_fields_as_assigned(py, schema)?)
-}
-
-/// Whether the `names` and the `fields` of the struct `schema`, which PySpark's conversion of local
-/// data reads (`fieldNames()` and `fields`), as Python reads them, may be those that PySpark's
-/// `__init__` assigns together through the class: of a class that defines neither, whose reads
-/// are of the native values, or of one whose reads of them do not raise an `Exception`, and are
-/// as many where both have a length (the conversion takes a list of the names). The native
-/// `__init__` does not assign them through the class's setters (SPARK-62231), so a property of
-/// such a setter reads the state that the setter did not write, of none, of its default, or of
-/// the `AttributeError` of the attribute that the setter sets, where PySpark's reads what
-/// `__init__` gave it: the native conversion converts the rows of such a struct, of the fields
-/// that it was given, as PySpark's of the fields of its setter.
-fn local_fields_as_assigned(py: Python<'_>, schema: &Bound<'_, PyAny>) -> PyResult<bool> {
-    /// The value of `result`, or None of the `Exception` that it raised.
-    fn of_exception<T>(py: Python<'_>, result: PyResult<T>) -> PyResult<Option<T>> {
-        match result {
-            Ok(value) => Ok(Some(value)),
-            Err(err) if err.is_instance_of::<pyo3::exceptions::PyException>(py) => Ok(None),
-            Err(err) => Err(err),
-        }
-    }
-    let reads_as_native = py
-        .import("pyspark.sql._pandas_input")?
-        .getattr("_reads_as")?
-        .call1((
-            schema.get_type(),
-            py.get_type::<crate::types::PyStructType>(),
-            ("names", "fields"),
-        ))?
-        .is_truthy()?;
-    if reads_as_native {
-        return Ok(true);
-    }
-    let names = of_exception(py, schema.getattr(pyo3::intern!(py, "names")))?;
-    let fields = of_exception(py, schema.getattr(pyo3::intern!(py, "fields")))?;
-    let (Some(names), Some(fields)) = (names, fields) else {
-        return Ok(false);
-    };
-    Ok(
-        match (
-            of_exception(py, names.len())?,
-            of_exception(py, fields.len())?,
-        ) {
-            (Some(names), Some(fields)) => names == fields,
-            _ => true,
-        },
-    )
-}
-
-/// Whether the `names` and the `fields` of the struct `schema`, as Python reads them, are as many,
-/// which PySpark's conversion zips (`_deduplicate_field_names`), of a struct of a Python subclass
-/// that defines `names` or `fields` itself: its setter, which PySpark's `__init__` assigns
-/// through, the native `__init__` does not call (SPARK-62231), so a `names` property of a setter
-/// reads none. True of another schema, also of a `fields` or `names` list of the struct changed in
-/// place, as PySpark's conversion takes it.
-fn names_as_many_as_fields(py: Python<'_>, schema: Option<&Bound<'_, PyAny>>) -> PyResult<bool> {
-    let Some(schema) =
-        schema.filter(|schema| schema.is_instance_of::<crate::types::PyStructType>())
-    else {
-        return Ok(true);
-    };
-    let reads_as_native = py
-        .import("pyspark.sql._pandas_input")?
-        .getattr("_reads_as")?
-        .call1((
-            schema.get_type(),
-            py.get_type::<crate::types::PyStructType>(),
-            ("names", "fields"),
-        ))?
-        .is_truthy()?;
-    if reads_as_native {
-        return Ok(true);
-    }
-    Ok(schema.getattr(pyo3::intern!(py, "names"))?.len()?
-        == schema.getattr(pyo3::intern!(py, "fields"))?.len()?)
+            .is_truthy()?)
 }
 
 /// The schema of `createDataFrame` as PySpark Connect's checks it, when the `AtomicType` or the

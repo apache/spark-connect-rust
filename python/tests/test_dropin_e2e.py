@@ -3188,8 +3188,8 @@ def test_create_dataframe_of_a_pandas_frame_under_a_subclass_that_overrides_its_
     # `IntegerType()`, the DataFrame is of that type, also of no rows; of a struct that iterates
     # its fields in reverse, the schema is of the fields in reverse, which the table zipped with
     # the fields is not of, and which the server raises INVALID_COLUMN_OR_FIELD_DATA_TYPE of. A
-    # struct whose `fields` property reads none, as the native `__init__` does not assign through
-    # its setter (SPARK-62231), is of the fields that it was given, as PySpark's is of its setter.
+    # struct whose `fields` property reads the fields that its setter kept, which `__init__`
+    # assigns through (SPARK-62231), is of them, as PySpark's.
     import json
 
     pd = pytest.importorskip("pandas")
