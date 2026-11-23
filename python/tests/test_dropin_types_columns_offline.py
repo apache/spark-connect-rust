@@ -2161,6 +2161,81 @@ def test_fields_of_metadata_that_json_dumps_refuses_are_made_as_pysparks():
         assert service.analyze_requests == [] and service.execute_requests == []
 
 
+@pytest.mark.parametrize(
+    "metadata, sent",
+    [
+        ([1, 2], "[1, 2]"),
+        ("abc", '"abc"'),
+        ((1, 2), "[1, 2]"),
+        ([{"a": 1}, [2]], '[{"a": 1}, [2]]'),
+        ('{"k": 1}', '"{\\"k\\": 1}"'),
+        (5, "object of type 'int' has no len()"),
+        (object(), "object of type 'object' has no len()"),
+    ],
+    ids=["list", "str", "tuple", "nested", "str-of-json", "int", "object"],
+)
+def test_fields_keep_metadata_that_is_not_a_dict_as_pysparks(metadata, sent):
+    # SPARK-62230: PySpark's StructField keeps any metadata (`metadata or {}`), of which its
+    # `jsonValue()`, `json()`, copies, pickles and `toNullable()` keep the object, and its plans send
+    # `json.dumps` of it when it has a length (`len(field.metadata) > 0`), which the server refuses
+    # (`ClassCastException`), or raise the `TypeError` of its length. The drop-in refused metadata
+    # that is not a dict when the field was made. The texts are official PySpark 4.3.0's.
+    field = T.StructField("a", T.LongType(), False, metadata)
+    struct = T.StructType([field])
+    assert field.metadata is metadata
+    assert field == T.StructField("a", T.LongType(), False, metadata)
+    assert field != T.StructField("a", T.LongType(), False)
+    assert repr(field) == "StructField('a', LongType(), False)"
+    assert field.jsonValue()["metadata"] is metadata
+    assert struct.jsonValue()["fields"][0]["metadata"] is metadata
+    assert struct.toNullable().fields[0].metadata is metadata
+    assert copy.copy(field).metadata is metadata
+    assert T.StructType().add("a", T.LongType(), True, metadata).fields[0].metadata is metadata
+    settable = T.StructField("z", T.LongType())
+    settable.metadata = metadata
+    assert settable.metadata is metadata
+    if type(metadata) is not object:
+        written = json.dumps(struct.jsonValue(), separators=(",", ":"), sort_keys=True)
+        assert struct.json() == written
+        assert pickle.loads(pickle.dumps(struct)).fields[0].metadata == metadata
+        assert copy.deepcopy(field).metadata == metadata
+        # As PySpark's `fromJson`, which looks for the collations in the metadata.
+        if isinstance(metadata, int):
+            with pytest.raises(TypeError, match="^argument of type 'int' is not iterable$"):
+                T.StructType.fromJson(json.loads(written))
+        else:
+            parsed = T.StructType.fromJson(json.loads(written))
+            assert parsed.fields[0].metadata == json.loads(json.dumps(metadata))
+    column = F.col("v").cast(struct)
+    assert repr(column) == "Column<'CAST(v AS STRUCT<A:BIGINT>)'>"
+    if sent.startswith("object of type"):
+        with pytest.raises(TypeError) as error:
+            column._expr.to_plan(None)
+        assert str(error.value) == sent
+    else:
+        assert column._expr.to_plan(None).cast.type.struct.fields[0].metadata == sent
+
+
+def test_fields_of_false_metadata_make_a_dict_and_keep_one_that_is_set_as_pysparks():
+    # As PySpark's `metadata or {}`: a field of false metadata, of no length, has a new empty dict,
+    # and one set after it is kept as it is, and is not sent; a falsy value set keeps the
+    # `TypeError` of PySpark's unpacking of the collations of a string of the field in its JSON.
+    for metadata in ([], "", 0, None, {}):
+        field = T.StructField("a", T.LongType(), True, metadata)
+        assert field.metadata == {} and field.metadata is not metadata
+    field = T.StructField("a", T.LongType())
+    field.metadata = []
+    assert field.metadata == [] and pickle.loads(pickle.dumps(field)).metadata == []
+    assert copy.deepcopy(field).metadata == [] and field.jsonValue()["metadata"] == []
+    plan = F.col("v").cast(T.StructType([field]))._expr.to_plan(None)
+    assert not plan.cast.type.struct.fields[0].HasField("metadata")
+    collated = T.StructField("s", T.StringType("UTF8_LCASE"), True, [1, 2])
+    with pytest.raises(TypeError, match="^'list' object is not a mapping$"):
+        collated.jsonValue()
+    with pytest.raises(TypeError, match="^'str' object is not a mapping$"):
+        T.StructType([T.StructField("s", T.ArrayType(T.StringType("UTF8_LCASE")), True, "ab")]).json()
+
+
 def _metadata_udt(metadata):
     """A UserDefinedType whose SQL type is a struct of a field of `metadata`."""
 

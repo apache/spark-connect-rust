@@ -1408,17 +1408,9 @@ fn foreign_proto_type_level(
                 foreign_proto_type(&element.getattr(pyo3::intern!(py, "dataType"))?, foreign)?;
             let nullable =
                 crate::streaming::proto_bool(&element.getattr(pyo3::intern!(py, "nullable"))?)?;
-            let metadata = element.getattr(pyo3::intern!(py, "metadata"))?;
-            let metadata = if !metadata.is_none() && metadata.len()? > 0 {
-                let text: String = py
-                    .import("json")?
-                    .call_method1("dumps", (&metadata,))?
-                    .extract()?;
-                Metadata::from_json(&text)
-                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
-            } else {
-                Metadata::new()
-            };
+            // As PySpark's `json.dumps(field.metadata)` of metadata of a length, of any value.
+            let metadata =
+                py_metadata_to_map(py, &element.getattr(pyo3::intern!(py, "metadata"))?)?;
             fields.push(StructField {
                 name,
                 data_type,
@@ -1867,16 +1859,20 @@ fn keep_flags_in_json_level(
         }
         json.set_item("nullable", field.nullable.bind(py))?;
         other |= !is_bool_flag(field.nullable.bind(py));
-        // As PySpark's, the metadata dict of the field, of the values as they were given, which
-        // the core's JSON values do not keep, and the collations of its strings, if it has some.
+        // As PySpark's, the metadata of the field, of the values as they were given, which the
+        // core's JSON values do not keep, and the collations of its strings, if it has some; of
+        // metadata that is not a dict too, which PySpark's field keeps as it is.
         let metadata = field.metadata.bind(py);
-        if !metadata.is_empty() {
+        let empty_dict = metadata
+            .cast::<pyo3::types::PyDict>()
+            .is_ok_and(|dict| dict.is_empty());
+        if !empty_dict {
             let collated = match field.data_type_object.kept(py) {
                 Some(object) => has_collations(&py_to_data_type(object.bind(py))?),
                 None => has_collations(&field.field.data_type),
             };
             if collated {
-                let with_collations = metadata.copy()?;
+                let with_collations = unpacked_metadata(py, metadata)?;
                 let collations = json
                     .get_item("metadata")?
                     .get_item(COLLATIONS_METADATA_KEY)?;
@@ -2276,8 +2272,7 @@ impl ForeignFields {
             let metadata = if collations.is_empty() {
                 metadata
             } else {
-                let merged = pyo3::types::PyDict::new(py);
-                merged.call_method1("update", (&metadata,))?;
+                let merged = unpacked_metadata(py, &metadata)?;
                 merged.set_item("__COLLATIONS", &collations)?;
                 merged.into_any()
             };
@@ -2870,11 +2865,18 @@ fn shim_from_json<'py>(py: Python<'py>, name: &str) -> PyResult<Bound<'py, PyAny
     py.import("pyspark.sql.types")?.getattr(name)
 }
 
-/// The core metadata of a `StructField` metadata dict, of the text of its `json.dumps`, which
-/// PySpark sends in a plan, and whose values the core keeps as it writes them: an int of any size,
-/// and the `NaN` and `Infinity` of a float that is not finite. The errors are those of
-/// `json.dumps`, as PySpark's plans raise them, and that of a str that UTF-8 cannot encode.
-fn py_metadata_to_map(py: Python<'_>, d: &Bound<'_, pyo3::types::PyDict>) -> PyResult<Metadata> {
+/// The core metadata of the metadata `d` of a `StructField`, as PySpark's plans send it: of the
+/// text of `json.dumps(d)` if it has a length (`if field.metadata is not None and
+/// len(field.metadata) > 0`), whose values the core keeps as it writes them: an int of any size,
+/// and the `NaN` and `Infinity` of a float that is not finite. PySpark's field keeps any metadata,
+/// so `d` may be another value than a dict, such as a list or a str, whose JSON the core keeps as
+/// it is (see `Metadata::from_json_value`), and which the server refuses. The errors are those of
+/// the length and of `json.dumps` of `d`, as PySpark's plans raise them (`object of type 'int'
+/// has no len()`), and that of a str that UTF-8 cannot encode.
+fn py_metadata_to_map(py: Python<'_>, d: &Bound<'_, PyAny>) -> PyResult<Metadata> {
+    if !metadata_is_sent(d)? {
+        return Ok(Metadata::new());
+    }
     let s: String = py
         .import("json")?
         .getattr("dumps")?
@@ -2883,12 +2885,21 @@ fn py_metadata_to_map(py: Python<'_>, d: &Bound<'_, pyo3::types::PyDict>) -> PyR
     metadata_of_dumps(d, &s)
 }
 
-/// The core metadata of the text `s` of `json.dumps` of the dict `d`.
-fn metadata_of_dumps(d: &Bound<'_, pyo3::types::PyDict>, s: &str) -> PyResult<Metadata> {
-    Metadata::from_json(s).or_else(|e| {
+/// Whether a plan sends the metadata `d` of a field, as PySpark's `field.metadata is not None and
+/// len(field.metadata) > 0`.
+fn metadata_is_sent(d: &Bound<'_, PyAny>) -> PyResult<bool> {
+    match d.cast::<pyo3::types::PyDict>() {
+        Ok(dict) => Ok(!dict.is_empty()),
+        Err(_) => Ok(!d.is_none() && d.len()? > 0),
+    }
+}
+
+/// The core metadata of the text `s` of `json.dumps` of the metadata `d`.
+fn metadata_of_dumps(d: &Bound<'_, PyAny>, s: &str) -> PyResult<Metadata> {
+    Metadata::from_json_value(s).or_else(|e| {
         // The metadata of the core is JSON of UTF-8, which `json.dumps` escapes a lone surrogate
         // of: the error is that of the first str that UTF-8 cannot encode, as of a name.
-        check_metadata_strs(d.as_any())?;
+        check_metadata_strs(d)?;
         Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
             e.to_string(),
         ))
@@ -2899,11 +2910,15 @@ fn metadata_of_dumps(d: &Bound<'_, pyo3::types::PyDict>, s: &str) -> PyResult<Me
 /// stands for its JSON (see `stand_in_field`): PySpark's field keeps any dict, and only the uses
 /// that write its JSON raise the error of `json.dumps` of it, `json()` and the plans of the type
 /// (see `PyStructField::current_field`). So metadata of a value that `json.dumps` refuses, such as
-/// a set, bytes or a key of a tuple, stands as none here. A str that UTF-8 cannot encode raises
-/// its `UnicodeEncodeError`.
-fn kept_metadata(py: Python<'_>, d: &Bound<'_, pyo3::types::PyDict>) -> PyResult<Metadata> {
-    if d.is_empty() {
-        return Ok(Metadata::new());
+/// a set, bytes or a key of a tuple, stands as none here, and so does metadata of another value
+/// whose length raises an `Exception`, such as an int (see `metadata_is_sent`). A str that UTF-8
+/// cannot encode raises its `UnicodeEncodeError`.
+fn kept_metadata(py: Python<'_>, d: &Bound<'_, PyAny>) -> PyResult<Metadata> {
+    match metadata_is_sent(d) {
+        Ok(true) => {}
+        Ok(false) => return Ok(Metadata::new()),
+        Err(error) if is_exception(py, &error) => return Ok(Metadata::new()),
+        Err(error) => return Err(error),
     }
     let dumps = py.import("json")?.getattr("dumps")?.call1((d,));
     let s: String = match dumps {
@@ -3139,16 +3154,43 @@ fn need_conversion_level(py: Python<'_>, data_type: &DataType) -> PyResult<bool>
     })
 }
 
-/// The Python dict of core metadata, as PySpark's `json.loads` of the metadata of a field reads it.
-fn metadata_map_to_py<'py>(
+/// The Python value of core metadata, as PySpark's `json.loads` of the metadata of a field reads
+/// it: a dict, or the value of metadata that is not an object (see `Metadata::from_json_value`).
+fn metadata_map_to_py<'py>(py: Python<'py>, m: &Metadata) -> PyResult<Bound<'py, PyAny>> {
+    py.import("json")?.getattr("loads")?.call1((m.json(),))
+}
+
+/// The metadata of a field made of the metadata `metadata`, as PySpark's `metadata or {}`: the
+/// object if it is true, else none, for which the field makes an empty dict.
+fn given_metadata<'py>(
+    metadata: Option<&Bound<'py, PyAny>>,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
+    match metadata {
+        Some(metadata) if metadata.is_truthy()? => Ok(Some(metadata.clone())),
+        _ => Ok(None),
+    }
+}
+
+/// `{**metadata}`, of which PySpark's `StructField.jsonValue` makes the metadata of the collations
+/// of the strings of a field (`{**self.metadata, "__COLLATIONS": ...}`): of the `TypeError` of
+/// metadata that is not a mapping, as Python's unpacking raises it.
+fn unpacked_metadata<'py>(
     py: Python<'py>,
-    m: &Metadata,
+    metadata: &Bound<'py, PyAny>,
 ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
-    py.import("json")?
-        .getattr("loads")?
-        .call1((m.json(),))?
-        .cast_into::<pyo3::types::PyDict>()
-        .map_err(|_| PyErr::new::<pyo3::exceptions::PyTypeError, _>("metadata is not a dict"))
+    let merged = pyo3::types::PyDict::new(py);
+    // SAFETY: both are valid objects of the thread that holds the GIL (`py`).
+    if unsafe { pyo3::ffi::PyDict_Update(merged.as_ptr(), metadata.as_ptr()) } < 0 {
+        let error = PyErr::fetch(py);
+        if error.is_instance_of::<pyo3::exceptions::PyAttributeError>(py) {
+            let class = metadata.get_type().name()?;
+            return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+                "'{class}' object is not a mapping"
+            )));
+        }
+        return Err(error);
+    }
+    Ok(merged)
 }
 
 #[pymethods]
@@ -5641,10 +5683,10 @@ pub struct PyStructField {
     /// The nullable flag as it was given, which PySpark's `StructField` keeps as it is (any
     /// value, not only a bool). `field.nullable` is its truth.
     nullable: Py<PyAny>,
-    /// The metadata dict, which PySpark's `StructField` keeps as it is: an edit of it in place
-    /// is the metadata of the field. `field.metadata` is only its snapshot at the time it was
-    /// made, so the metadata is read through `current_field`.
-    metadata: Py<pyo3::types::PyDict>,
+    /// The metadata, which PySpark's `StructField` keeps as it is, a dict or any other value: an
+    /// edit of it in place is the metadata of the field. `field.metadata` is only its snapshot at
+    /// the time it was made, so the metadata is read through `current_field`.
+    metadata: Py<PyAny>,
     /// The `needConversion` of the type, kept while it cannot change: that of an atomic type does
     /// not change with its parameters, which may be set, so `add` need not read it again for each
     /// field. Reset by a set `dataType`.
@@ -5670,18 +5712,18 @@ impl PyStructField {
     }
 
     /// A field of the given parts, as PySpark's `StructField(name, dataType, nullable, metadata)`:
-    /// a non-empty metadata dict is kept as it is, so that an edit of it shows in the field; an
-    /// empty or no dict gives a new one (`metadata or {}`).
+    /// metadata that is true is kept as it is, a dict or another value, so that an edit of it shows
+    /// in the field; none gives a new dict (`metadata or {}`, see `given_metadata`).
     fn build(
         py: Python<'_>,
         field: StructField,
-        metadata: Option<&Bound<'_, pyo3::types::PyDict>>,
+        metadata: Option<&Bound<'_, PyAny>>,
         nullable: Py<PyAny>,
         data_type_object: KeptType,
     ) -> PyResult<Self> {
         let metadata = match metadata {
-            Some(d) if !d.is_empty() => d.clone().unbind(),
-            _ => pyo3::types::PyDict::new(py).unbind(),
+            Some(metadata) => metadata.clone().unbind(),
+            None => pyo3::types::PyDict::new(py).into_any().unbind(),
         };
         Ok(PyStructField {
             field,
@@ -5788,9 +5830,7 @@ impl PyStructField {
             name: self.field.name.clone(),
             data_type,
             nullable: self.field.nullable,
-            metadata: if metadata.is_empty() {
-                Metadata::new()
-            } else if lenient {
+            metadata: if lenient {
                 kept_metadata(py, metadata)?
             } else {
                 py_metadata_to_map(py, metadata)?
@@ -5978,7 +6018,7 @@ impl PyStructField {
         name: &Bound<'_, PyAny>,
         dataType: &Bound<'_, PyAny>,
         nullable: Py<PyAny>,
-        metadata: Option<&Bound<'_, pyo3::types::PyDict>>,
+        metadata: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<()> {
         // Of a type of many levels, whose lowering and copies recurse over its levels, on a
         // stack with room for a level (the recursions below grow on their own).
@@ -5986,8 +6026,9 @@ impl PyStructField {
             let py = slf.py();
             let data_type = nested_data_type(dataType, "dataType")?;
             let name = field_name(name)?;
-            let md = match metadata {
-                Some(d) => kept_metadata(py, d)?,
+            let metadata = given_metadata(metadata)?;
+            let md = match &metadata {
+                Some(metadata) => kept_metadata(py, metadata)?,
                 None => Metadata::new(),
             };
             let field = StructField {
@@ -5996,7 +6037,13 @@ impl PyStructField {
                 nullable: nullable.bind(py).is_truthy()?,
                 metadata: md,
             };
-            let this = Self::build(py, field, metadata, nullable, KeptType::of(dataType))?;
+            let this = Self::build(
+                py,
+                field,
+                metadata.as_ref(),
+                nullable,
+                KeptType::of(dataType),
+            )?;
             // The parts that this replaces are freed after the borrow ends.
             let replaced = std::mem::replace(&mut *slf.borrow_mut(), this);
             drop(replaced);
@@ -6075,19 +6122,24 @@ impl PyStructField {
         drop(replaced);
         Ok(())
     }
-    /// The field's metadata dict (mirrors `StructField.metadata`; values may be any type).
+    /// The field's metadata (mirrors `StructField.metadata`): a dict, of values of any type, or
+    /// any other value, which PySpark's field keeps as it is given.
     #[getter]
-    fn metadata<'py>(&self, py: Python<'py>) -> Bound<'py, pyo3::types::PyDict> {
+    fn metadata<'py>(&self, py: Python<'py>) -> Bound<'py, PyAny> {
         self.metadata.bind(py).clone()
     }
+    /// As PySpark's plain attribute, of any value. Its snapshot is read before the field is
+    /// borrowed, as the truth of the value may read the field, and the value it replaces is
+    /// dropped after.
     #[setter]
-    fn set_metadata(
-        &mut self,
-        py: Python<'_>,
-        metadata: &Bound<'_, pyo3::types::PyDict>,
-    ) -> PyResult<()> {
-        self.field.metadata = kept_metadata(py, metadata)?;
-        self.metadata = metadata.clone().unbind();
+    fn set_metadata(slf: &Bound<'_, Self>, metadata: &Bound<'_, PyAny>) -> PyResult<()> {
+        let snapshot = kept_metadata(slf.py(), metadata)?;
+        let replaced = {
+            let mut this = slf.borrow_mut();
+            this.field.metadata = snapshot;
+            std::mem::replace(&mut this.metadata, metadata.clone().unbind())
+        };
+        drop(replaced);
         Ok(())
     }
     /// As PySpark's field, a Python object of a `__dict__` of its `name`, `dataType`, `nullable`
@@ -6248,7 +6300,10 @@ impl PyStructField {
         // found by the identity of the fields that are the types of each other, of no lowering,
         // which would call the methods of a user-defined type that PySpark's pickle does not.
         let holds_itself = field_cycle(slf.as_any());
-        if !is_native(slf) || has_dict_state(slf.as_any())? || holds_itself {
+        // Metadata that is not a dict is kept as it is, as PySpark's pickle of the `__dict__`
+        // keeps it, where the arguments of the class would make a dict of one that is false.
+        let other_metadata = !metadata.bind(py).is_instance_of::<pyo3::types::PyDict>();
+        if !is_native(slf) || has_dict_state(slf.as_any())? || holds_itself || other_metadata {
             return subclass_reduce(
                 slf.as_any(),
                 vec![
@@ -6620,7 +6675,7 @@ impl PyStructType {
         field: &Bound<'_, PyAny>,
         data_type: Option<&Bound<'_, PyAny>>,
         nullable: Py<PyAny>,
-        metadata: Option<&Bound<'_, pyo3::types::PyDict>>,
+        metadata: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Bound<'py, Self>> {
         let py = field.py();
         let (object, name) = if let Ok(sf) = field.cast::<PyStructField>() {
@@ -6650,8 +6705,9 @@ impl PyStructType {
             // The data type is asserted, then the name, by the `StructField` they make.
             let dt = nested_data_type(&type_object, "dataType")?;
             let name = field_name(field)?;
-            let md = match metadata {
-                Some(d) => kept_metadata(py, d)?,
+            let metadata = given_metadata(metadata)?;
+            let md = match &metadata {
+                Some(metadata) => kept_metadata(py, metadata)?,
                 None => Metadata::new(),
             };
             let new_field = StructField {
@@ -6665,7 +6721,7 @@ impl PyStructType {
                 PyStructField::build(
                     py,
                     new_field,
-                    metadata,
+                    metadata.as_ref(),
                     nullable,
                     KeptType::of(&type_object),
                 )?,
@@ -8545,7 +8601,13 @@ fn kept_holds_subclass_object(py: Python<'_>, kept: &KeptType) -> PyResult<bool>
 /// 64 bits, the text of a float).
 fn holds_metadata(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<bool> {
     if let Ok(field) = obj.cast::<PyStructField>() {
-        if !field.borrow().metadata.bind(py).is_empty() {
+        // Of a dict that is not empty, or of metadata that is not a dict.
+        let field = field.borrow();
+        let metadata = field.metadata.bind(py);
+        if !metadata
+            .cast::<pyo3::types::PyDict>()
+            .is_ok_and(|dict| dict.is_empty())
+        {
             return Ok(true);
         }
     }
