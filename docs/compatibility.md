@@ -2578,9 +2578,11 @@ whether the executions are reattachable, and `_get_operation_statuses` the statu
 operations of the session, of a GetStatus RPC under the `get_status` deadline. The client and the
 `conf` of a session hold it as PySpark's hold its client: once the program dropped the session and
 the objects that hold it, such as its DataFrames, a kept `conf` or client raises
-`NO_ACTIVE_SESSION`, as PySpark's do once the `__del__` of the session closed its client. The
-differences that remain are in `dev/parity/known-differences.md` ("Client session ID" and "A
-`client` kept apart from its session").
+`NO_ACTIVE_SESSION`, as PySpark's do once the `__del__` of the session closed its client, and such
+a client keeps its attributes, as PySpark's: its server-side session ID, whether its executions are
+reattachable and its retry policies among them. The differences that remain are in
+`dev/parity/known-differences.md` ("Client session ID" and "The attributes of
+`SparkConnectClient`").
 
 The retry policies of `get_retry_policies` and `set_retry_policies` are PySpark's own
 (`pyspark.sql.connect.client.retries`, vendored from v4.3.0, which needs `grpcio`, `grpcio-status`
@@ -2589,8 +2591,8 @@ themselves, of backoffs, a jitter and a delay of whole milliseconds, are retried
 without Python: of the parameters of the first `DefaultPolicy` of the list, its retries, backoffs,
 jitter and the delay that the server asks for, as PySpark's `Retrying` retries with them, of the
 failures that `DefaultPolicy.can_retry` retries; a `RetryPolicy` retries none. It reads the
-parameters when the policies are set, so a change to a policy afterwards applies once the policies
-are set again. Any other policies, such as those of a subclass of a `can_retry` or a `to_state` of
+parameters of the `_retry_policies` of the client as each call starts, so a change to a policy, or
+to the list, applies from the next call on. Any other policies, such as those of a subclass of a `can_retry` or a `to_state` of
 its own, are run by PySpark's `Retrying`, which the transport makes for each call, as PySpark's
 client makes one, and asks of each failed RPC, of grpcio's `RpcError` of it (`_InactiveRpcError`, or
 `_MultiThreadedRendezvous` of a stream of responses): `Retrying` calls the methods of the policies,
@@ -2600,6 +2602,36 @@ backoff that it gives. The client of a new session has the default policy, as Py
 and `clone` do. With `disable_reattachable_execute`, an execution has no reattach option and no
 deadline, is never released, and is sent again when it fails in a way that its policy retries, as
 PySpark's.
+
+The state of the client is the `__dict__` of its attributes, as PySpark's: `thread_local`,
+`_builder`, `_user_id`, `_retry_policies`, `_max_retry_exception_elapsed_time`, `_session_id`,
+`_closed`, `_rpc_deadlines`, `_use_reattachable_execute`, `_allow_arrow_batch_chunking`,
+`_preferred_arrow_chunk_size`, `_session_hooks`, `_server_session_id`, `_profiler_collector`,
+`_progress_handlers`, `_plan_compression_threshold`, `_plan_compression_algorithm`,
+`_release_session_on_exit`, `global_user_context_extensions` and
+`global_user_context_extensions_lock`, in that order, of PySpark's values, which the clients of a
+session share, as PySpark's session has one client, and of which `copy.copy` of a client makes a
+dict of its own, of the same values. The transport reads them as each call starts, under the GIL,
+as PySpark's requests read them when they are built: a change of an attribute, of an assignment, of
+the object that it holds (`client._session_hooks.append(hook)`) or of `vars(client)`, applies from
+the next call on, of the requests of the client of the call, or of the copy whose method made it.
+The methods read and set them as PySpark's: `set_retry_policies` sets `_retry_policies`,
+`enable_reattachable_execute` and `disable_reattachable_execute` set `_use_reattachable_execute`,
+`register_progress_handler`, `remove_progress_handler` and `clear_progress_handlers` change the list
+of `_progress_handlers`, which the `registerProgressHandler`, `removeProgressHandler` and
+`clearProgressHandlers` of the session call, `spark.profile` is a `Profile` of the
+`_profiler_collector`, which the profiles of the executions update, and `close()` sets `_closed`, as
+`stop()` and the drop of the last object of the session do. The responses set `_server_session_id`,
+the `_closed` of a server-side session change and the plan compression settings of their lookup,
+and a None of either setting makes the next plan look them up again. The exit of the interpreter
+reads `_closed` and `_release_session_on_exit`, as PySpark's `_on_exit` does. A client whose
+`__init__` never ran raises the `AttributeError` of `_closed`, which PySpark's `is_closed` reads.
+The `[DefaultPolicy()]` of `_retry_policies` is made at the first read of the attribute, or at a
+`copy.copy` of the client, as its module imports grpcio, which the drop-in does not require. The
+client has none of the attributes of PySpark's that hold the objects of grpcio and of its Python
+compression of plans, `_channel`, `_internal_stub`, `_artifact_manager`, `_release_futures` and
+`_zstd_module`, which the native transport replaces (see `dev/parity/known-differences.md`, "The
+attributes of `SparkConnectClient`").
 
 The relation of a DataFrame's plan (`df._plan.plan(client)`) is a placeholder that holds the
 relation of the DataFrame, which the core builds at the call, as PySpark's `plan` builds the
@@ -3924,8 +3956,8 @@ of `pyspark.sql.connect.logging`. So its names, of `dir()` and of
 `from pyspark.sql.connect.client import *`, are PySpark's, those classes, `getLogLevel` and the
 modules `core` and `retries`, but for PySpark's modules `artifact` and `reattach`, which the
 transport replaces, and for `retries` until it is imported (by `get_retry_policies`,
-`set_retry_policies`, a `retry_policy` of `SparkConnectClient`, or an import of it), as it imports
-grpc: until then the package has no attribute `retries`, which PySpark's `core` imports. `core`
+`set_retry_policies`, a read of `_retry_policies` or a `copy.copy` of a client, a `retry_policy` of
+`SparkConnectClient`, or an import of it), as it imports grpc: until then the package has no attribute `retries`, which PySpark's `core` imports. `core`
 defines PySpark's names, `PYSPARK_ROOT`, `_is_pyspark_source` and `_import_zstandard_if_available`
 too, and the private helpers of the drop-in. Of the names that PySpark's `core` imports, it has
 those that it imports too, such as `logger` and `os`, and those of `retries` (`RetryPolicy`,

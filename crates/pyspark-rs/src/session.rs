@@ -885,8 +885,9 @@ fn hook_factories_of(hook_factories: Option<Bound<'_, PyAny>>) -> PyResult<Vec<P
     }
 }
 
-/// Install on `session` the hooks that `factories` make of it, each called with the session, as
-/// PySpark's `SparkSession(hook_factories=...)`.
+/// Give the client of `session` the hooks that `factories` make of it, each called with the
+/// session, as its `_session_hooks`, as PySpark's `SparkSession(hook_factories=...)` makes the
+/// `session_hooks` of its client, which the executions read (see [`install_call_hooks`]).
 fn install_hook_factories(
     py: Python<'_>,
     factories: &[Py<PyAny>],
@@ -897,19 +898,142 @@ fn install_hook_factories(
     }
     let hooks = factories
         .iter()
-        .map(|factory| {
-            factory
-                .bind(py)
-                .call1((session.clone_ref(py),))
-                .map(Bound::unbind)
-        })
+        .map(|factory| factory.bind(py).call1((session.clone_ref(py),)))
         .collect::<PyResult<Vec<_>>>()?;
-    let hook: spark_connect::ExecutePlanHook = std::sync::Arc::new(move |request| {
-        Python::attach(|py| call_execute_plan_hooks(py, &hooks, request))
-            .map_err(crate::errors::callback_error)
-    });
-    session.borrow(py).session.set_execute_plan_hook(Some(hook));
+    py.import("pyspark.sql.connect.client.core")?
+        .call_method1("_client_state", (session.clone_ref(py),))?
+        .set_item("_session_hooks", PyList::new(py, hooks)?)?;
+    mark_session_hooks(&session.borrow(py).session, true);
     Ok(())
+}
+
+/// The session hooks of the call of a session that each thread makes now, of the
+/// `_session_hooks` of the client of the call as it started (see
+/// `crate::interrupt::apply_call_settings`), by the thread whose calls the core keys (see
+/// `spark_connect_core::runtime::calling_thread_id`) and the ID of the session: none of a call of
+/// none.
+type CallHooks = std::collections::HashMap<(std::thread::ThreadId, String), Py<PyAny>>;
+
+fn call_hooks() -> &'static std::sync::Mutex<CallHooks> {
+    static HOOKS: std::sync::OnceLock<std::sync::Mutex<CallHooks>> = std::sync::OnceLock::new();
+    HOOKS.get_or_init(Default::default)
+}
+
+/// The IDs of the sessions whose own client had session hooks as its last call started, or as its
+/// hook factories made them: the executions of such a session on a thread that started no call of
+/// it, as a thread of the transport that fits a class of a OneVsRest for a call, call the hooks of
+/// the `_session_hooks` of the client of the session as they are then (see [`install_call_hooks`]).
+fn sessions_with_hooks() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    static SESSIONS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    SESSIONS.get_or_init(Default::default)
+}
+
+/// Mark whether the own client of `session` has session hooks (see [`sessions_with_hooks`]).
+fn mark_session_hooks(session: &SparkSession, present: bool) {
+    let mut sessions = sessions_with_hooks()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if present {
+        sessions.insert(session.session_id().to_string());
+    } else {
+        sessions.remove(session.session_id());
+    }
+}
+
+/// Make `hooks`, the `_session_hooks` of the client of a call of `session` that starts on this
+/// thread, of the client of the session (`own`) or of a copy of it, those whose `on_execute_plan`
+/// the executions of the call call (see [`install_call_hooks`]), as PySpark's executions read the
+/// hooks of their client: of no hooks, the thread has none for the session, so its executions do
+/// not take the GIL for them.
+pub(crate) fn set_call_hooks(session: &SparkSession, hooks: &Bound<'_, PyAny>, own: bool) {
+    let key = (
+        spark_connect_core::runtime::calling_thread_id(),
+        session.session_id().to_string(),
+    );
+    let empty = hooks.len().is_ok_and(|n| n == 0);
+    if own {
+        mark_session_hooks(session, !empty);
+    }
+    let replaced = {
+        let mut kept = call_hooks().lock().unwrap_or_else(|e| e.into_inner());
+        if empty {
+            kept.remove(&key)
+        } else {
+            kept.insert(key, hooks.clone().unbind())
+        }
+    };
+    // Dropped once the map is unlocked, as the drop of a Python object may run Python code.
+    drop(replaced);
+}
+
+/// Forget the session hooks of the calls of `session`, which stopped.
+pub(crate) fn forget_call_hooks(session: &SparkSession) {
+    let id = session.session_id();
+    sessions_with_hooks()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(id);
+    let forgotten: Vec<Py<PyAny>> = {
+        let mut kept = call_hooks().lock().unwrap_or_else(|e| e.into_inner());
+        let keys: Vec<_> = kept.keys().filter(|(_, of)| of == id).cloned().collect();
+        keys.iter().filter_map(|key| kept.remove(key)).collect()
+    };
+    drop(forgotten);
+}
+
+/// Make the executions of `session` call the `on_execute_plan` of each session hook of the call
+/// that starts them, of the `_session_hooks` of its client (see [`set_call_hooks`]), or, on a
+/// thread that started no call of the session, of the client of the session as they are then, as
+/// PySpark's executions call the hooks of their client.
+fn install_call_hooks(session: &SparkSession) {
+    let weak = session.downgrade();
+    let id = session.session_id().to_string();
+    let hook: spark_connect::ExecutePlanHook = std::sync::Arc::new(move |request| {
+        let key = (spark_connect_core::runtime::calling_thread_id(), id.clone());
+        let of_call = call_hooks()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(&key);
+        if !of_call
+            && !sessions_with_hooks()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains(&key.1)
+        {
+            return Ok(request);
+        }
+        Python::attach(|py| {
+            let hooks = call_hooks()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&key)
+                .map(|hooks| hooks.clone_ref(py));
+            let hooks = match hooks {
+                Some(hooks) => hooks.into_bound(py),
+                None => {
+                    let Some(session) = weak.upgrade() else {
+                        return Ok(request);
+                    };
+                    let Some(state) = crate::state::client_state_of(py, &session) else {
+                        return Ok(request);
+                    };
+                    match state.get_item(pyo3::intern!(py, "_session_hooks"))? {
+                        Some(hooks) => hooks,
+                        None => return Ok(request),
+                    }
+                }
+            };
+            // As PySpark's `for hook in self._session_hooks`, of the list as it is then.
+            let hooks = hooks
+                .try_iter()?
+                .map(|hook| hook.map(Bound::unbind))
+                .collect::<PyResult<Vec<_>>>()?;
+            call_execute_plan_hooks(py, &hooks, request)
+        })
+        .map_err(crate::errors::callback_error)
+    });
+    session.set_execute_plan_hook(Some(hook));
 }
 
 /// The default session, which is the class attribute `_default_session` of `SparkSession`, as
@@ -1043,9 +1167,27 @@ fn with_lock<T>(lock: &Bound<'_, PyAny>, f: impl FnOnce() -> PyResult<T>) -> PyR
     result
 }
 
-/// `session`, unless it stopped.
+/// Set the `_closed` of the client of `session`, of the state of its clients, as PySpark's
+/// `close()` of a client sets it, which `stop()` and the `__del__` of a session call, or, of
+/// `of_call`, of the copy of a client whose `close()` calls, as PySpark's `close()` of a copy sets
+/// its own (see `_RequestContext._set_closed`).
+fn mark_client_closed(py: Python<'_>, session: &SparkSession, of_call: bool) -> PyResult<()> {
+    if let Some(refresher) = session.user_context_refresher() {
+        if let Some(refresh) = crate::state::refresh_of(refresher.as_ref()) {
+            refresh
+                .bind(py)
+                .call_method1(pyo3::intern!(py, "_set_closed"), (true, of_call))?;
+        }
+    }
+    Ok(())
+}
+
+/// `session`, unless it stopped, as PySpark's `is_stopped` of a session reads the `_closed` of its
+/// client (see `crate::state::client_closed`), which a call of a closed copy of the client, which
+/// marks the native session closed for its requests, does not set.
 fn unless_stopped(py: Python<'_>, session: &Py<PySparkSession>) -> Option<Py<PySparkSession>> {
-    (!session.borrow(py).session.is_stopped()).then(|| session.clone_ref(py))
+    let stopped = crate::state::client_closed(py, &session.borrow(py).session);
+    (!stopped).then(|| session.clone_ref(py))
 }
 
 /// The active session of this thread, unless it stopped.
@@ -1312,7 +1454,6 @@ fn live_sessions(hooked: &mut Vec<WeakSparkSession>) -> Vec<SparkSession> {
 #[pyclass(name = "_ExitHook", module = "pyspark.sql.connect.session", frozen)]
 pub struct PyExitHook {
     session: WeakSparkSession,
-    release_session_on_exit: bool,
 }
 
 #[pymethods]
@@ -1330,19 +1471,30 @@ impl PyExitHook {
         let Some(session) = self.session.upgrade() else {
             return Ok(());
         };
-        if session.is_stopped() {
+        // As PySpark's `_on_exit`, whose `if self._closed: return` reads the `_closed` of the
+        // client of the session, which a closed copy of it, whose calls mark the native session
+        // closed for their requests, does not set (see `crate::state::client_closed`).
+        if crate::state::client_closed(py, &session) {
             return Ok(());
         }
-        // As PySpark's `_on_exit`, which cleans the ML cache with the `_cleanup_ml_cache` of its
-        // client, which a program may replace, as PySpark's tests replace it: of the client of the
-        // session, whose `except Exception` drops the errors of the request, and out of which a
-        // `BaseException` only goes, as the KeyboardInterrupt of Ctrl-C, out of the hook.
+        // As PySpark's `_on_exit`, of its `_closed`, and which cleans the ML cache with the
+        // `_cleanup_ml_cache` of its client, which a program may replace, as PySpark's tests
+        // replace it: of the client of the session, whose `except Exception` drops the errors of
+        // the request, and out of which a `BaseException` only goes, as the KeyboardInterrupt of
+        // Ctrl-C, out of the hook; and then of its `_release_session_on_exit`.
         let object = session_object(py, &session)?;
-        py.import("pyspark.sql.connect.client.core")?
+        let client = py
+            .import("pyspark.sql.connect.client.core")?
             .getattr("_client_of")?
-            .call1((object,))?
-            .call_method0("_cleanup_ml_cache")?;
-        if self.release_session_on_exit {
+            .call1((object,))?;
+        if client.getattr(pyo3::intern!(py, "_closed"))?.is_truthy()? {
+            return Ok(());
+        }
+        client.call_method0("_cleanup_ml_cache")?;
+        let release = client
+            .getattr(pyo3::intern!(py, "_release_session_on_exit"))?
+            .is_truthy()?;
+        if release {
             // As PySpark's `release_session`, whose request carries no user context extensions.
             raise_only_base_exceptions(
                 py,
@@ -1370,9 +1522,9 @@ fn raise_only_base_exceptions<T>(
 }
 
 /// Close each session whose exit hook is registered and that is still alive, without a release,
-/// so that their exit hooks return at once: for the test suites, whose sessions are left open to
-/// servers that are gone, and whose exit would otherwise wait on the retries of their
-/// clean_cache. Not a stable API.
+/// and its client, as a `close()` of the client sets its `_closed`, so that their exit hooks
+/// return at once: for the test suites, whose sessions are left open to servers that are gone,
+/// and whose exit would otherwise wait on the retries of their clean_cache. Not a stable API.
 #[doc(hidden)]
 #[pyfunction]
 pub fn _close_sessions_at_exit(py: Python<'_>) {
@@ -1386,6 +1538,11 @@ pub fn _close_sessions_at_exit(py: Python<'_>) {
             session.close_at_once();
         }
     });
+    for session in &sessions {
+        if let Err(error) = mark_client_closed(py, session, false) {
+            error.write_unraisable(py, None);
+        }
+    }
 }
 
 /// Refuse the releases of executions for the rest of the process, as the thread pool that
@@ -1419,8 +1576,10 @@ pub(crate) fn register_release_refusal(m: &Bound<'_, PyModule>) -> PyResult<()> 
 }
 
 /// Register the exit hook of `session`, once for it, as PySpark's SparkConnectClient registers
-/// its `_on_exit` when it is made. The variable SPARK_CONNECT_RELEASE_SESSION_ON_EXIT is read
-/// now, as PySpark reads it: "true" or "1", in any case, release the session at exit.
+/// its `_on_exit` when it is made. Whether it releases the session at the exit is the
+/// `_release_session_on_exit` of its client then, which the client reads of the variable
+/// SPARK_CONNECT_RELEASE_SESSION_ON_EXIT as it is made, as PySpark's does: "true" or "1", in any
+/// case.
 fn register_exit_hook(py: Python<'_>, session: &SparkSession) -> PyResult<()> {
     // Dropped once the registry is unlocked (see `live_sessions`).
     let live;
@@ -1435,14 +1594,10 @@ fn register_exit_hook(py: Python<'_>, session: &SparkSession) -> PyResult<()> {
         hooked.push(session.downgrade());
     }
     drop(live);
-    let release_session_on_exit = std::env::var("SPARK_CONNECT_RELEASE_SESSION_ON_EXIT")
-        .map(|value| matches!(value.to_lowercase().as_str(), "true" | "1"))
-        .unwrap_or(false);
     let hook = Py::new(
         py,
         PyExitHook {
             session: session.downgrade(),
-            release_session_on_exit,
         },
     )?;
     py.import("atexit")?
@@ -1931,10 +2086,10 @@ impl PySparkSession {
         // profiles, which the updates of its first execution update too.
         Python::attach(|py| {
             crate::progress::session_progress(py, &session);
-            if let Err(error) = crate::profiler::profiler_collector(py, &session) {
-                error.write_unraisable(py, None);
-            }
+            crate::profiler::install_collector_updates(&session);
         });
+        // The session hooks of its client, which its executions call (see `install_call_hooks`).
+        install_call_hooks(&session);
         // The metrics of the Observations of its executions, which PySpark's client converts.
         crate::observation::check_observed_metrics(&session);
         // The warnings of its ML fits, which PySpark's `try_remote_fit` logs.
@@ -4526,7 +4681,7 @@ impl PySparkSession {
             // session of its `client` and of the `release_session_on_close` of its `__dict__`.
             let this = Self::of_client_named(slf, pyo3::intern!(py, "client"))?;
             let session: &SparkSession = &this.session;
-            let release = !session.is_stopped()
+            let release = !crate::state::client_closed(py, session)
                 && crate::state::attr(slf.as_any(), pyo3::intern!(py, "release_session_on_close"))?
                     .is_truthy()?;
             // As PySpark's stop, whose `except Exception` around the release of the client takes
@@ -4575,7 +4730,10 @@ impl PySparkSession {
                 unbuilt.map_or(Ok(()), Err)
             };
             crate::progress::forget_session(session);
+            forget_call_hooks(session);
             crate::profiler::forget_session(session);
+            // As PySpark's stop, whose `close()` of its client sets the `_closed` of the client.
+            mark_client_closed(py, session, false)?;
             Self::clear_stream_listeners(py, session);
             if let Err(error) = released {
                 // As PySpark's stop, whose `except Exception as e` logs the exception of the
@@ -4861,7 +5019,8 @@ impl PySparkSession {
             })?;
         }
         Self::clear_stream_listeners(py, &self.session);
-        Ok(())
+        // As PySpark's `close()` of a client, which sets its own `_closed`.
+        mark_client_closed(py, &self.session, true)
     }
 
     /// Keep the session alive until the interpreter exits, for a client that no session object
@@ -4895,19 +5054,11 @@ impl PySparkSession {
     #[getter]
     #[doc = connect_doc!(SparkSession.is_stopped)]
     fn is_stopped<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        // As PySpark's `self.client.is_closed`, the `_closed` of a client of the drop-in, which
+        // its `close()` and `stop()` set, and of a client of another class its own.
         let py = slf.py();
-        let client = crate::state::attr(slf.as_any(), pyo3::intern!(py, "client"))?;
-        let stopped = {
-            let this = slf.borrow();
-            match this.own_client.get().is_some_and(|own| own.is(&client)) {
-                true => Some(this.session.is_stopped()),
-                false => crate::state::client_session(&client).map(|other| other.is_stopped()),
-            }
-        };
-        match stopped {
-            Some(stopped) => Ok(pyo3::types::PyBool::new(py, stopped).to_owned().into_any()),
-            None => client.getattr(pyo3::intern!(py, "is_closed")),
-        }
+        crate::state::attr(slf.as_any(), pyo3::intern!(py, "client"))?
+            .getattr(pyo3::intern!(py, "is_closed"))
     }
 
     /// A session object of no client yet, as the `object.__new__` of PySpark's plain class: of any
@@ -5416,7 +5567,9 @@ impl PySparkSession {
     ) -> PyResult<()> {
         // As PySpark's `self._client.register_progress_handler(handler)`.
         let py = slf.py();
-        crate::progress::session_progress(py, &Self::of_client(slf)?.session).register(py, handler)
+        crate::state::attr(slf.as_any(), pyo3::intern!(py, "client"))?
+            .call_method1(pyo3::intern!(py, "register_progress_handler"), (handler,))?;
+        Ok(())
     }
 
     // Remove a progress handler, as PySpark Connect's: a `ValueError` for one that is not
@@ -5424,16 +5577,38 @@ impl PySparkSession {
     #[pyo3(name = "removeProgressHandler")]
     #[doc = connect_doc!(SparkSession.removeProgressHandler)]
     fn remove_progress_handler(slf: &Bound<'_, Self>, handler: &Bound<'_, PyAny>) -> PyResult<()> {
+        // As PySpark's `self._client.remove_progress_handler(handler)`.
         let py = slf.py();
-        crate::progress::session_progress(py, &Self::of_client(slf)?.session).remove(py, handler)
+        crate::state::attr(slf.as_any(), pyo3::intern!(py, "client"))?
+            .call_method1(pyo3::intern!(py, "remove_progress_handler"), (handler,))?;
+        Ok(())
     }
 
     // Remove all progress handlers. Mirrors `clearProgressHandlers`.
     #[pyo3(name = "clearProgressHandlers")]
     #[doc = connect_doc!(SparkSession.clearProgressHandlers)]
     fn clear_progress_handlers(slf: &Bound<'_, Self>) -> PyResult<()> {
+        // As PySpark's `self._client.clear_progress_handlers()`.
         let py = slf.py();
-        crate::progress::session_progress(py, &Self::of_client(slf)?.session).clear(py)
+        crate::state::attr(slf.as_any(), pyo3::intern!(py, "client"))?
+            .call_method0(pyo3::intern!(py, "clear_progress_handlers"))?;
+        Ok(())
+    }
+
+    /// Make the executions of the session call the progress handlers of the `_progress_handlers`
+    /// of its client from now on, as `register_progress_handler`, `remove_progress_handler` and
+    /// `clear_progress_handlers` of its client change them (see
+    /// `crate::progress::set_handler_count`); the calls read them as they start too.
+    fn _sync_progress_handlers(&self, py: Python<'_>) -> PyResult<()> {
+        let count = match crate::state::client_state_of(py, &self.session) {
+            Some(state) => match state.get_item("_progress_handlers")? {
+                Some(handlers) => handlers.len()?,
+                None => 0,
+            },
+            None => 0,
+        };
+        crate::progress::set_handler_count(py, &self.session, count);
+        Ok(())
     }
 
     // The UDF profiles of the session, as PySpark Connect's `spark.profile`: a `Profile` of its
@@ -5443,7 +5618,8 @@ impl PySparkSession {
     fn profile(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
         // As PySpark's `Profile(self._client._profiler_collector)`.
         let py = slf.py();
-        let collector = crate::profiler::profiler_collector(py, &Self::of_client(slf)?.session)?;
+        let collector = crate::state::attr(slf.as_any(), pyo3::intern!(py, "client"))?
+            .getattr(pyo3::intern!(py, "_profiler_collector"))?;
         Ok(py
             .import("pyspark.sql.profiler")?
             .getattr("Profile")?
@@ -5455,7 +5631,12 @@ impl PySparkSession {
     #[getter(_profiler_collector)]
     fn profiler_collector(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
         // As PySpark's `self._client._profiler_collector`.
-        crate::profiler::profiler_collector(slf.py(), &Self::of_client(slf)?.session)
+        let py = slf.py();
+        Ok(
+            crate::state::attr(slf.as_any(), pyo3::intern!(py, "client"))?
+                .getattr(pyo3::intern!(py, "_profiler_collector"))?
+                .unbind(),
+        )
     }
 
     // Get the data source registration accessor.
@@ -5613,16 +5794,16 @@ impl PySparkSession {
     /// its client.
     fn _set_user_context_refresh(&self, refresh: Py<PyAny>) {
         self.session
-            .set_user_context_refresher(Some(std::sync::Arc::new(refresh)));
+            .set_user_context_refresher(Some(std::sync::Arc::new(
+                crate::state::ClientRefresher::new(refresh),
+            )));
     }
 
     /// The function of `_set_user_context_refresh`, if any: the state of the clients of the
     /// session.
     fn _user_context_refresh(&self, py: Python<'_>) -> Option<Py<PyAny>> {
         let refresher = self.session.user_context_refresher()?;
-        refresher
-            .downcast_ref::<Py<PyAny>>()
-            .map(|refresh| refresh.clone_ref(py))
+        crate::state::refresh_of(refresher.as_ref()).map(|refresh| refresh.clone_ref(py))
     }
 
     /// A handle of this session that does not keep it alive, for `client` (see `_WeakSession`).
@@ -5630,16 +5811,19 @@ impl PySparkSession {
         PyWeakSession(self.session.downgrade())
     }
 
-    /// Mark the session closed, as PySpark's `client._closed = True`, or open it again, as
-    /// `client._closed = False`: a closed session sends nothing but the requests of its
-    /// artifacts, and one that `client.close()` or `stop()` closed raises the `ValueError` of a
-    /// closed channel for its requests once it is open again, as PySpark's do.
-    fn _set_closed(&self, closed: bool) {
-        if closed {
-            self.session.mark_closed();
-        } else {
-            self.session.reopen();
-        }
+    /// Whether the session is closed or stopped, of itself, for the `_closed` of a new client of it
+    /// (see `_new_client_state` of `pyspark.sql.connect.client.core`).
+    fn _is_closed_natively(&self) -> bool {
+        self.session.is_stopped()
+    }
+
+    /// The settings of the plan compression of the session as PySpark's client keeps them, its
+    /// `_plan_compression_threshold` and `_plan_compression_algorithm`, once they are looked up,
+    /// else None (see `spark_connect_core::client::PlanCompressionSettings`).
+    fn _plan_compression_settings(&self) -> Option<(i128, Option<String>)> {
+        self.session
+            .plan_compression_settings()
+            .map(|settings| (settings.threshold, settings.algorithm))
     }
 
     // Add local files, or `file:` URIs, as artifacts of the session, as PySpark's

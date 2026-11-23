@@ -973,7 +973,10 @@ class SparkConnectClient:
             if isinstance(connection, ChannelBuilder)
             else DefaultChannelBuilder(connection, channel_options)
         )
-        policies = None
+        # As PySpark's client, which makes the `DefaultPolicy` of the keyword arguments of
+        # ``retry_policy`` before it reads its builder, of its errors; of none, PySpark's
+        # `DefaultPolicy()`, which the client makes when it is read (see `_DefaultRetryPolicies`).
+        policies: Any = _DEFAULT_RETRY_POLICIES
         if retry_policy is not None:
             from pyspark.sql.connect.client.retries import DefaultPolicy
 
@@ -996,13 +999,28 @@ class SparkConnectClient:
             deadlines,
         )
         # As PySpark's client, which logs the deadlines that it was given as it is made.
-        _log_rpc_deadlines(rpc_deadlines if rpc_deadlines is not None else RpcDeadlines())
-        _init_client_state(session, builder, user_id, checked[2])
+        deadlines = rpc_deadlines if rpc_deadlines is not None else RpcDeadlines()
+        _log_rpc_deadlines(deadlines)
+        _init_client_state(
+            session,
+            builder,
+            user_id,
+            checked[2],
+            settings={
+                "_retry_policies": policies,
+                "_max_retry_exception_elapsed_time": (
+                    max_retry_exception_elapsed_time
+                    if max_retry_exception_elapsed_time is not None
+                    else _DEFAULT_MAX_RETRY_EXCEPTION_ELAPSED_TIME
+                ),
+                "_rpc_deadlines": deadlines,
+                "_use_reattachable_execute": use_reattachable_execute,
+                "_allow_arrow_batch_chunking": allow_arrow_batch_chunking,
+                "_preferred_arrow_chunk_size": preferred_arrow_chunk_size,
+                "_session_hooks": session_hooks or [],
+            },
+        )
         self._init_of_session(session)
-        if not use_reattachable_execute:
-            self.disable_reattachable_execute()
-        if policies is not None or max_retry_exception_elapsed_time is not None:
-            self._set_retry_policies(policies, max_retry_exception_elapsed_time)
         # As PySpark's client, which registers its exit hook once it is made: the registration
         # keeps it until the exit, and no session object owns it, whose __del__ would close it.
         self._keep_until_exit(session)
@@ -1055,6 +1073,13 @@ class SparkConnectClient:
                 self._url, None, None, [], True, None, None
             )
             dropped._close()
+            # The closed session that stands for the client reads its attributes, as PySpark's
+            # client, which its session closed, keeps them: its `_closed`, which the drop of the
+            # session set, and which set to False opens it again. Of them, it has only applied
+            # that it is closed.
+            self._context.applied.clear()
+            self._context.applied["closed"] = True
+            dropped._set_user_context_refresh(self._context)
             self._dropped = dropped
         return dropped
 
@@ -1069,6 +1094,14 @@ class SparkConnectClient:
         copied._dropped = self._dropped
         copied._context = self._context
         copied._copy_context = self._context
+        if self.__dict__.get("_retry_policies") is _DEFAULT_RETRY_POLICIES:
+            # As PySpark's copy, which shares the list of the retry policies of its client: made
+            # now, unless the module of the policies cannot be imported (see
+            # `_DefaultRetryPolicies`).
+            try:
+                _ = self._retry_policies
+            except ImportError:
+                pass
         copied.__dict__.update(self.__dict__)
         return copied
 
@@ -1107,41 +1140,6 @@ class SparkConnectClient:
             return token
         return os.environ.get("SPARK_CONNECT_AUTHENTICATE_TOKEN")
 
-    @property
-    def _server_session_id(self) -> Optional[str]:
-        """The server-side session ID that the responses carried, or None before the first
-        response, as SparkConnectClient's. Set it to simulate a server-side session change: the
-        next response then closes the client, as a changed ID does."""
-        return self._session._observed_server_session_id()
-
-    @_server_session_id.setter
-    def _server_session_id(self, value: Optional[str]) -> None:
-        self._session._set_observed_server_session_id(value)
-
-    @property
-    def _closed(self) -> bool:
-        """Whether the client is closed, as SparkConnectClient's ``_closed``. Setting it to True
-        closes the session, which the session registry then no longer returns, and its requests
-        raise ``NO_ACTIVE_SESSION`` but those of its artifacts; setting it to False opens it
-        again, as PySpark's requests are sent again then, or fail with the ``ValueError`` of a
-        closed channel once ``close()`` or ``stop()`` closed it."""
-        return self._session.is_stopped
-
-    @_closed.setter
-    def _closed(self, value: bool) -> None:
-        self._session._set_closed(bool(value))
-
-    @property
-    def _use_reattachable_execute(self) -> bool:
-        """Whether the executions of the client are reattachable, as SparkConnectClient's
-        ``_use_reattachable_execute``, which ``enable_reattachable_execute`` and
-        ``disable_reattachable_execute`` set, and which a caller may set."""
-        return self._session._reattachable_execute()
-
-    @_use_reattachable_execute.setter
-    def _use_reattachable_execute(self, value: bool) -> None:
-        self._session._set_reattachable_execute(bool(value))
-
     def _get_operation_statuses(
         self,
         operation_ids: Optional[list[str]] = None,
@@ -1172,9 +1170,9 @@ class SparkConnectClient:
         """
         Returns if the channel was closed previously using close() method
         """
-        # Whether the session of the client is stopped, as SparkConnectClient's ``is_closed``,
-        # whether its channel is closed.
-        return self._session.is_stopped
+        # Its `_closed`, as SparkConnectClient's ``is_closed``, which `close()` sets, and the
+        # requests of the session set when the server says that the session changed.
+        return self._closed
 
     def _proto_to_string(self, p: Any, truncate: bool = False) -> str:
         """A one-line string of the protobuf message ``p``, truncated if ``truncate``, as
@@ -2267,8 +2265,12 @@ class SparkConnectClient:
 
         """
         # Register ``handler`` to be called with the progress of the executions of the session,
-        # once, as SparkConnectClient's ``register_progress_handler``.
-        self._session.registerProgressHandler(handler)
+        # once, as SparkConnectClient's ``register_progress_handler``: in its
+        # `_progress_handlers`, which the executions read.
+        if handler in self._progress_handlers:
+            return
+        self._progress_handlers.append(handler)
+        self._session._sync_progress_handlers()
 
     def remove_progress_handler(self, handler: "ProgressHandler") -> None:
         """
@@ -2282,23 +2284,58 @@ class SparkConnectClient:
         """
         # Remove the progress handler ``handler``, as SparkConnectClient's
         # ``remove_progress_handler``: a ``ValueError`` for one that is not registered.
-        self._session.removeProgressHandler(handler)
+        try:
+            self._progress_handlers.remove(handler)
+        finally:
+            self._session._sync_progress_handlers()
 
     def clear_progress_handlers(self) -> None:
         # Remove the progress handlers, as SparkConnectClient's ``clear_progress_handlers``.
-        self._session.clearProgressHandlers()
+        self._progress_handlers.clear()
+        self._session._sync_progress_handlers()
 
     def disable_reattachable_execute(self) -> "SparkConnectClient":
         # Make the executions of the session not reattachable from the next one on, as
         # SparkConnectClient's ``disable_reattachable_execute``: the client.
-        self._session._set_reattachable_execute(False)
+        self._use_reattachable_execute = False
         return self
 
     def enable_reattachable_execute(self) -> "SparkConnectClient":
         # Make the executions of the session reattachable from the next one on, as
         # SparkConnectClient's ``enable_reattachable_execute``: the client.
-        self._session._set_reattachable_execute(True)
+        self._use_reattachable_execute = True
         return self
+
+    @property
+    def _retry_policies(self) -> list["RetryPolicy"]:
+        # The retry policies of the client, of its `__dict__`, as PySpark's attribute: of a client
+        # that has not read them, PySpark's `[DefaultPolicy()]`, made now (see
+        # `_DefaultRetryPolicies`); of one that has none, the AttributeError of the attribute.
+        state = self.__dict__
+        try:
+            policies = state["_retry_policies"]
+        except KeyError:
+            raise AttributeError(
+                f"'{type(self).__name__}' object has no attribute '_retry_policies'"
+            ) from None
+        if policies is _DEFAULT_RETRY_POLICIES:
+            from pyspark.sql.connect.client.retries import DefaultPolicy
+
+            policies = state["_retry_policies"] = [DefaultPolicy()]
+        return policies
+
+    @_retry_policies.setter
+    def _retry_policies(self, policies: Any) -> None:
+        self.__dict__["_retry_policies"] = policies
+
+    @_retry_policies.deleter
+    def _retry_policies(self) -> None:
+        try:
+            del self.__dict__["_retry_policies"]
+        except KeyError:
+            raise AttributeError(
+                f"'{type(self).__name__}' object has no attribute '_retry_policies'"
+            ) from None
 
     def set_retry_policies(self, policies: Iterable["RetryPolicy"]) -> None:
         """
@@ -2307,54 +2344,21 @@ class SparkConnectClient:
 
         """
         # Set the retry policies of the RPCs of the session, as SparkConnectClient's
-        # ``set_retry_policies``: a failure is retried by the first of ``policies`` that can retry
-        # it, with its backoff, until its retries are spent. The Rust transport retries with the
-        # parameters of PySpark's own ``DefaultPolicy`` and ``RetryPolicy`` as they are now, of
-        # whole milliseconds, without Python; any other policy, as a subclass of its own
-        # ``can_retry`` or ``to_state``, is asked by PySpark's ``Retrying`` of each call, as
-        # PySpark's client asks it, of the ``grpc.RpcError`` of each failed RPC.
-        self._set_retry_policies(list(policies), None)
+        # ``set_retry_policies``: a copy of ``policies`` as its `_retry_policies`, which each call
+        # reads as it starts. A failure is retried by the first of them that can retry it, with
+        # its backoff, until its retries are spent. The Rust transport retries with the parameters
+        # of PySpark's own ``DefaultPolicy`` and ``RetryPolicy`` as they are then, of whole
+        # milliseconds, without Python; any other policy, as a subclass of its own ``can_retry``
+        # or ``to_state``, is asked by PySpark's ``Retrying`` of each call, as PySpark's client
+        # asks it, of the ``grpc.RpcError`` of each failed RPC (see `_call_settings`).
+        self._retry_policies = list(policies)
 
     def get_retry_policies(self) -> list["RetryPolicy"]:
         """
         Return list of currently used policies
         """
-        # The retry policies of the RPCs of the session, as SparkConnectClient's
-        # ``get_retry_policies``: those that ``set_retry_policies`` set, else a ``DefaultPolicy``
-        # of the parameters that the transport retries with.
-        policies = _RETRY_POLICIES.get(self._context)
-        if policies is None:
-            from pyspark.sql.connect.client.retries import DefaultPolicy
-
-            parameters = self._session._retry_policy()
-            parameters.pop("max_retry_exception_elapsed_time")
-            parameters.pop("retries_failures")
-            policies = [DefaultPolicy(**parameters)]
-            _RETRY_POLICIES[self._context] = policies
-        return list(policies)
-
-    def _set_retry_policies(
-        self, policies: Optional[list[Any]], max_retry_exception_elapsed_time: Optional[float]
-    ) -> None:
-        """Make the Rust transport retry with ``policies``, if given, and for up to
-        ``max_retry_exception_elapsed_time`` seconds of the retries of a ``RetryException``, if
-        given, from the calls that start from now on."""
-        parameters = self._session._retry_policy()
-        if max_retry_exception_elapsed_time is not None:
-            parameters["max_retry_exception_elapsed_time"] = _elapsed_time_bound(
-                max_retry_exception_elapsed_time
-            )
-        native = None
-        if policies is not None:
-            native = _retry_parameters(policies)
-            if native is not None:
-                parameters.update(native)
-        self._session._set_retry_policy(**parameters)
-        if policies is not None:
-            # Policies that the transport does not retry with as they are, PySpark's `Retrying`
-            # decides, of a copy of the list, as PySpark's client keeps one.
-            self._session._set_retry_decider(None if native is not None else list(policies))
-            _RETRY_POLICIES[self._context] = policies
+        # A copy of its `_retry_policies`, as SparkConnectClient's ``get_retry_policies``.
+        return list(self._retry_policies)
 
     def release_session(self) -> None:
         # Release the session on the server, as SparkConnectClient's: its state there.
@@ -2368,6 +2372,7 @@ class SparkConnectClient:
         # not released on the server, whose channel is closed, so that its requests raise the
         # ``ValueError`` of a closed channel once ``_closed`` is set to False.
         self._session._close()
+        self._closed = True
 
     def _resources(self) -> dict[str, Any]:
         """The resources of the cluster, as SparkConnectClient's: of a GetResourcesCommand, by
@@ -2772,10 +2777,13 @@ class _RequestContext:
     ``CloneSession``), only those of the session ID and the user are raised; of the mode 0 (the
     artifacts), none is. A value that a refresh of no error does not read is ``...``."""
 
-    __slots__ = ("state", "__weakref__")
+    __slots__ = ("state", "applied", "__weakref__")
 
     def __init__(self, state: dict[str, Any]) -> None:
         self.state = state
+        # The settings of the attributes of a client that the native session has (see
+        # `_call_settings`), as they were given it or as its calls wrote them back.
+        self.applied: dict[str, Any] = {}
 
     def __call__(self, mode: int) -> tuple[Any, ...]:
         # The attributes of the copy of a client whose method calls, else those of the session,
@@ -2790,11 +2798,26 @@ class _RequestContext:
                 state = token.old_value[1]
         try:
             values = _request_values(state, min(mode, 2))
+            settings = None if mode == 0 else _call_settings(state, self.applied)
         except BaseException:
             if token is not None:
                 _COPY_CALL.reset(token)
             raise
-        return values + (token, state is self.state)
+        return values + (token, state is self.state, settings)
+
+    def _set_closed(self, closed: bool, of_call: bool = False) -> None:
+        # The `_closed` of the client that closed the session, whose native session is closed
+        # then: as PySpark's `close()` sets that of its own client, of the copy of a client whose
+        # `close()` calls (`of_call`), which shares the channel with its client, whose `_closed`
+        # stays, as PySpark's copy shares it (see `_hold`); else of the client of the session, as
+        # PySpark's `stop()` and `SparkSession.__del__` close the client of the session.
+        state = self.state
+        if of_call:
+            call = _COPY_CALL.get()
+            if call is not None and call[0] is self:
+                state = call[1]
+        state["_closed"] = closed
+        self.applied["closed"] = bool(closed)
 
     def _hold(self) -> Any:
         # The token of the contextvar of the copy of a client of this session whose method calls,
@@ -2833,7 +2856,9 @@ class _RequestContext:
             state = token.old_value[1]
         return _request_values(state, mode, strict_tags=False)
 
-    def _after_call(self, read_tags: bool, handled_error: bool, token: Any = None) -> None:
+    def _after_call(
+        self, read_tags: bool, handled_error: bool, token: Any = None, written: Any = None
+    ) -> None:
         # What PySpark's client leaves in the `thread_local` of the calling thread once a call
         # ended: the empty set of tags that the `get_tags` of the request of an execution gives a
         # thread of none (`read_tags`), and the `inside_error_handling` that its `_handle_error`
@@ -2843,6 +2868,8 @@ class _RequestContext:
             state = self.state
             if token is not None and token.old_value is not contextvars.Token.MISSING:
                 state = token.old_value[1]
+            if written is not None:
+                _write_back(state, self.applied, written)
             if read_tags or handled_error:
                 local = _client_attribute(state, "thread_local")
                 if read_tags and not hasattr(local, "tags"):
@@ -2903,6 +2930,141 @@ def _request_values(state: dict[str, Any], mode: int, strict_tags: bool = True) 
         read(extensions, own_extensions),
         read(extensions and strict_tags, tags),
     )
+
+
+# The names of the fields of `RpcDeadlines`, which `_call_settings` reads of `_rpc_deadlines`.
+_DEADLINE_FIELDS = (
+    "reattachable_execute_plan",
+    "reattach_execute",
+    "analyze_plan",
+    "add_artifacts",
+    "config",
+    "interrupt",
+    "release_session",
+    "artifact_status",
+    "fetch_error_details",
+    "clone_session",
+    "get_status",
+)
+
+
+class _DefaultRetryPolicies:
+    """The retry policies of a client that no program read or set yet: PySpark's
+    ``[DefaultPolicy()]``, which the client makes when they are first read (see
+    ``SparkConnectClient._retry_policies``) or copied, as the module of the policies,
+    ``pyspark.sql.connect.client.retries``, imports grpcio, which the drop-in needs for nothing
+    else and does not require. The transport retries with the parameters of ``DefaultPolicy()``
+    until then (``_DEFAULT_RETRY_PARAMETERS``)."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "<the [DefaultPolicy()] of the client, made when it is read>"
+
+
+_DEFAULT_RETRY_POLICIES = _DefaultRetryPolicies()
+
+# The parameters of PySpark's `DefaultPolicy()` that the transport retries with, as
+# `_retry_parameters` gives them, and the `DEFAULT_MAX_RETRY_EXCEPTION_ELAPSED_TIME` of
+# `pyspark.sql.connect.client.retries`, of a client before its policies are read (see
+# `_DefaultRetryPolicies`).
+_DEFAULT_RETRY_PARAMETERS: dict[str, Any] = {
+    "max_retries": 15,
+    "initial_backoff": 50,
+    "max_backoff": 60000,
+    "jitter": 500,
+    "min_jitter_threshold": 2000,
+    "max_server_retry_delay": 600000,
+    "backoff_multiplier": 4.0,
+    "recognize_server_retry_delay": True,
+    "retries_failures": True,
+}
+_DEFAULT_MAX_RETRY_EXCEPTION_ELAPSED_TIME = 3600
+
+
+def _call_settings(state: dict[str, Any], applied: dict[str, Any]) -> tuple[Any, ...]:
+    # The attributes of the client of `state` that PySpark's requests read as they are sent, for
+    # the native session as a call starts, as PySpark's client reads them of itself then: whether
+    # it is closed (of its `_stub`), the server-side session ID that its requests observe, the
+    # deadlines of its RPCs, the result chunking and the reattachability of its executions, its
+    # retry policies and the bound of the retries of a `RetryException` (of its `_retrying()`),
+    # its plan compression, its session hooks and the number of its progress handlers, of the
+    # AttributeError of one that it lacks. Of the closed flag, the server-side session ID, the
+    # retries and the plan compression, which the session keeps, the value and whether it is
+    # another than the session has (`applied`, of the values given it, and of those that its calls
+    # wrote back), which only then is given it, as the session changes them (see `_write_back`).
+    def kept(name: str, value: Any) -> tuple[Any, bool]:
+        changed = name not in applied or applied[name] != value
+        if changed:
+            applied[name] = value
+        return value, changed
+
+    closed = bool(_client_attribute(state, "_closed"))
+    server_session_id = _client_attribute(state, "_server_session_id")
+    if server_session_id is not None:
+        # As PySpark's requests set it in their string field, of upb's TypeError.
+        server_session_id = _proto_str(server_session_id)
+    deadlines = _client_attribute(state, "_rpc_deadlines")
+    seconds = {name: getattr(deadlines, name) for name in _DEADLINE_FIELDS}
+    chunking = (
+        _client_attribute(state, "_allow_arrow_batch_chunking"),
+        _client_attribute(state, "_preferred_arrow_chunk_size"),
+    )
+    reattachable = bool(_client_attribute(state, "_use_reattachable_execute"))
+    policies = _client_attribute(state, "_retry_policies")
+    elapsed = _client_attribute(state, "_max_retry_exception_elapsed_time")
+    native = (
+        _DEFAULT_RETRY_PARAMETERS
+        if policies is _DEFAULT_RETRY_POLICIES
+        else _retry_parameters(policies)
+    )
+    # The policies that the transport does not retry with as they are, PySpark's `Retrying` of the
+    # list of the client decides, as PySpark's `_retrying()` reads it.
+    retry = (native, None if native is not None else policies, _elapsed_time_bound(elapsed))
+    compression = (
+        _client_attribute(state, "_plan_compression_threshold"),
+        _client_attribute(state, "_plan_compression_algorithm"),
+    )
+    hooks = _client_attribute(state, "_session_hooks")
+    handlers = len(_client_attribute(state, "_progress_handlers"))
+    retry_key = (
+        None if native is None else tuple(sorted(native.items())),
+        None if native is not None else (id(policies), tuple(map(id, policies))),
+        retry[2],
+    )
+    retry_changed = kept("retry", retry_key)[1]
+    return (
+        kept("closed", closed),
+        kept("server_session_id", server_session_id),
+        seconds,
+        chunking,
+        reattachable,
+        (retry, retry_changed),
+        kept("compression", compression),
+        hooks,
+        handlers,
+    )
+
+
+def _write_back(state: dict[str, Any], applied: dict[str, Any], written: tuple[Any, ...]) -> None:
+    # Write the closed flag, the server-side session ID and the plan compression that the calls
+    # of the session changed into the attributes of the client of `state`, as PySpark's client
+    # sets its `_closed` when the server says that the session changed, its `_server_session_id`
+    # of its first response, and its `_plan_compression_threshold` and
+    # `_plan_compression_algorithm` of their lookup: of each, `...` when the session has the
+    # value that it was given.
+    closed, server_session_id, compression = written
+    if closed is not ...:
+        state["_closed"] = closed
+        applied["closed"] = bool(closed)
+    if server_session_id is not ...:
+        state["_server_session_id"] = server_session_id
+        applied["server_session_id"] = server_session_id
+    if compression is not ...:
+        threshold, algorithm = compression if compression is not None else (None, None)
+        state["_plan_compression_threshold"] = threshold
+        state["_plan_compression_algorithm"] = algorithm
+        applied["compression"] = (threshold, algorithm)
 
 
 def _parse_response(message_class: Any, data: bytes, streaming: bool = False) -> Any:
@@ -3055,15 +3217,27 @@ def _metadata_of_call(metadata: Any) -> list[tuple[bytes, bytes]]:
 
 
 def _new_client_state(
-    session: Any, builder: Any, user_id: Any, builder_user: Any = _MISSING
+    session: Any,
+    builder: Any,
+    user_id: Any,
+    builder_user: Any = _MISSING,
+    settings: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """The attributes of a new client of ``session``, as PySpark's ``SparkConnectClient`` makes
-    them: its channel builder ``builder``, as ``_builder``, else a ``DefaultChannelBuilder`` of the
-    connection of the session; a ``threading.local`` as its ``thread_local``; an empty list of
-    global user context extensions, and its lock; the session ID of the session, as
-    ``_session_id``; and as ``_user_id``, the ``userId`` of the channel builder, as the client
-    read it (``builder_user``), else as it reads it now, else ``user_id`` as it is given, else the
-    user of the connection of the session, of ``SPARK_USER`` or ``USER``."""
+    them, in its order: a ``threading.local`` as its ``thread_local``; its channel builder
+    ``builder``, as ``_builder``, else a ``DefaultChannelBuilder`` of the connection of the
+    session; as ``_user_id``, the ``userId`` of the channel builder, as the client read it
+    (``builder_user``), else as it reads it now, else ``user_id`` as it is given, else the user of
+    the connection of the session, of ``SPARK_USER`` or ``USER``; the session ID of the session,
+    as ``_session_id``; an empty list of global user context extensions, and its lock; and the
+    attributes that its calls read as they start (see ``_call_settings``), of ``settings``, else
+    those of a client of no arguments: a ``DefaultPolicy`` as its retry policies, the deadlines of
+    ``RpcDeadlines()``, reattachable executions of a chunking of their results of no preferred
+    size, no session hooks, no progress handlers, a ``ConnectProfilerCollector``, no server-side
+    session ID nor plan compression yet, and the release of the session at the exit of
+    ``SPARK_CONNECT_RELEASE_SESSION_ON_EXIT``. The objects of its native transport, its
+    ``_channel``, ``_internal_stub``, ``_artifact_manager``, ``_release_futures`` and
+    ``_zstd_module``, it has none of (see ``docs/compatibility.md``)."""
     if builder is None:
         connection_string = getattr(session, "_connection_string", None)
         if connection_string is not None:
@@ -3080,11 +3254,46 @@ def _new_client_state(
         user = user_id
     else:
         user = session._user_id()
+    from pyspark.sql.connect.profiler import ConnectProfilerCollector
+
+    settings = settings or {}
+
+    def setting(name: str, default: Any) -> Any:
+        return settings[name] if name in settings else default()
+
+    # Of a session that is closed already, or that observed a server-side session ID or looked up
+    # its plan compression, as a session object made again of a session in use is; a session of
+    # another class is of a new client's.
+    def of_session(name: str, default: Any) -> Any:
+        method = getattr(session, name, None)
+        return default if method is None else method()
+
+    compression = of_session("_plan_compression_settings", None)
+    threshold, algorithm = compression if compression is not None else (None, None)
+
     return {
         "thread_local": threading.local(),
         "_builder": builder,
         "_user_id": user,
+        "_retry_policies": setting("_retry_policies", lambda: _DEFAULT_RETRY_POLICIES),
+        "_max_retry_exception_elapsed_time": setting(
+            "_max_retry_exception_elapsed_time", lambda: _DEFAULT_MAX_RETRY_EXCEPTION_ELAPSED_TIME
+        ),
         "_session_id": session._client_session_id(),
+        "_closed": of_session("_is_closed_natively", False),
+        "_rpc_deadlines": setting("_rpc_deadlines", RpcDeadlines),
+        "_use_reattachable_execute": setting("_use_reattachable_execute", lambda: True),
+        "_allow_arrow_batch_chunking": setting("_allow_arrow_batch_chunking", lambda: True),
+        "_preferred_arrow_chunk_size": setting("_preferred_arrow_chunk_size", lambda: None),
+        "_session_hooks": setting("_session_hooks", list),
+        "_server_session_id": of_session("_observed_server_session_id", None),
+        "_profiler_collector": ConnectProfilerCollector(),
+        "_progress_handlers": [],
+        "_plan_compression_threshold": threshold,
+        "_plan_compression_algorithm": algorithm,
+        "_release_session_on_exit": os.getenv("SPARK_CONNECT_RELEASE_SESSION_ON_EXIT", "false")
+        .lower()
+        in ("true", "1"),
         "global_user_context_extensions": [],
         "global_user_context_extensions_lock": threading.Lock(),
     }
@@ -3110,18 +3319,25 @@ def _client_state(session: Any) -> dict[str, Any]:
 
 
 def _init_client_state(
-    session: Any, connection: Any, user_id: Any = None, builder_user: Any = _MISSING
+    session: Any,
+    connection: Any,
+    user_id: Any = None,
+    builder_user: Any = _MISSING,
+    settings: Optional[dict[str, Any]] = None,
 ) -> None:
     """Give ``session``, a new session of ``connection``, the attributes of PySpark's client of
     ``connection`` and ``user_id``: of the channel builder of ``connection`` (the object itself if
     it is one), and of the user ``user_id`` as it is given, unless the connection has one, of the
     ``userId`` of the builder that the client read (``builder_user``, see
     ``_checked_channel_builder``), as PySpark's ``SparkSession(connection, userId)`` and
-    ``SparkConnectClient(connection, user_id)`` make their client."""
+    ``SparkConnectClient(connection, user_id)`` make their client, of the attributes ``settings``
+    that its calls read (see ``_new_client_state``)."""
     builder = (
         connection if isinstance(connection, ChannelBuilder) else DefaultChannelBuilder(connection)
     )
-    _set_client_state(session, _new_client_state(session, builder, user_id, builder_user))
+    _set_client_state(
+        session, _new_client_state(session, builder, user_id, builder_user, settings)
+    )
 
 
 def _set_client_state(session: Any, state: dict[str, Any]) -> None:
@@ -3189,17 +3405,20 @@ def _new_session_of(
         # As PySpark's client of the new session, which reads the `metadata()` of its builder as
         # it is made, and again for each call.
         new._set_metadata_source(new_builder, new_builder.metadata())
-    _set_client_state(new, _new_client_state(new, new_builder, new_user))
+    # As PySpark's `newSession` and `clone` of a client, which make the new client of its
+    # `_use_reattachable_execute`, its `_session_hooks` (a new list of none) and its
+    # `_rpc_deadlines`, and of the retry policies of a client of no arguments.
+    settings = {
+        "_use_reattachable_execute": _client_attribute(state, "_use_reattachable_execute"),
+        "_session_hooks": _client_attribute(state, "_session_hooks") or [],
+        "_rpc_deadlines": _client_attribute(state, "_rpc_deadlines"),
+    }
+    _set_client_state(new, _new_client_state(new, new_builder, new_user, settings=settings))
     return new
 
 
 # The client of each session, by its ID, while it is in use.
 _CLIENTS: "weakref.WeakValueDictionary[str, SparkConnectClient]" = weakref.WeakValueDictionary()
-
-# The retry policies that `set_retry_policies` set on each session, which its clients give back,
-# whatever client of the session set them, as PySpark's client keeps the policies objects it is
-# given. The Rust transport retries with their parameters.
-_RETRY_POLICIES: "weakref.WeakKeyDictionary[Any, list[Any]]" = weakref.WeakKeyDictionary()
 
 
 def _client_of(session: Any, session_id: Optional[str] = None) -> "SparkConnectClient":

@@ -75,6 +75,74 @@ pub(crate) fn reduce_ex<'py>(
     Ok(crate::reduce::plain_reduce(obj)?.into_any())
 }
 
+/// The refresher of the calls of a session, the `_RequestContext` of the state of its clients (see
+/// `pyspark.sql.connect.client.core._client_context`), which the core keeps as long as the session
+/// lives, of its client and of the clones that its executions hold. Once the session is gone, its
+/// drop sets the `_closed` of the clients of the state, as the `__del__` of PySpark's session
+/// object closes its client: a client that the program kept apart from its session is closed then
+/// (see `_session` of `SparkConnectClient`).
+pub(crate) struct ClientRefresher(Option<Py<PyAny>>);
+
+impl ClientRefresher {
+    pub(crate) fn new(refresh: Py<PyAny>) -> Self {
+        ClientRefresher(Some(refresh))
+    }
+
+    /// The `_RequestContext`.
+    pub(crate) fn refresh(&self) -> Option<&Py<PyAny>> {
+        self.0.as_ref()
+    }
+}
+
+impl Drop for ClientRefresher {
+    fn drop(&mut self) {
+        let Some(refresh) = self.0.take() else {
+            return;
+        };
+        // Of an interpreter that is gone, nothing; of the exception that the thread was raising
+        // kept as it was, as the drop may run while one propagates.
+        let _ = Python::try_attach(|py| {
+            crate::deliver::preserving_pending_exception(py, |py| {
+                if let Err(error) = refresh.bind(py).call_method1("_set_closed", (true,)) {
+                    error.write_unraisable(py, None);
+                }
+            })
+        });
+    }
+}
+
+/// The `_RequestContext` of the refresher `refresher` of a session (see [`ClientRefresher`]).
+pub(crate) fn refresh_of(refresher: &(dyn std::any::Any + Send + Sync)) -> Option<&Py<PyAny>> {
+    refresher.downcast_ref::<ClientRefresher>()?.refresh()
+}
+
+/// The attributes of the clients of `session` (`pyspark.sql.connect.client.core._client_state`),
+/// of the state that the session keeps with the refresher of its calls (see
+/// `_RequestContext`), or None of a session of no state yet.
+pub(crate) fn client_state_of<'py>(
+    py: Python<'py>,
+    session: &SparkSession,
+) -> Option<Bound<'py, pyo3::types::PyDict>> {
+    let refresher = session.user_context_refresher()?;
+    let refresh = refresh_of(refresher.as_ref())?;
+    refresh
+        .bind(py)
+        .getattr(pyo3::intern!(py, "state"))
+        .ok()?
+        .cast_into::<pyo3::types::PyDict>()
+        .ok()
+}
+
+/// Whether the client of `session` is closed, of the `_closed` of the attributes of its clients
+/// (see [`client_state_of`]), as PySpark's `is_stopped` of a session reads the `_closed` of its
+/// client, else of the session.
+pub(crate) fn client_closed(py: Python<'_>, session: &SparkSession) -> bool {
+    match client_state_of(py, session).and_then(|state| state.get_item("_closed").ok().flatten()) {
+        Some(closed) => closed.is_truthy().unwrap_or(true),
+        None => session.is_stopped(),
+    }
+}
+
 /// The session of `client`, a client of Spark Connect of this client
 /// (`pyspark.sql.connect.client.core.SparkConnectClient`, of its class or of a subclass), and not
 /// of another object, a session included.

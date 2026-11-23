@@ -824,22 +824,23 @@ requests of the unpickled object pickle as it is then. This case still differs:
   0.1 to 0.2 s, as of the first `spark.client.close()` of a program, where `close()` itself returns
   at once when no release of an execution is in flight.
 - **Retry and reattach** (intentional; DESIGN). Retries and reattachment live in the Rust
-  transport. `client.retries` is PySpark's, vendored. `SparkConnectClient.set_retry_policies`
-  makes the transport retry with the parameters of PySpark's own `DefaultPolicy` and `RetryPolicy`,
-  without Python, read when they are set; the policies of a subclass, or of a backoff, a jitter or
-  a delay that is not a whole number of milliseconds, are run by PySpark's `Retrying`, as PySpark's
-  client runs them, of grpcio's `RpcError` of each failed RPC (see `docs/compatibility.md`). What
-  stays different: PySpark's `Retrying` offers its policies every exception of an attempt, such as
+  transport. `client.retries` is PySpark's, vendored. The `_retry_policies` of the client, which
+  `set_retry_policies` sets, make the transport retry with the parameters of PySpark's own
+  `DefaultPolicy` and `RetryPolicy`, without Python, read as each call starts; the policies of a
+  subclass, or of a backoff, a jitter or a delay that is not a whole number of milliseconds, are run
+  by PySpark's `Retrying`, as PySpark's client runs them, of grpcio's `RpcError` of each failed RPC
+  (see `docs/compatibility.md`). What stays different: PySpark's `Retrying` offers its policies every exception of an attempt, such as
   a `KeyboardInterrupt` or an error of its Python code that reads the responses, where the
   transport, which reads them in Rust, offers them the failures of the RPCs; and the states of the
   policies (`to_state`), which a `Retrying` makes of each call and of each response of an
   execution, as PySpark's makes them, are as many as the requests of the drop-in, which sends more
-  releases than PySpark's. `RpcDeadlines` sets the deadlines of the transport, `get_status` that of
-  `_get_operation_statuses`. `client.reattach` (`ExecutePlanResponseReattachableIterator`) is not
-  provided: it reads the responses of a stub of the generated `base_pb2_grpc`, over a channel of
-  grpcio, which the drop-in has neither of. `disable_reattachable_execute` and
-  `enable_reattachable_execute` set the executions of the transport not reattachable or
-  reattachable.
+  releases than PySpark's. The `_rpc_deadlines` of the client, an `RpcDeadlines`, are the deadlines
+  of the transport, `get_status` that of `_get_operation_statuses`. `client.reattach`
+  (`ExecutePlanResponseReattachableIterator`) is not provided: it reads the responses of a stub of
+  the generated `base_pb2_grpc`, over a channel of grpcio, which the drop-in has neither of.
+  `disable_reattachable_execute` and `enable_reattachable_execute` set the
+  `_use_reattachable_execute` of the client, of which the executions of the calls that start then
+  are not reattachable or reattachable.
 - **Errors that PySpark's client leaves to grpc, without grpcio** (intentional; the transport is
   native). PySpark's `SparkConnectClient.clone`, its `ArtifactManager`'s copy to the file system
   (`copy_from_local_to_fs`, and so `SparkSession.cloneSession` and `copyFromLocalToFs`) and its
@@ -1113,13 +1114,7 @@ requests of the unpickled object pickle as it is then. This case still differs:
   client sends its own attributes, as PySpark's, also at once with its client on another thread,
   and a call of the session that runs during a call of the copy, as of a progress handler or a
   finalizer, sends the session's, after which the call of the copy sends its own again, as they are
-  then; but it shares with its session whether it is closed (`_closed`), the server-side session ID
-  that the responses carried, whether its executions are reattachable and the retry policies, which
-  PySpark's copy has of its own. So the `close()` of a copy closes its client too, whose calls then
-  raise `NO_ACTIVE_SESSION`, where PySpark's copy shares only the channel with its client, which
-  stays open (`is_closed` False) and whose calls then raise grpc's `ValueError` of a closed channel
-  (`Cannot invoke RPC on closed channel!`, and `Cannot invoke RPC: Channel closed!` of an
-  execution).
+  then (see "The attributes of `SparkConnectClient`" for the others).
 - **Plans of a DataFrame's relation** (intentional; DESIGN). `df._plan.plan(client)` is a
   placeholder that holds the DataFrame's relation, which the core builds at the call, as
   PySpark's `plan` does, with its pickles, warnings and errors: the core builds the relation, and
@@ -1187,7 +1182,57 @@ requests of the unpickled object pickle as it is then. This case still differs:
   the `TypeError` of the string field of the session ID for every request, where PySpark's
   executions and `CloneSession` send an empty session ID, which the server refuses; one of the
   bytes of a session ID is sent as its text, where PySpark's check of the responses compares the
-  str of the server with the bytes and fails with `PySparkAssertionError`.
+  str of the server with the bytes and fails with `PySparkAssertionError`. A response of an empty
+  server-side session ID, which a Spark server sends only in its answer to the release of a session
+  that it does not have, is not observed: `_server_session_id` stays None, and a later response of
+  a server-side session ID is observed, where PySpark's `_server_session_id` becomes the empty
+  string, of which a later response of a server-side session ID closes the client
+  (`Received incorrect server side session identifier for request`).
+- **The attributes of `SparkConnectClient`** (intentional; the transport is native). The state of
+  the client is the `__dict__` of its attributes, of PySpark's names, values and order, which the
+  native transport reads as each call starts, under the GIL, for the requests of the call, and a
+  copy of the client has its own, as PySpark's (see `docs/compatibility.md`). What stays different:
+  - the client has none of the attributes of PySpark's that hold the objects of grpcio and of its
+    Python compression of plans, which the native transport replaces: `_channel` (the
+    `grpc.Channel` of the channel builder), `_internal_stub` (the `SparkConnectServiceStub` of the
+    channel, which the property `_stub` gives), `_artifact_manager` (the `ArtifactManager`, whose
+    stub of its own sends the artifacts), `_release_futures` (the futures of the `ReleaseExecute`
+    requests of PySpark's thread pool) and `_zstd_module` (the `zstandard` module of PySpark's
+    compression, where the transport compresses of its own zstd): they are not in `vars(client)`,
+    and reading one raises `AttributeError`;
+  - the `[DefaultPolicy()]` of `_retry_policies` of a client that is not given its policies is made
+    when the attribute is first read, by `get_retry_policies` too, or when the client is copied, as
+    the module of the policies, `pyspark.sql.connect.client.retries`, imports grpcio, which the
+    drop-in does not require: until then, `vars(client)` holds
+    `<the [DefaultPolicy()] of the client, made when it is read>`, of which the transport retries
+    as of `DefaultPolicy()`;
+  - PySpark's client reads them as each request is built, and at each RPC (`_stub`,
+    `_retrying()`), where the transport reads them as each call starts, for all the requests of
+    the call: a change during a call, as by a progress handler, a session hook or another thread,
+    applies from the next call on; the requests that continue an execution in the background, its
+    reattaches and its releases, carry the deadlines and the result chunking of the start of its
+    call, and are retried of the policies of the last call of the session that started; and the
+    attributes that the responses set, `_server_session_id`, the `_closed` of a server-side session
+    change and the plan compression settings of their lookup, are set when the call ends, where
+    PySpark's are set as the response arrives; the fits of the classes of a OneVsRest, which the
+    transport runs on threads of its own, carry the deadlines and the result chunking of the last
+    call that started, and call the session hooks of the client of the session;
+  - the closed flag, the server-side session ID, the reattachability, the retry policies and the
+    bound of their retries of a `RetryException`, and the plan compression settings, are those of
+    the native session for all of its calls, which a call gives it of its client as it starts:
+    calls of a copy of a client and of the client, of different values of them, that run at once on
+    different threads have those of the call that started last, where PySpark's calls each have
+    their own; the deadlines, the result chunking and the session hooks are of the calling thread;
+  - the progress handlers are those of the `_progress_handlers` of the client of the call, or of the
+    copy whose method made it, as they are at each progress, where PySpark's execution calls the
+    handlers of the list that `_progress_handlers` held as it started, so a list assigned during an
+    execution is called from its next progress on; and an execution takes the GIL for them only
+    when the list had handlers as its call started, or as `register_progress_handler` added one,
+    so a handler appended to an empty list during a call, as by another thread, is called from the
+    next call on;
+  - a `_plan_compression_threshold` that is neither an int nor a float, such as a str, compresses
+    no plan, where PySpark's plans raise the `TypeError` of its comparison with 0 as they are built
+    (`'>=' not supported between instances of 'str' and 'int'`).
 - **The exit of a dropped session in a reference cycle** (intentional). PySpark's
   `SparkSession.__del__` closes the client of a session object that is freed, and the exit hook of a
   closed client sends nothing; the drop-in closes a session once the program dropped its objects and
@@ -1209,14 +1254,6 @@ requests of the unpickled object pickle as it is then. This case still differs:
   or `SparkSession(connection=...)`): its `SparkSession.__del__` closes the client in the teardown
   of the interpreter, whose grpcio `Channel.close()` waits forever. That is a bug of PySpark, which
   the drop-in does not reproduce: it exits.
-- **A `client` kept apart from its session** (intentional; the state is native). As PySpark's
-  `RuntimeConf` and `SparkConnectClient`, which hold the client of a session and not the session
-  object, the drop-in's do not keep the session open: once the program dropped the session and the
-  objects that hold it, as its DataFrames, a kept `conf` or `client` raises `NO_ACTIVE_SESSION`, as
-  PySpark's raise once the `__del__` of the session closed the client, and the exit sends nothing
-  for the session. The client of such a session keeps its attributes and its retry policies, but
-  reads its server-side session ID and whether its executions are reattachable of a closed session
-  of its connection, which has the defaults, where PySpark's client keeps its own.
 - **The `__dict__` of the objects of a session** (intentional; the state is native). The
   readers, writers and the other objects of a session or a DataFrame hold their
   state in the Rust core: their `__dict__` holds the attributes that a user sets on them,

@@ -1908,6 +1908,41 @@ impl SparkSession {
             .set_thread_request_context(session_id, user_id, global);
     }
 
+    /// Give the calls of the current thread the deadlines of their RPCs and the result chunking
+    /// options of their executions of the client that it calls, or those of the session again of
+    /// None (see [`SparkConnectClient::set_thread_call_settings`]). Binding hook; not a stable
+    /// API.
+    #[doc(hidden)]
+    pub fn set_thread_call_settings(
+        &self,
+        rpc_deadlines: Option<spark_connect_core::client::RpcDeadlines>,
+        result_chunking: Option<spark_connect_core::client::ResultChunking>,
+    ) {
+        self.client
+            .set_thread_call_settings(rpc_deadlines, result_chunking);
+    }
+
+    /// The settings of the plan compression of the client of this session, as PySpark's client
+    /// keeps them, once they are read (see `SparkConnectClient::plan_compression_settings`).
+    /// Binding hook; not a stable API.
+    #[doc(hidden)]
+    pub fn plan_compression_settings(
+        &self,
+    ) -> Option<spark_connect_core::client::PlanCompressionSettings> {
+        self.client.plan_compression_settings()
+    }
+
+    /// Make `settings` the plan compression of the client of this session and of its clones, or
+    /// look it up again with the next plan of None (see
+    /// `SparkConnectClient::set_plan_compression_settings`). Binding hook; not a stable API.
+    #[doc(hidden)]
+    pub fn set_plan_compression_settings(
+        &self,
+        settings: Option<spark_connect_core::client::PlanCompressionSettings>,
+    ) {
+        self.client.set_plan_compression_settings(settings);
+    }
+
     /// Keep the context of the requests of the calling thread, as it is now, until the returned
     /// guard drops, when the thread has it again: the session ID, the user and the global user
     /// context extensions of [`SparkSession::set_thread_request_context`], the user context

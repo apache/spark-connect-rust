@@ -98,6 +98,22 @@ _CHILD = textwrap.dedent("""
         os.environ["SPARK_CONNECT_RELEASE_SESSION_ON_EXIT"] = "true"
     if mode == "unset_after_creation":
         del os.environ["SPARK_CONNECT_RELEASE_SESSION_ON_EXIT"]
+    if mode == "release_attribute_set":
+        spark.client._release_session_on_exit = True
+    if mode == "release_attribute_unset":
+        spark.client._release_session_on_exit = False
+    if mode == "closed_attribute":
+        spark.client._closed = True
+    if mode == "closed_copy":
+        import copy
+
+        # A copy of the client, closed, whose request raises NO_ACTIVE_SESSION.
+        copied = copy.copy(spark.client)
+        copied._closed = True
+        try:
+            copied.get_configs("spark.a")
+        except Exception as error:
+            assert error.getCondition() == "NO_ACTIVE_SESSION", error
     if mode == "stop_wait":
         spark.stop()
         print("ready", flush=True)
@@ -247,6 +263,28 @@ def test_d_variable_is_read_when_the_session_is_made(exit_service):
 
     _, (session_id,) = _run_child(exit_service.remote, "unset_after_creation", variable="true")
     assert _exit_requests(exit_service, session_id) == ["clean_cache", "release_session"]
+
+
+def test_d_the_attribute_of_the_client_is_read_at_exit_as_pyspark(exit_service):
+    # (d) As PySpark's `_on_exit`, which reads the `_release_session_on_exit` of the client, which
+    # the variable sets when the client is made: set True, the exit releases the session, and set
+    # False, it does not.
+    _, (session_id,) = _run_child(exit_service.remote, "release_attribute_set")
+    assert _exit_requests(exit_service, session_id) == ["clean_cache", "release_session"]
+
+    _, (session_id,) = _run_child(exit_service.remote, "release_attribute_unset", variable="true")
+    assert _exit_requests(exit_service, session_id) == ["clean_cache"]
+
+
+def test_b_a_client_set_closed_sends_nothing_at_exit_as_pyspark(exit_service):
+    # (b) As PySpark's `_on_exit`, of the `_closed` of the client of the session: set True, the
+    # exit sends nothing, and a copy of the client that is closed, whose request raised, leaves
+    # the client open, which cleans its ML cache at exit.
+    _, (session_id,) = _run_child(exit_service.remote, "closed_attribute", variable="true")
+    assert _exit_requests(exit_service, session_id) == []
+
+    _, (session_id,) = _run_child(exit_service.remote, "closed_copy")
+    assert _exit_requests(exit_service, session_id) == ["clean_cache"]
 
 
 def test_g_closing_the_registered_sessions_makes_their_exit_send_nothing(exit_service):

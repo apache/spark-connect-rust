@@ -33974,7 +33974,8 @@ def test_client_of_a_connection_as_pyspark(monkeypatch):
     try:
         assert (client.host, client.token, client.is_closed) == ("other", "abc", False)
         assert client._session is not SparkSession.getActiveSession()
-        assert client._session._retry_policy()["max_retry_exception_elapsed_time"] == 5.0
+        # Kept in the client's __dict__ as PySpark's, and read at the start of each request.
+        assert client._max_retry_exception_elapsed_time == 5
     finally:
         client.close()
     assert client.is_closed
@@ -34978,6 +34979,346 @@ def test_a_conf_or_a_client_kept_apart_from_its_session_is_closed_with_it_as_pys
     fresh = client.newSession()
     assert fresh.get_config_with_defaults(("spark.sql.shuffle.partitions", "200")) == ("200",)
     fresh.close()
+
+
+_CLIENT_STATE_KEYS = [
+    "thread_local",
+    "_builder",
+    "_user_id",
+    "_retry_policies",
+    "_max_retry_exception_elapsed_time",
+    "_session_id",
+    "_closed",
+    "_rpc_deadlines",
+    "_use_reattachable_execute",
+    "_allow_arrow_batch_chunking",
+    "_preferred_arrow_chunk_size",
+    "_session_hooks",
+    "_server_session_id",
+    "_profiler_collector",
+    "_progress_handlers",
+    "_plan_compression_threshold",
+    "_plan_compression_algorithm",
+    "_release_session_on_exit",
+    "global_user_context_extensions",
+    "global_user_context_extensions_lock",
+]
+
+
+def test_the_state_of_a_client_is_the_dict_of_its_attributes_as_pysparks(mock_connect):
+    # As PySpark's SparkConnectClient, a plain object: its state is the dict of its attributes, of
+    # PySpark's names, order and values, but for the objects of grpcio and of PySpark's Python plan
+    # compression, which the native transport replaces (`_channel`, `_internal_stub`,
+    # `_artifact_manager`, `_release_futures`, `_zstd_module`), and for its `[DefaultPolicy()]`,
+    # which is made when it is first read or copied, as the module of the policies imports grpcio,
+    # which the drop-in does not require; the clients of a session and of a subclass are so; and
+    # one whose `__init__` never ran raises the AttributeError of the `_closed` that its
+    # `is_closed` reads first, as PySpark's.
+    import copy
+    import threading
+
+    from pyspark.sql import SparkSession
+    from pyspark.sql.connect.client import RpcDeadlines, SparkConnectClient
+    from pyspark.sql.connect.client.core import (
+        _DEFAULT_RETRY_PARAMETERS,
+        _DEFAULT_RETRY_POLICIES,
+        DefaultChannelBuilder,
+        _retry_parameters,
+    )
+    from pyspark.sql.connect.client.retries import (
+        DEFAULT_MAX_RETRY_EXCEPTION_ELAPSED_TIME,
+        DefaultPolicy,
+    )
+    from pyspark.sql.connect.profiler import ConnectProfilerCollector
+
+    spark, service = mock_connect
+    service.confs = _plan_confs("1024")
+    spark.range(1).collect()
+    client = spark.client
+    state = vars(client)
+    assert list(state) == _CLIENT_STATE_KEYS
+    assert type(state["thread_local"]) is threading.local
+    assert type(state["_builder"]) is DefaultChannelBuilder
+    assert state["_retry_policies"] is _DEFAULT_RETRY_POLICIES
+    policies = client._retry_policies
+    assert [type(policy) for policy in policies] == [DefaultPolicy]
+    assert state["_retry_policies"] is policies and client.get_retry_policies() == policies
+    assert vars(policies[0]) == vars(DefaultPolicy())
+    assert _retry_parameters(policies) == _DEFAULT_RETRY_PARAMETERS
+    assert state["_max_retry_exception_elapsed_time"] == DEFAULT_MAX_RETRY_EXCEPTION_ELAPSED_TIME
+    assert state["_closed"] is False and state["_rpc_deadlines"] == RpcDeadlines()
+    assert state["_use_reattachable_execute"] is True
+    assert state["_allow_arrow_batch_chunking"] is True
+    assert state["_preferred_arrow_chunk_size"] is None and state["_session_hooks"] == []
+    assert type(state["_profiler_collector"]) is ConnectProfilerCollector
+    assert state["_progress_handlers"] == []
+    # Looked up by the first plan, as PySpark's `_get_plan_compression_threshold_and_algorithm`.
+    assert state["_plan_compression_threshold"] == 1024
+    assert state["_plan_compression_algorithm"] == "ZSTD"
+    assert state["_release_session_on_exit"] is False
+    for name in ("_channel", "_internal_stub", "_artifact_manager", "_release_futures",
+                 "_zstd_module"):
+        assert not hasattr(client, name)
+    assert vars(spark.client) is state
+
+    class Client(SparkConnectClient):
+        pass
+
+    other = Client(service.remote, use_reattachable_execute=False, preferred_arrow_chunk_size=8)
+    try:
+        assert list(vars(other)) == _CLIENT_STATE_KEYS
+        assert other._use_reattachable_execute is False
+        assert other._preferred_arrow_chunk_size == 8
+        assert other._plan_compression_threshold is None and other._server_session_id is None
+    finally:
+        other.close()
+    assert other._closed is True and other.is_closed
+    # A copy shares the list of the policies of its client, as PySpark's.
+    fresh = SparkSession.builder.remote(service.remote).create()
+    try:
+        assert vars(fresh.client)["_retry_policies"] is _DEFAULT_RETRY_POLICIES
+        copied = copy.copy(fresh.client)
+        assert copied._retry_policies is fresh.client._retry_policies
+        assert type(copied._retry_policies) is list
+    finally:
+        fresh.stop()
+    for name in ("_closed", "_retry_policies"):
+        with pytest.raises(AttributeError) as error:
+            getattr(object.__new__(SparkConnectClient), name)
+        assert str(error.value) == f"'SparkConnectClient' object has no attribute '{name}'"
+
+
+def test_the_attributes_of_a_client_are_read_at_the_start_of_each_request_as_pysparks(
+    mock_connect,
+):
+    # As PySpark's requests, which read the attributes of their client when they are built: a
+    # change of `_allow_arrow_batch_chunking`, `_preferred_arrow_chunk_size`,
+    # `_use_reattachable_execute`, `_session_hooks`, `_rpc_deadlines`, `_retry_policies` or of the
+    # plan compression settings, of an assignment, of the list itself or of `vars()`, applies to
+    # the next request, also of the clients of the session.
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.errors.exceptions.connect import SparkConnectGrpcException
+    from pyspark.sql.connect.client import RpcDeadlines
+    from pyspark.sql.connect.client.retries import DefaultPolicy
+
+    spark, service = mock_connect
+    client = spark.client
+
+    def options():
+        return list(pb2.ExecutePlanRequest.FromString(service.execute_requests[-1]).request_options)
+
+    def chunking():
+        (option,) = [option.result_chunking_options for option in options()
+                     if option.HasField("result_chunking_options")]
+        return option.allow_arrow_batch_chunking, option.preferred_arrow_chunk_size
+
+    def reattachable():
+        return [option.reattach_options.reattachable for option in options()
+                if option.HasField("reattach_options")]
+
+    spark.range(1).collect()
+    assert chunking() == (True, 0) and reattachable() == [True]
+    client._allow_arrow_batch_chunking = False
+    vars(client)["_preferred_arrow_chunk_size"] = 1024
+    client._use_reattachable_execute = False
+    spark.range(1).collect()
+    assert chunking() == (False, 1024) and reattachable() == []
+    client.enable_reattachable_execute()
+    spark.client._allow_arrow_batch_chunking = True
+    spark.range(1).collect()
+    assert chunking() == (True, 1024) and reattachable() == [True]
+
+    seen = []
+
+    class Hook:
+        def __init__(self, name):
+            self.name = name
+
+        def on_execute_plan(self, request):
+            seen.append(self.name)
+            return request
+
+    client._session_hooks.append(Hook("appended"))
+    spark.range(1).collect()
+    client._session_hooks = [Hook("assigned")]
+    spark.range(1).collect()
+    client._session_hooks = []
+    spark.range(1).collect()
+    assert seen == ["appended", "assigned"]
+
+    service.confs = {"spark.a": "1"}
+    client._rpc_deadlines = RpcDeadlines(config=0.2)
+    service.block_config = True
+    try:
+        with pytest.raises(SparkConnectGrpcException) as error:
+            client.get_configs("spark.a")
+        assert error.value.getGrpcStatusCode().name == "DEADLINE_EXCEEDED"
+    finally:
+        service.release_response()
+        service.block_config = False
+    client._rpc_deadlines = RpcDeadlines()
+    assert client.get_configs("spark.a") == ("1",)
+
+    client._retry_policies = [
+        DefaultPolicy(max_retries=1, initial_backoff=1, max_backoff=1, jitter=0)]
+    service.stream_failure = "UNAVAILABLE"
+    try:
+        executions = service.execute_calls
+        client._use_reattachable_execute = False
+        with pytest.raises(SparkConnectGrpcException):
+            spark.range(1).collect()
+        assert service.execute_calls - executions == 2
+        client._retry_policies = [DefaultPolicy(max_retries=0)]
+        executions = service.execute_calls
+        with pytest.raises(SparkConnectGrpcException):
+            spark.range(1).collect()
+        assert service.execute_calls - executions == 1
+    finally:
+        service.stream_failure = None
+    assert spark.client.get_retry_policies() == client._retry_policies
+
+
+def test_the_plan_compression_settings_of_a_client_are_its_attributes_as_pysparks(mock_connect):
+    # As PySpark's `_try_compress_and_set_plan`, of the `_plan_compression_threshold` and
+    # `_plan_compression_algorithm` of the client, which its first plan looks up, unless they are
+    # set, and which a None makes it look up again.
+    from pyspark.sql import SparkSession
+
+    _, service = mock_connect
+    service.confs = _plan_confs("1024")
+    session = SparkSession.builder.remote(service.remote).create()
+    try:
+        client = session.client
+        client._plan_compression_threshold = 1 << 40
+        client._plan_compression_algorithm = "ZSTD"
+        _long_literal_frame(session).collect()
+        assert service.plan_compression_lookups == 0
+        assert 3 not in _sent_plan(service.execute_requests)
+        client._plan_compression_threshold = 0
+        _long_literal_frame(session).collect()
+        assert 3 in _sent_plan(service.execute_requests)
+        client._plan_compression_algorithm = "NONE"
+        _long_literal_frame(session).collect()
+        assert 3 not in _sent_plan(service.execute_requests)
+        client._plan_compression_threshold = None
+        _long_literal_frame(session).collect()
+        assert service.plan_compression_lookups == 1
+        assert (client._plan_compression_threshold, client._plan_compression_algorithm) == (
+            1024, "ZSTD")
+        assert 3 in _sent_plan(service.execute_requests)
+    finally:
+        session.stop()
+
+
+def test_a_client_and_its_copies_are_closed_of_their_own_closed_as_pysparks(mock_connect):
+    # As PySpark's `_closed`, which `is_closed`, the `is_stopped` of the session and the stub of
+    # each request read: set True, the requests of the client raise NO_ACTIVE_SESSION, and the
+    # session is stopped; set False, they are sent again. A copy of the client has its own, which
+    # its `close()` sets, where the channel that it shares with its client closes: the client stays
+    # open, of the ValueError of a closed channel.
+    import copy
+
+    from pyspark.errors.exceptions.connect import SparkConnectException
+    from pyspark.sql import SparkSession
+
+    spark, service = mock_connect
+    client = spark.client
+    spark.range(1).collect()
+    client._closed = True
+    with pytest.raises(SparkConnectException) as error:
+        spark.range(1).collect()
+    assert error.value.getCondition() == "NO_ACTIVE_SESSION"
+    assert spark.is_stopped and SparkSession.getActiveSession() is None
+    client._closed = False
+    assert spark.range(1).collect() == [] and not spark.is_stopped
+
+    copied = copy.copy(client)
+    copied._closed = True
+    with pytest.raises(SparkConnectException) as error:
+        copied.get_configs("spark.a")
+    assert error.value.getCondition() == "NO_ACTIVE_SESSION"
+    assert not client.is_closed and not spark.is_stopped
+    assert SparkSession.getActiveSession() is spark
+    assert spark.range(1).collect() == []
+    copied._closed = False
+    copied.close()
+    assert copied.is_closed and not client.is_closed and not spark.is_stopped
+    with pytest.raises(ValueError, match="^Cannot invoke RPC on closed channel!$"):
+        client.get_configs("spark.a")
+    with pytest.raises(ValueError, match="^Cannot invoke RPC: Channel closed!$"):
+        spark.range(1).collect()
+    with pytest.raises(SparkConnectException) as error:
+        copied.get_configs("spark.a")
+    assert error.value.getCondition() == "NO_ACTIVE_SESSION"
+
+
+def test_the_progress_handlers_and_the_profiler_collector_of_a_client_are_its_own_as_pysparks(
+    mock_connect,
+):
+    # As PySpark's executions, which call the handlers of the `_progress_handlers` of the client,
+    # and update its `_profiler_collector`, as they are when they run, of the client or of the
+    # copy of a client whose method makes the execution; and the methods of the session, which
+    # call those of its client.
+    import copy
+    import cProfile
+    import pstats
+
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.accumulators import SpecialAccumulatorIds, specialAccumulatorSer
+    from pyspark.sql.connect.profiler import ConnectProfilerCollector
+
+    spark, service = mock_connect
+    client = spark.client
+    stage = (varint_field(1, 7) + varint_field(2, 4) + varint_field(3, 1)
+             + varint_field(4, 1024) + varint_field(5, 0))
+    service.execute_payload = message_field(18, message_field(1, stage) + varint_field(2, 3))
+    appended, assigned = [], []
+    client._progress_handlers.append(lambda **kwargs: appended.append(kwargs["done"]))
+    spark.range(1).collect()
+    assert appended == [False, True]
+    client._progress_handlers = [lambda **kwargs: assigned.append(kwargs["done"])]
+    spark.range(1).collect()
+    assert appended == [False, True] and assigned == [False, True]
+
+    def handler(**kwargs):
+        pass
+
+    spark.registerProgressHandler(handler)
+    assert client._progress_handlers[-1] is handler
+    spark.removeProgressHandler(handler)
+    spark.clearProgressHandlers()
+    assert client._progress_handlers == []
+    # Those of a copy of the client, of its own list, as the execution of PySpark's copy reads it.
+    command = pb2.Command()
+    command.sql_command.sql = "SELECT 1"
+    copied = copy.copy(client)
+    of_copy = []
+    copied._progress_handlers = [lambda **kwargs: of_copy.append(kwargs["done"])]
+    copied.execute_command(command)
+    assert of_copy == [False, True] and assigned == [False, True]
+
+    profiler = cProfile.Profile()
+    profiler.enable()
+    sum(range(10))
+    profiler.disable()
+    stats = pstats.Stats(profiler, stream=None)
+    stats.stream = None
+    # ExecutePlanResponse.observed_metrics=6 -> ObservedMetrics name=1, values=2
+    # (Expression.Literal binary=2).
+    update = specialAccumulatorSer.dumps(
+        (SpecialAccumulatorIds.SQL_UDF_PROFIER_V2, {7: {"perf": stats}}))
+    service.execute_payload = message_field(
+        6, message_field(1, "__python_accumulator__") + message_field(2, message_field(2, update)))
+    collector = ConnectProfilerCollector()
+    client._profiler_collector = collector
+    spark.range(1).collect()
+    assert list(collector._profile_results) == [7]
+    assert spark._profiler_collector is collector
+    assert spark.profile.profiler_collector is collector
+    copied._profiler_collector = ConnectProfilerCollector()
+    copied.execute_command(command)
+    assert list(copied._profiler_collector._profile_results) == [7]
+    assert list(collector._profile_results) == [7]
 
 
 def test_sessions_of_a_connection_take_pysparks_users_and_channel_builders(mock_connect):
