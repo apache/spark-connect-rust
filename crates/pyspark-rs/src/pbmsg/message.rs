@@ -964,6 +964,47 @@ fn copy_fields_of(
     native::copy_slots_now(py, message, budget)
 }
 
+/// Whether Python holds `child`, an unset child that a message gave out, as upb tells it of the
+/// weak map of its unset children: upb's unset children and their containers hold their parents
+/// strongly, so Python holds the child if it holds it, an unset child of it of any level, or a
+/// container of one (`a.crosstab.input`, `a.crosstab.input.project.expressions`). The runtime's
+/// hold their parents weakly, and each message holds its unset children and containers: so the
+/// child of none of those has no reference but its parent's, nor has any of them. It runs no
+/// Python code; a message that Rust code borrows meanwhile is taken as held.
+fn held_by_python(py: Python<'_>, child: &Py<PyMessage>) -> bool {
+    // SAFETY: each object is live, of the reference of the message that holds it.
+    let held = |object: *mut pyo3::ffi::PyObject| unsafe { pyo3::ffi::Py_REFCNT(object) } > 1;
+    if held(child.as_ptr()) {
+        return true;
+    }
+    // The unset children below the child, each looked at before its reference here is taken.
+    let mut pending = vec![child.clone_ref(py)];
+    while let Some(stub) = pending.pop() {
+        let stub = stub.bind(py);
+        let Ok(stub) = stub.try_borrow() else {
+            return true;
+        };
+        for (_, slot) in stub.slots.iter() {
+            let container = match slot {
+                Slot::Repeated(c) => c.as_ptr(),
+                Slot::Composite(c) => c.as_ptr(),
+                Slot::Map(c) => c.as_ptr(),
+                _ => continue,
+            };
+            if held(container) {
+                return true;
+            }
+        }
+        for (_, grandchild) in &stub.lazy {
+            if held(grandchild.as_ptr()) {
+                return true;
+            }
+            pending.push(grandchild.clone_ref(py));
+        }
+    }
+    false
+}
+
 /// Set `message` in its parent if it is an unset child, and the parent in its own, as setting a
 /// field of an unset child does.
 pub(crate) fn mark_present(message: &Bound<'_, PyMessage>) -> PyResult<()> {
@@ -2600,10 +2641,11 @@ impl PyMessage {
         // As upb's, which sets an unset child of the field that Python holds in the message first
         // (its `EnsureReified`), then clears the field: so the member of its oneof that the
         // message holds is cleared too. (upb holds its unset children weakly, so one that Python
-        // no longer holds is not: the message's own reference is the only one of it then.)
-        // SAFETY: the child is a live object, which the message holds.
-        let held = |child: &Py<PyMessage>| unsafe { pyo3::ffi::Py_REFCNT(child.as_ptr()) } > 1;
-        if me.lazy_child(index).is_some_and(held) {
+        // no longer holds is not; see `held_by_python`.)
+        if me
+            .lazy_child(index)
+            .is_some_and(|child| held_by_python(py, child))
+        {
             me.clear_oneof_siblings(py, index);
         }
         me.clear_index(py, index);

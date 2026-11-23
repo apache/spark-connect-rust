@@ -8604,6 +8604,17 @@ def _clear_field_of_a_member_cases(C):
         a.ClearField("crosstab")
         return [_hex(a), a.WhichOneof("rel_type"), held is not None and held is a.crosstab]
 
+    def below(read, keep):
+        # The unset child of the member is held of what Python holds below it (`read` of it),
+        # or not (`keep` false: read, and dropped at once).
+        a = R()
+        held = read(a.crosstab) if keep else None
+        if not keep:
+            read(a.crosstab)
+        a.show_string.vertical = True
+        a.ClearField("crosstab")
+        return [_hex(a), a.WhichOneof("rel_type"), held is not None]
+
     return {
         "held, the other set by a read": _outcome(lambda: run(True, lambda a: setattr(a.show_string, "vertical", True))),
         "held, the other of CopyFrom": _outcome(
@@ -8611,13 +8622,24 @@ def _clear_field_of_a_member_cases(C):
         ),
         "not held": _outcome(lambda: run(False, lambda a: setattr(a.show_string, "vertical", True))),
         "held, none set": _outcome(lambda: run(True, lambda a: None)),
+        "held of its unset child": _outcome(lambda: below(lambda c: c.input, True)),
+        "held of an unset child two levels below": _outcome(lambda: below(lambda c: c.input.limit, True)),
+        "held of a container below": _outcome(lambda: below(lambda c: c.input.project.expressions, True)),
+        "held of a container of scalars below": _outcome(
+            lambda: below(lambda c: c.input.read.data_source.paths, True)
+        ),
+        "held of a map below": _outcome(lambda: below(lambda c: c.input.read.data_source.options, True)),
+        "a container below dropped": _outcome(lambda: below(lambda c: c.input.project.expressions, False)),
+        "an unset child below dropped": _outcome(lambda: below(lambda c: c.input.limit, False)),
     }
 
 
 def test_clear_field_of_a_member_of_an_unset_child_held_clears_its_oneof_as_upbs(upb):
     # As upb's, whose ClearField sets an unset child of the field that Python holds in its message
     # first (its `EnsureReified`), so the member of the oneof that the message holds is cleared;
-    # of one that Python no longer holds (upb holds its unset children weakly), it is not.
+    # of one that Python no longer holds (upb holds its unset children weakly), it is not. upb's
+    # unset children and their containers hold their parents, so Python holds the unset child of
+    # what it holds below it too: an unset child of it, of any level, or a container of one.
     assert _clear_field_of_a_member_cases(ours) == _clear_field_of_a_member_cases(upb)
 
 
