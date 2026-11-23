@@ -58,6 +58,14 @@ impl ConversionBudget {
         }
     }
 
+    /// A budget of no checkpoint, for a copy that holds the GIL until it ends, as the operation
+    /// that makes it did before (the text format of a message, see `pbmsg::text::to_text`).
+    pub(crate) fn never() -> Self {
+        ConversionBudget {
+            steps_until_checkpoint: AtomicUsize::new(usize::MAX),
+        }
+    }
+
     /// One step of the conversion, which is a checkpoint when the budget is spent.
     #[inline]
     pub(crate) fn step(&self, py: Python<'_>) -> PyResult<()> {

@@ -1792,22 +1792,25 @@ impl MapEntries {
         let mut copies = Vec::with_capacity(self.entries.len());
         for (key, value) in self.entries {
             budget.step(py)?;
-            let value = match value {
-                EntryValue::Scalar(v) => NativeValue::Scalar(v),
-                EntryValue::Object(m) => NativeValue::Message(Arc::new(native::copy_message(
-                    py,
-                    m.bind(py),
-                    entry.below()?,
-                    generation,
-                    budget,
-                )?)),
-                EntryValue::Native(m) => {
-                    if entry_levels.is_some_and(|levels| m.depth >= levels) {
-                        return Err(CopyError::TooDeep);
+            // The level of the entry, of the stack of every 16th level, as of a message's.
+            let value = entry.grown(|| -> Result<NativeValue, CopyError> {
+                Ok(match value {
+                    EntryValue::Scalar(v) => NativeValue::Scalar(v),
+                    EntryValue::Object(m) => NativeValue::Message(Arc::new(native::copy_message(
+                        py,
+                        m.bind(py),
+                        entry.below()?,
+                        generation,
+                        budget,
+                    )?)),
+                    EntryValue::Native(m) => {
+                        if entry_levels.is_some_and(|levels| m.depth >= levels) {
+                            return Err(CopyError::TooDeep);
+                        }
+                        NativeValue::Message(m.at(py, generation))
                     }
-                    NativeValue::Message(m.at(py, generation))
-                }
-            };
+                })
+            })?;
             copies.push((key, value));
         }
         Ok(NativeMap::new(

@@ -703,6 +703,10 @@ class _Lockstep:
     def __init__(self, upb, seed):
         self.upb = upb
         self.rng = random.Random(seed)
+        # The objects of the fields read at a comparison (a message, a container, its first
+        # message), of either runtime, held so that each later comparison tells whether the field
+        # gives the same object still (see `compare_identities`).
+        self.kept = []
 
     def value(self, f):
         rng = self.rng
@@ -827,6 +831,29 @@ class _Lockstep:
         except KeyError:
             text = None
         assert text is None or str(b) == text, f"str() after {where}"
+        self.compare_identities(a, b, where)
+
+    def compare_identities(self, a, b, where):
+        """Whether each field of a message (a message field, a repeated message field and its first
+        message) gives the object that it gave at an earlier comparison, of either runtime alike;
+        the objects that it gives now are held for the later ones."""
+
+        def objects(m, f):
+            value = getattr(m, f.name)
+            if not f.is_repeated:
+                return [value]
+            return [value] + ([value[0]] if len(value) else [None])
+
+        for f in a.DESCRIPTOR.fields:
+            if f.type != f.TYPE_MESSAGE or f.message_type.GetOptions().map_entry:
+                continue
+            now_a, now_b = objects(a, f), objects(b, f)
+            for ka, kb, name, then_a, then_b in self.kept:
+                if ka is a and kb is b and name == f.name:
+                    same = [x is y for x, y in zip(then_a, now_a)], [x is y for x, y in zip(then_b, now_b)]
+                    assert same[0] == same[1], f"the objects of {name} (upb's, ours: {same}) after {where}"
+            if not any(ka is a and name == f.name for ka, _, name, _, _ in self.kept):
+                self.kept.append((a, b, f.name, now_a, now_b))
 
 
 @pytest.mark.parametrize("seed", range(8))
@@ -8252,3 +8279,554 @@ def test_a_second_init_keeps_what_upbs_keeps_of_a_failure(upb):
     # ValueError of a value of None too, and keyword arguments (even none) set an unset child in its
     # parent first, as upb's `__init__` does.
     assert _partial_cases(_alias_classes("ours")) == _partial_cases(_alias_classes("upb"))
+
+
+
+def _plan_of_an_any(count):
+    """Plans of a relation of an `Any` of a known type (which protobuf's text format expands to its
+    message), each the copy of a constructor, whose `root` is native until it is read."""
+    inner = proto.Relation(range={"end": 1})
+    rel = proto.Relation()
+    rel.extension.Pack(inner)
+    rel.common.plan_id = 3
+    return rel, [proto.Plan(root=rel) for _ in range(count)]
+
+
+def test_a_first_read_of_a_collection_of_the_text_format_finds_the_message():
+    # The drop-in's writer of protobuf's text format (`_proto_message_to_string`, of the client's
+    # plan logging) writes a native copy of the message, so a collection that its expansion of an
+    # Any starts, whose callback reads the native field of the message for the first time, finds it
+    # free, as it does of protobuf's `text_format` and of `str()`: the writer held the message
+    # borrowed, of the runtime's PanicException ("Already borrowed"). (Without protobuf, of the
+    # drop-in's writer and of `str()` only.)
+    try:
+        from google.protobuf import text_format
+    except ImportError:
+        text_format = None
+    writers = [("_proto_message_to_string", _pyspark._proto_message_to_string), ("str", str)]
+    if text_format is not None:
+        writers.append(("text_format", text_format.MessageToString))
+    out = {}
+    for name, write in writers:
+        _, (plan,) = _plan_of_an_any(1)
+        state = {"ran": False}
+
+        def callback(phase, info, plan=plan, state=state):
+            if phase == "start" and not state["ran"]:
+                state["ran"] = True
+                try:
+                    root = plan.root
+                    state["same"] = root is plan.root
+                except BaseException as e:  # noqa: BLE001 (a PanicException too)
+                    state["error"] = f"{type(e).__name__}: {e}"
+
+        gc.collect()
+        gc.callbacks.append(callback)
+        threshold = gc.get_threshold()
+        gc.set_threshold(1)
+        try:
+            text = write(plan)
+        finally:
+            gc.set_threshold(*threshold)
+            gc.callbacks.remove(callback)
+        out[name] = [state.get("error"), state.get("same"), "plan_id: 3" in text, plan.root.common.plan_id]
+    assert out["_proto_message_to_string"] == [None, True, True, 3], out
+    assert out.get("text_format", out["_proto_message_to_string"]) == out["_proto_message_to_string"], out
+    assert out["str"][0] is None and out["str"][2:] == [True, 3], out
+
+
+def test_a_first_read_of_another_thread_during_the_text_format_finds_the_message():
+    # The cross-thread form: a callback of the collections of the writer gives the GIL to another
+    # thread, which reads the native field of each plan for the first time while the writer
+    # writes it. Each read is whole, and the field gives one object from then on.
+    rel, plans = _plan_of_an_any(100)
+    state = {"current": None, "done": False}
+    seen = {"ok": 0, "errors": {}}
+
+    def callback(phase, info):
+        if phase == "start":
+            time.sleep(0.0002)
+
+    def reader():
+        last = None
+        while not state["done"]:
+            i = state["current"]
+            if i is None or i == last:
+                time.sleep(0)
+                continue
+            last = i
+            try:
+                plans[i].root
+                seen["ok"] += 1
+            except BaseException as e:  # noqa: BLE001 (a PanicException too)
+                key = f"{type(e).__name__}: {e}"
+                seen["errors"][key] = seen["errors"].get(key, 0) + 1
+
+    thread = threading.Thread(target=reader)
+    thread.start()
+    gc.callbacks.append(callback)
+    threshold = gc.get_threshold()
+    gc.set_threshold(1)
+    try:
+        for i in range(len(plans)):
+            state["current"] = i
+            _pyspark._proto_message_to_string(plans[i], as_one_line=True)
+    finally:
+        gc.set_threshold(*threshold)
+        gc.callbacks.remove(callback)
+        state["done"] = True
+        thread.join()
+    assert seen["errors"] == {} and seen["ok"] > 0, seen
+    expected = proto.Plan(root=rel).SerializeToString()
+    assert all(p.root is p.root and p.root.common.plan_id == 3 for p in plans)
+    assert all(p.SerializeToString() == expected for p in plans)
+
+
+def test_unknown_field_pairs_of_a_collection_find_the_message():
+    # The unknown field pairs (protobuf's `_unknown_fields` of its pure-Python messages) are made of
+    # a copy of the bytes, so a collection that the list starts, whose callback reads the message,
+    # finds it free.
+    unknown = b"".join(_tag(900 + i, 0) + _varint(i) for i in range(200))
+    plan = proto.Plan.FromString(proto.Plan(root=proto.Relation(range={"end": 1})).SerializeToString() + unknown)
+    message = proto.Plan(root=plan.root)
+    message.MergeFromString(unknown)
+    state = {"errors": []}
+
+    def callback(phase, info):
+        if phase == "start":
+            try:
+                message.root
+                message.SerializeToString()
+            except BaseException as e:  # noqa: BLE001 (a PanicException too)
+                state["errors"].append(type(e).__name__)
+
+    gc.callbacks.append(callback)
+    threshold = gc.get_threshold()
+    gc.set_threshold(1)
+    try:
+        pairs = _pyspark._proto_unknown_field_pairs(message)
+    finally:
+        gc.set_threshold(*threshold)
+        gc.callbacks.remove(callback)
+    assert state["errors"] == [] and len(pairs) == 200
+    assert b"".join(tag + value for tag, value in pairs) == unknown
+
+
+
+def test_threads_that_read_change_and_copy_the_same_copies_at_once_see_them_whole():
+    # Threads that read, change, replace and copy the same native copies at once, of a switch
+    # interval of a microsecond, so that one takes the GIL at the checkpoints of the making of
+    # the objects of a container of more than 1,024 messages: one container of the field, of
+    # every message of it and of both additions, and each copy of its own.
+    count = 3000
+    element = proto.Expression.Literal(integer=1)
+    source = proto.Expression.Literal.Array(elements=[element] * count)
+    other = proto.Expression.Literal.Array(elements=[proto.Expression.Literal(string="o")] * 7)
+    problems = []
+
+    def holder():
+        return proto.Expression.Literal(array=source)
+
+    def run_threads(*targets):
+        threads = [threading.Thread(target=target) for target in targets]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+    interval = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+    try:
+        for round_ in range(30):
+            h = holder()
+            seen = [None, None]
+
+            def reader(i, h=h, seen=seen):
+                seen[i] = h.array.elements
+
+            run_threads(lambda: reader(0), lambda: reader(1))
+            if seen[0] is not seen[1] or len(seen[0]) != count or seen[0] is not h.array.elements:
+                problems.append(("two readers", round_))
+
+            h = holder()
+
+            def adder(value, h=h):
+                h.array.elements.add().integer = value
+
+            run_threads(lambda: adder(5), lambda: adder(6))
+            values = [e.integer for e in h.array.elements]
+            if len(values) != count + 2 or sorted(values[-2:]) != [5, 6] or len(source.elements) != count:
+                problems.append(("two adders", round_, len(values)))
+
+            h = holder()
+            got = {}
+
+            def counter(h=h, got=got):
+                got["n"] = len(h.array.elements)
+
+            run_threads(counter, lambda h=h: h.array.CopyFrom(other))
+            if got["n"] not in (count, 7) or h.array.SerializeToString() != other.SerializeToString():
+                problems.append(("a reader and a CopyFrom", round_, got["n"]))
+
+            h = holder()
+            made = {}
+
+            def changer(h=h):
+                h.array.elements[0].integer = 9
+
+            def copier(h=h, made=made):
+                made["copy"] = proto.Expression(literal=h)
+
+            run_threads(changer, copier)
+            first = made["copy"].literal.array.elements[0].integer
+            made["copy"].literal.array.elements[1].integer = 4
+            if first not in (1, 9) or h.array.elements[0].integer != 9 or h.array.elements[1].integer != 1:
+                problems.append(("a change and a copy", round_, first))
+    finally:
+        sys.setswitchinterval(interval)
+    assert problems == [] and len(source.elements) == count and source.elements[1].integer == 1, problems
+
+
+def test_a_signal_during_the_first_read_of_a_copy_leaves_it_whole():
+    # The first read of a repeated message field of a copy of many messages makes their objects
+    # of checkpoints, every 1,024 messages: a signal there raises the exception of its handler
+    # from the read, as from the other operations of many steps, and the message stays whole, its
+    # field read again in full, of one object from then on.
+    import signal
+
+    count = 200_000
+    source = proto.Expression.Literal.Array(elements=[proto.Expression.Literal(integer=1)] * count)
+    data = source.SerializeToString()
+
+    class Stop(Exception):
+        pass
+
+    def handler(signum, frame):
+        raise Stop()
+
+    previous = signal.signal(signal.SIGALRM, handler)
+    outcomes = []
+    try:
+        for attempt in range(10):
+            h = proto.Expression.Literal(array=source)
+            array = h.array  # of one level: its elements stay native
+            signal.setitimer(signal.ITIMER_REAL, 0.0005 + attempt * 0.0002)
+            try:
+                len(array.elements)
+                outcomes.append("completed")
+            except Stop:
+                outcomes.append("interrupted")
+            finally:
+                signal.setitimer(signal.ITIMER_REAL, 0)
+            again = array.elements
+            assert len(again) == count and again is array.elements, attempt
+            assert array.SerializeToString() == data and h == proto.Expression.Literal(array=source), attempt
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+    assert "interrupted" in outcomes, outcomes
+
+
+def test_copies_of_copies_across_a_registration_are_of_the_classes_of_their_copy():
+    # A copy of a copy made after another class of its type is registered clones the native values
+    # that it shares at the new generation, so its objects, of any level, are of the new class,
+    # where those of the first copy stay of the class registered when it was made; of a message of
+    # thousands of levels, on a thread of a small stack.
+    script = """
+        import copy
+        import json
+        import threading
+
+        import pyspark.sql.connect.proto as proto
+        from pyspark import _pyspark
+        from pyspark.sql.connect.proto import _rust
+        from tests.test_proto_rust_offline import _relation_bytes
+
+        LEVELS = 3000
+        results = {}
+
+
+        def run():
+            data = _relation_bytes(LEVELS, lambda level: level % 7 == 0)
+            deep = _pyspark._proto_parse_deep(proto.Relation, data)
+            first = copy.deepcopy(deep)
+            other = type(
+                "Relation",
+                (_pyspark.ProtoMessage, _rust._MessageBase),
+                {"__slots__": (), "DESCRIPTOR": proto.Relation.DESCRIPTOR},
+            )
+            _pyspark._proto_register_classes({"spark.connect.Relation": other})
+            try:
+                second = copy.deepcopy(first)
+                third = proto.Relation()
+                third.CopyFrom(first)
+                results["copies"] = second.SerializeToString() == data and third == first
+                walk = second
+                for _ in range(LEVELS):
+                    walk = walk.limit.input
+                results["the bottom of the copy of the copy"] = type(walk) is other
+                walk = first
+                for _ in range(100):
+                    walk = walk.limit.input
+                results["the objects of the first copy"] = type(walk) is proto.Relation
+            finally:
+                _pyspark._proto_register_classes({"spark.connect.Relation": proto.Relation})
+            results["after"] = first == deep and second == deep and first.ByteSize() == len(data)
+
+
+        threading.stack_size(512 * 1024)
+        thread = threading.Thread(target=run)
+        thread.start()
+        thread.join()
+        print(json.dumps(results))
+        """
+    assert _run_script(script) == {
+        "copies": True,
+        "the bottom of the copy of the copy": True,
+        "the objects of the first copy": True,
+        "after": True,
+    }
+
+
+def _clear_field_of_a_member_cases(C):
+    """ClearField of a member of a oneof that the message does not hold, of an unset child of it
+    that Python holds or not."""
+    R = C("spark.connect.Relation")
+
+    def run(hold, change):
+        a = R()
+        if hold:
+            held = a.crosstab
+        else:
+            a.crosstab  # noqa: B018 (read, and dropped at once)
+            held = None
+        change(a)
+        a.ClearField("crosstab")
+        return [_hex(a), a.WhichOneof("rel_type"), held is not None and held is a.crosstab]
+
+    def below(read, keep):
+        # The unset child of the member is held of what Python holds below it (`read` of it),
+        # or not (`keep` false: read, and dropped at once).
+        a = R()
+        held = read(a.crosstab) if keep else None
+        if not keep:
+            read(a.crosstab)
+        a.show_string.vertical = True
+        a.ClearField("crosstab")
+        return [_hex(a), a.WhichOneof("rel_type"), held is not None]
+
+    return {
+        "held, the other set by a read": _outcome(lambda: run(True, lambda a: setattr(a.show_string, "vertical", True))),
+        "held, the other of CopyFrom": _outcome(
+            lambda: run(True, lambda a: a.show_string.CopyFrom(C("spark.connect.ShowString")(num_rows=3)))
+        ),
+        "not held": _outcome(lambda: run(False, lambda a: setattr(a.show_string, "vertical", True))),
+        "held, none set": _outcome(lambda: run(True, lambda a: None)),
+        "held of its unset child": _outcome(lambda: below(lambda c: c.input, True)),
+        "held of an unset child two levels below": _outcome(lambda: below(lambda c: c.input.limit, True)),
+        "held of a container below": _outcome(lambda: below(lambda c: c.input.project.expressions, True)),
+        "held of a container of scalars below": _outcome(
+            lambda: below(lambda c: c.input.read.data_source.paths, True)
+        ),
+        "held of a map below": _outcome(lambda: below(lambda c: c.input.read.data_source.options, True)),
+        "a container below dropped": _outcome(lambda: below(lambda c: c.input.project.expressions, False)),
+        "an unset child below dropped": _outcome(lambda: below(lambda c: c.input.limit, False)),
+    }
+
+
+def test_clear_field_of_a_member_of_an_unset_child_held_clears_its_oneof_as_upbs(upb):
+    # As upb's, whose ClearField sets an unset child of the field that Python holds in its message
+    # first (its `EnsureReified`), so the member of the oneof that the message holds is cleared;
+    # of one that Python no longer holds (upb holds its unset children weakly), it is not. upb's
+    # unset children and their containers hold their parents, so Python holds the unset child of
+    # what it holds below it too: an unset child of it, of any level, or a container of one.
+    assert _clear_field_of_a_member_cases(ours) == _clear_field_of_a_member_cases(upb)
+
+
+
+def _copy_into_unset_children_cases(C):
+    """CopyFrom into a message whose unset children, of several levels, Python holds."""
+    P, R = C("spark.connect.Plan"), C("spark.connect.Relation")
+
+    def rel():
+        return R(
+            read={"data_source": {"format": "csv", "paths": ["a"], "options": {"k": "v"}}},
+            common={"plan_id": 1},
+        )
+
+    def nested():
+        p = P()
+        stub = p.root
+        deep = stub.read
+        deeper = deep.data_source
+        p.CopyFrom(P(root=rel()))
+        deeper.format = "json"
+        return [p.root is stub, p.root.read is deep, p.root.read.data_source is deeper, _hex(p)]
+
+    def nested_changed_at_the_middle():
+        p = P()
+        deep = p.root.read
+        p.CopyFrom(P(root=rel()))
+        deep.data_source.format = "json"
+        return [p.root.read is deep, _hex(p)]
+
+    def unset_by_the_copy():
+        # The copy sets `read`; the unset child of `limit` (of the same oneof) stays unset, and
+        # setting it sets the member.
+        p = P()
+        stub = p.root
+        other = stub.limit
+        p.CopyFrom(P(root=rel()))
+        before = _hex(p)
+        other.limit = 5
+        return [p.root is stub, before, _hex(p), p.root.HasField("read")]
+
+    def copied_twice():
+        p = P()
+        deep = p.root.read
+        p.CopyFrom(P(root=rel()))
+        p.CopyFrom(P(root=R(read={"named_table": {"unparsed_identifier": "t"}})))
+        deep.data_source.format = "json"
+        return [p.root.read is deep, _hex(p), _hex(deep)]
+
+    cases = [nested, nested_changed_at_the_middle, unset_by_the_copy, copied_twice]
+    return {case.__name__: _outcome(case) for case in cases}
+
+
+def test_copies_into_unset_children_of_many_levels_keep_what_they_copied_as_upbs(upb):
+    # The unset children that Python holds of a message that a CopyFrom sets, of any level, are
+    # the messages of the copy, as upb's are (of its `SyncSubobjs`): a change of one keeps what the
+    # copy set, where a change of an unset child below the first level replaced the copied
+    # message with the unset child, of the change only.
+    assert _copy_into_unset_children_cases(ours) == _copy_into_unset_children_cases(upb)
+
+
+
+def test_copies_of_many_levels_of_maps_grow_the_stack_at_their_entries():
+    # A native copy grows its stack every 16 levels, a map entry a level of its own: of a chain of
+    # maps whose entries are at the levels of a multiple of 16, the copy grows it at the entries,
+    # which it did not, so a copy of many such levels on a small stack (a thread of 256 KiB)
+    # overflowed it. Of a process of its own, of 4 GB. (The plugin's type of maps of itself needs
+    # protobuf's descriptor pool and builder.)
+    pytest.importorskip("google.protobuf")
+    script = textwrap.dedent(
+        """
+        import copy, json, threading
+        from tests.test_proto_rust_offline import _alias_classes
+        N = _alias_classes("ours")("tests.alias.Node")
+        out = {}
+        def run():
+            n = N()
+            m = n.next  # the entries at the even levels, the messages at the odd ones
+            for _ in range(20000):
+                m = m.children["k"]
+            m.v = 7
+            data = n.SerializeToString()
+            twin = copy.deepcopy(n)
+            out["deepcopy"] = twin.SerializeToString() == data
+            other = N()
+            other.CopyFrom(n)
+            out["CopyFrom"] = other.SerializeToString() == data
+            del twin, other, n, m
+        threading.stack_size(256 * 1024)
+        thread = threading.Thread(target=run)
+        thread.start()
+        thread.join()
+        print(json.dumps(out))
+        """
+    )
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    result = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, timeout=600, cwd=str(root), preexec_fn=_capped_to_4_gb
+    )
+    assert result.returncode == 0, result.stderr[-2000:]
+    assert json.loads(result.stdout.strip().splitlines()[-1]) == {"deepcopy": True, "CopyFrom": True}
+
+
+def _first_reads_of_containers():
+    """The first reads of a container of a message (a repeated message field, a map, a repeated
+    scalar field), each of the message and of the read."""
+    return {
+        "repeated": (lambda m: m.project, lambda t: t.expressions),
+        "map": (lambda m: m.read.data_source, lambda t: t.options),
+        "repeated scalar": (lambda m: m.read.data_source, lambda t: t.paths),
+    }
+
+
+def test_a_collection_during_the_first_read_of_a_container_finds_the_message():
+    # The first read of a container of a message makes the container, and the weak reference of
+    # its owner, with no borrow of the message held: a collection that their allocation starts,
+    # whose callback reads the message, finds it free, where it raised the runtime's
+    # PanicException ("Already mutably borrowed").
+    out = {}
+    for case, (target_of, read) in _first_reads_of_containers().items():
+        target = target_of(proto.Relation())
+        state = {"ran": False, "error": None}
+
+        def callback(phase, info, target=target, state=state):
+            if phase == "start" and not state["ran"]:
+                state["ran"] = True
+                try:
+                    target.ListFields()
+                except BaseException as e:  # noqa: BLE001 (a PanicException too)
+                    state["error"] = f"{type(e).__name__}: {e}"
+
+        gc.collect()
+        gc.callbacks.append(callback)
+        threshold = gc.get_threshold()
+        gc.set_threshold(1)
+        try:
+            container = read(target)
+        finally:
+            gc.set_threshold(*threshold)
+            gc.callbacks.remove(callback)
+        out[case] = [state["ran"], state["error"], container is read(target)]
+    assert out == {case: [True, None, True] for case in _first_reads_of_containers()}, out
+
+
+def test_another_thread_during_the_first_read_of_a_container_finds_the_message():
+    # The cross-thread form: a callback of the collections of the first read gives the GIL to
+    # another thread, which reads the message meanwhile, whole.
+    out = {}
+    for case, (target_of, read) in _first_reads_of_containers().items():
+        targets = [target_of(proto.Relation()) for _ in range(40)]
+        state = {"current": None, "done": False}
+        seen = {"ok": 0, "errors": {}}
+
+        def reader(targets=targets, state=state, seen=seen):
+            last = None
+            while not state["done"]:
+                i = state["current"]
+                if i is None or i == last:
+                    time.sleep(0)
+                    continue
+                last = i
+                try:
+                    targets[i].ListFields()
+                    seen["ok"] += 1
+                except BaseException as e:  # noqa: BLE001 (a PanicException too)
+                    key = f"{type(e).__name__}: {e}"
+                    seen["errors"][key] = seen["errors"].get(key, 0) + 1
+
+        def callback(phase, info):
+            if phase == "start":
+                time.sleep(0.0002)
+
+        thread = threading.Thread(target=reader)
+        thread.start()
+        gc.callbacks.append(callback)
+        threshold = gc.get_threshold()
+        gc.set_threshold(1)
+        try:
+            for i, target in enumerate(targets):
+                state["current"] = i
+                read(target)
+        finally:
+            gc.set_threshold(*threshold)
+            gc.callbacks.remove(callback)
+            state["done"] = True
+            thread.join()
+        out[case] = seen["errors"]
+        assert all(read(t) is read(t) for t in targets)
+    assert out == {case: {} for case in _first_reads_of_containers()}, out

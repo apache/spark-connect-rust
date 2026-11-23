@@ -2307,10 +2307,12 @@ errors are the runtime's `DecodeError` and `EncodeError`. The differences:
   copy, upb's 0.08 s), and a read of every message of a copy takes as long as the copy of each
   message as an object took before. The parse, the constructor (of lists and mappings too),
   the copies (`CopyFrom`, and `copy.deepcopy` of a message or of a repeated field of messages), the
-  merges (`MergeFrom`), the `extend` of a repeated field of messages and the `update` and
-  `MergeFrom` of a map let another thread take the GIL, and a signal interrupt them with the
-  exception of its handler, every 1,024 steps of the operation (a message that it reads, makes or
-  copies, an entry of a map, or a value of a repeated field that the constructor takes), where upb
+  merges (`MergeFrom`), the `extend` of a repeated field of messages, the `update` and `MergeFrom`
+  of a map, and the first read of a repeated message field or a map of messages of a copy, which
+  makes the objects of its messages (of 1,024 messages or more), let another thread take the GIL,
+  and a signal interrupt them with the exception of its handler, every 1,024 steps of the operation
+  (a message that it reads, makes or copies, an entry of a map, or a value of a repeated field that
+  the constructor takes; the read, interrupted, leaves the field as it was), where upb
   holds the GIL until they end (but in the `update` and `MergeFrom` of a map and the constructor of
   a map of scalars, which run `MutableMapping.update` in Python, as the runtime's constructor runs
   it of a value that is not a dict), so another thread can use a message that one of them reads
@@ -2328,7 +2330,13 @@ errors are the runtime's `DecodeError` and `EncodeError`. The differences:
   one pickles as upb's, of `protobuf`'s class (`google.protobuf.any_pb2.Any`), of the same bytes,
   so the pickle loads wherever `protobuf` does, as in the Python worker of the server that runs a
   UDF that holds one, and in the drop-in as a message of `protobuf`'s class, which the runtime's
-  fields take as they are, as one of PySpark's does; `copy.copy` keeps the runtime's class.
+  fields take as they are, as one of PySpark's does; `copy.copy` keeps the runtime's class. So a
+  message of such a pickle is of another class than the runtime's message that it was of
+  (inherent: upb's methods take messages of their own class only, and the runtime's `Any` is a
+  message of the runtime): it equals the runtime's, and the runtime's `MergeFrom` and `CopyFrom`
+  take it, but its own refuse the runtime's, of upb's `TypeError` of a message of another class
+  (`pickle.loads(pickle.dumps(a)).MergeFrom(a)`, where `a.MergeFrom(pickle.loads(pickle.dumps(a)))`
+  merges).
   Without `protobuf`, a pickle of protocol 4 or later names the class by the name that the module
   of the first proto of Spark Connect that imports its file binds it to, which is the class's own
   (`pyspark.sql.connect.proto.base_pb2` and `google_dot_protobuf_dot_any__pb2.Any`, whose `repr`
