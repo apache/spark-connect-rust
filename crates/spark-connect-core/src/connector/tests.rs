@@ -126,10 +126,12 @@ fn target(addresses: Vec<SocketAddr>, grpcio: bool) -> Target {
         grpcio,
         form: None,
         names: None,
+        resolved: Default::default(),
         addresses: Some(addresses),
         resolves_never: false,
         dns_config: None,
         lookups: Default::default(),
+        name_lookups: Default::default(),
     }
 }
 
@@ -1253,10 +1255,12 @@ fn form_target(form: ChannelTarget, grpcio: bool) -> Target {
         grpcio,
         form: None,
         names: None,
+        resolved: Default::default(),
         addresses: None,
         resolves_never: false,
         dns_config: None,
         lookups: Default::default(),
+        name_lookups: Default::default(),
     }
     .of_channel_target(Some(form), None)
 }
@@ -1763,6 +1767,11 @@ async fn a_name_of_a_dns_server_of_its_target_is_resolved_through_it() {
     assert!(dns
         .asked()
         .contains(&(false, "spark.test".to_string(), "A")));
+    // The next attempt within 30 s of the resolution takes its addresses, as gRPC's channel does
+    // not resolve the name again sooner (SPARK-62233).
+    let asked = dns.asked().len();
+    assert!(attempt(&target, Duration::from_secs(20)).await.is_ok());
+    assert_eq!(dns.asked().len(), asked);
     assert_eq!(
         failure_of(&of_server("nx.test", true)).await,
         format!(
@@ -1786,4 +1795,51 @@ async fn a_name_of_a_dns_server_of_its_target_is_resolved_through_it() {
         );
     }
     assert_eq!(dns.asked().len(), asked);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_name_is_resolved_again_no_sooner_than_30_s_after_its_last_resolution() {
+    // As gRPC's resolver (`grpc.dns_min_time_between_resolutions_ms`, SPARK-62233): in the dialect
+    // of grpcio, the addresses of the last resolution of a name that succeeded are taken for 30 s
+    // from its start, by every clone of the target; a Rust client resolves the name for each pass
+    // of its attempts, as tonic's channel does.
+    for grpcio in [true, false] {
+        let mut target = Target::new("localhost", 15002, None, None);
+        target.grpcio = grpcio;
+        let lookups = Arc::clone(&target.name_lookups);
+        let first = target.resolve().await.unwrap();
+        assert!(!first.is_empty());
+        assert_eq!(target.clone().resolve().await.unwrap(), first);
+        assert_eq!(lookups.load(Ordering::SeqCst), if grpcio { 1 } else { 2 });
+        tokio::time::advance(Duration::from_secs(29)).await;
+        target.resolve().await.unwrap();
+        assert_eq!(lookups.load(Ordering::SeqCst), if grpcio { 1 } else { 3 });
+        tokio::time::advance(Duration::from_secs(1)).await;
+        target.resolve().await.unwrap();
+        assert_eq!(lookups.load(Ordering::SeqCst), if grpcio { 2 } else { 4 });
+    }
+    // An address is no name, which is not looked up.
+    let mut target = Target::new("127.0.0.1", 15002, None, None);
+    target.grpcio = true;
+    target.resolve().await.unwrap();
+    assert_eq!(target.name_lookups.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn a_failed_resolution_is_tried_again_a_backoff_after_its_end() {
+    // As gRPC's resolver, whose next resolution after one that failed is a backoff after the end of
+    // that one, where a subchannel connects again a backoff after the start of its last attempt.
+    let start = Instant::now();
+    let end = start + Duration::from_secs(6);
+    let delay = Duration::from_secs(1);
+    let resolve = ChannelFailure::Resolve {
+        name: "spark.test:15002".to_string(),
+        failure: ResolveFailure::Timeout,
+    };
+    assert_eq!(next_attempt(start, end, delay, &resolve), end + delay);
+    assert!(failed_to_resolve(&resolve));
+    assert_eq!(
+        next_attempt(start, end, delay, &ChannelFailure::NoAddress),
+        start + delay
+    );
 }

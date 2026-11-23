@@ -755,30 +755,27 @@ requests of the unpickled object pickle as it is then. This case still differs:
   exclusions, and the name of `dns://` and an authority of an IP address and a port is asked of that
   DNS server, as gRPC's resolver asks it; the host of the connection string stands for the target
   only, and decides neither its TLS, nor its token, nor its proxy, nor its calls. What stays
-  different: a channel resolves its name again as each pass of its attempts to connect starts, of a
-  backoff from the start of the last pass, where gRPC's resolver resolves it again no sooner than 30
-  s after its last resolution, connecting to the addresses of that one meanwhile, and of its backoff
-  from the end of a resolution that failed (until SPARK-62233); a new session of a target that the
-  process is connected to shares the connection, and does not resolve its name again, where the
-  channel of each client of grpcio resolves it (until SPARK-62234); the search domains and the
-  options of a lookup through a DNS server are those of `/etc/resolv.conf`, `LOCALDOMAIN` and
-  `RES_OPTIONS` on any system, where c-ares reads them on macOS of the system's configuration of
-  DNS, of each of its resolvers of no domain (their search lists joined), and not of
-  `/etc/resolv.conf` (`ares_sysconfig_mac.c` of c-ares 1.34.5), and on Windows of the registry (the
-  `SearchList`, `Domain`, `DhcpDomain` and `PrimaryDnsSuffix` of TCP/IP, of its policies and of each
-  interface; `ares_sysconfig_win.c`), which the transport does not read (until SPARK-62254); the
-  `:authority` of the calls of a target whose authority HTTP's URIs cannot hold, of a `%` but in
-  brackets or of more than one `:`, as of a Unix socket (`tmp%2Fa.sock`) or of a list of addresses,
-  is the host and the port of the connection string (`localhost:443`, the first address), as hyper
-  and h2, the HTTP/2 of the transport, take the authority of a URI only, where gRPC sends its own,
-  so the server of a long list does not refuse the headers of its calls, as grpc-java refuses those
-  of grpcio past their limit; the TLS sends the name that it verifies as SNI only of a name of DNS,
-  up to a `%` (`localhost` of `localhost%00`), as rustls takes no other, where BoringSSL sends the
-  host of gRPC's authority as it is (`x*y.localhost`, `a%2Fb.localhost`); a target of `xds:` of a
-  bootstrap of xDS in the environment fails each call of `UNAVAILABLE`, as the transport has no
-  client of xDS, where grpcio's would connect through it; and gRPC's core writes to stderr the
-  errors of a target that it refuses (`Error parsing URI(s)`, `channel stack builder failed`, `no
-  port given for ipv4 scheme`), which the transport does not write.
+  different: a new session of a target that the process is connected to shares the connection, and
+  does not resolve its name again, where the channel of each client of grpcio resolves it (until
+  SPARK-62234); the search domains and the options of a lookup through a DNS server are those of
+  `/etc/resolv.conf`, `LOCALDOMAIN` and `RES_OPTIONS` on any system, where c-ares reads them on
+  macOS of the system's configuration of DNS, of each of its resolvers of no domain (their search
+  lists joined), and not of `/etc/resolv.conf` (`ares_sysconfig_mac.c` of c-ares 1.34.5), and on
+  Windows of the registry (the `SearchList`, `Domain`, `DhcpDomain` and `PrimaryDnsSuffix` of
+  TCP/IP, of its policies and of each interface; `ares_sysconfig_win.c`), which the transport does
+  not read (until SPARK-62254); the `:authority` of the calls of a target whose authority HTTP's
+  URIs cannot hold, of a `%` but in brackets or of more than one `:`, as of a Unix socket
+  (`tmp%2Fa.sock`) or of a list of addresses, is the host and the port of the connection string
+  (`localhost:443`, the first address), as hyper and h2, the HTTP/2 of the transport, take the
+  authority of a URI only, where gRPC sends its own, so the server of a long list does not refuse
+  the headers of its calls, as grpc-java refuses those of grpcio past their limit; the TLS sends the
+  name that it verifies as SNI only of a name of DNS, up to a `%` (`localhost` of `localhost%00`),
+  as rustls takes no other, where BoringSSL sends the host of gRPC's authority as it is
+  (`x*y.localhost`, `a%2Fb.localhost`); a target of `xds:` of a bootstrap of xDS in the environment
+  fails each call of `UNAVAILABLE`, as the transport has no client of xDS, where grpcio's would
+  connect through it; and gRPC's core writes to stderr the errors of a target that it refuses
+  (`Error parsing URI(s)`, `channel stack builder failed`, `no port given for ipv4 scheme`), which
+  the transport does not write.
 
   The members of a gRPC channel are not there: `toChannel`, which the transport calls of a builder
   of its own for its errors only, so a subclass whose `toChannel` connects elsewhere is of its

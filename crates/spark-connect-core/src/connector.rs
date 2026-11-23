@@ -113,6 +113,11 @@ const MAX_BACKOFF: Duration = Duration::from_secs(120);
 /// channel idles after `grpc.client_idle_timeout_ms`.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
+/// How long, in the dialect of grpcio, a channel takes the addresses of its last resolution of a
+/// name, from its start, before it resolves the name again, as gRPC's resolver resolves it again
+/// no sooner (`grpc.dns_min_time_between_resolutions_ms`).
+const MIN_TIME_BETWEEN_RESOLUTIONS: Duration = Duration::from_secs(30);
+
 /// The connection preface of an HTTP/2 client (RFC 9113, section 3.4).
 const PREFACE: &[u8; 24] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 
@@ -494,6 +499,10 @@ pub(crate) struct Target {
     form: Option<ChannelTarget>,
     /// gRPC's names of the target of gRPC, if any, of which the tunnel of a proxy names the server.
     names: Option<TargetNames>,
+    /// The addresses of the last resolution of the name of the host that succeeded, and when it
+    /// started, in the dialect of grpcio (see [`Target::resolve_host`]), of every clone of the
+    /// target.
+    resolved: Arc<Mutex<Option<Resolution>>>,
     /// The addresses of the host, resolved by the tests rather than by the system's resolver.
     #[cfg(test)]
     addresses: Option<Vec<SocketAddr>>,
@@ -507,6 +516,9 @@ pub(crate) struct Target {
     /// The count of the lookups of the host, one for each pass of attempts, of the tests.
     #[cfg(test)]
     lookups: Arc<std::sync::atomic::AtomicUsize>,
+    /// The count of the lookups of the name of the host that were made, of the tests.
+    #[cfg(test)]
+    name_lookups: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 /// The tunnel of a proxy to the server.
@@ -543,6 +555,7 @@ impl Target {
             grpcio: grpcio_dialect(),
             form: None,
             names: None,
+            resolved: Default::default(),
             #[cfg(test)]
             addresses: None,
             #[cfg(test)]
@@ -551,6 +564,8 @@ impl Target {
             dns_config: None,
             #[cfg(test)]
             lookups: Default::default(),
+            #[cfg(test)]
+            name_lookups: Default::default(),
         }
     }
 
@@ -712,10 +727,34 @@ impl Target {
     /// label or of one of more than 63 characters, or longer than DNS takes, is not resolved
     /// (`Misformatted domain name`); and a name that the system's resolver would read as an
     /// address, as of `inet_aton` (`127.1`), is a name that it looks up.
+    ///
+    /// In the dialect of grpcio, as gRPC's resolver resolves a name again no sooner than
+    /// [`MIN_TIME_BETWEEN_RESOLUTIONS`] after the start of its last resolution, of whose addresses
+    /// its channel connects meanwhile, the addresses of the last resolution that succeeded are
+    /// taken until then (and see [`failed_to_resolve`]).
     async fn resolve_host(&self) -> Result<Vec<SocketAddr>, ResolveFailure> {
         if let Ok(ip) = self.host.parse::<std::net::IpAddr>() {
             return Ok(vec![SocketAddr::new(ip, self.port)]);
         }
+        if !self.grpcio {
+            return self.look_up_host().await;
+        }
+        let started = Instant::now();
+        if let Some((at, addresses)) = &*self.resolved.lock().unwrap_or_else(|e| e.into_inner()) {
+            if started.duration_since(*at) < MIN_TIME_BETWEEN_RESOLUTIONS {
+                return Ok(addresses.clone());
+            }
+        }
+        let addresses = self.look_up_host().await?;
+        *self.resolved.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some((started, addresses.clone()));
+        Ok(addresses)
+    }
+
+    /// The addresses of the host, of a lookup now (see [`Target::resolve_host`]).
+    async fn look_up_host(&self) -> Result<Vec<SocketAddr>, ResolveFailure> {
+        #[cfg(test)]
+        self.name_lookups.fetch_add(1, Ordering::SeqCst);
         if let Some(server) = self.dns_server() {
             return self.resolve_through(server).await;
         }
@@ -793,6 +832,32 @@ impl Target {
         crate::dns::lookup(server, host, self.port, &config, ipv6_loopback_usable())
             .await
             .map_err(ResolveFailure::Server)
+    }
+}
+
+/// The addresses of a resolution of a name, and when it started.
+type Resolution = (Instant, Vec<SocketAddr>);
+
+/// Whether `failure` is of a resolution of the target, which gRPC's resolver tries again a backoff
+/// after its end, where an attempt to connect starts a backoff after the start of the previous one:
+/// a resolution that fails late, of its timeouts, is not tried again at once.
+fn failed_to_resolve(failure: &ChannelFailure) -> bool {
+    matches!(failure, ChannelFailure::Resolve { .. })
+}
+
+/// When the attempt after one that started at `start` and failed of `failure` at `end` starts, of
+/// the backoff `delay`: a backoff after the end of a resolution that failed, as gRPC's resolver
+/// tries it again, else after the start of the attempt, as gRPC's subchannel connects again.
+fn next_attempt(
+    start: Instant,
+    end: Instant,
+    delay: Duration,
+    failure: &ChannelFailure,
+) -> Instant {
+    if failed_to_resolve(failure) {
+        end + delay
+    } else {
+        start + delay
     }
 }
 
@@ -2327,6 +2392,11 @@ impl tonic::codegen::Service<tonic::codegen::http::Uri> for Connector {
                 // again at each call that needs a connection, as tonic's channel does.
                 Err(failure) if shared.target.grpcio && !shared.unused() => {
                     let error = ConnectError::of(&failure, shared.target.grpcio);
+                    let started = if failed_to_resolve(&failure) {
+                        Instant::now()
+                    } else {
+                        started
+                    };
                     *state = State::TransientFailure(failure);
                     drop(state);
                     reconnect_in_background(&shared, started);
@@ -2494,8 +2564,8 @@ fn reconnect_in_background(shared: &Arc<Shared>, started: Instant) {
                 return;
             }
             let start = Instant::now();
-            next = start + backoff.next();
-            let per_address = (next - start).max(CONNECT_TIMEOUT);
+            let delay = backoff.next();
+            let per_address = delay.max(CONNECT_TIMEOUT);
             // The attempt, dropped once no open client uses the channel, and not of a notification
             // that another client's open followed.
             let attempting = attempt(&shared.target, per_address);
@@ -2524,7 +2594,10 @@ fn reconnect_in_background(shared: &Arc<Shared>, started: Instant) {
                     *state = State::Held(ready);
                     return;
                 }
-                Err(failure) => *state = State::TransientFailure(failure),
+                Err(failure) => {
+                    next = next_attempt(start, Instant::now(), delay, &failure);
+                    *state = State::TransientFailure(failure);
+                }
             }
         }
     });
