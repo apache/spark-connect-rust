@@ -1988,6 +1988,15 @@ fn type_json_value_level<'py>(
     py: Python<'py>,
     obj: &Bound<'py, PyAny>,
 ) -> PyResult<(Bound<'py, PyAny>, bool)> {
+    // As PySpark's `jsonValue`, of the attributes as Python reads them, of an object of a Python
+    // subclass that reads one of them of its own, or of a class patched over one, which the core's
+    // JSON of the native values does not hold (see `json_reads_otherwise`).
+    if json_reads_otherwise(obj)? {
+        return Ok((
+            ForeignFields::default().json_value_of_native(py, obj)?,
+            true,
+        ));
+    }
     // Of a struct whose fields hold an element that is not a `StructField`, at any level, as
     // PySpark's `jsonValue` writes it, of the `jsonValue` of each element.
     let (lowered, maybe_foreign) = lower_noting_subclasses(obj, MetadataOf::AsGiven);
@@ -2046,7 +2055,9 @@ fn json_dumps(py: Python<'_>, json: &Bound<'_, PyAny>) -> PyResult<String> {
 /// The `json()` text of the type object `schema`, as PySpark's `json()` writes it, when the core's
 /// text is not it: of a type of a Python subclass, of its own method, and of a struct of a nullable
 /// flag that is not a bool or of metadata (see `type_json_value`). None for no schema, or another
-/// one.
+/// one. Of the attributes of the types as Python reads them, as PySpark's `json()` reads them, of
+/// a Python subclass of its own or of a patched class too (see `json_reads_otherwise`), of a
+/// relation of no rows.
 pub(crate) fn raw_schema_json(schema: Option<&Bound<'_, PyAny>>) -> PyResult<Option<String>> {
     let Some(schema) = schema else {
         return Ok(None);
@@ -2217,7 +2228,8 @@ impl ForeignFields {
     }
 
     /// [`ForeignFields::json_value`] of `obj` itself, which the native `jsonValue` of its class
-    /// writes: not of a `jsonValue` of a Python subclass of its own, which may call the native one.
+    /// writes: not of a `jsonValue` of a Python subclass of its own, or of a patch of the native
+    /// class, which may call the native one (`super().jsonValue()`).
     fn json_value_of_native<'py>(
         &mut self,
         py: Python<'py>,
@@ -2227,7 +2239,7 @@ impl ForeignFields {
     }
 
     /// [`ForeignFields::json_value`] of one level, of the `jsonValue` of a Python subclass of its
-    /// own if `of_its_own`.
+    /// own, or of a patch of the native class, if `of_its_own`.
     fn json_value_level<'py>(
         &mut self,
         py: Python<'py>,
@@ -2236,7 +2248,7 @@ impl ForeignFields {
     ) -> PyResult<Bound<'py, PyAny>> {
         let json_value = pyo3::intern!(py, "jsonValue");
         let own = |native: Bound<'_, pyo3::types::PyType>| {
-            Ok::<bool, PyErr>(of_its_own && overrides(obj, "jsonValue", &native)?)
+            Ok::<bool, PyErr>(of_its_own && reads_own(obj, "jsonValue", &native)?)
         };
         let json = pyo3::types::PyDict::new(py);
         if obj.is_instance_of::<PyStructType>() {
@@ -2367,13 +2379,93 @@ impl ForeignFields {
 }
 
 /// The elements of the fields of the struct `obj`, as PySpark's `for f in self` iterates them:
-/// `iter(self.fields)`, or the `__iter__` of a Python subclass of its own.
+/// `iter(self.fields)`, or the `__iter__` of a Python subclass of its own. Of a struct of a class
+/// that defines `names` or `fields`, whose `fields` are not those that PySpark's `__init__` would
+/// have assigned (see `fields_as_assigned`), the fields that its native `__init__` was given.
 fn struct_elements<'py>(obj: &Bound<'py, PyAny>) -> PyResult<Bound<'py, pyo3::types::PyIterator>> {
     let py = obj.py();
-    if overrides(obj, "__iter__", &py.get_type::<PyStructType>())? {
+    let native = py.get_type::<PyStructType>();
+    let fields = if reads_as_native(obj, &native, &["names", "fields"])? {
+        None
+    } else {
+        match fields_as_assigned(obj)? {
+            Some(fields) => Some(fields),
+            None => {
+                let kept = obj.cast::<PyStructType>()?.borrow().fields.clone_ref(py);
+                return kept.into_bound(py).try_iter();
+            }
+        }
+    };
+    if reads_own(obj, "__iter__", &native)? {
         return obj.try_iter();
     }
-    obj.getattr(pyo3::intern!(py, "fields"))?.try_iter()
+    match fields {
+        Some(fields) => fields.try_iter(),
+        None => obj.getattr(pyo3::intern!(py, "fields"))?.try_iter(),
+    }
+}
+
+/// Whether the class of `obj` reads the attributes `names` as the native class `native` does: no
+/// class before it in the MRO of the class defines one of them, `__getattribute__` or
+/// `__class__` (as `_reads_as` of `pyspark.sql._pandas_input`).
+fn reads_as_native(
+    obj: &Bound<'_, PyAny>,
+    native: &Bound<'_, pyo3::types::PyType>,
+    names: &[&str],
+) -> PyResult<bool> {
+    let py = obj.py();
+    for class in obj.get_type().mro().iter() {
+        if class.is(native) {
+            return Ok(true);
+        }
+        let namespace = class.getattr(pyo3::intern!(py, "__dict__"))?;
+        for name in ["__getattribute__", "__class__"].iter().chain(names) {
+            if namespace.contains(*name)? {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(false)
+}
+
+/// The `fields` of the struct `obj`, of a class that defines `names` or `fields`, as Python reads
+/// them, if they may be those that PySpark's `__init__` assigns through the class with the `names`
+/// (`self.names = [f.name for f in fields]`), which its `json()` reads; None of fields that are
+/// not: whose read raises an `Exception`, or which are not as many as the `names`, as Python reads
+/// them. The native `__init__` does not assign them through the class's setters (SPARK-62231), so
+/// a property of such a setter reads the state that the setter did not write, of none, of its
+/// default, or of the `AttributeError` of the attribute that the setter sets, where PySpark's
+/// reads the fields that `__init__` gave it: its `__init__` reads them too (it iterates them for
+/// `_needConversion`), so no struct that it makes has fields whose read raises. The JSON of such a
+/// struct, and the relations that are of it, are of the fields that the native `__init__` was
+/// given, as the rows of a pandas frame under one whose reads are not as many
+/// (`names_as_many_as_fields` of the session). Names that raise, or have no length, which
+/// PySpark's `json()` does not read, are no evidence: the fields are as read.
+fn fields_as_assigned<'py>(obj: &Bound<'py, PyAny>) -> PyResult<Option<Bound<'py, PyAny>>> {
+    /// The value of `result`, or None of the `Exception` that it raised.
+    fn of_exception<T>(py: Python<'_>, result: PyResult<T>) -> PyResult<Option<T>> {
+        match result {
+            Ok(value) => Ok(Some(value)),
+            Err(err) if err.is_instance_of::<pyo3::exceptions::PyException>(py) => Ok(None),
+            Err(err) => Err(err),
+        }
+    }
+    let py = obj.py();
+    let Some(fields) = of_exception(py, obj.getattr(pyo3::intern!(py, "fields")))? else {
+        return Ok(None);
+    };
+    let Some(names) = of_exception(py, obj.getattr(pyo3::intern!(py, "names")))? else {
+        return Ok(Some(fields));
+    };
+    Ok(
+        match (
+            of_exception(py, names.len())?,
+            of_exception(py, fields.len())?,
+        ) {
+            (Some(names), Some(count)) if names != count => None,
+            _ => Some(fields),
+        },
+    )
 }
 
 /// PySpark's `StructField.getCollationMetadata` of the type `data_type` of a field at `path`, its
@@ -2460,6 +2552,204 @@ fn holds_foreign_element(obj: &Bound<'_, PyAny>) -> PyResult<bool> {
         .any(|element| !element.is_instance_of::<PyStructField>()))
 }
 
+/// The native classes of types that PySpark's `jsonValue` of a type reads the attributes of, and
+/// those attributes, which a Python subclass may read of its own, or a patch of the class replace:
+/// of a struct, `fields` and the iteration; of a field, its `name`, `dataType`, `nullable` and
+/// `metadata`; of an array, `elementType` and `containsNull`; of a map, `keyType`, `valueType` and
+/// `valueContainsNull`; of a string, `simpleString`, `isUTF8BinaryCollation` and `collation`; and
+/// `jsonValue` of each. The core's JSON of the other types is that of their native values.
+fn json_reads(py: Python<'_>) -> [(Bound<'_, pyo3::types::PyType>, &'static [&'static str]); 5] {
+    [
+        (
+            py.get_type::<PyStructType>(),
+            &["fields", "__iter__", "jsonValue"],
+        ),
+        (
+            py.get_type::<PyStructField>(),
+            &["name", "dataType", "nullable", "metadata", "jsonValue"],
+        ),
+        (
+            py.get_type::<PyArrayType>(),
+            &["elementType", "containsNull", "jsonValue"],
+        ),
+        (
+            py.get_type::<PyMapType>(),
+            &["keyType", "valueType", "valueContainsNull", "jsonValue"],
+        ),
+        (
+            py.get_type::<PyStringType>(),
+            &[
+                "simpleString",
+                "isUTF8BinaryCollation",
+                "collation",
+                "jsonValue",
+            ],
+        ),
+    ]
+}
+
+/// The attributes of `json_reads` of the native classes, as the module makes them, before any
+/// patch of them, which `native_attribute` compares a class's attribute with.
+type NativeJsonReads = Vec<(
+    Py<pyo3::types::PyType>,
+    &'static str,
+    Py<pyo3::types::PyString>,
+    Py<PyAny>,
+)>;
+static NATIVE_JSON_READS: PyOnceLock<NativeJsonReads> = PyOnceLock::new();
+
+/// Keep the attributes of `json_reads` of the native classes, as the module makes them (see
+/// `NATIVE_JSON_READS`).
+pub(crate) fn keep_native_json_reads(py: Python<'_>) -> PyResult<()> {
+    NATIVE_JSON_READS.get_or_try_init(py, || -> PyResult<NativeJsonReads> {
+        let mut kept = Vec::new();
+        for (class, names) in json_reads(py) {
+            for &name in names {
+                let interned = pyo3::types::PyString::intern(py, name);
+                let attribute = class.getattr(&interned)?;
+                kept.push((
+                    class.clone().unbind(),
+                    name,
+                    interned.unbind(),
+                    attribute.unbind(),
+                ));
+            }
+        }
+        Ok(kept)
+    })?;
+    Ok(())
+}
+
+/// Whether the attribute `name` of the native class `class`, if the class has one of its own, is
+/// its native getter, method or slot, and not what a patch of the class set, as
+/// `StringType.isUTF8BinaryCollation = lambda self: False` sets it. True of an attribute that the
+/// class does not have of its own, which it inherits. Of an attribute of `json_reads`, the one
+/// that the module made (`NATIVE_JSON_READS`), of one lookup.
+fn native_attribute(class: &Bound<'_, pyo3::types::PyType>, name: &str) -> PyResult<bool> {
+    let py = class.py();
+    if let Some((_, _, interned, native)) = NATIVE_JSON_READS.get(py).and_then(|kept| {
+        kept.iter()
+            .find(|(owner, kept_name, _, _)| *kept_name == name && owner.bind(py).is(class))
+    }) {
+        return Ok(class
+            .getattr(interned.bind(py))
+            .is_ok_and(|attribute| attribute.is(native.bind(py))));
+    }
+    let Ok(attribute) = class.getattr(pyo3::intern!(py, "__dict__"))?.get_item(name) else {
+        return Ok(true);
+    };
+    let kind = attribute.get_type().name()?;
+    Ok(matches!(
+        kind.to_cow()?.as_ref(),
+        "getset_descriptor" | "method_descriptor" | "wrapper_descriptor" | "classmethod_descriptor"
+    ) && attribute
+        .getattr(pyo3::intern!(py, "__objclass__"))
+        .is_ok_and(|owner| owner.is(class)))
+}
+
+/// Whether a native class of types is patched over an attribute that PySpark's `jsonValue` reads
+/// (see `json_reads`): PySpark's `json()` of the types then reads the patch, as
+/// `ForeignFields::json_value` does, where the core's JSON is of the native values. Not while a
+/// JSON of the native values is written (see `of_native_values`).
+fn json_reads_patched(py: Python<'_>) -> PyResult<bool> {
+    if json_of_native_values() {
+        return Ok(false);
+    }
+    if let Some(kept) = NATIVE_JSON_READS.get(py) {
+        return Ok(kept.iter().any(|(class, _, name, native)| {
+            !class
+                .bind(py)
+                .getattr(name.bind(py))
+                .is_ok_and(|attribute| attribute.is(native.bind(py)))
+        }));
+    }
+    for (class, names) in json_reads(py) {
+        for name in names {
+            if !native_attribute(&class, name)? {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+/// Whether the type object `obj` is of a Python subclass that reads one of the attributes that
+/// PySpark's `jsonValue` of it reads (see `json_reads`) of its own.
+fn json_reads_of_its_own(obj: &Bound<'_, PyAny>) -> PyResult<bool> {
+    for (native, names) in json_reads(obj.py()) {
+        if obj.is_instance(&native)? {
+            if obj.get_type().is(&native) {
+                return Ok(false);
+            }
+            for name in names {
+                if overrides(obj, name, &native)? {
+                    return Ok(true);
+                }
+            }
+            return Ok(false);
+        }
+    }
+    Ok(false)
+}
+
+/// Whether PySpark's `jsonValue` of the type object `obj` reads, of its level, an attribute that
+/// the native class does not give: of a Python subclass of the attribute of its own, or of a
+/// native class patched over one (see `json_reads`). `ForeignFields::json_value` reads them as
+/// PySpark's does, of the levels below too, where the core's JSON is of the native values. Not
+/// while a JSON of the native values is written (see `of_native_values`).
+fn json_reads_otherwise(obj: &Bound<'_, PyAny>) -> PyResult<bool> {
+    Ok(!json_of_native_values() && (json_reads_of_its_own(obj)? || json_reads_patched(obj.py())?))
+}
+
+thread_local! {
+    /// Whether this thread writes the JSON of types of their native values now (see
+    /// `of_native_values`).
+    static OF_NATIVE_VALUES: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Run `write`, which writes the JSON of a type, of the native values of the types, of the
+/// attributes that the native classes keep, and not of those that a Python subclass, or a patch of
+/// a native class, reads otherwise (see `json_reads_otherwise`): the schema of a relation of rows
+/// that the native types convert, which is of the types of its rows (see `schema_json_text`).
+fn of_native_values<T>(write: impl FnOnce() -> T) -> T {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            OF_NATIVE_VALUES.with(|of| of.set(self.0));
+        }
+    }
+    let _restore = Restore(OF_NATIVE_VALUES.with(|of| of.replace(true)));
+    write()
+}
+
+/// Whether this thread writes the JSON of types of their native values now (see
+/// `of_native_values`).
+fn json_of_native_values() -> bool {
+    OF_NATIVE_VALUES.with(std::cell::Cell::get)
+}
+
+/// Whether PySpark's `jsonValue` of the type object `obj` reads otherwise (see
+/// `json_reads_otherwise`) at any of its levels, of the types that it keeps as their objects (see
+/// `keeps_object_of`).
+fn holds_json_reads_otherwise(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<bool> {
+    fn holds_own(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<bool> {
+        Ok(json_reads_of_its_own(obj)? || keeps_object_of(py, obj, holds_own)?)
+    }
+    Ok(json_reads_patched(py)? || holds_own(py, obj)?)
+}
+
+/// Whether the attribute `name` of `obj`, of the native class `native` or a Python subclass of it,
+/// is not the native one: of a Python subclass that overrides it (see `overrides`), or of the
+/// native class patched over it (see `native_attribute`), as `StructType.__iter__ = ...` patches
+/// it, whose read is the patch.
+fn reads_own(
+    obj: &Bound<'_, PyAny>,
+    name: &str,
+    native: &Bound<'_, pyo3::types::PyType>,
+) -> PyResult<bool> {
+    Ok(overrides(obj, name, native)? || !native_attribute(native, name)?)
+}
+
 /// Whether the class of `obj` overrides the attribute `name` of the native class `native`, as a
 /// Python subclass of its own method does.
 fn overrides(
@@ -2491,6 +2781,15 @@ fn field_json_value_level<'py>(
     py: Python<'py>,
     field: &Bound<'py, PyStructField>,
 ) -> PyResult<(Bound<'py, PyAny>, bool)> {
+    // As PySpark's `StructField.jsonValue`, of its `name`, `dataType`, `nullable` and `metadata`
+    // as Python reads them, of a Python subclass of one of its own, or of the class patched over
+    // one (see `json_reads_otherwise`).
+    if json_reads_otherwise(field.as_any())? {
+        return Ok((
+            ForeignFields::default().json_value_of_native(py, field.as_any())?,
+            true,
+        ));
+    }
     // Of a type that holds a struct whose fields hold an element that is not a `StructField`, of
     // the walk of the foreign fields only of a field that may hold one, as the lowering of its type
     // tells (see `lower_noting_subclasses`).
@@ -2519,14 +2818,39 @@ fn field_json_value_level<'py>(
 /// and 'int'`), and of the keys of a dict in the order of Python's sort of them, of an int key by
 /// its value (`{10: "a", 9: "b"}` is `{"9":"b","10":"a"}`), which the sort of the strs of the
 /// keys of the core's JSON does not keep. None of another schema, whose JSON the core writes as
-/// PySpark does.
+/// PySpark does. Of the native values of the types (see `of_native_values`), of the relation of
+/// rows that the native types convert, which are of those types: PySpark's conversion of the
+/// rows reads the attributes that a Python subclass or a patch of a class reads otherwise, as its
+/// `json()` does (see `pyspark_schema_json_text`).
 pub(crate) fn schema_json_text(schema: Option<&Bound<'_, PyAny>>) -> PyResult<Option<String>> {
     let Some(schema) = schema.filter(|schema| schema.is_instance_of::<PyStructType>()) else {
         return Ok(None);
     };
     let py = schema.py();
-    if !(holds_metadata(py, schema)? || holds_udt(py, schema)?) {
+    of_native_values(|| {
+        if !(holds_metadata(py, schema)? || holds_udt(py, schema)?) {
+            return Ok(None);
+        }
+        Ok(Some(
+            schema.call_method0(pyo3::intern!(py, "json"))?.extract()?,
+        ))
+    })
+}
+
+/// [`schema_json_text`] of the attributes of the types as Python reads them, as PySpark's
+/// `json()` reads them, of a relation of rows that PySpark's conversion converted, which reads them
+/// too (`prepare_pandas_table`), or of no rows: also of a struct that holds, at any level, a type
+/// of a Python subclass that reads one of them of its own, or of a native class patched over one
+/// (see `json_reads_otherwise`), whose `json()` reads them.
+pub(crate) fn pyspark_schema_json_text(
+    schema: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Option<String>> {
+    let Some(schema) = schema.filter(|schema| schema.is_instance_of::<PyStructType>()) else {
         return Ok(None);
+    };
+    let py = schema.py();
+    if !holds_json_reads_otherwise(py, schema)? {
+        return schema_json_text(Some(schema));
     }
     Ok(Some(
         schema.call_method0(pyo3::intern!(py, "json"))?.extract()?,
@@ -4097,14 +4421,29 @@ pub struct PyStringType {
 
 impl PyStringType {
     /// PySpark's `self.isUTF8BinaryCollation()`, which its `simpleString` and `__repr__` call: of a
-    /// Python subclass, its own.
+    /// Python subclass, or of the class patched over the method, its own.
     fn of_binary_collation(slf: &Bound<'_, Self>) -> PyResult<bool> {
-        if !is_native(slf) {
+        let py = slf.py();
+        if !is_native(slf) || !native_attribute(&py.get_type::<Self>(), "isUTF8BinaryCollation")? {
             return slf
-                .call_method0(pyo3::intern!(slf.py(), "isUTF8BinaryCollation"))?
+                .call_method0(pyo3::intern!(py, "isUTF8BinaryCollation"))?
                 .is_truthy();
         }
         Ok(slf.borrow().collation == "UTF8_BINARY")
+    }
+
+    /// PySpark's `self.collation`, which its `simpleString` and `__repr__` read: of a Python
+    /// subclass, or of the class patched over the attribute, the attribute as it reads it.
+    fn collation_of(slf: &Bound<'_, Self>) -> PyResult<String> {
+        let py = slf.py();
+        if !is_native(slf) || !native_attribute(&py.get_type::<Self>(), "collation")? {
+            return Ok(slf
+                .getattr(pyo3::intern!(py, "collation"))?
+                .str()?
+                .to_cow()?
+                .into_owned());
+        }
+        Ok(slf.borrow().collation.clone())
     }
 }
 
@@ -4138,22 +4477,23 @@ impl PyStringType {
     }
 
     // --- DataType object-model methods (v4.2.0 parity) ---
-    // As PySpark's `DataType.json`, of the `jsonValue` of the type, of a Python subclass its own.
+    // As PySpark's `DataType.json`, of the `jsonValue` of the type, of a Python subclass, or of
+    // the class patched over a read of it, its own.
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
-        if !is_native(slf) {
+        if !is_native(slf) || json_reads_patched(slf.py())? {
             return json_of_json_value(slf.as_any());
         }
         Ok(py_to_data_type(slf.as_any())?.json())
     }
     // As PySpark's `StringType.jsonValue`, the `simpleString()` of the type, of a Python
-    // subclass its own.
+    // subclass, or of the class patched over a read of it, its own.
     #[pyo3(name = "jsonValue")]
     fn __obj_json_value<'py>(
         slf: &Bound<'py, Self>,
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        if !is_native(slf) {
+        if !is_native(slf) || json_reads_patched(py)? {
             return slf.call_method0(pyo3::intern!(py, "simpleString"));
         }
         let v = py_to_data_type(slf.as_any())?.json_value();
@@ -4222,23 +4562,23 @@ impl PyStringType {
     fn __init__(slf: &Bound<'_, Self>, collation: String) -> PyResult<()> {
         Self::set_collation(slf, collation)
     }
-    /// As PySpark's, of `isUTF8BinaryCollation()`, of a Python subclass its own.
+    /// As PySpark's, of `isUTF8BinaryCollation()` and then `collation`, of a Python subclass, or
+    /// of the class patched over them, its own.
     fn __repr__(slf: &Bound<'_, Self>) -> PyResult<String> {
-        let collation = slf.borrow().collation.clone();
         Ok(if Self::of_binary_collation(slf)? {
             "StringType()".to_string()
         } else {
-            format!("StringType('{collation}')")
+            format!("StringType('{}')", Self::collation_of(slf)?)
         })
     }
-    // As PySpark's, of `isUTF8BinaryCollation()`, of a Python subclass its own.
+    // As PySpark's, of `isUTF8BinaryCollation()` and then `collation`, of a Python subclass, or of
+    // the class patched over them, its own.
     #[pyo3(name = "simpleString")]
     fn simple_string(slf: &Bound<'_, Self>) -> PyResult<String> {
-        let collation = slf.borrow().collation.clone();
         Ok(if Self::of_binary_collation(slf)? {
             "string".to_string()
         } else {
-            format!("string collate {collation}")
+            format!("string collate {}", Self::collation_of(slf)?)
         })
     }
 
@@ -4680,10 +5020,11 @@ impl PyArrayType {
     }
 
     // --- DataType object-model methods (v4.2.0 parity) ---
-    // As PySpark's `DataType.json`, of the `jsonValue` of the type, of a Python subclass its own.
+    // As PySpark's `DataType.json`, of the `jsonValue` of the type, of a Python subclass, or of
+    // the class patched over it, its own.
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
-        if !is_native(slf) {
+        if !is_native(slf) || !native_attribute(&slf.py().get_type::<Self>(), "jsonValue")? {
             return json_of_json_value(slf.as_any());
         }
         // Of an array of more levels than the recursion limit, PySpark's text, of the calls of its
@@ -5003,10 +5344,11 @@ impl PyMapType {
     }
 
     // --- DataType object-model methods (v4.2.0 parity) ---
-    // As PySpark's `DataType.json`, of the `jsonValue` of the type, of a Python subclass its own.
+    // As PySpark's `DataType.json`, of the `jsonValue` of the type, of a Python subclass, or of
+    // the class patched over it, its own.
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
-        if !is_native(slf) {
+        if !is_native(slf) || !native_attribute(&slf.py().get_type::<Self>(), "jsonValue")? {
             return json_of_json_value(slf.as_any());
         }
         type_json_text(slf.as_any())
@@ -5483,11 +5825,12 @@ impl PyStructField {
             &[],
         ))
     }
-    // As PySpark's `DataType.json`, of the `jsonValue` of the field, of a Python subclass its own.
+    // As PySpark's `DataType.json`, of the `jsonValue` of the field, of a Python subclass, or of
+    // the class patched over it, its own.
     #[pyo3(name = "json")]
     fn __sf_json(slf: &Bound<'_, Self>) -> PyResult<String> {
         let py = slf.py();
-        if !is_native(slf) {
+        if !is_native(slf) || !native_attribute(&py.get_type::<Self>(), "jsonValue")? {
             return json_of_json_value(slf.as_any());
         }
         let (json, other) = field_json_value(py, slf)?;
@@ -6121,10 +6464,11 @@ impl PyStructType {
 #[pymethods]
 impl PyStructType {
     // --- DataType object-model methods (v4.2.0 parity) ---
-    // As PySpark's `DataType.json`, of the `jsonValue` of the type, of a Python subclass its own.
+    // As PySpark's `DataType.json`, of the `jsonValue` of the type, of a Python subclass, or of
+    // the class patched over it, its own.
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
-        if !is_native(slf) {
+        if !is_native(slf) || !native_attribute(&slf.py().get_type::<Self>(), "jsonValue")? {
             return json_of_json_value(slf.as_any());
         }
         type_json_text(slf.as_any())

@@ -153,9 +153,10 @@ pub(crate) fn create_dataframe(
         return crate::session::schema_text_dataframe(session, json);
     }
     // Of the metadata as it was given, of which PySpark writes the `json()` after the cast, which
-    // the relation sends as its schema (`schema_json_text`); of a struct whose fields hold an
-    // element that is not a `StructField`, as PySpark's `json()` writes it, of the `AttributeError`
-    // of such an element of no `jsonValue` (`foreign_schema_json`).
+    // the relation sends as its schema, also of the attributes that the cast read of a Python
+    // subclass of its own or a patched class (`pyspark_schema_json_text`); of a struct whose fields
+    // hold an element that is not a `StructField`, as PySpark's `json()` writes it, of the
+    // `AttributeError` of such an element of no `jsonValue` (`foreign_schema_json`).
     let (spark_schema, schema_json) = if schema.is_none() {
         (None, None)
     } else if let Some(json) = crate::types::foreign_schema_json(&schema)? {
@@ -164,7 +165,7 @@ pub(crate) fn create_dataframe(
         };
         (Some(unparsed), Some(json))
     } else {
-        let json = crate::types::schema_json_text(Some(&schema))?;
+        let json = crate::types::pyspark_schema_json_text(Some(&schema))?;
         (Some(crate::types::py_to_data_type_as_given(&schema)?), json)
     };
     if let (true, Some(json)) = (empty, &schema_json) {
