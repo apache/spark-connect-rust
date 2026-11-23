@@ -10363,18 +10363,61 @@ def test_row_fields():
     }
 
 
-def test_struct_type_add_with_metadata_is_linear_and_matches_the_constructor(monkeypatch):
-    # As in PySpark, whose add reads no field of the struct but the new one: a loop of adds with
-    # metadata is quick, also of fields of nested types, and its struct is the one the
-    # constructor gives. The bounds are generous: the add that read every field and its metadata
-    # on each call took about 17 s for the 2000 fields, and 10 s for the 1500 nested ones.
-    count = 2000
-    started = time.perf_counter()
-    st = T.StructType()
-    for i in range(count):
-        st.add(f"c{i}", T.StringType(), True, {"comment": f"col {i}"})
-    elapsed = time.perf_counter() - started
-    assert elapsed < 3.0, elapsed
+def _best_cpu_seconds(first, second, rounds=3):
+    """The least CPU time of this thread of `first` and of `second`, each run `rounds` times in
+    turn, with the automatic garbage collection off: so that their ratio is of their work, and not
+    of the load of the machine, which the CPU time of the thread does not count."""
+    import gc
+
+    times = ([], [])
+    enabled = gc.isenabled()
+    gc.disable()
+    try:
+        for _ in range(rounds):
+            for run, kept in zip((first, second), times):
+                started = time.thread_time()
+                run()
+                kept.append(time.thread_time() - started)
+    finally:
+        if enabled:
+            gc.enable()
+    return min(times[0]), min(times[1])
+
+
+def _pysparks_need_conversions(fields):
+    """The work of the adds of `fields` of PySpark's `StructType.add`, which assigns
+    `_needConversion` again of `[f.needConversion() for f in self]` at each add, of the fields so
+    far, as a loop of Python code."""
+    from itertools import islice
+
+    def run():
+        for count in range(1, len(fields) + 1):
+            _ = [field.needConversion() for field in islice(fields, count)]
+
+    return run
+
+
+def test_struct_type_add_with_metadata_costs_pysparks_and_matches_the_constructor(monkeypatch):
+    # As in PySpark, whose add reads no field of the struct but the new one, but for the
+    # `needConversion()` of each field, of which it assigns `_needConversion` again: a loop of adds
+    # with metadata costs about what PySpark's needConversions of each add cost, of the same
+    # fields, also of fields of nested types, and its struct is the one the constructor gives.
+    # They are timed in the CPU time of this thread, so of no load of the machine. The add that
+    # read every field and its metadata on each call took about ten times what they cost.
+    count = 500
+    made = {}
+
+    def adds():
+        made["st"] = T.StructType()
+        for i in range(count):
+            made["st"].add(f"c{i}", T.StringType(), True, {"comment": f"col {i}"})
+
+    adds()
+    add_seconds, need_seconds = _best_cpu_seconds(
+        adds, _pysparks_need_conversions(made["st"].fields)
+    )
+    assert add_seconds < 3 * need_seconds, (add_seconds, need_seconds)
+    st = made["st"]
     fields = [
         T.StructField(f"c{i}", T.StringType(), True, {"comment": f"col {i}"})
         for i in range(count)
@@ -10396,15 +10439,25 @@ def test_struct_type_add_with_metadata_is_linear_and_matches_the_constructor(mon
         inner = T.StructType([T.StructField("x", T.IntegerType(), True, {"comment": f"x {i}"})])
         return [inner, T.ArrayType(inner), T.MapType(T.StringType(), inner)][i % 3]
 
-    started = time.perf_counter()
-    nested = T.StructType()
-    for i in range(1500):
-        nested.add(f"n{i}", nested_type(i), True, {"comment": f"col {i}"})
-    nested.add("longs", T.ArrayType(T.LongType()))
-    elapsed = time.perf_counter() - started
-    assert elapsed < 3.0, elapsed
+    nested_count = 400
+
+    def nested_adds():
+        made["nested"] = T.StructType()
+        for i in range(nested_count):
+            made["nested"].add(f"n{i}", nested_type(i), True, {"comment": f"col {i}"})
+        made["nested"].add("longs", T.ArrayType(T.LongType()))
+
+    nested_adds()
+    add_seconds, need_seconds = _best_cpu_seconds(
+        nested_adds, _pysparks_need_conversions(made["nested"].fields)
+    )
+    assert add_seconds < 3 * need_seconds, (add_seconds, need_seconds)
+    nested = made["nested"]
     expected = T.StructType(
-        [T.StructField(f"n{i}", nested_type(i), True, {"comment": f"col {i}"}) for i in range(1500)]
+        [
+            T.StructField(f"n{i}", nested_type(i), True, {"comment": f"col {i}"})
+            for i in range(nested_count)
+        ]
         + [T.StructField("longs", T.ArrayType(T.LongType()))]
     )
     assert nested == expected and nested.json() == expected.json()
