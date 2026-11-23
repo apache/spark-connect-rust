@@ -85,12 +85,67 @@ pub(crate) fn column_object(py: Python<'_>, column: Column) -> PyResult<Bound<'_
     column_of_expression(expression_object(py, column)?.as_any())
 }
 
-/// The `_ColumnExpression` of `column`, the one holder of the parts of its expression.
+/// The `_ColumnExpression` of `column`, the one holder of the parts of its expression. One of no
+/// part of Python objects reaches no Python object, now or later: the collector does not track
+/// it, as CPython does not track an object that holds no other, so a Column of it is of two
+/// tracked objects (the Column and its `__dict__`), as PySpark's (its Column and its expression).
 pub(crate) fn expression_object(
     py: Python<'_>,
     column: Column,
 ) -> PyResult<Bound<'_, PyColumnExpression>> {
-    Bound::new(py, PyColumnExpression::new_with(py, column))
+    let expression = Bound::new(py, PyColumnExpression::new_with(py, column))?;
+    if expression.borrow().parts.holds_no_shared() {
+        // SAFETY: the GIL is held, and the object is a valid object of a type of the collector;
+        // its `__traverse__` reports nothing, as it holds no shared part.
+        unsafe { pyo3::ffi::PyObject_GC_UnTrack(expression.as_ptr().cast()) };
+    }
+    Ok(expression)
+}
+
+/// The `__getattribute__` and the `asc` of the class `Column` as the module made them, before a
+/// patch of them, which [`column_class_is_original`] compares with the class's (see
+/// [`remember_column_class`]).
+struct ColumnClassOriginals {
+    getattribute: Py<PyAny>,
+    asc: Py<PyAny>,
+}
+
+static COLUMN_CLASS_ORIGINALS: pyo3::sync::PyOnceLock<ColumnClassOriginals> =
+    pyo3::sync::PyOnceLock::new();
+
+/// Remember the `__getattribute__` and the `asc` of the class `Column`, as the module makes it,
+/// before user code could patch them.
+pub(crate) fn remember_column_class(py: Python<'_>) -> PyResult<()> {
+    let class = py.get_type::<PyColumn>();
+    let originals = ColumnClassOriginals {
+        getattribute: class
+            .getattr(pyo3::intern!(py, "__getattribute__"))?
+            .unbind(),
+        asc: class.getattr(pyo3::intern!(py, "asc"))?.unbind(),
+    };
+    let _ = COLUMN_CLASS_ORIGINALS.set(py, originals);
+    Ok(())
+}
+
+/// Whether the class `Column` has the `__getattribute__` that the module made it of, and, if
+/// `asc`, the `asc` too, each of one lookup of the class: a patch of `Column.__getattribute__` or
+/// `Column.asc`, of a library, takes the paths that read and call them as PySpark's do, in place
+/// of the paths that make the expressions of a window at once. (A patch of `__getattr__` is called
+/// of a Column of no `_expr` only, whose read takes the lookup of its class.)
+pub(crate) fn column_class_is_original(py: Python<'_>, asc: bool) -> bool {
+    let Some(originals) = COLUMN_CLASS_ORIGINALS.get(py) else {
+        return false;
+    };
+    let class = py.get_type::<PyColumn>();
+    let unpatched = |name: &Bound<'_, pyo3::types::PyString>, original: &Py<PyAny>| {
+        class
+            .getattr(name)
+            .is_ok_and(|value| value.is(original.bind(py)))
+    };
+    unpatched(
+        pyo3::intern!(py, "__getattribute__"),
+        &originals.getattribute,
+    ) && (!asc || unpatched(pyo3::intern!(py, "asc"), &originals.asc))
 }
 
 /// The Column of `expression`, as PySpark's `Column(expr)` keeps the object that it is given as
@@ -114,32 +169,10 @@ pub(crate) fn column_of(column: &Bound<'_, PyColumn>) -> PyResult<Column> {
     expression_value(&expression_attr(column.as_any())?)
 }
 
-/// The `_expr` of `column`, a Column, as PySpark's methods read `self._expr` (see
-/// [`crate::state::attr`]). Of a Column of the class itself, it is read by the generic lookup of
-/// its type and its instance dict at once, which is what the class's lookup does before its
-/// `__getattr__`: so of a value, as of a descriptor of the type, the result is the same, and the
-/// `AttributeError` of a Column of no `_expr` takes the lookup of the class, to its `__getattr__`.
+/// The `_expr` of `column`, a Column, as PySpark's methods read `self._expr`: of the attribute
+/// lookup of its class, of a patch of its `__getattribute__` too (see [`crate::state::attr`]).
 pub(crate) fn expression_attr<'py>(column: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
-    let py = column.py();
-    let name = pyo3::intern!(py, "_expr");
-    if column.get_type().is(py.get_type::<PyColumn>()) {
-        // SAFETY: the GIL is held, and both are valid objects; the result is a new reference, or
-        // null with the error set, which `from_owned_ptr_or_err` takes.
-        let value = unsafe {
-            Bound::from_owned_ptr_or_err(
-                py,
-                pyo3::ffi::PyObject_GenericGetAttr(column.as_ptr(), name.as_ptr()),
-            )
-        };
-        match value {
-            Ok(value) => return Ok(value),
-            Err(error) if !error.is_instance_of::<pyo3::exceptions::PyAttributeError>(py) => {
-                return Err(error);
-            }
-            Err(_) => {}
-        }
-    }
-    crate::state::attr(column, name)
+    crate::state::attr(column, pyo3::intern!(column.py(), "_expr"))
 }
 
 /// Whether `expression` is an expression of PySpark's classes, an instance of the
@@ -150,6 +183,51 @@ fn is_pyspark_expression(expression: &Bound<'_, PyAny>) -> PyResult<bool> {
         pyo3::sync::PyOnceLock::new();
     let class = EXPRESSION.import(py, "pyspark.sql.connect.expressions", "Expression")?;
     expression.is_instance(class)
+}
+
+/// The argument `expr` of `args` and `kwargs`, as CPython binds them to PySpark's
+/// `def __init__(self, expr)` of `Column`: of its errors, in its order, an unexpected keyword
+/// argument and a value of `expr` by keyword and by position, then too many positional
+/// arguments, then none.
+fn bound_argument<'py>(
+    args: &Bound<'py, PyTuple>,
+    kwargs: Option<&Bound<'py, PyDict>>,
+) -> PyResult<Bound<'py, PyAny>> {
+    use pyo3::exceptions::PyTypeError;
+    let mut expr = args.get_item(0).ok();
+    for (key, value) in kwargs.into_iter().flat_map(|kwargs| kwargs.iter()) {
+        let name = key.str()?.to_cow()?.into_owned();
+        if name != "expr" {
+            return Err(PyTypeError::new_err(format!(
+                "Column.__init__() got an unexpected keyword argument '{name}'"
+            )));
+        }
+        if expr.is_some() {
+            return Err(PyTypeError::new_err(
+                "Column.__init__() got multiple values for argument 'expr'",
+            ));
+        }
+        expr = Some(value);
+    }
+    if args.len() > 1 {
+        return Err(PyTypeError::new_err(format!(
+            "Column.__init__() takes 2 positional arguments but {} were given",
+            args.len() + 1
+        )));
+    }
+    expr.ok_or_else(|| {
+        PyTypeError::new_err("Column.__init__() missing 1 required positional argument: 'expr'")
+    })
+}
+
+/// The rendering of the window expression of `function` over `window`, as PySpark's
+/// `WindowExpression.__repr__` renders it, `WindowExpression(<function>, (<window>))`, of the
+/// `str` of the window, as an f-string formats it; None of a function or a window that does not
+/// render, whose error the default rendering raises.
+fn rendered_over(function: &Column, window: &Bound<'_, PyAny>) -> Option<String> {
+    let function = function.expression().try_render().ok()?;
+    let window = window.str().ok()?.to_cow().ok()?.into_owned();
+    Some(format!("WindowExpression({function}, ({window}))"))
 }
 
 /// The check of PySpark's `Column(expr)` of `expression`, as its `__init__` makes it: an
@@ -184,12 +262,42 @@ fn not_an_expression(expression: &Bound<'_, PyAny>) -> PyErr {
 
 /// The core expression of `expression`, an object that is not an expression of this client, such
 /// as one of PySpark's classes: its `spark.connect.Expression`, of its `to_plan` (see
-/// [`planned_expression`]), as it is sent, of its `repr` as its rendering, as PySpark's Column of
-/// it sends and shows it.
+/// [`planned_expression`]), as it is sent, rendered as its `str`, as PySpark's expressions render
+/// those that they hold. The error of the `str` (of an `Expression` of a class whose `__repr__`
+/// gives None, as PySpark's base does) is that of the rendering of the expression, which a
+/// `repr` of a Column of it raises, as PySpark's raises it then, and not of its uses.
 fn converted_expression(expression: &Bound<'_, PyAny>) -> PyResult<Column> {
     let planned = planned_expression(expression)?;
-    let rendered: String = expression.repr()?.extract()?;
-    sent_column(planned.as_bytes(), rendered)
+    let rendered = expression.str().and_then(|text| text.extract::<String>());
+    match rendered {
+        Ok(rendered) => sent_column(planned.as_bytes(), rendered),
+        Err(error) => unrenderable_column(sent_column(planned.as_bytes(), String::new())?, error),
+    }
+}
+
+/// `column`, whose rendering raises `error`, the error of the rendering of the object that it was
+/// made of, anew at each rendering, as PySpark renders the object at each `repr`.
+pub(crate) fn unrenderable_column(column: Column, error: PyErr) -> PyResult<Column> {
+    use spark_connect::expression::{Expression, UnbuildableExpression};
+    Python::attach(|py| {
+        let (error, owner) = match crate::dataframe::unbuildable_error(py, error) {
+            Ok(error) => (error, None),
+            Err(error) => {
+                let (error, owner) = crate::errors::kept_exception_error(py, error)?;
+                (error, Some(spark_connect::plan::RelationOwner(owner)))
+            }
+        };
+        Ok(Column::new(Expression::new(ExpressionNode::Unbuildable(
+            Box::new(UnbuildableExpression {
+                expression: column.expression().clone(),
+                before: None,
+                after: None,
+                unrenderable: Some(error),
+                owner,
+                rendered: None,
+            }),
+        ))))
+    })
 }
 
 /// The `spark.connect.Expression` of `expression`, an object that is not an expression of this
@@ -277,6 +385,33 @@ pub(crate) fn reduce_with_state_but<'py>(
     let mut items: Vec<Bound<'py, PyAny>> = reduce.cast::<PyTuple>()?.iter().collect();
     items.push(state.into_any());
     Ok(PyTuple::new(owner.py(), items)?.into_any())
+}
+
+/// The reduce `reduce` of `owner`, an object of the class `base` or of a Python subclass of it,
+/// of the function that gives back an object of `base` and its arguments: of an object of a
+/// subclass, the reduce of `_column_reduce.instance_of`, which makes an object of the subclass of
+/// the entries of the `__dict__` of that object (and its native state), as PySpark's pickle of an
+/// object of a subclass, a plain object, unpickles as the subclass.
+pub(crate) fn subclass_reduce<'py>(
+    owner: &Bound<'py, PyAny>,
+    base: &Bound<'py, pyo3::types::PyType>,
+    reduce: Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let py = owner.py();
+    let class = owner.get_type();
+    if class.is(base) {
+        return Ok(reduce);
+    }
+    let reduce = reduce.cast_into::<PyTuple>()?;
+    let instance_of = py
+        .import("pyspark.sql.connect.dataframe")?
+        .getattr("_column_reduce")?
+        .getattr("instance_of")?;
+    let args = PyTuple::new(
+        py,
+        [class.into_any(), reduce.get_item(0)?, reduce.get_item(1)?],
+    )?;
+    Ok(PyTuple::new(py, [instance_of, args.into_any()])?.into_any())
 }
 
 /// `class.__new__(class, *args)`, of the arguments `args`, a tuple, as `copyreg.__newobj__`
@@ -566,11 +701,18 @@ impl PyColumn {
     /// `Column(expr)`, as PySpark Connect's `__init__`, which keeps the expression `expr` as its
     /// `_expr`: an expression of this client, the `_expr` of a Column, or one of PySpark's classes
     /// of `pyspark.sql.connect.expressions`, such as a `LiteralExpression`, which the Column
-    /// sends as its `to_plan` gives it; another object is PySpark's `NOT_EXPECTED_TYPE`.
-    fn __init__(slf: &Bound<'_, Self>, expr: &Bound<'_, PyAny>) -> PyResult<()> {
+    /// sends as its `to_plan` gives it; another object is PySpark's `NOT_EXPECTED_TYPE`. Of the
+    /// arguments as CPython binds them to PySpark's `def __init__(self, expr)`, with its errors.
+    #[pyo3(signature = (*args, **kwargs))]
+    fn __init__(
+        slf: &Bound<'_, Self>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
         let py = slf.py();
-        check_expression(expr)?;
-        crate::state::assign(slf.as_any(), &[(pyo3::intern!(py, "_expr"), expr)])
+        let expr = bound_argument(args, kwargs)?;
+        check_expression(&expr)?;
+        crate::state::assign(slf.as_any(), &[(pyo3::intern!(py, "_expr"), &expr)])
     }
 
     // Alias the column with each given name, optionally attaching column metadata (a
@@ -1225,17 +1367,22 @@ impl PyColumn {
         // expression is a value of the core (see `window::window_spec_of`). The error of a bound
         // of the frame that the window of the core does not hold is raised by each request, as
         // PySpark's build raises it, after the window function and the specs.
-        let (spec, error) = crate::window::window_spec_of(window)?;
-        let column = function.over(spec);
-        Ok(ColumnOut::new(match error {
-            None => column,
-            Some(error) => Column::new(spark_connect::expression::Expression::unbuildable(
-                column.expression().clone(),
-                None,
-                Some(error),
-                None,
-            )),
-        }))
+        let (spec, error, rendered) = crate::window::window_spec_of(window)?;
+        if error.is_none() && rendered {
+            return Ok(ColumnOut::new(function.over(spec)));
+        }
+        let column = function.clone().over(spec);
+        // Rendered as PySpark's `WindowExpression.__repr__` renders the window, of the bounds of
+        // its frame as they are, which the window of the core does not hold, or renders of
+        // another text (a bool).
+        use spark_connect::expression::Expression;
+        let expression = column.expression().clone();
+        Ok(ColumnOut::new(Column::new(
+            match rendered_over(&function, window) {
+                Some(rendered) => Expression::unbuildable_rendered(expression, error, rendered),
+                None => Expression::unbuildable(expression, None, error, None),
+            },
+        )))
     }
 
     /// String representation, mirroring `pyspark.sql.connect.column.Column.__repr__`
@@ -1450,6 +1597,7 @@ impl PyColumn {
                 subqueries,
                 expression_holes,
             ))?;
+        let reduce = subclass_reduce(slf.as_any(), &py.get_type::<PyColumn>(), reduce)?;
         // The state of the other attributes, as the expression is the reduce's.
         reduce_with_state_but(&reduce, slf.as_any(), pyo3::intern!(py, "_expr"))
     }

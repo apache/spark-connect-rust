@@ -143,9 +143,14 @@ impl PyTableArg {
         cols: Vec<Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, Self>> {
         let inner = Self::inner_of(slf)?;
-        // PySpark checks the partitioning before it converts the columns.
+        // PySpark checks the partitioning before it converts the columns, as
+        // `[F._sort_col(c)._expr for c in _to_cols(cols)]`, of the `asc()` of a Column of a
+        // subclass too, as the window's `orderBy`.
         inner.check_order_by().to_pyerr()?;
-        let columns = window_columns(cols)?;
+        let columns = crate::window::sort_expressions_of(slf.py(), cols)?
+            .iter()
+            .map(crate::column::expression_value)
+            .collect::<PyResult<Vec<_>>>()?;
         Self::of_same_session(slf, inner.order_by(columns).to_pyerr()?)
     }
 
@@ -314,12 +319,23 @@ impl PyTableArg {
             .into_pyobject(py)?;
         let table_arg_of = reduce_module.getattr("table_arg_of")?;
         let reduce = pyo3::types::PyTuple::new(py, [table_arg_of, args.into_any()])?.into_any();
+        let reduce =
+            crate::column::subclass_reduce(slf.as_any(), &py.get_type::<PyTableArg>(), reduce)?;
         // The state of the other attributes, as the subquery expression is the reduce's.
         crate::column::reduce_with_state_but(
             &reduce,
             slf.as_any(),
             pyo3::intern!(py, "_subquery_expr"),
         )
+    }
+
+    /// Give `target`, a table argument of a subclass that an unpickle makes, the session of
+    /// `source`, the table argument that the pickle gave back, which it keeps natively, as the
+    /// pickle of an object of a subclass unpickles (`_column_reduce.instance_of`).
+    #[staticmethod]
+    fn _take_session_of(target: &Bound<'_, Self>, source: &Bound<'_, Self>) {
+        let session_id = source.borrow().session_id.clone();
+        target.borrow_mut().session_id = session_id;
     }
 
     /// The table argument of `relation`, the bytes of the relation of `levels` levels of the plan

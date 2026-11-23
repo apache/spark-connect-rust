@@ -3124,8 +3124,9 @@ The frame bounds of `Window.rowsBetween` and `rangeBetween` are converted when t
 as in PySpark: the window keeps them in PySpark's `WindowFrame` as they are, so a bound of a row
 frame beyond an int, such as a start of `-2**40` or of `Window.unboundedFollowing`, a bound of
 `True`, which protobuf's int field refuses, and an int beyond a long make a window that shows them
-as they are, of which each request of a plan of a window expression raises PySpark's error, of the
-start and then of the end (`VALUE_NOT_BETWEEN`, the `TypeError` of protobuf, `Value out of range`).
+as they are, as does the `repr` of a window expression of it (`F.sum("x").over(w)`), of which each
+request of a plan raises PySpark's error, of the start and then of the end (`VALUE_NOT_BETWEEN`,
+the `TypeError` of protobuf, `Value out of range`).
 The type of `cast` and `try_cast` is converted when the plan is
 built, as in PySpark: a `StructField`, the base `DataType()`, an abstract type such as `AtomicType()`
 and a Python subclass of them, also one nested in the type, make a Column that renders as the
@@ -4121,9 +4122,7 @@ and `TableArg` of `pyspark.sql.connect`, which construct of their PySpark argume
 `GroupedData(df, "groupby", [F.col("id")])`, `DataFrameNaFunctions(df)`, `Column(col._expr)`,
 `WindowSpec([], [], None)`, `TableArg(table._subquery_expr)`), also a subclass of an `__init__` of
 its own, and whose setters, copies and pickles are of the subclass (but those of a session, which
-are the active session of its ID, as PySpark's, and the pickles of a `Column` and a `TableArg`,
-which unpickle as the base class, with the other entries of the `__dict__` of the object kept,
-where PySpark's unpickle as the subclass); `SparkSession.Builder`,
+are the active session of its ID, as PySpark's); `SparkSession.Builder`,
 `SparkSession.Hook`, `StorageLevel` and `PythonEvalType`; and the data types, from `StringType` and
 `DecimalType` to `ArrayType`, `StructField` and `StructType` (see above). A session of a subclass is
 the session that its DataFrames, readers and catalogs give back, as in PySpark.
@@ -4300,34 +4299,41 @@ The `Column`, the `WindowSpec` and the `TableArg` of `pyspark.sql.connect` keep 
 expression of another Column, as `outer()` does, or an `Expression` of
 `pyspark.sql.connect.expressions`, such as a `LiteralExpression` or one of a class of the user's,
 whose `repr` the Column shows and whose `to_plan` its requests send, of the fields of the object
-then, and raises PySpark's `NOT_EXPECTED_TYPE` of another object. `WindowSpec(partitionSpec,
-orderSpec, frame)` asserts PySpark's types of a bare `AssertionError` (a list of expressions, a list
-of sort orders, a `WindowFrame` or None), and its `__new__` takes the same arguments. The sort
-orders of `orderSpec` are the client's only, those of `asc()`, `desc()` and the others, as the
-drop-in's `pyspark.sql.connect.expressions` has no `SortOrder`, whose objects PySpark's takes;
-`partitionBy`, `orderBy`, `rowsBetween` and `rangeBetween` make a window of the base class, of the
-lists and the frame that they do not replace, shared with this one. `TableArg(subquery_expr)` keeps
-any object, whose fields its methods read (an `int` raises the `AttributeError` of
-`_partition_spec`, as PySpark's). So `vars()` of them is PySpark's, an assignment of `_expr` gives a
-Column of the other expression, a subclass whose property gives the state is of it, an object whose
-`__init__` never ran raises the `AttributeError` of its first attribute that PySpark's method reads
-(`_partitionSpec`, `_orderSpec`, `_subquery_expr`), or of a Column the `RecursionError` of its
-`__getattr__`, which reads `_expr` again. Their copies are those of their `__dict__`, of `__new__`
-of their class and of the arguments of their `__getnewargs__`, as PySpark's: a shallow copy shares
-the state, so a copy of a window shares its lists, and a deep copy copies it. A window pickles so
-too, of `copyreg.__newobj__`, at every protocol, also to a Python worker of the server, where it
-unpickles as PySpark Connect's; a Column and a table argument pickle their expression and its plans,
-as above, and the other entries of their `__dict__`. What differs is of the expressions of the core:
-a Column that a method makes is a value of the expressions at the call, so the window expression of
-`over` is of the lists and the frame of the window then, and a later change of them is not of it,
-where PySpark's `WindowExpression` holds the window and builds its message of it at each request,
-and a Column made of a Column of an `Expression` of PySpark's classes holds its message as its
-`to_plan` gave it then. The expressions that the drop-in makes, the `_expr` of a Column, the entries
-of the lists of a window and the `_subquery_expr` of a table argument, are of the client's class
-`_ColumnExpression` of `pyspark.sql.connect.expressions`, of PySpark's `to_plan` and `repr`, and not
-of PySpark's classes of the module (`ColumnReference`, `SortOrder`, `SubqueryExpression` and the
-others), whose fields they do not have, as the expressions are the core's (see
-`dev/parity/known-differences.md`).
+then, and raises PySpark's `NOT_EXPECTED_TYPE` of another object, of the errors of CPython's binding
+of the arguments of `def __init__(self, expr)` too. An expression whose `str` fails, as one of a
+class of the user's whose `__repr__` gives None, as PySpark's base `Expression` does, makes a Column
+that is sent as its `to_plan` gives it, and whose `repr`, and that of a Column made of it, raises
+that error, as PySpark's raises it at the `repr`. `WindowSpec(partitionSpec, orderSpec, frame)`
+asserts PySpark's types of a bare `AssertionError` (a list of expressions, a list of sort orders, a
+`WindowFrame` or None), and its `__new__` takes the same arguments. The sort orders of `orderSpec`
+are the client's only, those of `asc()`, `desc()` and the others, as the drop-in's
+`pyspark.sql.connect.expressions` has no `SortOrder`, whose objects PySpark's takes; `partitionBy`,
+`orderBy`, `rowsBetween` and `rangeBetween` make a window of the base class, of the lists and the
+frame that they do not replace, shared with this one; `orderBy` of a window and of a table argument
+sorts a Column of a subclass by its own `asc()`, and a patch of `Column.asc`,
+`Column.__getattribute__` or `Column.__getattr__` is called where PySpark's `_sort_col` and the
+methods of a Column call them. `TableArg(subquery_expr)` keeps any object, whose fields its methods
+read (an `int` raises the `AttributeError` of `_partition_spec`, as PySpark's). So `vars()` of them
+is PySpark's, an assignment of `_expr` gives a Column of the other expression, a subclass whose
+property gives the state is of it, an object whose `__init__` never ran raises the `AttributeError`
+of its first attribute that PySpark's method reads (`_partitionSpec`, `_orderSpec`,
+`_subquery_expr`), or of a Column the `RecursionError` of its `__getattr__`, which reads `_expr`
+again. Their copies are those of their `__dict__`, of `__new__` of their class and of the arguments
+of their `__getnewargs__`, as PySpark's: a shallow copy shares the state, so a copy of a window
+shares its lists, and a deep copy copies it. A window pickles so too, of `copyreg.__newobj__`, at
+every protocol, also to a Python worker of the server, where it unpickles as PySpark Connect's; a
+Column and a table argument pickle their expression and its plans, as above, and the other entries
+of their `__dict__`, and of a subclass unpickle as an object of the subclass, of those entries, as
+PySpark's. What differs is of the expressions of the core: a Column that a method makes is a value
+of the expressions at the call, so the window expression of `over` is of the lists and the frame of
+the window then, and a later change of them is not of it, where PySpark's `WindowExpression` holds
+the window and builds its message of it at each request, and a Column made of a Column of an
+`Expression` of PySpark's classes holds its message as its `to_plan` gave it then. The expressions
+that the drop-in makes, the `_expr` of a Column, the entries of the lists of a window and the
+`_subquery_expr` of a table argument, are of the client's class `_ColumnExpression` of
+`pyspark.sql.connect.expressions`, of PySpark's `to_plan` and `repr`, and not of PySpark's classes
+of the module (`ColumnReference`, `SortOrder`, `SubqueryExpression` and the others), whose fields
+they do not have, as the expressions are the core's (see `dev/parity/known-differences.md`).
 
 A pickle of PySpark, which makes an object of its class without arguments and then sets its
 `__dict__`, loads in the drop-in: a reader, a catalog and a registration, of their `__dict__`; and

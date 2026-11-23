@@ -590,6 +590,14 @@ requests of the unpickled object pickle as it is then. This case still differs:
     session holds them, which reads them at each request of any thread, and which every DataFrame,
     reader, catalog and query of the session holds, with the threads of the core, so that no
     Python object can answer for all of their references to them.
+  - A reference cycle of a Python subclass of a class of the binding and an object of it that the
+    subclass holds, such as `Sub.inst = Sub(e)` of a subclass of `Column`, `WindowSpec`,
+    `TableArg`, `GroupedData` or `Catalog`, is not collected (inherent to PyO3 0.29): CPython's
+    traversal of an object of a subclass, a heap type, leaves the visit of its class to the
+    traversal of its base class when that is a heap type too (`subtype_traverse`), as the classes
+    of PyO3 are, and PyO3's traversal of an object visits its `__dict__` and what its class reports,
+    but not its class, so the collector does not see that the object holds its class. PySpark's
+    objects, of plain Python classes, visit their class, and such a cycle is collected.
 
 ## Session and client (Connect)
 
@@ -946,6 +954,12 @@ requests of the unpickled object pickle as it is then. This case still differs:
   a handler of a record of the conversion, has no context in the handler, where PySpark's has the
   failure that is converted, as it raises it while it handles that failure; once it goes out of
   the handler, and so out of the conversion, it has that failure as its context in both.
+- **The order of the parameters of an error that the core raises** (intentional; the core keeps
+  the parameters of an error in a map of their names). The `getMessageParameters()` of a PySpark
+  error that the core raises, such as the `VALUE_NOT_BETWEEN` of a bound of a frame of a window,
+  holds its entries in the order of their names (`{'arg_name': 'start', 'max': '2147483647',
+  'min': '-2147483648'}`), where PySpark's holds them in the order of its code (`arg_name`, `min`,
+  `max`); the entries, the error class and the message are PySpark's.
 - **The children of a fork** (intentional; the transport is native). A child of `os.fork()` makes
   the threads, the runtime and the channels of the client again, as grpcio's fork support does,
   leaves the objects of its parent to the parent, and closes the sockets of its parent's connections
@@ -1334,10 +1348,18 @@ requests of the unpickled object pickle as it is then. This case still differs:
   `SortOrder._child`, `SubqueryExpression._plan` and the fields of about 30 classes), as the
   expression of a Column is the core's tree: a mirror of them in Python would show the fields, but
   a change of a field would not change the Column, and building the expressions in Python is the
-  hot path that the core replaces. Of PySpark's classes, the drop-in's module has `Expression` and
-  `LiteralExpression`, which a Column takes, but no `SortOrder`: so the `orderSpec` of
-  `WindowSpec(...)` takes the client's sort orders only, those of `asc()`, `desc()` and the
-  others, where PySpark's takes its `SortOrder` objects. What remains of these is inherent, as the
+  hot path that the core replaces. Of PySpark's classes, the drop-in's module has `Expression`,
+  `LiteralExpression`, `UnresolvedNamedLambdaVariable` and `DistributedSequenceID`, of which a
+  Column takes the first two, but no `SortOrder`: so the `orderSpec` of `WindowSpec(...)` takes
+  the client's sort orders only, those of `asc()`, `desc()` and the others, where PySpark's takes
+  its `SortOrder` objects. Of the state of a window, as the window expression is made of it at
+  `over()`: an entry of `_orderSpec` that is not a sort order, which the list holds once it is
+  assigned, is sorted ascending with nulls first, where PySpark sends the empty `SortOrder` of its
+  `to_plan(session).sort_order`; and a partitioning or an ordering that is not a list, and a window
+  whose `__init__` never ran, raise PySpark's errors (the `TypeError` of `can only concatenate list
+  (not "tuple") to list`, the `AttributeError` of `_partitionSpec`) at `over()`, where PySpark's
+  `over()` keeps the window and raises them when a DataFrame selects the window expression
+  (`_collect_references`), and at its `repr`. What remains of these is inherent, as the
   transport is native: the requests of the session, of a catalog, of the table-valued functions, of
   a streaming query and of a manager are made by the native transport of the session of the
   drop-in's client of the `_client` or the `client` of the session that they are or hold (at once
@@ -1368,10 +1390,8 @@ requests of the unpickled object pickle as it is then. This case still differs:
   `SparkSession.Hook`, `StorageLevel`,
   `PythonEvalType` and the data types are subclassed as PySpark's: a subclass constructs of the
   arguments of its `__init__`, and its copies and pickles are of the subclass (but those of a
-  session, which are the active session of its ID, as PySpark's, and the pickles of a `Column` and
-  a `TableArg`, which unpickle as the base class, with the other entries of the `__dict__` of the
-  object kept, where PySpark's unpickle as the subclass), and PySpark's pickle of a reader, a
-  catalog or a registration, which makes it of its class without arguments, loads in the drop-in.
+  session, which are the active session of its ID, as PySpark's), and PySpark's pickle of a reader,
+  a catalog or a registration, which makes it of its class without arguments, loads in the drop-in.
   The `Window` of `pyspark.sql.window` and of `pyspark.sql.connect.window`, and the classic
   `Column`, `DataFrameNaFunctions`, `DataFrameStatFunctions`, `WindowSpec` and `TableArg`, are
   PySpark's classes, which construct and subclass as PySpark's. The catalog, the table-valued
@@ -1389,7 +1409,11 @@ requests of the unpickled object pickle as it is then. This case still differs:
   `sparkSession`, `_client`, `_query_id`, `_session`, `_lock`, `_df`, `_gd1`, `df`,
   `_partitionSpec`, `_orderSpec`, `_subquery_expr`), or of a Column the `RecursionError` of its
   `__getattr__`, which reads `_expr` again, as PySpark's, and so do the readers and the writers,
-  PySpark's classes. The other native classes are not subclassable (`TypeError: type '...' is not
+  PySpark's classes. The message of that `RecursionError` is CPython's of the check of the
+  recursion that stops it, which is not always PySpark's: `repr` of such a Column raises
+  `maximum recursion depth exceeded`, where PySpark's raises it `while calling a Python object`,
+  as the recursion of the drop-in's `__repr__` goes through native calls, which a check of their
+  own stops. The other native classes are not subclassable (`TypeError: type '...' is not
   an acceptable base type`), and do not construct (`cannot create '...' instances`): their objects
   are of the native state of a plan, an expression or a query, which the arguments of PySpark's
   constructors, the Python objects of its client, do not give, as the drop-in's native state

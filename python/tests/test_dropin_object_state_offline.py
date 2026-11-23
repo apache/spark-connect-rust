@@ -3601,3 +3601,226 @@ def test_a_table_argument_reads_its_subquery_of_its_dict_as_pysparks(objects):
     for call in (other._is_partitioned, lambda: other.partitionBy("id"), other.withSinglePartition):
         with pytest.raises(AttributeError, match="'int' object has no attribute '_partition_spec'"):
             call()
+
+
+def _module_subclass(base, name):
+    # A subclass of `base` of this module, which `pickle` pickles by reference, as of a class of a
+    # module of the user's.
+    import sys
+
+    cls = type(name, (base,), {"__module__": __name__, "__qualname__": name})
+    setattr(sys.modules[__name__], name, cls)
+    return cls
+
+
+def test_pickles_of_subclasses_unpickle_as_the_subclass_as_pysparks(objects):
+    # PySpark's Column, WindowSpec and TableArg are plain classes, whose pickle of an object of a
+    # subclass unpickles as the subclass, of its `__dict__`: of `pickle` and of cloudpickle.
+    import pickle
+
+    from pyspark import cloudpickle
+    from pyspark.sql import functions as F
+    from pyspark.sql.connect.column import Column
+    from pyspark.sql.connect.table_arg import TableArg
+    from pyspark.sql.connect.window import Window, WindowSpec
+
+    window = Window.partitionBy("id").orderBy("id")
+    table = objects.df.asTable().partitionBy("id")
+    column_class = _module_subclass(Column, "_PickledColumn")
+    table_class = _module_subclass(TableArg, "_PickledTableArg")
+    made = {
+        column_class: lambda cls: cls((F.col("id") + 1)._expr),
+        _module_subclass(WindowSpec, "_PickledWindowSpec"): lambda cls: cls(
+            window._partitionSpec, window._orderSpec, None
+        ),
+        table_class: lambda cls: cls(table._subquery_expr),
+    }
+    for cls, make in made.items():
+        obj = make(cls)
+        obj.tag = [1]
+        for dumps in (lambda o: pickle.dumps(o, 4), cloudpickle.dumps):
+            loaded = pickle.loads(dumps(obj))
+            assert type(loaded) is cls
+            assert list(vars(loaded)) == list(vars(obj)) and loaded.tag == [1]
+    column = column_class(F.col("id")._expr)
+    assert repr(pickle.loads(pickle.dumps(column, 4))) == repr(column) == "Column<'id'>"
+    loaded = pickle.loads(pickle.dumps(table_class(table._subquery_expr), 4))
+    client = objects.spark.client
+    assert loaded._is_partitioned() and loaded.to_plan(client) == table.to_plan(client)
+
+
+def test_a_column_of_an_expression_that_does_not_render_is_sent_as_pysparks(objects):
+    # PySpark renders the expression of a Column at its `repr`: an `Expression` of a class whose
+    # `__repr__` gives None, as PySpark's base does, or raises, makes a Column whose plans send it,
+    # of which Columns are made, and whose `repr` of the Columns made of it raises the error then.
+    from pyspark.sql import functions as F
+    from pyspark.sql.connect.column import Column
+    from pyspark.sql.connect.expressions import Expression
+
+    Reference = type(_Reference.of("a"))
+
+    class NoRepr(Reference):
+        __repr__ = Expression.__repr__
+
+    class BadRepr(Reference):
+        def __repr__(self):
+            raise RuntimeError("no repr")
+
+    df = objects.df
+    for cls, error in ((NoRepr, TypeError), (BadRepr, RuntimeError)):
+        column = Column(cls("v"))
+        sent = _sent_plan(objects, df.select(column, (column + 1).alias("w")))
+        expressions = sent.root.project.expressions
+        assert expressions[0].unresolved_attribute.unparsed_identifier == "v"
+        assert expressions[1].alias.name == ["w"]
+        with pytest.raises(error):
+            repr(column + 1)
+        with pytest.raises(error):
+            repr(F.sum("x").over(_window_of(cls("p"))))
+    assert repr(Column(NoRepr("v"))) == "Column<'None'>"
+
+
+def _window_of(partition):
+    # A window partitioned by `partition`, an expression.
+    from pyspark.sql.connect.window import WindowSpec
+
+    return WindowSpec([partition], [], None)
+
+
+def test_a_window_expression_shows_the_bounds_of_its_frame_as_pysparks(objects):
+    # PySpark's `WindowExpression.__repr__` shows the window and its `WindowFrame` as they are: of a
+    # bound that its build refuses, a bool or an int beyond an int or a long, too.
+    from pyspark.sql import functions as F
+    from pyspark.sql.connect.window import Window
+
+    window = Window.orderBy("b")
+    for frame, shown in (
+        (window.rowsBetween(-(2**40), 0), "WindowFrame(ROW_FRAME, -1099511627776, 0)"),
+        (window.rowsBetween(True, 0), "WindowFrame(ROW_FRAME, True, 0)"),
+        (window.rowsBetween(False, 1), "WindowFrame(ROW_FRAME, False, 1)"),
+        (window.rangeBetween(2**64, 0), "WindowFrame(RANGE_FRAME, 18446744073709551616, 0)"),
+        (window.rowsBetween(-1, 1), "WindowFrame(ROW_FRAME, -1, 1)"),
+    ):
+        assert repr(F.sum("x").over(frame)) == (
+            f"Column<'WindowExpression(sum(x), (WindowSpec(OrderBy(b ASC NULLS FIRST), {shown})))'>"
+        )
+
+
+def test_the_order_of_a_table_argument_sorts_a_subclass_by_its_asc_as_pysparks(objects):
+    # PySpark's `TableArg.orderBy` sorts each Column by `F._sort_col`, of its `asc()`, of a Column
+    # of a subclass too, as the window's `orderBy`.
+    from pyspark.sql import functions as F
+    from pyspark.sql.connect.column import Column
+    from pyspark.sql.connect.window import Window
+
+    class Descending(Column):
+        def asc(self):
+            return self.desc()
+
+    descending = Descending(F.col("id")._expr)
+    table = objects.df.asTable().partitionBy("id").orderBy(descending)
+    order = table._subquery_expr.to_plan(objects.spark.client).subquery_expression
+    # SORT_DIRECTION_DESCENDING.
+    assert [o.direction for o in order.table_arg_options.order_spec] == [2]
+    assert repr(Window.orderBy(descending)) == "WindowSpec(OrderBy(id DESC NULLS LAST))"
+
+
+def test_a_window_of_lists_that_are_not_lists_raises_pysparks_error(objects):
+    # PySpark's `WindowExpression.children` concatenates the partitioning and the ordering of its
+    # window to a list, of the `TypeError` of an object that is not a list, when a DataFrame
+    # selects it.
+    from pyspark.sql import functions as F
+    from pyspark.sql.connect.window import Window
+
+    for name in ("_partitionSpec", "_orderSpec"):
+        window = Window.partitionBy("a").orderBy("a")
+        setattr(window, name, tuple(getattr(window, name)))
+        with pytest.raises(TypeError, match=r'can only concatenate list \(not "tuple"\) to list'):
+            objects.df.select(F.sum("x").over(window))
+
+
+def test_a_column_binds_its_arguments_as_pysparks_init(objects):
+    # PySpark's `Column.__init__(self, expr)`, whose arguments CPython binds, of its errors.
+    from pyspark.sql import functions as F
+    from pyspark.sql.connect.column import Column
+
+    expr = F.col("a")._expr
+    for args, kwargs, message in (
+        ((), {}, "Column.__init__() missing 1 required positional argument: 'expr'"),
+        ((expr, 2), {}, "Column.__init__() takes 2 positional arguments but 3 were given"),
+        ((expr,), {"expr": expr}, "Column.__init__() got multiple values for argument 'expr'"),
+        ((expr, 2), {"x": 1}, "Column.__init__() got an unexpected keyword argument 'x'"),
+    ):
+        with pytest.raises(TypeError) as raised:
+            Column(*args, **kwargs)
+        assert str(raised.value) == message
+    assert Column(expr=expr)._expr is expr
+
+
+def test_patches_of_the_column_class_are_called_by_the_windows_as_pysparks():
+    # PySpark's `_sort_col` calls the `asc` of the class of a Column, and its methods read `_expr`
+    # through the attribute lookup of the class: patches of them are called, in a new interpreter,
+    # whose class the test patches.
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    code = """
+import pyspark.sql.connect.column as module
+from pyspark.sql import functions as F
+from pyspark.sql.connect.window import Window
+
+original_asc = module.Column.asc
+module.Column.asc = lambda self: self.desc()
+print(repr(Window.orderBy("b")), repr(Window.orderBy(F.col("b"))))
+module.Column.asc = original_asc
+reads = []
+original = module.Column.__getattribute__
+
+def counted(self, name):
+    if name == "_expr":
+        reads.append(name)
+    return original(self, name)
+
+module.Column.__getattribute__ = counted
+column = F.col("a")
+reads.clear()
+column.isNull()
+print(len(reads))
+reads.clear()
+Window.orderBy(column)
+print(len(reads))
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        cwd=Path(__file__).parent,
+        check=True,
+    )
+    assert result.stdout.split("\n")[:3] == [
+        "WindowSpec(OrderBy(b DESC NULLS LAST)) WindowSpec(OrderBy(b DESC NULLS LAST))",
+        "1",
+        "3",
+    ]
+
+
+@pytest.mark.xfail(
+    _DROP_IN,
+    strict=True,
+    reason="inherent to PyO3 0.29, whose traversal of an object does not visit its class",
+)
+def test_a_cycle_of_a_subclass_and_an_object_of_it_is_collected_as_pysparks():
+    # PySpark's classes are plain classes, whose objects the collector sees hold their class: a
+    # cycle of a subclass and an object of it that the subclass holds is collected.
+    from pyspark.sql import functions as F
+    from pyspark.sql.connect.column import Column
+
+    class Held(Column):
+        pass
+
+    Held.inst = Held(F.col("a")._expr)
+    freed = weakref.ref(Held)
+    del Held
+    gc.collect()
+    assert freed() is None

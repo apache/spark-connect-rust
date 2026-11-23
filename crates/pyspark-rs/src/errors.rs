@@ -565,7 +565,18 @@ fn kept_item<'py>(py: Python<'py>, err: &SparkError, index: usize) -> Option<Bou
 /// PySpark's pickle carries its plan objects, which its unpickle builds again, of a new error of
 /// its own.
 pub(crate) fn kept_plan<'py>(py: Python<'py>, err: &SparkError) -> Option<Bound<'py, PyAny>> {
-    kept_item(py, err, 0)
+    // An exception kept of no plan ([`kept_exception_error`]) is of None.
+    kept_item(py, err, 0).filter(|plan| !plan.is_none())
+}
+
+/// The error of the core of `exception`, which an expression keeps and raises anew at each call
+/// that fails of it, as PySpark raises a new exception at each such call, and the owner of the
+/// exception, which the expression holds: as [`kept_error`], of no plan.
+pub(crate) fn kept_exception_error(
+    py: Python<'_>,
+    exception: PyErr,
+) -> PyResult<(SparkError, std::sync::Arc<dyn std::any::Any + Send + Sync>)> {
+    kept_error(py, &py.None().into_bound(py), exception)
 }
 
 thread_local! {

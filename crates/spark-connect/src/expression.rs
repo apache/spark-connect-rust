@@ -670,6 +670,11 @@ pub struct UnbuildableExpression {
     /// What the errors need alive while the expression lives, as the plan of a client's error
     /// that the plan keeps (see [`Expression::unbuildable_owned`]).
     pub owner: Option<crate::plan::RelationOwner>,
+    /// The rendering of the expression in place of that of `expression`, as PySpark renders the
+    /// objects that `expression` stands for when they hold what the core does not, such as the
+    /// bounds of the frame of a window that its build fails of (see
+    /// [`Expression::unbuildable_rendered`]).
+    pub rendered: Option<String>,
 }
 
 impl PartialEq for UnbuildableExpression {
@@ -687,6 +692,7 @@ impl PartialEq for UnbuildableExpression {
             && same(&self.before, &other.before)
             && same(&self.after, &other.after)
             && same(&self.unrenderable, &other.unrenderable)
+            && self.rendered == other.rendered
     }
 }
 
@@ -704,9 +710,13 @@ impl UnbuildableExpression {
         expr
     }
 
-    /// The rendering of `expression`, after which PySpark's `__repr__` fails, if it does.
+    /// The rendering of `expression`, or the one in its place, after which PySpark's `__repr__`
+    /// fails, if it does.
     fn render(&self) -> String {
-        let text = self.expression.render();
+        let text = match &self.rendered {
+            Some(rendered) => rendered.clone(),
+            None => self.expression.render(),
+        };
         if let Some(error) = &self.unrenderable {
             record_unrenderable(error);
         }
@@ -1263,6 +1273,29 @@ impl Expression {
                 after,
                 unrenderable,
                 owner: None,
+                rendered: None,
+            },
+        )))
+    }
+
+    /// As [`Expression::unbuildable`] of `after`, of the rendering `rendered` in place of that of
+    /// `expression`, as PySpark renders the objects that `expression` stands for, which hold what
+    /// the core does not: a request raises `after`, if any, once it built `expression`. Not a
+    /// stable API.
+    #[doc(hidden)]
+    pub fn unbuildable_rendered(
+        expression: Expression,
+        after: Option<SparkError>,
+        rendered: String,
+    ) -> Expression {
+        Expression::new(ExpressionNode::Unbuildable(Box::new(
+            UnbuildableExpression {
+                expression,
+                before: None,
+                after,
+                unrenderable: None,
+                owner: None,
+                rendered: Some(rendered),
             },
         )))
     }
@@ -1285,6 +1318,7 @@ impl Expression {
                 after: None,
                 unrenderable,
                 owner: Some(crate::plan::RelationOwner(owner)),
+                rendered: None,
             },
         )))
     }
