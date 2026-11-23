@@ -132,7 +132,7 @@ fn stream_reads_of_an_empty_path_fail_as_pyspark() {
 #[test]
 fn test_stream_read_basic_structure() {
     let plan = LogicalPlan::Read {
-        read_type: ReadType::DataSource {
+        read_type: Box::new(ReadType::DataSource {
             format: Some("rate".to_string()),
             schema: None,
             options: vec![("rowsPerSecond".to_string(), "10".to_string())]
@@ -141,7 +141,7 @@ fn test_stream_read_basic_structure() {
             paths: vec![],
             predicates: vec![],
             source_name: None,
-        },
+        }),
         is_streaming: true,
     };
 
@@ -159,14 +159,14 @@ fn test_stream_read_basic_structure() {
 #[test]
 fn test_stream_read_json_format() {
     let plan = LogicalPlan::Read {
-        read_type: ReadType::DataSource {
+        read_type: Box::new(ReadType::DataSource {
             format: Some("json".to_string()),
             schema: None,
             options: Default::default(),
             paths: vec!["s3://bucket/path".to_string()],
             predicates: vec![],
             source_name: None,
-        },
+        }),
         is_streaming: true,
     };
 
@@ -190,14 +190,14 @@ fn test_stream_read_json_format() {
 #[test]
 fn test_stream_read_with_schema() {
     let plan = LogicalPlan::Read {
-        read_type: ReadType::DataSource {
+        read_type: Box::new(ReadType::DataSource {
             format: Some("json".to_string()),
             schema: Some("id INT, name STRING, timestamp TIMESTAMP".to_string()),
             options: Default::default(),
             paths: vec!["/data/stream".to_string()],
             predicates: vec![],
             source_name: None,
-        },
+        }),
         is_streaming: true,
     };
 
@@ -220,10 +220,10 @@ fn test_stream_read_with_schema() {
 #[test]
 fn test_stream_read_named_table() {
     let plan = LogicalPlan::Read {
-        read_type: ReadType::NamedTable {
+        read_type: Box::new(ReadType::NamedTable {
             table_name: "my_table".to_string(),
             options: Default::default(),
-        },
+        }),
         is_streaming: true,
     };
 
@@ -246,14 +246,14 @@ fn test_stream_read_named_table() {
 #[test]
 fn test_stream_read_with_source_name() {
     let plan = LogicalPlan::Read {
-        read_type: ReadType::DataSource {
+        read_type: Box::new(ReadType::DataSource {
             format: Some("rate".to_string()),
             schema: None,
             options: Default::default(),
             paths: vec![],
             predicates: vec![],
             source_name: Some("my_rate_source".to_string()),
-        },
+        }),
         is_streaming: true,
     };
 
@@ -351,14 +351,14 @@ fn changes_of_a_reader_of_a_schema_fail_as_pyspark() {
 fn test_stream_read_non_streaming_false() {
     // Verify that non-streaming reads are marked appropriately
     let plan = LogicalPlan::Read {
-        read_type: ReadType::DataSource {
+        read_type: Box::new(ReadType::DataSource {
             format: Some("parquet".to_string()),
             schema: None,
             options: Default::default(),
             paths: vec!["/path".to_string()],
             predicates: vec![],
             source_name: None,
-        },
+        }),
         is_streaming: false,
     };
 

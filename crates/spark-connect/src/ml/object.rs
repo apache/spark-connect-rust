@@ -1164,7 +1164,7 @@ pub fn attribute_relation(
         Some(dataset) => Ok(DataFrame::new(
             target.session().clone(),
             LogicalPlan::MlTransform {
-                ml_relation: relation,
+                ml_relation: Box::new(relation),
                 input: dataset.plan.clone(),
                 owner: Some(RelationOwner(owner)),
             },
@@ -1173,7 +1173,7 @@ pub fn attribute_relation(
             Some(input) => Ok(DataFrame::new(
                 target.session().clone(),
                 LogicalPlan::MlTransform {
-                    ml_relation: relation,
+                    ml_relation: Box::new(relation),
                     input: input.clone(),
                     owner: Some(RelationOwner(owner)),
                 },

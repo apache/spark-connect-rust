@@ -139,7 +139,7 @@ impl ALSModel {
             Ok(DataFrame::new(
                 self.cached.0.session.clone(),
                 LogicalPlan::MlTransform {
-                    ml_relation: relation,
+                    ml_relation: Box::new(relation),
                     input: df.plan.clone(),
                     owner: Some(RelationOwner(self.cached.0.clone())),
                 },

@@ -726,12 +726,12 @@ pub(crate) mod tests {
         LogicalPlan::GroupMap {
             input,
             grouping_expressions: vec![Expression::column("id")],
-            func: CommonInlineUserDefinedFunctionExpression::new(
+            func: Box::new(CommonInlineUserDefinedFunctionExpression::new(
                 "g".to_string(),
                 true,
                 Vec::new(),
                 PythonUDFPayload::new(DataType::Long, 200, vec![1], "3.11".into()),
-            ),
+            )),
             sorting_expressions: Vec::new(),
             initial_input: Some(initial),
             initial_grouping_expressions: vec![Expression::column("id")],
@@ -852,7 +852,7 @@ pub(crate) mod tests {
                 pickler: Some(pickler("udtf")),
             }),
             plan(LogicalPlan::MlTransform {
-                ml_relation: spark_connect_proto::Relation::default(),
+                ml_relation: Box::default(),
                 input: input(),
                 owner: Some(crate::plan::RelationOwner(Arc::new("ml"))),
             }),
@@ -937,7 +937,7 @@ pub(crate) mod tests {
         let plan = |plan: LogicalPlan| DataFrame::new(spark.clone(), plan);
         let ml = |input: &DataFrame, owner: Option<crate::plan::RelationOwner>| {
             plan(LogicalPlan::MlTransform {
-                ml_relation: spark_connect_proto::Relation::default(),
+                ml_relation: Box::default(),
                 input: Arc::clone(&input.plan),
                 owner,
             })

@@ -154,14 +154,14 @@ impl DataStreamReader {
     pub fn load(self, path: Option<&str>) -> DataFrame {
         let paths = path.map(|p| vec![p.to_string()]);
         let plan = LogicalPlan::Read {
-            read_type: ReadType::DataSource {
+            read_type: Box::new(ReadType::DataSource {
                 format: self.format.clone(),
                 schema: Some(self.schema.clone()),
                 options: self.options.clone(),
                 paths: paths.unwrap_or_default(),
                 predicates: vec![],
                 source_name: self.source_name.clone(),
-            },
+            }),
             is_streaming: true,
         };
         let dataframe = self.dataframe_of(plan);
@@ -177,10 +177,10 @@ impl DataStreamReader {
     /// Read a named streaming table.
     pub fn table(self, table_name: &str) -> DataFrame {
         let plan = LogicalPlan::Read {
-            read_type: ReadType::NamedTable {
+            read_type: Box::new(ReadType::NamedTable {
                 table_name: table_name.to_string(),
                 options: self.options.clone(),
-            },
+            }),
             is_streaming: true,
         };
         self.dataframe_of(plan)

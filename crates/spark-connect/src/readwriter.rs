@@ -102,14 +102,14 @@ impl DataFrameReader {
     /// is empty, as PySpark's reader sends its `""` of no schema, which the server reads as none.
     pub fn load_paths<S: Into<String>>(self, paths: impl IntoIterator<Item = S>) -> DataFrame {
         let plan = LogicalPlan::Read {
-            read_type: ReadType::DataSource {
+            read_type: Box::new(ReadType::DataSource {
                 format: self.format,
                 schema: Some(self.schema),
                 options: self.options,
                 paths: paths.into_iter().map(Into::into).collect(),
                 predicates: vec![],
                 source_name: None,
-            },
+            }),
             is_streaming: false,
         };
         DataFrame::new(self.session, plan)
@@ -164,10 +164,10 @@ impl DataFrameReader {
     /// Read from a named table.
     pub fn table(self, table_name: &str) -> DataFrame {
         let plan = LogicalPlan::Read {
-            read_type: ReadType::NamedTable {
+            read_type: Box::new(ReadType::NamedTable {
                 table_name: table_name.to_string(),
                 options: self.options,
-            },
+            }),
             is_streaming: false,
         };
         DataFrame::new(self.session, plan)
@@ -214,14 +214,14 @@ impl DataFrameReader {
             .insert("dbtable".to_string(), table.to_string());
 
         let plan = LogicalPlan::Read {
-            read_type: ReadType::DataSource {
+            read_type: Box::new(ReadType::DataSource {
                 format: self.format,
                 schema: Some(self.schema),
                 options: self.options,
                 paths: vec![],
                 predicates: predicates.unwrap_or_default(),
                 source_name: None,
-            },
+            }),
             is_streaming: false,
         };
         DataFrame::new(self.session, plan)
@@ -1131,13 +1131,12 @@ mod tests {
             .option("password", "secret")
             .jdbc("jdbc:mysql://localhost:3306/db", "table_name", None);
 
-        match df.plan.as_ref() {
-            LogicalPlan::Read {
-                read_type:
-                    ReadType::DataSource {
-                        options, format, ..
-                    },
-                ..
+        let LogicalPlan::Read { read_type, .. } = df.plan.as_ref() else {
+            panic!("expected Read plan");
+        };
+        match read_type.as_ref() {
+            ReadType::DataSource {
+                options, format, ..
             } => {
                 assert_eq!(format.as_deref(), Some("jdbc"));
                 assert_eq!(
@@ -1162,13 +1161,12 @@ mod tests {
             Some(predicates.clone()),
         );
 
-        match df.plan.as_ref() {
-            LogicalPlan::Read {
-                read_type:
-                    ReadType::DataSource {
-                        predicates: preds, ..
-                    },
-                ..
+        let LogicalPlan::Read { read_type, .. } = df.plan.as_ref() else {
+            panic!("expected Read plan with predicates");
+        };
+        match read_type.as_ref() {
+            ReadType::DataSource {
+                predicates: preds, ..
             } => {
                 assert_eq!(preds.len(), 2);
             }
@@ -1302,13 +1300,12 @@ mod tests {
             .options(opts)
             .load(Some("/data.csv"));
 
-        match df.plan.as_ref() {
-            LogicalPlan::Read {
-                read_type:
-                    ReadType::DataSource {
-                        options, format, ..
-                    },
-                ..
+        let LogicalPlan::Read { read_type, .. } = df.plan.as_ref() else {
+            panic!("expected Read plan");
+        };
+        match read_type.as_ref() {
+            ReadType::DataSource {
+                options, format, ..
             } => {
                 assert_eq!(format.as_deref(), Some("csv"));
                 assert_eq!(options.get("delimiter").map(String::as_str), Some(";"));

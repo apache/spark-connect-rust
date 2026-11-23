@@ -1084,7 +1084,7 @@ impl Catalog {
     /// for an empty database (e.g. `listTables` with no tables) rather than erroring.
     fn execute_catalog_as_dataframe(&self, catalog: &proto::Catalog) -> Result<DataFrame> {
         let plan = crate::plan::LogicalPlan::Catalog {
-            catalog: catalog.clone(),
+            catalog: Box::new(catalog.clone()),
         };
         Ok(DataFrame::new(self.session.clone(), plan))
     }

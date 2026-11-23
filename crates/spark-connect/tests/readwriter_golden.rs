@@ -174,7 +174,7 @@ fn test_read_json() {
     };
 
     let plan = LogicalPlan::Read {
-        read_type,
+        read_type: Box::new(read_type),
         is_streaming: false,
     };
 
@@ -206,7 +206,7 @@ fn test_read_parquet() {
     };
 
     let plan = LogicalPlan::Read {
-        read_type,
+        read_type: Box::new(read_type),
         is_streaming: false,
     };
 
@@ -236,7 +236,7 @@ fn test_read_csv() {
     };
 
     let plan = LogicalPlan::Read {
-        read_type,
+        read_type: Box::new(read_type),
         is_streaming: false,
     };
 
@@ -265,7 +265,7 @@ fn test_read_orc() {
     };
 
     let plan = LogicalPlan::Read {
-        read_type,
+        read_type: Box::new(read_type),
         is_streaming: false,
     };
 
@@ -294,7 +294,7 @@ fn test_read_text() {
     };
 
     let plan = LogicalPlan::Read {
-        read_type,
+        read_type: Box::new(read_type),
         is_streaming: false,
     };
 
@@ -327,7 +327,7 @@ fn test_read_with_options() {
     };
 
     let plan = LogicalPlan::Read {
-        read_type,
+        read_type: Box::new(read_type),
         is_streaming: false,
     };
 
@@ -357,7 +357,7 @@ fn test_read_with_schema() {
     };
 
     let plan = LogicalPlan::Read {
-        read_type,
+        read_type: Box::new(read_type),
         is_streaming: false,
     };
 
@@ -382,7 +382,7 @@ fn test_read_table() {
     };
 
     let plan = LogicalPlan::Read {
-        read_type,
+        read_type: Box::new(read_type),
         is_streaming: false,
     };
 
@@ -417,7 +417,7 @@ fn test_read_jdbc() {
     };
 
     let plan = LogicalPlan::Read {
-        read_type,
+        read_type: Box::new(read_type),
         is_streaming: false,
     };
 

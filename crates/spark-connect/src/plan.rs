@@ -148,9 +148,11 @@ impl std::fmt::Debug for SharedPlan {
 }
 
 #[derive(Debug, Clone)]
-// `GroupMap` is the largest variant; boxing its fields would change the public fields of the
-// variant, and each plan node is shared in an `Arc`, so its size is paid once per node.
-#[allow(clippy::large_enum_variant)]
+// Each node of every plan is the size of the largest variant, which every DataFrame derived of
+// another pays for its node: so the large fields of the variants that few plans have are boxed,
+// the UDF expressions of the maps, the state of `GroupMap`, the relation of `MlTransform`, the
+// error of `Unbuildable`, the catalog of `Catalog`, the read type of `Read` and the return type of
+// `CommonInlineUdtf`, which makes a node 184 bytes, from 648 (see `layout_tests`).
 pub enum LogicalPlan {
     /// A range of integers: `range(start, end, step)`.
     Range {
@@ -342,7 +344,7 @@ pub enum LogicalPlan {
     /// either kind, in the order in which PySpark builds the plan, its inputs before itself.
     Unbuildable {
         input: SharedPlan,
-        error: SparkError,
+        error: Box<SparkError>,
     },
     /// Hint: `df.hint(name, parameters...)`.
     Hint {
@@ -437,7 +439,7 @@ pub enum LogicalPlan {
     CachedRelation { relation: Box<proto::Relation> },
     /// Read: `spark.read.format(...).load(...)` or `spark.read.table(...)`.
     Read {
-        read_type: crate::readwriter::ReadType,
+        read_type: Box<crate::readwriter::ReadType>,
         is_streaming: bool,
     },
     /// RelationChanges: `spark.read.changes(table)` / `spark.readStream.changes(table)`
@@ -518,14 +520,14 @@ pub enum LogicalPlan {
     /// inline, so `input` keeps the input plan, and the owners in it, alive; `owner` keeps
     /// the cached model that the relation refers to alive, if any.
     MlTransform {
-        ml_relation: proto::Relation,
+        ml_relation: Box<proto::Relation>,
         input: Arc<LogicalPlan>,
         owner: Option<RelationOwner>,
     },
     /// A catalog operation exposed as a relation (e.g. `listTables`, `listColumns`),
     /// evaluated lazily so `.collect()` returns the server's rows - including zero
     /// rows for an empty database, which must not be an error.
-    Catalog { catalog: proto::Catalog },
+    Catalog { catalog: Box<proto::Catalog> },
     /// Transpose: swap rows and columns. `index_columns` optionally names the
     /// column(s) used as the transposed header (empty = server default).
     Transpose {
@@ -536,7 +538,7 @@ pub enum LogicalPlan {
     /// of the resource profile of its stage, if any.
     MapPartitions {
         input: SharedPlan,
-        func: CommonInlineUserDefinedFunctionExpression,
+        func: Box<CommonInlineUserDefinedFunctionExpression>,
         is_barrier: bool,
         profile_id: Option<i32>,
         /// The id of the resource profile as a request reads it when it builds the plan, after
@@ -552,7 +554,7 @@ pub enum LogicalPlan {
     GroupMap {
         input: SharedPlan,
         grouping_expressions: Vec<Expression>,
-        func: CommonInlineUserDefinedFunctionExpression,
+        func: Box<CommonInlineUserDefinedFunctionExpression>,
         sorting_expressions: Vec<Expression>,
         // Stateful fields (all default to None/empty for plain applyInPandas/applyInArrow).
         initial_input: Option<SharedPlan>,
@@ -560,15 +562,15 @@ pub enum LogicalPlan {
         is_map_groups_with_state: Option<bool>,
         output_mode: Option<String>,
         timeout_conf: Option<String>,
-        state_schema: Option<DataType>,
-        transform_with_state_info: Option<TransformWithStateInfo>,
+        state_schema: Option<Box<DataType>>,
+        transform_with_state_info: Option<Box<TransformWithStateInfo>>,
     },
     /// ApplyInPandasWithState: `GroupedData.applyInPandasWithState`. The schemas are the
     /// strings that it sends, a DDL string or the JSON of a type, which the server parses.
     ApplyInPandasWithState {
         input: SharedPlan,
         grouping_expressions: Vec<Expression>,
-        func: CommonInlineUserDefinedFunctionExpression,
+        func: Box<CommonInlineUserDefinedFunctionExpression>,
         output_schema: String,
         state_schema: String,
         output_mode: String,
@@ -580,7 +582,7 @@ pub enum LogicalPlan {
         input_grouping_expressions: Vec<Expression>,
         other: SharedPlan,
         other_grouping_expressions: Vec<Expression>,
-        func: CommonInlineUserDefinedFunctionExpression,
+        func: Box<CommonInlineUserDefinedFunctionExpression>,
     },
     /// AsOfJoin: `DataFrame._joinAsOf`, which pandas-on-Spark's `merge_asof` calls.
     AsOfJoin {
@@ -610,7 +612,7 @@ pub enum LogicalPlan {
         function_name: String,
         deterministic: bool,
         arguments: Vec<Expression>,
-        return_type: Option<crate::types::DataType>,
+        return_type: Option<Box<crate::types::DataType>>,
         eval_type: i32,
         command: Vec<u8>,
         python_ver: String,
@@ -3924,7 +3926,7 @@ impl LogicalPlan {
                 let mut read = proto::Read::default();
                 read.is_streaming = *is_streaming;
 
-                match read_type {
+                match &**read_type {
                     crate::readwriter::ReadType::DataSource {
                         format,
                         schema,
@@ -4134,10 +4136,10 @@ impl LogicalPlan {
             }
 
             LogicalPlan::MlTransform { ml_relation, .. } => {
-                return ml_relation.clone();
+                return (**ml_relation).clone();
             }
             LogicalPlan::Catalog { catalog } => {
-                relation.rel_type = Some(proto::relation::RelType::Catalog(catalog.clone()));
+                relation.rel_type = Some(proto::relation::RelType::Catalog((**catalog).clone()));
                 return relation;
             }
             LogicalPlan::Transpose {
@@ -4295,7 +4297,7 @@ impl LogicalPlan {
                     function_name,
                     *deterministic,
                     arguments,
-                    return_type.as_ref(),
+                    return_type.as_deref(),
                     *eval_type,
                     (command, pickler.as_ref()),
                     python_ver,
@@ -5315,7 +5317,7 @@ mod inline_udtf_tests {
             LogicalPlan::GroupMap {
                 input: Arc::new(range(0, 1, 1)).into(),
                 grouping_expressions: vec![Expression::column("id")],
-                func: pickled_udf(recording_pickler(&calls, "function", false)),
+                func: Box::new(pickled_udf(recording_pickler(&calls, "function", false))),
                 sorting_expressions: vec![],
                 initial_input: Some(Arc::new(initial).into()),
                 initial_grouping_expressions: vec![Expression::column("id")],
@@ -6900,7 +6902,7 @@ mod deep_plan_tests {
         );
         Arc::new(LogicalPlan::Unbuildable {
             input: input.into(),
-            error,
+            error: Box::new(error),
         })
     }
 
@@ -7057,5 +7059,21 @@ mod deep_plan_tests {
         });
         let error = relation_with_ids(&plan, &PlanIds::new()).unwrap_err();
         assert!(error.message().contains("data type subquery"), "{error}");
+    }
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+
+    /// The size of a node of a plan, that of its largest variant, which each node of every plan
+    /// takes, whatever its variant (see `LogicalPlan`): a field that makes it grow goes in a box,
+    /// or this size changes on purpose. The largest variants are `Parse`, `GroupMap` and
+    /// `AsOfJoin`, of 177 bytes, of the 16 bytes of each of their inputs (`SharedPlan`).
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn a_node_of_a_plan_is_184_bytes() {
+        assert_eq!(std::mem::size_of::<SharedPlan>(), 16);
+        assert_eq!(std::mem::size_of::<LogicalPlan>(), 184);
     }
 }

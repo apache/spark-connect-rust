@@ -1629,7 +1629,7 @@ impl Transformer for VectorAssembler {
         relation.common = Some(proto::RelationCommon::default());
         relation.rel_type = Some(proto::relation::RelType::MlRelation(Box::new(ml_relation)));
         let plan = LogicalPlan::MlTransform {
-            ml_relation: relation,
+            ml_relation: Box::new(relation),
             input: df.plan.clone(),
             owner: None,
         };
@@ -2081,7 +2081,7 @@ impl CachedModel {
         Ok(DataFrame::new(
             df.session.clone(),
             LogicalPlan::MlTransform {
-                ml_relation: relation,
+                ml_relation: Box::new(relation),
                 input: df.plan.clone(),
                 owner: Some(RelationOwner(self.0.clone())),
             },
@@ -5900,7 +5900,7 @@ impl PowerIterationClustering {
         Ok(DataFrame::new(
             dataset.session.clone(),
             LogicalPlan::MlTransform {
-                ml_relation: relation,
+                ml_relation: Box::new(relation),
                 input: dataset.plan.clone(),
                 owner: None,
             },

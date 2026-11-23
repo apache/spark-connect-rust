@@ -134,7 +134,7 @@ macro_rules! feature_transformer {
                 Ok(DataFrame::new(
                     df.session.clone(),
                     LogicalPlan::MlTransform {
-                        ml_relation,
+                        ml_relation: Box::new(ml_relation),
                         input: df.plan.clone(),
                         owner: None,
                     },
