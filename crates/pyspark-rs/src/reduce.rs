@@ -8,8 +8,6 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyString, PyTuple};
 use spark_connect::column::Column;
 
-use crate::column::PyColumn;
-
 /// The object of the native state `init` of the class `cls`, `T` itself or a Python subclass of
 /// it, as PyO3's `tp_new` of a `#[new]` makes one of a subclass: so a copy of an object of a
 /// subclass, and the object that `_of_state` gives back of its pickle, are of the subclass, as
@@ -126,7 +124,7 @@ pub(crate) fn column_list<'py>(
 ) -> PyResult<Bound<'py, PyList>> {
     let items = columns
         .iter()
-        .map(|column| Bound::new(py, PyColumn::new(column.clone())))
+        .map(|column| crate::column::column_object(py, column.clone()))
         .collect::<PyResult<Vec<_>>>()?;
     PyList::new(py, items)
 }

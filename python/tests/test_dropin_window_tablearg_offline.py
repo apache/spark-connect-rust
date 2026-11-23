@@ -200,7 +200,12 @@ def test_table_arg_pickles_as_pyspark(spark, _shared_mock_connect):
             assert type(loaded) is type(table)
             assert loaded.to_plan(spark.client) == table.to_plan(spark.client)
             assert loaded._is_partitioned() == table._is_partitioned()
-            assert vars(loaded) == vars(table)
+            # Of a new subquery expression, of the same repr, and of the same user attributes.
+            assert list(vars(loaded)) == list(vars(table))
+            assert repr(loaded._subquery_expr) == repr(table._subquery_expr)
+            assert loaded._subquery_expr is not table._subquery_expr
+            assert {k: v for k, v in vars(loaded).items() if k != "_subquery_expr"} == {
+                k: v for k, v in vars(table).items() if k != "_subquery_expr"}
             assert references(loaded) == references(table)
     assert (len(service.analyze_requests), len(service.execute_requests)) == requests
     bad = spark.range(1).alias(5).asTable()
@@ -280,9 +285,16 @@ def test_window_copy_and_pickle_keep_user_attributes():
 
 
 def test_window_without_user_attributes_copies_and_pickles():
+    # As PySpark's WindowSpec, a plain object of its state: a copy shares its lists and its
+    # frame, and a pickle of any protocol copies them, of the same repr.
     window = Window.partitionBy("id").orderBy("name")
-    assert vars(copy.copy(window)) == {}
-    assert vars(pickle.loads(pickle.dumps(window))) == {}
+    state = ["_partitionSpec", "_orderSpec", "_frame"]
+    shallow = copy.copy(window)
+    assert list(vars(shallow)) == state
+    assert all(vars(shallow)[key] is vars(window)[key] for key in state)
+    for protocol in range(pickle.HIGHEST_PROTOCOL + 1):
+        loaded = pickle.loads(pickle.dumps(window, protocol))
+        assert list(vars(loaded)) == state and repr(loaded) == repr(window)
     assert repr(copy.copy(window)) == repr(window)
 
 

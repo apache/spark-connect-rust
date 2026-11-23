@@ -24,9 +24,7 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING, Union
 
 from pyspark import _pyspark
-from pyspark import cloudpickle as _cloudpickle
 from pyspark._pyspark import WindowSpec
-from pyspark.sql.connect import _window_reduce
 from pyspark.sql.window import Window as _ParentWindow
 
 if TYPE_CHECKING:
@@ -77,5 +75,3 @@ class Window(_ParentWindow):
     def rangeBetween(start: int, end: int) -> "WindowSpec":
         return Window._spec.rangeBetween(start, end)
 
-
-_cloudpickle.register_pickle_by_value(_window_reduce)

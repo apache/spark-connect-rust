@@ -8588,3 +8588,54 @@ def test_a_session_keeps_its_state_in_its_dict_and_requests_of_its_client_as_pys
         assert session.conf.get("spark.sql.shuffle.partitions") != "7"
     finally:
         other.stop()
+
+
+def test_columns_windows_and_table_arguments_keep_their_state_in_their_dict_as_pysparks(session):
+    # As official PySpark 4.3.0, whose Column keeps its `_expr`, whose WindowSpec keeps its
+    # `_partitionSpec`, `_orderSpec` and `_frame`, and whose TableArg keeps its `_subquery_expr`
+    # in their __dict__, which their methods read at the call: a Column of a LiteralExpression,
+    # a Column whose `_expr` is assigned, a window of PySpark's arguments and a table argument of
+    # the subquery of another give the rows of their state, and a frame of a row bound beyond an
+    # int is PySpark's error of the request.
+    from pyspark.errors import PySparkValueError
+    from pyspark.sql import functions as F
+    from pyspark.sql.connect.column import Column
+    from pyspark.sql.connect.expressions import LiteralExpression
+    from pyspark.sql.connect.table_arg import TableArg
+    from pyspark.sql.connect.window import Window, WindowFrame, WindowSpec
+    from pyspark.sql.types import LongType
+
+    df = session.range(4).select(F.col("id"), (F.col("id") % 2).alias("g"))
+    five = Column(LiteralExpression(5, LongType()))
+    assert vars(five) == {"_expr": five._expr}
+    assert df.select((five + F.col("id")).alias("v")).collect()[0].v == 5
+    col = F.col("id")
+    col._expr = (F.col("id") * 10)._expr
+    assert [row[0] for row in df.select(col).orderBy("id").collect()] == [0, 10, 20, 30]
+    ordered = Window.partitionBy("g").orderBy("id")
+    window = WindowSpec(
+        ordered._partitionSpec, ordered._orderSpec, WindowFrame(True, Window.unboundedPreceding, 0)
+    )
+    assert vars(window)["_partitionSpec"] is ordered._partitionSpec
+    rows = df.select("id", F.sum("id").over(window).alias("s")).orderBy("id").collect()
+    assert [row.s for row in rows] == [0, 1, 2, 4]
+    beyond = F.sum("id").over(ordered.rowsBetween(-(2**40), 0))
+    with pytest.raises(PySparkValueError) as raised:
+        df.select(beyond).collect()
+    assert raised.value.getCondition() == "VALUE_NOT_BETWEEN"
+    table = df.asTable().withSinglePartition()
+    same = TableArg(table._subquery_expr)
+    assert vars(same) == {"_subquery_expr": table._subquery_expr} and same._is_partitioned()
+
+    @F.udtf(returnType="n: long")
+    class Count:
+        def __init__(self):
+            self.n = 0
+
+        def eval(self, row):
+            self.n += 1
+
+        def terminate(self):
+            yield (self.n,)
+
+    assert [row.n for row in Count(same).collect()] == [4]

@@ -31,6 +31,35 @@ pub(crate) fn with_origin(fragment: &str) -> PyResult<Option<OriginGuard>> {
     Python::attach(|py| Ok(origin_of(py, fragment)?.map(set_current)))
 }
 
+/// The call site in user code of one call of a native function that does what several API
+/// functions of PySpark do, such as `WindowSpec.orderBy`, which calls `col` and `asc` of each
+/// column name: [`CallSiteOrigin::with`] of each of their names is [`with_origin`] of it, of the
+/// call site that the first one reads, as no Python frame is entered between them.
+pub(crate) struct CallSiteOrigin(std::cell::OnceCell<Option<Origin>>);
+
+impl CallSiteOrigin {
+    pub(crate) fn new() -> Self {
+        CallSiteOrigin(std::cell::OnceCell::new())
+    }
+
+    /// As [`with_origin`] of `fragment`, of the call site of the first call.
+    pub(crate) fn with(&self, fragment: &str) -> PyResult<Option<OriginGuard>> {
+        let origin = match self.0.get() {
+            Some(origin) => origin,
+            None => {
+                let read = Python::attach(|py| origin_of(py, fragment))?;
+                self.0.get_or_init(|| read)
+            }
+        };
+        Ok(origin.as_ref().map(|origin| {
+            set_current(Origin {
+                fragment: fragment.to_string(),
+                call_site: origin.call_site.clone(),
+            })
+        }))
+    }
+}
+
 /// The origin that [`with_origin`] gives the expressions of `fragment` now, as PySpark's
 /// `_with_origin` makes it: None when DataFrame debugging is disabled, or when the call site
 /// cannot be read.

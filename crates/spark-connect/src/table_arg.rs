@@ -235,6 +235,23 @@ impl TableArg {
     pub fn to_column(&self) -> Column {
         Column::new(ExpressionNode::Subquery(Box::new(self.subquery.clone())).into())
     }
+
+    /// The table argument of `column`, if it is the Column of the subquery of a table argument
+    /// ([`TableArg::to_column`]), as PySpark's `TableArg(subquery_expr)` is of the subquery
+    /// expression that it is given. Not a stable API.
+    #[doc(hidden)]
+    pub fn of_column(column: &Column) -> Option<TableArg> {
+        match column.expression().node() {
+            ExpressionNode::Subquery(subquery)
+                if subquery.subquery_type == SubqueryType::TableArg =>
+            {
+                Some(TableArg {
+                    subquery: (**subquery).clone(),
+                })
+            }
+            _ => None,
+        }
+    }
 }
 
 impl From<TableArg> for Column {
@@ -289,6 +306,25 @@ mod tests {
         let subquery = subquery_proto(&t);
         assert_eq!(subquery.plan_id, 7);
         assert_eq!(subquery.table_arg_options, None);
+    }
+
+    #[test]
+    fn the_column_of_a_table_argument_gives_it_back_and_no_other_column_does() {
+        // As PySpark's `TableArg(t._subquery_expr)`, of the subquery of the table argument.
+        let t = arg().partition_by(vec![col("a")]).unwrap();
+        let back = TableArg::of_column(&t.to_column()).expect("a table argument");
+        assert!(back.is_partitioned());
+        assert_eq!(subquery_proto(&back), subquery_proto(&t));
+        assert!(TableArg::of_column(&col("a")).is_none());
+        let scalar = Column::new(
+            ExpressionNode::Subquery(Box::new(SubqueryExpression::new(
+                std::sync::Arc::new(base_plan()),
+                7,
+                SubqueryType::Scalar,
+            )))
+            .into(),
+        );
+        assert!(TableArg::of_column(&scalar).is_none());
     }
 
     #[test]

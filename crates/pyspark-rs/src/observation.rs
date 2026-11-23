@@ -124,12 +124,12 @@ impl PyObservation {
     fn _on(
         slf: &Bound<'_, Self>,
         df: PyRef<'_, PyDataFrame>,
-        exprs: Vec<PyRef<'_, PyColumn>>,
+        exprs: Vec<Bound<'_, PyColumn>>,
     ) -> PyResult<PyDataFrame> {
-        let exprs: Vec<_> = exprs
+        let exprs = exprs
             .iter()
-            .map(|c| c.column.expression().clone())
-            .collect();
+            .map(|c| Ok(crate::column::column_of(c)?.expression().clone()))
+            .collect::<PyResult<Vec<_>>>()?;
         let observed = observe(slf.py(), &df, slf, exprs)?;
         // The cached schema of the DataFrame, which observing does not change.
         Ok(df.of_same_schema(observed))

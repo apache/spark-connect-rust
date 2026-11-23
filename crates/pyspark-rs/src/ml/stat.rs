@@ -243,7 +243,7 @@ impl PySummaryBuilder {
         slf: &Bound<'_, Self>,
         featuresCol: &Bound<'_, PyAny>,
         weightCol: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<PyColumn> {
+    ) -> PyResult<crate::column::ColumnOut> {
         // As in the remote SummaryBuilder, the metrics are those of the `_metrics` of the builder
         // (the AttributeError of a builder of none, `SummaryBuilder(None)`), converted at
         // summary(), each with `lit` (`F.array([F.lit(m) for m in self._metrics])`), so that a list
@@ -254,19 +254,20 @@ impl PySummaryBuilder {
             .try_iter()?
             .map(|v| crate::functions::to_column(&v?))
             .collect::<PyResult<Vec<_>>>()?;
-        let features = featuresCol
-            .extract::<PyRef<'_, PyColumn>>()
-            .map_err(|_| PyAssertionError::new_err(()))?
-            .column
-            .clone();
+        let features = crate::column::column_of(
+            featuresCol
+                .cast::<PyColumn>()
+                .map_err(|_| PyAssertionError::new_err(()))?,
+        )?;
         let weight = weightCol
             .map(|v| {
-                v.extract::<PyRef<'_, PyColumn>>()
-                    .map(|c| c.column.clone())
-                    .map_err(|_| PyAssertionError::new_err(()))
+                let column = v
+                    .cast::<PyColumn>()
+                    .map_err(|_| PyAssertionError::new_err(()))?;
+                crate::column::column_of(column)
             })
             .transpose()?;
-        Ok(PyColumn::new(
+        Ok(crate::column::ColumnOut::new(
             SummaryBuilder::from_metric_columns(metrics).summary(features, weight),
         ))
     }
@@ -280,17 +281,9 @@ fn columns(
     weight: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<(spark_connect::Column, Option<spark_connect::Column>)> {
     let error = || PyTypeError::new_err("featureCol and weightCol should be a Column");
-    let col = col
-        .extract::<PyRef<'_, PyColumn>>()
-        .map_err(|_| error())?
-        .column
-        .clone();
+    let col = crate::column::column_of(col.cast::<PyColumn>().map_err(|_| error())?)?;
     let weight = weight
-        .map(|v| {
-            v.extract::<PyRef<'_, PyColumn>>()
-                .map(|c| c.column.clone())
-                .map_err(|_| error())
-        })
+        .map(|v| crate::column::column_of(v.cast::<PyColumn>().map_err(|_| error())?))
         .transpose()?;
     Ok((col, weight))
 }
@@ -330,9 +323,12 @@ macro_rules! metrics {
         #[staticmethod]
         #[pyo3(name=$python, signature=(col, weightCol=None))]
         #[allow(non_snake_case)]
-        fn $name(col: &Bound<'_, PyAny>, weightCol: Option<&Bound<'_, PyAny>>) -> PyResult<PyColumn> {
+        fn $name(
+            col: &Bound<'_, PyAny>,
+            weightCol: Option<&Bound<'_, PyAny>>,
+        ) -> PyResult<crate::column::ColumnOut> {
             let (col, weight) = columns(col, weightCol)?;
-            Ok(PyColumn::new(Summarizer::$name(col, weight)))
+            Ok(crate::column::ColumnOut::new(Summarizer::$name(col, weight)))
         }
     )* } };
 }

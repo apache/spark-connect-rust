@@ -3121,12 +3121,12 @@ a Column of any depth, as PySpark's `copy.copy` does; PySpark's `copy.deepcopy` 
 `RecursionError` from about 165 levels.
 
 The frame bounds of `Window.rowsBetween` and `rangeBetween` are converted when the plan is built,
-as in PySpark: a bound of a row frame beyond an int, such as a start of `-2**40` or of
-`Window.unboundedFollowing`, makes a window that shows it as it is, of which each request of a plan
-raises `VALUE_NOT_BETWEEN`, of the start and then of the end. A bound of `True`, which protobuf's
-int field refuses, or of an int beyond a long, which the window of the drop-in does not hold, raises
-at the call the error that PySpark raises when it builds the plan, the first of the start and of
-the end. The type of `cast` and `try_cast` is converted when the plan is
+as in PySpark: the window keeps them in PySpark's `WindowFrame` as they are, so a bound of a row
+frame beyond an int, such as a start of `-2**40` or of `Window.unboundedFollowing`, a bound of
+`True`, which protobuf's int field refuses, and an int beyond a long make a window that shows them
+as they are, of which each request of a plan of a window expression raises PySpark's error, of the
+start and then of the end (`VALUE_NOT_BETWEEN`, the `TypeError` of protobuf, `Value out of range`).
+The type of `cast` and `try_cast` is converted when the plan is
 built, as in PySpark: a `StructField`, the base `DataType()`, an abstract type such as `AtomicType()`
 and a Python subclass of them, also one nested in the type, make a Column that renders as the
 `simpleString` of the type, and whose plans raise PySpark's `UNSUPPORTED_OPERATION`.
@@ -3542,11 +3542,10 @@ session of that ID is active, as a pickled DataFrame does: it raises `NO_ACTIVE_
 is, such as on another thread, and `PySparkAssertionError` where another one is, where PySpark's,
 whose plan holds no session, unpickles anywhere. On a
 Python worker of the server it unpickles as PySpark Connect's table argument of the relation, which
-needs no session. Its `_subquery_expr` is an expression of `pyspark.sql.connect.expressions`, as a
-Column's `_expr` is, of PySpark's `to_plan` and `repr`, which is made at each access as a property
-of the native class: `vars()` of the table argument does not show it and it cannot be set, where
-PySpark's is an instance attribute, a `SubqueryExpression` with the fields of the subquery.
-`_is_partitioned()` is PySpark's.
+needs no session. Its `_subquery_expr` is the entry of its `__dict__`, as PySpark's, an expression
+of `pyspark.sql.connect.expressions`, as a Column's `_expr` is, of PySpark's `to_plan` and `repr`,
+but not the `SubqueryExpression` of PySpark, whose fields of the subquery it does not have (see the
+`Column`, the `WindowSpec` and the `TableArg` below). `_is_partitioned()` is PySpark's.
 
 The `__repr__` of a Column of a subquery names its plan by its plan ID,
 `SubqueryExpression(plan=<plan 2>, type=scalar)`, where PySpark's shows the repr of its plan
@@ -3906,13 +3905,16 @@ Column of the subquery of a DataFrame of a plan that did not build keeps, to bui
 requests, the plan and the exception of a build that failed, which a plan keeps, and the Python
 Observations of `observe`. Each object that holds a reference to such a part holds a reference to
 its `SharedPart` and reports it, as each of PySpark's objects holds its plan objects: a DataFrame, a
-Column, a table argument, a window specification, the generator of `toLocalIterator`, which holds
-its DataFrame until it ends, as PySpark's generator holds `self`, and the expression of a Column
-(`Column._expr`) and of a table argument (`TableArg._subquery_expr`), which `copy.copy` and
-`copy.deepcopy` copy as they copy a Column. So a reference cycle through such an object and any of
-the objects that hold it, one or several, is collected, as PySpark collects it: through a bound
-method of an object that keeps a Column and a DataFrame of it, or a DataFrame and one derived from
-it; through a plan of the Python client whose attribute
+generator of `toLocalIterator`, which holds its DataFrame until it ends, as PySpark's generator
+holds `self`, and the expressions of the client, the `_expr` of a Column, the `_subquery_expr` of a
+table argument and the entries of the lists of a window specification, which `copy.copy` and
+`copy.deepcopy` copy as they copy a Column, and which the `__dict__` of the Column, the table
+argument and the window holds, as PySpark's hold their expressions, so the collector sees them
+through it, and a Column of an expression that it replaced holds the parts of the new one only. So
+a reference cycle through such an object and any of the objects that hold it, one or several, is
+collected, as PySpark collects it: through a bound method of an object that keeps a Column and a
+DataFrame of it, or a DataFrame and one derived from it; through a plan of the Python client whose
+attribute
 keeps both its DataFrame and a Column of its subquery, or a table argument of it. A function or a
 plan that a live object reaches is kept as it is, and pickled at the requests of that object. Those
 that hold their DataFrame report it too, and grouped data, their cogroups, `na` and `stat` hold
@@ -4091,28 +4093,30 @@ construct and subclass as PySpark's plain classes do. A patch of a classic class
 reaches the objects of a session as it reaches PySpark's Connect objects, which inherit it: not
 where the Connect class has the name itself, nor where the objects set it on themselves (`_expr`
 of a Column, `df` of `na`) and the patch is not a data descriptor; deleting it gives the native
-class its own attribute back. What stays different: these classic classes are of an `ABCMeta`
+class its own attribute back. A data descriptor without a setter patched over such an attribute
+(`_expr` of a Column, `_partitionSpec` of a WindowSpec, `_subquery_expr` of a TableArg, `df` of
+`na` and `stat`) raises its `AttributeError` when the `__init__` of a Connect object sets it, as
+PySpark's. What stays different: these classic classes are of an `ABCMeta`
 subclass, of an `_abc_impl` among their attributes, and a class that subclasses one of them is
-of `abc.ABCMeta`, where PySpark's are of `type`; and of a data descriptor without a setter
-patched over such an attribute of the objects of a Column, a WindowSpec or a TableArg, PySpark's
-`__init__` of a Connect object raises its `AttributeError`, where the drop-in's object reads the
-patch (the `__init__` of `na` and `stat` sets their `df`, and raises it as PySpark's). The readers
-and writers of PySpark Connect are subclasses of the `OptionUtils` of
-`pyspark.sql.connect.readwriter`, a class of private methods only: so are the drop-in's readers and
-writers, PySpark's classes.
+of `abc.ABCMeta`, where PySpark's are of `type`. The readers and writers of PySpark Connect are
+subclasses of the `OptionUtils` of `pyspark.sql.connect.readwriter`, a class of private methods
+only: so are the drop-in's readers and writers, PySpark's classes.
 
 PySpark's classes are plain Python classes, which a user subclasses. So are these of the drop-in:
 the DataFrame, `Observation`, and the `SparkSession`, `Catalog`, `TableValuedFunction`,
 `DataSourceRegistration`, `RuntimeConf`, `StreamingQuery`, `StreamingQueryManager`,
 `StreamingQueryListenerBus`, `DataFrameReader`, `DataStreamReader`, `GroupedData`,
 `PandasCogroupedOps`, `DataFrameNaFunctions`, `DataFrameStatFunctions`, `DataFrameWriter`,
-`DataFrameWriterV2`, `DataStreamWriter` and `MergeIntoWriter` and its clauses of
-`pyspark.sql.connect`, which construct of their PySpark arguments
+`DataFrameWriterV2`, `DataStreamWriter`, `MergeIntoWriter` and its clauses, `Column`, `WindowSpec`
+and `TableArg` of `pyspark.sql.connect`, which construct of their PySpark arguments
 (`SparkSession(connection=...)`, `Catalog(spark)`, `RuntimeConf(spark.client)`,
-`StreamingQuery(spark, id, runId)`, `DataFrameReader(spark)`, `GroupedData(df, "groupby",
-[F.col("id")])`, `DataFrameNaFunctions(df)`), also a subclass of an
-`__init__` of its own, and whose setters, copies and pickles are of the subclass (but those of a
-session, which are the active session of its ID, as PySpark's); `SparkSession.Builder`,
+`StreamingQuery(spark, id, runId)`, `DataFrameReader(spark)`,
+`GroupedData(df, "groupby", [F.col("id")])`, `DataFrameNaFunctions(df)`, `Column(col._expr)`,
+`WindowSpec([], [], None)`, `TableArg(table._subquery_expr)`), also a subclass of an `__init__` of
+its own, and whose setters, copies and pickles are of the subclass (but those of a session, which
+are the active session of its ID, as PySpark's, and the pickles of a `Column` and a `TableArg`,
+which unpickle as the base class, with the other entries of the `__dict__` of the object kept,
+where PySpark's unpickle as the subclass); `SparkSession.Builder`,
 `SparkSession.Hook`, `StorageLevel` and `PythonEvalType`; and the data types, from `StringType` and
 `DecimalType` to `ArrayType`, `StructField` and `StructType` (see above). A session of a subclass is
 the session that its DataFrames, readers and catalogs give back, as in PySpark.
@@ -4282,23 +4286,50 @@ which the `execute_command` of its `_client` executes, whose `ExecutionInfo` the
 `df.mergeInto` makes the `executionInfo` of the DataFrame. The `_source_plan` of a merge writer is
 the plan object that `df._plan` gave when `mergeInto` was called.
 
+The `Column`, the `WindowSpec` and the `TableArg` of `pyspark.sql.connect` keep their state in their
+`__dict__` too, as PySpark's: the `_expr` of a Column, the `_partitionSpec`, `_orderSpec` and
+`_frame` of a window specification and the `_subquery_expr` of a table argument, which their
+`__init__` sets of PySpark's arguments and their methods read at the call. `Column(expr)` takes the
+expression of another Column, as `outer()` does, or an `Expression` of
+`pyspark.sql.connect.expressions`, such as a `LiteralExpression` or one of a class of the user's,
+whose `repr` the Column shows and whose `to_plan` its requests send, of the fields of the object
+then, and raises PySpark's `NOT_EXPECTED_TYPE` of another object. `WindowSpec(partitionSpec,
+orderSpec, frame)` asserts PySpark's types of a bare `AssertionError` (a list of expressions, a list
+of sort orders, a `WindowFrame` or None), and its `__new__` takes the same arguments. The sort
+orders of `orderSpec` are the client's only, those of `asc()`, `desc()` and the others, as the
+drop-in's `pyspark.sql.connect.expressions` has no `SortOrder`, whose objects PySpark's takes;
+`partitionBy`, `orderBy`, `rowsBetween` and `rangeBetween` make a window of the base class, of the
+lists and the frame that they do not replace, shared with this one. `TableArg(subquery_expr)` keeps
+any object, whose fields its methods read (an `int` raises the `AttributeError` of
+`_partition_spec`, as PySpark's). So `vars()` of them is PySpark's, an assignment of `_expr` gives a
+Column of the other expression, a subclass whose property gives the state is of it, an object whose
+`__init__` never ran raises the `AttributeError` of its first attribute that PySpark's method reads
+(`_partitionSpec`, `_orderSpec`, `_subquery_expr`), or of a Column the `RecursionError` of its
+`__getattr__`, which reads `_expr` again. Their copies are those of their `__dict__`, of `__new__`
+of their class and of the arguments of their `__getnewargs__`, as PySpark's: a shallow copy shares
+the state, so a copy of a window shares its lists, and a deep copy copies it. A window pickles so
+too, of `copyreg.__newobj__`, at every protocol, also to a Python worker of the server, where it
+unpickles as PySpark Connect's; a Column and a table argument pickle their expression and its plans,
+as above, and the other entries of their `__dict__`. What differs is of the expressions of the core:
+a Column that a method makes is a value of the expressions at the call, so the window expression of
+`over` is of the lists and the frame of the window then, and a later change of them is not of it,
+where PySpark's `WindowExpression` holds the window and builds its message of it at each request,
+and a Column made of a Column of an `Expression` of PySpark's classes holds its message as its
+`to_plan` gave it then. The expressions that the drop-in makes, the `_expr` of a Column, the entries
+of the lists of a window and the `_subquery_expr` of a table argument, are of the client's class
+`_ColumnExpression` of `pyspark.sql.connect.expressions`, of PySpark's `to_plan` and `repr`, and not
+of PySpark's classes of the module (`ColumnReference`, `SortOrder`, `SubqueryExpression` and the
+others), whose fields they do not have, as the expressions are the core's (see
+`dev/parity/known-differences.md`).
+
 A pickle of PySpark, which makes an object of its class without arguments and then sets its
 `__dict__`, loads in the drop-in: a reader, a catalog and a registration, of their `__dict__`; and
 the drop-in's pickles of them load in PySpark, of their classes, as PySpark's own do: where the
-session of their ID is active. The other native classes, of which the Connect `Column`, `WindowSpec`
-and `TableArg` are, cannot be subclassed (`TypeError: type 'Column' is not an acceptable base
-type`), and do not construct (`TypeError: cannot create '...' instances`): their objects are made of
-the state of the Rust core, a plan, an expression or a query, which the arguments of PySpark's
-constructors, the Python objects of its client, do not give, as the drop-in does not have them, so a
-subclass would have no `__init__` to call:
-- `Column` takes an `Expression` of `pyspark.sql.connect.expressions`; the drop-in's expressions
-  are the Rust core's.
-- `WindowSpec` takes the expressions of its partitioning and ordering and a `WindowFrame`, and
-  `TableArg` a `SubqueryExpression`, of the plan of the Rust core. A WindowSpec has PySpark's
-  `_partitionSpec`, `_orderSpec` and `_frame` as properties of the native object, not in its
-  `__dict__`: lists of the `_expr` of Columns, whose `repr` is that of PySpark's expressions (`[a]`,
-  `[a ASC NULLS FIRST]`), made at each read, and the `WindowFrame` of `pyspark.sql.connect.window`,
-  or None.
+session of their ID is active. The other native classes cannot be subclassed (`TypeError: type
+'...' is not an acceptable base type`), and do not construct (`TypeError: cannot create '...'
+instances`): their objects are made of the state of the Rust core, a plan, an expression or a
+query, which the arguments of PySpark's constructors, the Python objects of its client, do not give,
+as the drop-in does not have them, so a subclass would have no `__init__` to call.
 
 A `copy.copy` or `copy.deepcopy` of a DataFrame requests its schema as PySpark's does, one request
 for the copy, and one more for the DataFrame in a deep copy when it has no schema yet, so a stopped

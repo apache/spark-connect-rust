@@ -15652,7 +15652,7 @@ def test_variant_and_spatial_values_are_sent_and_collected_by_their_attributes_a
 def test_freed_instances_release_their_dict_as_pyspark(mock_connect):
     # As PySpark's classes, plain Python classes, whose instance __dict__ CPython releases with
     # the instance: an attribute is set, read, listed by dir() and deleted, and vars() of a Column
-    # here holds the attributes set and nothing else (PySpark's also holds _expr); one that
+    # holds its _expr and the attributes set, as PySpark's; one that
     # shadows a method, as monkeypatching sets it, is called in its place until it is deleted;
     # and a freed instance releases its dict, which keeps its items while it is referenced. Of
     # a class, of one that extends it in Rust (ArrayType) and of a Python subclass (a UDT), whose
@@ -15668,10 +15668,12 @@ def test_freed_instances_release_their_dict_as_pyspark(mock_connect):
     spark, _ = mock_connect
     df = spark.range(1)
     column = F.col("a")
+    expression = column._expr
     column.tag = 1
-    assert column.tag == 1 and vars(column) == {"tag": 1} and "tag" in dir(column)
+    assert column.tag == 1 and vars(column) == {"_expr": expression, "tag": 1}
+    assert "tag" in dir(column)
     del column.tag
-    assert vars(column) == {}
+    assert vars(column) == {"_expr": expression}
     column.alias = lambda *names: "patched"
     df.count = lambda: 42
     assert column.alias("b") == "patched" and df.count() == 42
@@ -16239,6 +16241,57 @@ def test_holders_that_share_a_plan_report_each_reference_once(mock_connect):
         for target in copies:
             check(name, target, {id(holders), id(copies)})
         del holders, copies, target
+
+
+def test_a_column_whose_expression_is_replaced_holds_and_reports_the_new_expression_only(
+        mock_connect):
+    # As PySpark's Column, whose `_expr` is an entry of its `__dict__`: a Column holds the
+    # expression that it was given last, which the collector sees through its `__dict__`, and
+    # nothing of the expression that it replaced, which reference counting frees with the
+    # function of its UDF once no other object holds it. The parts of the new expression are
+    # reported by the expression, once, whichever Columns and window specifications hold it.
+    import gc
+    import sys
+    import weakref
+
+    from pyspark.sql import Window
+    from pyspark.sql import functions as F
+
+    def function():
+        def f(x):
+            return x
+
+        return f
+
+    old, new = function(), function()
+    column = F.udf(old, "long")("id")
+    other = F.udf(new, "long")("id")
+    freed = weakref.ref(old)
+    del old
+    column._expr = other._expr
+    assert freed() is None
+    assert vars(column) in gc.get_referents(column)
+    assert [r for r in gc.get_referents(vars(column)) if r is other._expr] == [other._expr]
+    holders = [column, other, Window.partitionBy(column), Window.orderBy(other)]
+    gc.collect()
+
+    def check(target, skipped):
+        # As `test_holders_that_share_a_plan_report_each_reference_once`: the references to
+        # `target` but those of this call (the argument and getrefcount's), and the visits of the
+        # objects that the collector tracks, but frames, whose locals it does not visit.
+        others = sys.getrefcount(target) - 2
+        seen = 0
+        for obj in gc.get_objects():
+            if id(obj) not in skipped and type(obj).__name__ != "frame":
+                seen += sum(1 for referent in gc.get_referents(obj) if referent is target)
+        assert seen <= others, (type(target).__name__, seen, others)
+
+    # The UDF holds the tuple of the function and the output type.
+    tuples = [o for o in gc.get_referrers(new) if type(o) is tuple and len(o) == 2]
+    assert tuples
+    for target in [new, other._expr] + tuples:
+        check(target, {id(holders), id(tuples)})
+    del holders, tuples, target
 
 
 def test_holders_that_share_a_plan_are_made_and_freed_on_threads_as_the_collector_runs(
@@ -37949,9 +38002,9 @@ def test_window_frame_bounds_are_compared_asserted_and_converted_as_pyspark():
     # requests raise: 0, False too, is the current row, a row frame sets an int of an int32 in
     # the integer literal, and raises VALUE_NOT_BETWEEN of an int beyond, and a range frame any
     # other int in the long literal, both of which protobuf's default (upb) backend refuses of a
-    # bool, and the long of an int beyond a long. The window of the drop-in holds no bound of True
-    # nor of an int beyond a long: of such a frame, the call raises the error that PySpark's build
-    # raises first, of the start and then of the end.
+    # bool, and the long of an int beyond a long. The window keeps the bounds in PySpark's
+    # WindowFrame as they are, also True and an int beyond a long, so the build of the plan of a
+    # window expression of it raises the error of the start and then of the end, as PySpark's.
     from pyspark.errors import PySparkValueError
     from pyspark.sql import Window
     from pyspark.sql import functions as F
@@ -37995,32 +38048,33 @@ def test_window_frame_bounds_are_compared_asserted_and_converted_as_pyspark():
     for between in rows:
         assert bounds(between(-5, 2**31 - 1)) == (("integer", -5), ("integer", 2**31 - 1))
         for start, end in [(True, 0), (0, True), (True, 2**40)]:
+            spec = between(start, end)
             with pytest.raises(TypeError) as error:
-                between(start, end)
+                bounds(spec)
             assert str(error.value) == integer
         for start, end, name in [(2**40, True, "start"), (2**64, 0, "start"),
-                                 (0, -(2**64), "end"), (2**40, -(2**64), "start")]:
-            with pytest.raises(PySparkValueError) as error:
-                between(start, end)
-            assert error.value.getMessageParameters()["arg_name"] == name
-        for start, end, name in [(2**40, 0, "start"), (0, -(2**40), "end"),
+                                 (0, -(2**64), "end"), (2**40, -(2**64), "start"),
+                                 (2**40, 0, "start"), (0, -(2**40), "end"),
                                  (Window.unboundedFollowing, Window.unboundedPreceding, "start")]:
+            spec = between(start, end)
             with pytest.raises(PySparkValueError) as error:
-                bounds(between(start, end))
+                bounds(spec)
             assert error.value.getMessageParameters()["arg_name"] == name
     for between in ranges:
         assert bounds(between(-(2**31) - 1, 2**40)) == (("long", -(2**31) - 1), ("long", 2**40))
         assert bounds(between(Window.unboundedFollowing, Window.unboundedPreceding)) == (
             ("long", 2**63 - 1), ("long", -(2**63)))
         for start, end in [(True, 0), (0, True), (2**40, True)]:
+            spec = between(start, end)
             with pytest.raises(TypeError) as error:
-                between(start, end)
+                bounds(spec)
             assert str(error.value) == long
         for start, end, shown in [(2**63, 0, "9223372036854775808"),
                                   (0, -(2**63) - 1, "-9223372036854775809"),
                                   (2**64, True, "18446744073709551616")]:
+            spec = between(start, end)
             with pytest.raises(ValueError) as error:
-                between(start, end)
+                bounds(spec)
             assert type(error.value) is ValueError
             assert str(error.value) == f"Value out of range: {shown}"
     assert repr(o.rangeBetween(0, Window.unboundedPreceding)) == (
