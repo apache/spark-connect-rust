@@ -6806,8 +6806,17 @@ mod plan_construction_tests {
 
     #[test]
     fn explain_string_takes_the_explain_modes_of_pyspark() {
-        // As PySpark Connect's client, which checks the mode before it asks the server.
+        // As PySpark Connect's client, which checks the mode before it asks the server. Its
+        // `to_proto` looks up the plan compression first, as PySpark's does, which retries until
+        // its budget ends of no server: of the settings of a failed lookup, as a binding sets
+        // PySpark's `_plan_compression_threshold`, the plan is built of no request.
         let spark = session();
+        spark.client().set_plan_compression_settings(Some(
+            spark_connect_core::client::PlanCompressionSettings {
+                threshold: -1,
+                algorithm: Some("NONE".to_string()),
+            },
+        ));
         let df = spark.range(1).unwrap();
         for mode in ["FORMATTED", "bogus", ""] {
             let err = df.explain_string(mode).unwrap_err();
