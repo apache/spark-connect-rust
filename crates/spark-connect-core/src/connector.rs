@@ -500,6 +500,10 @@ pub(crate) struct Target {
     /// Whether the lookup of the host never ends, of the tests of its deadline.
     #[cfg(test)]
     resolves_never: bool,
+    /// The configuration of the resolver of a DNS server of the target, of the tests, in place of
+    /// the system's.
+    #[cfg(test)]
+    dns_config: Option<crate::dns::Config>,
     /// The count of the lookups of the host, one for each pass of attempts, of the tests.
     #[cfg(test)]
     lookups: Arc<std::sync::atomic::AtomicUsize>,
@@ -544,6 +548,8 @@ impl Target {
             #[cfg(test)]
             resolves_never: false,
             #[cfg(test)]
+            dns_config: None,
+            #[cfg(test)]
             lookups: Default::default(),
         }
     }
@@ -569,7 +575,9 @@ impl Target {
         names: Option<TargetNames>,
     ) -> Self {
         match &form {
-            Some(ChannelTarget::Name { host, port, name }) => match &mut self.tunnel {
+            Some(ChannelTarget::Name {
+                host, port, name, ..
+            }) => match &mut self.tunnel {
                 Some(tunnel) => tunnel.authority = name.clone(),
                 None => {
                     self.host = unbracketed(host).to_string();
@@ -708,6 +716,9 @@ impl Target {
         if let Ok(ip) = self.host.parse::<std::net::IpAddr>() {
             return Ok(vec![SocketAddr::new(ip, self.port)]);
         }
+        if let Some(server) = self.dns_server() {
+            return self.resolve_through(server).await;
+        }
         let mut lookup = std::borrow::Cow::Borrowed(self.host.as_str());
         if self.grpcio {
             // As c-ares takes the name, a C string, up to its first NUL.
@@ -743,6 +754,45 @@ impl Target {
             return Ok(localhost_addresses(resolved.unwrap_or_default(), self.port));
         }
         resolved
+    }
+
+    /// The DNS server of the authority of the target of gRPC (`dns://<server>/<name>`), which
+    /// its name is resolved through, if it has one: of none through the tunnel of a proxy, whose
+    /// own name the system's resolver resolves, as gRPC's proxy mapper replaces the target of the
+    /// channel with the proxy's.
+    fn dns_server(&self) -> Option<SocketAddr> {
+        match &self.form {
+            Some(ChannelTarget::Name {
+                server: Some(server),
+                ..
+            }) if self.tunnel.is_none() => Some(*server),
+            _ => None,
+        }
+    }
+
+    /// The addresses of the host through the DNS server `server`, as grpcio's channel resolves
+    /// them (see [`crate::dns`]): of a C string, up to its first NUL; an address of four decimal
+    /// numbers, of leading zeros too, and an IPv6 address of a zone, are those addresses, as c-ares
+    /// takes them; else the name is looked up through the server, of the configuration of the
+    /// system, as c-ares reads it for each lookup.
+    async fn resolve_through(&self, server: SocketAddr) -> Result<Vec<SocketAddr>, ResolveFailure> {
+        let host = self.host.split('\0').next().unwrap_or_default();
+        if let Some(ip) = crate::grpc_target::ares_numeric_v4(host) {
+            return Ok(vec![SocketAddr::new(ip.into(), self.port)]);
+        }
+        if let Some(address) = crate::grpc_target::ipv6_literal(host, self.port) {
+            return Ok(vec![address]);
+        }
+        #[cfg(test)]
+        let config = self
+            .dns_config
+            .clone()
+            .unwrap_or_else(crate::dns::Config::system);
+        #[cfg(not(test))]
+        let config = crate::dns::Config::system();
+        crate::dns::lookup(server, host, self.port, &config, ipv6_loopback_usable())
+            .await
+            .map_err(ResolveFailure::Server)
     }
 }
 
@@ -879,6 +929,8 @@ enum ResolveFailure {
     /// The name of a target of gRPC is not one that its resolver resolves, of the error that it
     /// gives (see [`ChannelTarget::Unresolvable`]).
     Unparsable(String),
+    /// The lookup of the name through the DNS server of the target failed (see [`crate::dns`]).
+    Server(crate::dns::Status),
     /// Any other error of the resolver, as it gives it.
     Other(String),
 }
@@ -931,6 +983,7 @@ impl ResolveFailure {
             Self::NoData => "DNS server returned answer with no data",
             Self::Timeout => "Timeout while contacting DNS servers",
             Self::BadName => "Misformatted domain name",
+            Self::Server(status) => status.text(),
             Self::Unparsable(detail) | Self::Other(detail) => detail,
         }
     }
@@ -946,6 +999,7 @@ impl ResolveFailure {
             Self::NoData => "the name has no address",
             Self::Timeout => "timed out",
             Self::BadName => "misformatted domain name",
+            Self::Server(status) => status.text(),
         }
     }
 }
@@ -2001,10 +2055,15 @@ async fn attempt_after(
     per_address: Duration,
     delay: Duration,
 ) -> Result<Ready, ChannelFailure> {
-    // The lookup has the deadline of an attempt too, as tonic's connect timeout bounded it.
-    let resolved = match tokio::time::timeout(per_address, target.resolve()).await {
-        Ok(resolved) => resolved,
-        Err(_) => Err(ResolveFailure::Timeout),
+    // The lookup has the deadline of an attempt too, as tonic's connect timeout bounded it, but
+    // through a DNS server, whose lookup ends of the timeout of gRPC's resolution itself.
+    let resolved = if target.dns_server().is_some() {
+        target.resolve().await
+    } else {
+        match tokio::time::timeout(per_address, target.resolve()).await {
+            Ok(resolved) => resolved,
+            Err(_) => Err(ResolveFailure::Timeout),
+        }
     };
     let addresses = resolved.map_err(|failure| ChannelFailure::Resolve {
         name: target.name(),

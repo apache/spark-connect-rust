@@ -128,6 +128,7 @@ fn target(addresses: Vec<SocketAddr>, grpcio: bool) -> Target {
         names: None,
         addresses: Some(addresses),
         resolves_never: false,
+        dns_config: None,
         lookups: Default::default(),
     }
 }
@@ -1254,6 +1255,7 @@ fn form_target(form: ChannelTarget, grpcio: bool) -> Target {
         names: None,
         addresses: None,
         resolves_never: false,
+        dns_config: None,
         lookups: Default::default(),
     }
     .of_channel_target(Some(form), None)
@@ -1309,6 +1311,7 @@ async fn the_names_of_a_target_of_grpc_are_resolved_as_c_ares_resolves_them() {
         host: host.to_string(),
         port: server.port(),
         name: format!("{host}:{}", server.port()),
+        server: None,
     };
     // Four decimal numbers are an address, of leading zeros too, and the names under `localhost`
     // the loopback, of any character.
@@ -1725,4 +1728,62 @@ fn the_tunnel_of_a_target_of_grpc_names_the_server_of_grpcs_proxy_mapper() {
         tunnel_of(path_socket, Some(names("tmp%2Fa.sock", None))),
         None
     );
+}
+
+#[tokio::test]
+async fn a_name_of_a_dns_server_of_its_target_is_resolved_through_it() {
+    use crate::dns::tests::{Answer, Responder};
+    // As grpcio's channel of `dns://<server>/<name>`: the name is asked of the server, of each
+    // family, and its addresses are tried; a failure of the lookup has c-ares's text.
+    let (server, _) = settings_server().await;
+    let dns = Responder::start(
+        move |name: &str, _| match name {
+            "spark.test" => Answer::Addresses(vec![server.ip()]),
+            _ => Answer::Rcode(3),
+        },
+        true,
+    )
+    .await;
+    let port = server.port();
+    let of_server = |host: &str, grpcio: bool| {
+        let mut target = form_target(
+            ChannelTarget::Name {
+                host: host.to_string(),
+                port,
+                name: format!("{host}:{port}"),
+                server: Some(dns.address),
+            },
+            grpcio,
+        );
+        target.dns_config = Some(crate::dns::Config::default());
+        target
+    };
+    let target = of_server("spark.test", true);
+    assert!(attempt(&target, Duration::from_secs(20)).await.is_ok());
+    assert!(dns
+        .asked()
+        .contains(&(false, "spark.test".to_string(), "A")));
+    assert_eq!(
+        failure_of(&of_server("nx.test", true)).await,
+        format!(
+            "errors resolving nx.test:{port}: [field:hostname lookup error:address lookup failed \
+             for nx.test:{port}: Domain name not found]"
+        )
+    );
+    let rust = attempt(&of_server("nx.test", false), Duration::from_secs(20)).await;
+    assert_eq!(
+        rust.err().unwrap().text(false),
+        format!("dns error: failed to look up nx.test:{port}: Domain name not found")
+    );
+    // An address, of leading zeros too, and the loopback, are not asked.
+    let asked = dns.asked().len();
+    for host in ["127.000.0.1", "localhost"] {
+        assert!(
+            attempt(&of_server(host, true), Duration::from_secs(20))
+                .await
+                .is_ok(),
+            "{host}"
+        );
+    }
+    assert_eq!(dns.asked().len(), asked);
 }
