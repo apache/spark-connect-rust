@@ -30539,6 +30539,92 @@ def test_a_struct_whose_fields_hold_the_struct_itself_raises_recursion_error_as_
     }
 
 
+def test_a_field_that_is_its_own_type_compares_copies_and_pickles_as_pyspark():
+    # SPARK-62253: a field that is its own type (`f.dataType = f`) is equal to itself and to its
+    # copies, and the types that hold it to theirs, as Python's comparison of the `__dict__` of
+    # PySpark's types checks the identity of their attributes first; its pickle keeps the cycle,
+    # and its JSON and simple string raise PySpark's RecursionError, of PySpark's text of the
+    # simple strings. A shallow copy of a type of any depth is of the same attribute objects, as
+    # PySpark's copy of the `__dict__`, and the setters of the flags, the names and the lists
+    # read their values without a borrow of the type, which their Python code may read. In a
+    # process of its own under a cap.
+    out = _run_dropin_script(
+        """
+        import copy, json, pickle, resource
+        resource.setrlimit(resource.RLIMIT_AS, (4 << 30, 4 << 30))
+        from pyspark.sql import types as T
+
+        def outcome(call):
+            try:
+                result = call()
+            except Exception as error:
+                return f"{type(error).__name__}: {error}"
+            return result if isinstance(result, (bool, str)) else type(result).__name__
+
+        f = T.StructField("x", T.LongType())
+        f.dataType = f
+        out = {
+            "==": [f == f, f != f, f == copy.copy(f), T.ArrayType(f) == T.ArrayType(f),
+                   T.MapType(T.StringType(), f) == T.MapType(T.StringType(), f),
+                   T.StructField("f", f) == T.StructField("f", f)],
+            "pickle": (lambda copied: copied.dataType is copied)(pickle.loads(pickle.dumps(f))),
+            "json": outcome(f.json),
+            "simpleString": outcome(f.simpleString),
+        }
+        s = T.StructType([T.StructField("a", T.LongType())])
+        s.fields.append(T.StructField("b", s))
+        a = T.ArrayType(T.LongType())
+        a.elementType = a
+        out["texts"] = [outcome(s.simpleString), outcome(a.simpleString), outcome(a.json)]
+
+        def nested(levels, struct):
+            t = T.LongType()
+            for _ in range(levels):
+                t = T.StructType([T.StructField("a", t)]) if struct else T.ArrayType(t)
+            return t
+
+        out["copies"] = [outcome(lambda: copy.copy(nested(levels, struct)))
+                         for levels in (300, 999, 1500) for struct in (True, False)]
+        out["shares"] = copy.copy(s).fields is s.fields
+
+        class Reading:
+            def __init__(self, read):
+                self.read, self.done = read, False
+
+            def __bool__(self):
+                if not self.done:
+                    self.done = True
+                    self.read()
+                return True
+
+            def __str__(self):
+                self.__bool__()
+                return "n"
+
+        array, field, struct = T.ArrayType(T.LongType()), T.StructField("x", T.LongType()), s
+        out["setters"] = [
+            outcome(lambda: setattr(array, "containsNull", Reading(lambda: T.ArrayType(array)))),
+            outcome(lambda: setattr(field, "nullable", Reading(lambda: field.name))),
+            outcome(lambda: setattr(field, "name", Reading(lambda: field.name)) or str(field.name)),
+            outcome(lambda: setattr(struct, "names", (struct.names and n for n in ["p", "q"]))
+                    or ",".join(struct.names)),
+        ]
+        print(json.dumps(out))
+        """
+    )
+    raised = "RecursionError: maximum recursion depth exceeded"
+    assert out == {
+        "==": [True, False, True, True, True, True],
+        "pickle": True,
+        "json": raised,
+        "simpleString": raised,
+        "texts": [raised, raised, raised + " while calling a Python object"],
+        "copies": ["StructType", "ArrayType"] * 3,
+        "shares": True,
+        "setters": ["NoneType", "NoneType", "n", "p,q"],
+    }
+
+
 def test_client_executes_the_plans_and_commands_it_is_given_as_pyspark(mock_connect):
     # As PySpark Connect's SparkConnectClient: to_table, to_pandas and to_table_as_iterator
     # execute the plan that they are given and read the schema and the Arrow batches of the

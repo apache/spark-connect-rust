@@ -3118,8 +3118,9 @@ user set, a `hasPrecisionInfo` that is not true, or the `names` and `_needConver
 `StructType` that an edit of its fields made differ, pickles and copies as its class and PySpark's
 `__dict__` of it, as a type of a Python subclass does (see below), also in the types that hold it:
 the pickle of a type of no types in it, such as a `DecimalType` of an attribute, is PySpark's own,
-byte for byte. A shallow copy of a struct that pickles of its JSON is of new fields, where
-PySpark's shares the list of its fields. The class's own types compare without the attributes that
+byte for byte. A shallow copy (`copy.copy`) of a struct, an array, a map or a field is of its
+class and the same attribute objects, as PySpark's copy of the `__dict__`, at any depth: a struct's
+copy shares the list of its fields. The class's own types compare without the attributes that
 a user set, where PySpark's comparison of the `__dict__`s holds them: a `DecimalType(7, 3)` of an
 attribute equals `DecimalType(7, 3)`, where a type of a Python subclass compares them (see below).
 
@@ -3177,8 +3178,8 @@ by name compares the `name` of each element, and a slice is `StructType(...)` of
 the errors of its `__init__`; `add` appends the field and its name and then reads the
 `needConversion()` of each element; and `toNullable()` reads the `name`, the `dataType` and the
 `metadata` of each element, in that order. An assignment of `fields` takes any elements; pickles and
-copies keep them, as PySpark's pickle of the `__dict__` of the struct (of a struct at the top
-level, a shallow copy shares the list); and a `StructField`, an `ArrayType` and a `MapType` of such a
+copies keep them, as PySpark's pickle of the `__dict__` of the struct (a shallow copy shares the
+list); and a `StructField`, an `ArrayType` and a `MapType` of such a
 struct keep it as it is. The plans of a UDF, of a map or group function and of `transformWithState`
 and `transformWithStateInPandas` send the type that PySpark's `pyspark_types_to_proto_types` reads
 of the elements when the request builds the plan, of each its `name`, `dataType`, `nullable` and
