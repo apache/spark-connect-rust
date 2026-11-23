@@ -15,7 +15,7 @@ use spark_connect_proto as proto;
 
 use crate::dataframe::DataFrame;
 use crate::plan::{LogicalPlan, PlanIds};
-use crate::profiler::{PythonAccumulators, WeakPythonAccumulators};
+use crate::profiler::PythonAccumulators;
 use crate::progress::{ExecutionStream, ProgressTracker, ProgressUpdate};
 use crate::row::{Row, Value};
 use crate::types::DataType;
@@ -247,9 +247,12 @@ pub struct KeptThreadRequestContext<'a> {
 impl Drop for KeptThreadRequestContext<'_> {
     fn drop(&mut self) {
         if let Some(client) = self.client.take() {
-            self.session.client.restore_thread_request_state(client);
+            self.session.client().restore_thread_request_state(client);
         }
-        self.session.tags.restore(self.thread, self.tags.take());
+        self.session
+            .inner
+            .tags
+            .restore(self.thread, self.tags.take());
     }
 }
 
@@ -393,8 +396,20 @@ pub fn enter_stop_lock() -> Option<StopLockHold> {
 
 /// A Spark Connect session for interacting with a remote Spark cluster.
 ///
-/// Mirrors `pyspark.sql.SparkSession`.
+/// Mirrors `pyspark.sql.SparkSession`. A clone is another handle of the same session, which
+/// shares all of its state.
+#[derive(Clone)]
 pub struct SparkSession {
+    /// The state of the session, which the session and its clones share: a clone is one more
+    /// reference to it.
+    inner: Arc<SessionInner>,
+}
+
+/// The state of a session, which the session and its clones share (see [`SparkSession`]), and
+/// which the last of them drops, field by field, in this order. A part of it that an object holds
+/// apart from the session is an `Arc` of its own: the client, the plan IDs, the registry of the
+/// progress handlers and the listener bus.
+struct SessionInner {
     /// Shared gRPC client
     client: Arc<SparkConnectClient>,
     /// Stable plan IDs for the plan nodes this session serializes.
@@ -402,26 +417,26 @@ pub struct SparkSession {
     /// Operation tags attached to every ExecutePlan request that a thread starts from this
     /// session, those of the thread. Mirrors `pyspark.sql.connect.session.SparkSession`'s
     /// addTag/removeTag/getTags, of the `thread_local` of its client.
-    tags: Arc<ThreadTags>,
+    tags: ThreadTags,
     /// Metrics/observed-metrics captured from the most recent execution on this
     /// session. Backs `DataFrame::execution_info` and the profiler accessor.
-    last_execution: Arc<Mutex<Option<ExecutionInfo>>>,
+    last_execution: Mutex<Option<ExecutionInfo>>,
     /// Registered progress handlers, keyed by id (for removal). Invoked with each progress of
     /// an execution, and when it ends. Mirrors `registerProgressHandler`.
     progress_handlers: ProgressHandlers,
     /// Monotonic id source for `register_progress_handler`.
-    progress_handler_id: Arc<AtomicU64>,
+    progress_handler_id: AtomicU64,
     /// The handler of the updates of the Python accumulators of its executions.
     python_accumulators: PythonAccumulators,
     /// The check of the metrics of the Observations of its executions (shared across clones).
-    observation_metrics_check: Arc<Mutex<Option<ObservationMetricsCheck>>>,
+    observation_metrics_check: Mutex<Option<ObservationMetricsCheck>>,
     /// The handler of the warnings of its ML fits (shared across clones).
-    ml_fit_warning_handler: Arc<Mutex<Option<MlFitWarningHandler>>>,
+    ml_fit_warning_handler: Mutex<Option<MlFitWarningHandler>>,
     /// Whether this session was stopped, by `stop()` once its release ended, or by `close()`
     /// (shared across clones). Backs `is_stopped`.
-    stopped: Arc<AtomicBool>,
+    stopped: AtomicBool,
     /// Successful server version, shared by handles for this session only.
-    server_version: Arc<Mutex<Option<String>>>,
+    server_version: Mutex<Option<String>>,
     /// The client-side listener bus of the streaming queries of this session (shared across
     /// clones), which each of its `StreamingQueryManager`s adds to, removes from and posts to,
     /// as the one `StreamingQueryListenerBus` of PySpark Connect's `spark.streams`.
@@ -429,21 +444,23 @@ pub struct SparkSession {
 }
 
 impl SparkSession {
-    /// Create a new SparkSession with a client.
+    /// Create a new SparkSession with a client, of none of the state of another session.
     pub(crate) fn new(client: SparkConnectClient) -> Self {
         SparkSession {
-            client: Arc::new(client),
-            plan_ids: Arc::new(PlanIds::new()),
-            tags: Arc::new(ThreadTags::default()),
-            last_execution: Arc::new(Mutex::new(None)),
-            progress_handlers: Arc::new(Mutex::new(Vec::new())),
-            progress_handler_id: Arc::new(AtomicU64::new(0)),
-            python_accumulators: PythonAccumulators::default(),
-            observation_metrics_check: Arc::default(),
-            ml_fit_warning_handler: Arc::default(),
-            stopped: Arc::new(AtomicBool::new(false)),
-            server_version: Arc::new(Mutex::new(None)),
-            listener_bus: Arc::default(),
+            inner: Arc::new(SessionInner {
+                client: Arc::new(client),
+                plan_ids: Arc::new(PlanIds::new()),
+                tags: ThreadTags::default(),
+                last_execution: Mutex::new(None),
+                progress_handlers: Arc::new(Mutex::new(Vec::new())),
+                progress_handler_id: AtomicU64::new(0),
+                python_accumulators: PythonAccumulators::default(),
+                observation_metrics_check: Mutex::new(None),
+                ml_fit_warning_handler: Mutex::new(None),
+                stopped: AtomicBool::new(false),
+                server_version: Mutex::new(None),
+                listener_bus: Arc::default(),
+            }),
         }
     }
 
@@ -469,7 +486,7 @@ impl SparkSession {
     }
 
     fn add(&self, tag: Tag) {
-        self.tags.update(|tags| {
+        self.inner.tags.update(|tags| {
             if !tags.contains(&tag) {
                 tags.push(tag);
             }
@@ -497,21 +514,23 @@ impl SparkSession {
 
     /// Remove a tag that this thread added. Mirrors `SparkSession.removeTag`.
     pub fn remove_tag(&self, tag: &str) {
-        self.tags
+        self.inner
+            .tags
             .update(|tags| tags.retain(|t| !matches!(t, Tag::Text(text) if text == tag)));
     }
 
     /// Remove a tag of [`SparkSession::add_unencodable_tag`] of these bytes. Not a stable API.
     #[doc(hidden)]
     pub fn remove_unencodable_tag(&self, utf32le: &[u8]) {
-        self.tags.update(|tags| {
+        self.inner.tags.update(|tags| {
             tags.retain(|t| !matches!(t, Tag::Unencodable(bytes) if bytes == utf32le))
         });
     }
 
     /// Get the tags that this thread set on this session. Mirrors `SparkSession.getTags`.
     pub fn get_tags(&self) -> Vec<String> {
-        self.tags
+        self.inner
+            .tags
             .current()
             .into_iter()
             .filter_map(|tag| match tag {
@@ -525,7 +544,8 @@ impl SparkSession {
     /// [`SparkSession::get_tags`] does not give. Not a stable API.
     #[doc(hidden)]
     pub fn unencodable_tags(&self) -> Vec<Vec<u8>> {
-        self.tags
+        self.inner
+            .tags
             .current()
             .into_iter()
             .filter_map(|tag| match tag {
@@ -538,7 +558,7 @@ impl SparkSession {
     /// Clear the tags that this thread set on this session. Mirrors `SparkSession.clearTags`:
     /// the thread gets a new empty set of tags, which it shares with no other thread.
     pub fn clear_tags(&self) {
-        self.tags.clear();
+        self.inner.tags.clear();
     }
 
     /// A copy of the tags of the current thread, as of now, which the threads that are given it
@@ -546,14 +566,14 @@ impl SparkSession {
     /// `inheritable_thread_target(session)` copies the tags of the thread that decorates a
     /// function, which every thread that runs the function then has.
     pub fn copy_thread_tags(&self) -> SharedTags {
-        self.tags.copy()
+        self.inner.tags.copy()
     }
 
     /// Make `tags` the tags of the current thread, which it shares with the other threads given
     /// them: a tag that one of them adds or removes is added or removed for all, until a thread
     /// clears its tags.
     pub fn share_thread_tags(&self, tags: &SharedTags) {
-        self.tags.share(tags);
+        self.inner.tags.share(tags);
     }
 
     /// Register a handler of the progress of the executions of this session: it is called with
@@ -590,8 +610,12 @@ impl SparkSession {
         &self,
         handler: impl Fn(&ProgressUpdate) -> Result<()> + Send + Sync + 'static,
     ) -> u64 {
-        let id = self.progress_handler_id.fetch_add(1, Ordering::SeqCst);
-        self.progress_handlers
+        let id = self
+            .inner
+            .progress_handler_id
+            .fetch_add(1, Ordering::SeqCst);
+        self.inner
+            .progress_handlers
             .lock()
             .unwrap()
             .push((id, Arc::new(handler)));
@@ -601,7 +625,8 @@ impl SparkSession {
     /// Remove a progress handler by the id returned from
     /// [`SparkSession::register_progress_handler`]. Mirrors `removeProgressHandler`.
     pub fn remove_progress_handler(&self, id: u64) {
-        self.progress_handlers
+        self.inner
+            .progress_handlers
             .lock()
             .unwrap()
             .retain(|(hid, _)| *hid != id);
@@ -609,12 +634,12 @@ impl SparkSession {
 
     /// Remove all progress handlers. Mirrors `clearProgressHandlers`.
     pub fn clear_progress_handlers(&self) {
-        self.progress_handlers.lock().unwrap().clear();
+        self.inner.progress_handlers.lock().unwrap().clear();
     }
 
     /// Share the progress-handler registry without retaining the session or its listener bus.
     pub(crate) fn progress_handlers(&self) -> ProgressHandlers {
-        Arc::clone(&self.progress_handlers)
+        Arc::clone(&self.inner.progress_handlers)
     }
 
     /// Execute `request` on the server, with the progress of the execution for the progress
@@ -717,13 +742,13 @@ impl SparkSession {
     /// Store the metrics captured from the most recent execution. Called by the
     /// execute loop; not part of the public API.
     pub(crate) fn record_execution(&self, info: ExecutionInfo) {
-        *self.last_execution.lock().unwrap() = Some(info);
+        *self.inner.last_execution.lock().unwrap() = Some(info);
     }
 
     /// The metrics captured from the most recent execution on this session, if any.
     /// Backs `DataFrame::execution_info`.
     pub fn last_execution_info(&self) -> Option<ExecutionInfo> {
-        self.last_execution.lock().unwrap().clone()
+        self.inner.last_execution.lock().unwrap().clone()
     }
 
     /// Raw observed metrics from the most recent execution only.
@@ -744,7 +769,8 @@ impl SparkSession {
     /// of them from then on (see [`SparkSession::has_thread_tags`]), as PySpark's request reads
     /// them with `get_tags`, which gives its `thread_local` a set.
     pub(crate) fn tags(&self) -> Result<Vec<String>> {
-        self.tags
+        self.inner
+            .tags
             .current_or_new()
             .into_iter()
             .map(|tag| match tag {
@@ -764,7 +790,7 @@ impl SparkSession {
     /// one in the `thread_local` of its client. Not a stable API.
     #[doc(hidden)]
     pub fn has_thread_tags(&self) -> bool {
-        self.tags.has_current()
+        self.inner.tags.has_current()
     }
 
     /// Start a brand-new session of the same endpoint, over the connection of the process to it,
@@ -772,7 +798,7 @@ impl SparkSession {
     /// Mirrors `SparkSession.newSession` — a fresh server-side session (new session id), with its
     /// own tags and plan IDs.
     pub fn new_session(&self) -> SparkSession {
-        self.new_session_of(self.client.with_new_session_id())
+        SparkSession::new(self.client().with_new_session_id())
     }
 
     /// As [`SparkSession::new_session`], of the user `user_id` as it is given, whom its requests
@@ -781,25 +807,7 @@ impl SparkSession {
     /// `SparkConnectClient::with_new_session_id_of_user`). Not a stable API.
     #[doc(hidden)]
     pub fn new_session_of_user(&self, user_id: Option<String>) -> SparkSession {
-        self.new_session_of(self.client.with_new_session_id_of_user(user_id))
-    }
-
-    /// A new session of the client `client`, of none of the state of this one.
-    fn new_session_of(&self, client: SparkConnectClient) -> SparkSession {
-        SparkSession {
-            client: Arc::new(client),
-            plan_ids: Arc::new(PlanIds::new()),
-            tags: Arc::new(ThreadTags::default()),
-            last_execution: Arc::new(Mutex::new(None)),
-            progress_handlers: Arc::new(Mutex::new(Vec::new())),
-            progress_handler_id: Arc::new(AtomicU64::new(0)),
-            python_accumulators: PythonAccumulators::default(),
-            observation_metrics_check: Arc::default(),
-            ml_fit_warning_handler: Arc::default(),
-            stopped: Arc::new(AtomicBool::new(false)),
-            server_version: Arc::new(Mutex::new(None)),
-            listener_bus: Arc::default(),
-        }
+        SparkSession::new(self.client().with_new_session_id_of_user(user_id))
     }
 
     /// Clone this session on the server, mirroring `SparkSession.cloneSession()`: the new
@@ -816,8 +824,8 @@ impl SparkSession {
     pub fn clone_session_with_id(&self, new_session_id: Option<&str>) -> Result<SparkSession> {
         // Of the one client that the clone makes, as PySpark's: a channel of the proxy of the
         // environment, which logs what grpcio logs of it once.
-        let client = block_on(self.client.clone_session(new_session_id))?;
-        Ok(self.new_session_of(client))
+        let client = block_on(self.client().clone_session(new_session_id))?;
+        Ok(SparkSession::new(client))
     }
 
     /// As [`SparkSession::clone_session_with_id`], of the user `user_id` as it is given, whom the
@@ -830,8 +838,8 @@ impl SparkSession {
         new_session_id: Option<&str>,
         user_id: Option<String>,
     ) -> Result<SparkSession> {
-        let client = block_on(self.client.clone_session_of_user(new_session_id, user_id))?;
-        Ok(self.new_session_of(client))
+        let client = block_on(self.client().clone_session_of_user(new_session_id, user_id))?;
+        Ok(SparkSession::new(client))
     }
 
     /// Set the hook of the executions of this session, and of its clones, or clear it: the
@@ -839,27 +847,27 @@ impl SparkSession {
     /// the one it returns, of the operation ID of the original. Mirrors the hooks of
     /// `SparkSession.Hook.on_execute_plan`, of `SparkSession.Builder._registerHook`.
     pub fn set_execute_plan_hook(&self, hook: Option<ExecutePlanHook>) {
-        self.client.set_execute_plan_hook(hook);
+        self.client().set_execute_plan_hook(hook);
     }
 
     /// The stable plan IDs of the plan nodes this session serializes.
     pub(crate) fn plan_ids(&self) -> &PlanIds {
-        &self.plan_ids
+        &self.inner.plan_ids
     }
 
     pub(crate) fn plan_ids_shared(&self) -> &Arc<PlanIds> {
-        &self.plan_ids
+        &self.inner.plan_ids
     }
 
     /// Get the underlying client.
     pub(crate) fn client(&self) -> &Arc<SparkConnectClient> {
-        &self.client
+        &self.inner.client
     }
 
     /// Whether `other` is this session or a clone of it, which shares its client. Two sessions
     /// made apart are not the same session, even of the same session ID.
     pub fn is_same_session(&self, other: &SparkSession) -> bool {
-        Arc::ptr_eq(&self.client, &other.client)
+        Arc::ptr_eq(self.client(), other.client())
     }
 
     /// A handle of this session that does not keep it alive, as `Arc::downgrade` makes a `Weak`
@@ -868,18 +876,7 @@ impl SparkSession {
     #[doc(hidden)]
     pub fn downgrade(&self) -> WeakSparkSession {
         WeakSparkSession {
-            client: Arc::downgrade(&self.client),
-            plan_ids: Arc::downgrade(&self.plan_ids),
-            tags: Arc::downgrade(&self.tags),
-            last_execution: Arc::downgrade(&self.last_execution),
-            progress_handlers: Arc::downgrade(&self.progress_handlers),
-            progress_handler_id: Arc::downgrade(&self.progress_handler_id),
-            python_accumulators: self.python_accumulators.downgrade(),
-            observation_metrics_check: Arc::downgrade(&self.observation_metrics_check),
-            ml_fit_warning_handler: Arc::downgrade(&self.ml_fit_warning_handler),
-            stopped: Arc::downgrade(&self.stopped),
-            server_version: Arc::downgrade(&self.server_version),
-            listener_bus: Arc::downgrade(&self.listener_bus),
+            inner: Arc::downgrade(&self.inner),
         }
     }
 
@@ -1137,7 +1134,7 @@ impl SparkSession {
         let options = match options {
             Some(options) => options,
             None => {
-                fetched = crate::ArrowInputOptions::from_client(&self.client)?;
+                fetched = crate::ArrowInputOptions::from_client(self.client())?;
                 &fetched
             }
         };
@@ -1149,7 +1146,7 @@ impl SparkSession {
         let bytes = crate::arrow_input::batch_data_size(&batch);
         if bytes >= INLINE_IPC_BYTES || bytes >= options.cache_threshold() {
             return crate::arrow_input::create_relation(
-                &self.client,
+                self.client(),
                 vec![batch],
                 Some(schema),
                 Some(options),
@@ -1246,7 +1243,7 @@ impl SparkSession {
         let options = match options {
             Some(options) => options,
             None => {
-                fetched = crate::ArrowInputOptions::from_client(&self.client)?;
+                fetched = crate::ArrowInputOptions::from_client(self.client())?;
                 &fetched
             }
         };
@@ -1268,7 +1265,12 @@ impl SparkSession {
                 .map(|batch| with_large_var_types(batch, &schema, large))
                 .collect::<Result<Vec<_>>>()?;
             let schema = options.sent_schema(schema);
-            crate::arrow_input::create_relation(&self.client, batches, Some(schema), Some(options))?
+            crate::arrow_input::create_relation(
+                self.client(),
+                batches,
+                Some(schema),
+                Some(options),
+            )?
         } else {
             LogicalPlan::LocalRelation {
                 schema: Some(options.sent_schema(schema)),
@@ -1301,7 +1303,7 @@ impl SparkSession {
             Some(schema) if batches.iter().all(|batch| batch.num_rows() == 0) => {
                 crate::arrow_input::empty_relation(&batches, schema)?
             }
-            schema => crate::arrow_input::create_relation(&self.client, batches, schema, None)?,
+            schema => crate::arrow_input::create_relation(self.client(), batches, schema, None)?,
         };
         Ok(DataFrame::new(self.clone(), plan))
     }
@@ -1309,7 +1311,7 @@ impl SparkSession {
     /// Internal settings handoff for the Python Arrow importer; not a stable API.
     #[doc(hidden)]
     pub fn arrow_input_options(&self) -> Result<crate::ArrowInputOptions> {
-        crate::ArrowInputOptions::from_client(&self.client)
+        crate::ArrowInputOptions::from_client(self.client())
     }
 
     /// Internal Arrow import entry point using the normalization settings snapshot. Its caller
@@ -1325,7 +1327,7 @@ impl SparkSession {
     ) -> Result<DataFrame> {
         let schema = schema.into().map(|schema| options.sent_schema(schema));
         let plan =
-            crate::arrow_input::create_relation(&self.client, batches, schema, Some(options))?;
+            crate::arrow_input::create_relation(self.client(), batches, schema, Some(options))?;
         Ok(DataFrame::new(self.clone(), plan))
     }
 
@@ -1352,7 +1354,7 @@ impl SparkSession {
 
     /// The client-side listener bus of the streaming queries of this session.
     pub(crate) fn listener_bus(&self) -> Arc<crate::streaming::ListenerBus> {
-        Arc::clone(&self.listener_bus)
+        Arc::clone(&self.inner.listener_bus)
     }
 
     /// Get the catalog for this session.
@@ -1487,12 +1489,12 @@ impl SparkSession {
         request: impl Into<crate::plan::BuiltOutside<proto::AnalyzePlanRequest>>,
     ) -> Result<proto::AnalyzePlanResponse> {
         let (mut request, urls) = request.into().into_parts();
-        request.session_id = self.client.session_id().to_string();
+        request.session_id = self.client().session_id().to_string();
         if let Some(analyze) = request.analyze.as_mut() {
             crate::plan::resolve_analysis(analyze, urls)?;
         }
         block_on(
-            self.client
+            self.client()
                 .analyze_plan_as_is(request, spark_connect_core::client_log::AnalysisLog::Silent),
         )
     }
@@ -1522,7 +1524,7 @@ impl SparkSession {
         plan: impl Into<crate::plan::BuiltOutside<proto::Plan>>,
     ) -> Result<Option<proto::Plan>> {
         let mut plan = self.resolved_plan_proto(plan)?;
-        block_on(self.client.prepare_plan(&mut plan))?;
+        block_on(self.client().prepare_plan(&mut plan))?;
         Ok(match plan.op_type {
             Some(proto::plan::OpType::CompressedOperation(_)) => Some(plan),
             _ => None,
@@ -1534,8 +1536,8 @@ impl SparkSession {
     /// as the configuration requests of the core are. Not a stable API.
     #[doc(hidden)]
     pub fn config_proto(&self, mut request: proto::ConfigRequest) -> Result<proto::ConfigResponse> {
-        request.session_id = self.client.session_id().to_string();
-        block_on(self.client.config(request))
+        request.session_id = self.client().session_id().to_string();
+        block_on(self.client().config(request))
     }
 
     /// Cache `blobs` as artifacts of the session, of their SHA-256 hashes, which are returned in
@@ -1543,13 +1545,13 @@ impl SparkSession {
     /// `ArtifactStatus` request asks which are cached on the server already, and one
     /// `AddArtifacts` uploads each other one once.
     pub fn cache_artifacts(&self, blobs: Vec<Vec<u8>>) -> Result<Vec<String>> {
-        block_on(self.client.cache_artifacts(blobs))
+        block_on(self.client().cache_artifacts(blobs))
     }
 
     /// The retry policy of the RPCs of this session, as the policies of PySpark's
     /// `SparkConnectClient.get_retry_policies` retry them.
     pub fn retry_policy(&self) -> spark_connect_core::retries::RetryPolicy {
-        self.client.retry_policy()
+        self.client().retry_policy()
     }
 
     /// Replace the retry policy of the RPCs of this session and of its clones, as PySpark's
@@ -1557,14 +1559,14 @@ impl SparkSession {
     /// `policy`. A new session ([`SparkSession::new_session`], [`SparkSession::clone_session`])
     /// has the default policy, as PySpark's new client does.
     pub fn set_retry_policy(&self, policy: spark_connect_core::retries::RetryPolicy) {
-        self.client.replace_retry_policy(policy);
+        self.client().replace_retry_policy(policy);
     }
 
     /// Read the user agent of the requests of this session again (see
     /// [`spark_connect_core::client::SparkConnectClient::refresh_user_agent`]). Not a stable API.
     #[doc(hidden)]
     pub fn refresh_user_agent(&self) {
-        self.client.refresh_user_agent();
+        self.client().refresh_user_agent();
     }
 
     /// The result chunking options of the executions of the client of this session, as PySpark's
@@ -1572,7 +1574,7 @@ impl SparkSession {
     /// `SparkConnectClient::result_chunking`). Not a stable API.
     #[doc(hidden)]
     pub fn result_chunking(&self) -> spark_connect_core::client::ResultChunking {
-        self.client.result_chunking()
+        self.client().result_chunking()
     }
 
     /// The plan compression of the client of this session once its settings are read, and None
@@ -1582,13 +1584,13 @@ impl SparkSession {
     /// Not a stable API.
     #[doc(hidden)]
     pub fn known_plan_compression(&self) -> Option<Option<usize>> {
-        self.client.known_plan_compression()
+        self.client().known_plan_compression()
     }
 
     /// The per-RPC deadlines of the calls of this session (see
     /// [`spark_connect_core::client::RpcDeadlines`]).
     pub fn rpc_deadlines(&self) -> spark_connect_core::client::RpcDeadlines {
-        self.client.rpc_deadlines().clone()
+        self.client().rpc_deadlines().clone()
     }
 
     /// Make `decider` decide the retries of the RPCs of this session and of its clones that start
@@ -1599,7 +1601,7 @@ impl SparkSession {
         &self,
         decider: Option<Arc<dyn spark_connect_core::retries::RetryDecider>>,
     ) {
-        self.client.set_retry_decider(decider);
+        self.client().set_retry_decider(decider);
     }
 
     /// Give the calls of this session the metadata of `source` from now on, in place of the
@@ -1611,7 +1613,7 @@ impl SparkSession {
         calls: Option<Arc<dyn spark_connect_core::channel::MetadataSource>>,
         artifacts: Option<Arc<dyn spark_connect_core::channel::MetadataSource>>,
     ) {
-        self.client.set_metadata_source(calls, artifacts);
+        self.client().set_metadata_source(calls, artifacts);
     }
 
     /// Make the executions of this session reattachable or not, from the next one on, as PySpark's
@@ -1619,19 +1621,19 @@ impl SparkSession {
     /// [`SparkConnectClient::set_reattachable_execute`]). A new session keeps the setting, as
     /// PySpark's new client does.
     pub fn set_reattachable_execute(&self, reattachable: bool) {
-        self.client.set_reattachable_execute(reattachable);
+        self.client().set_reattachable_execute(reattachable);
     }
 
     /// Whether the executions of this session are reattachable, which they are by default.
     pub fn reattachable_execute(&self) -> bool {
-        self.client.reattachable_execute()
+        self.client().reattachable_execute()
     }
 
     /// The `token` parameter of the connection string of this session, if it has one, which
     /// PySpark's `SparkConnectClient.token` reads before the environment's
     /// `SPARK_CONNECT_AUTHENTICATE_TOKEN`.
     pub fn token_parameter(&self) -> Option<&str> {
-        self.client.token_parameter()
+        self.client().token_parameter()
     }
 
     /// Make the requests of the executions, the analyses and the configurations of the calling
@@ -1639,7 +1641,7 @@ impl SparkSession {
     /// `SparkConnectClient::set_thread_call_stack`). Not a stable API.
     #[doc(hidden)]
     pub fn set_thread_call_stack(&self, call_stack: Option<prost_types::Any>) {
-        self.client.set_thread_call_stack(call_stack);
+        self.client().set_thread_call_stack(call_stack);
     }
 
     /// Delete the ML cached objects `refs` on the server, as PySpark's `RemoteModelRef` does
@@ -1675,7 +1677,7 @@ impl SparkSession {
             })),
         };
         let request = proto::ExecutePlanRequest {
-            session_id: self.client.session_id().to_string(),
+            session_id: self.client().session_id().to_string(),
             user_context: Some(proto::UserContext::default()),
             operation_id: Some(uuid::Uuid::new_v4().to_string()),
             tags,
@@ -1684,7 +1686,7 @@ impl SparkSession {
             }),
             ..Default::default()
         };
-        self.client.spawn_execute_plan_reattachable(request);
+        self.client().spawn_execute_plan_reattachable(request);
     }
 
     /// Remove the cached remote relation `relation_id` on the server, as PySpark's
@@ -1717,14 +1719,14 @@ impl SparkSession {
             ),
         };
         let request = proto::ExecutePlanRequest {
-            session_id: self.client.session_id().to_string(),
+            session_id: self.client().session_id().to_string(),
             tags,
             plan: Some(proto::Plan {
                 op_type: Some(proto::plan::OpType::Command(command)),
             }),
             ..Default::default()
         };
-        self.client.spawn_unary_execute_plan(request);
+        self.client().spawn_unary_execute_plan(request);
     }
 
     /// The request of a finalizer of this session on the calling thread, and whether to send it,
@@ -1751,7 +1753,7 @@ impl SparkSession {
     ///
     /// Mirrors `pyspark.sql.SparkSession.conf`.
     pub fn conf(&self) -> crate::conf::RuntimeConf {
-        crate::conf::RuntimeConf::new(Arc::clone(&self.client))
+        crate::conf::RuntimeConf::new(Arc::clone(self.client()))
     }
 
     /// Get table-valued functions for this session.
@@ -1765,68 +1767,68 @@ impl SparkSession {
     ///
     /// Mirrors `pyspark.sql.SparkSession.session_id` / the connect client session id.
     pub fn session_id(&self) -> &str {
-        self.client.session_id()
+        self.client().session_id()
     }
 
     /// The display host of the endpoint of this session, as PySpark's `SparkConnectClient.host`.
     pub fn host(&self) -> &str {
-        self.client.host()
+        self.client().host()
     }
 
     /// The server-side session ID that the responses of this session carried, or None before the
     /// first response, as PySpark's `SparkConnectClient._server_session_id`.
     pub fn server_session_id(&self) -> Option<String> {
-        self.client.observed_server_session_id()
+        self.client().observed_server_session_id()
     }
 
     /// Set the server-side session ID that the requests of this session observe.
     pub fn set_server_session_id(&self, id: Option<String>) {
-        self.client.set_observed_server_session_id(id);
+        self.client().set_observed_server_session_id(id);
     }
 
     /// Add `extension` to the user context of the requests that the current thread sends from
     /// this session, and return its ID. Mirrors PySpark's
     /// `SparkConnectClient.add_threadlocal_user_context_extension`.
     pub fn add_threadlocal_user_context_extension(&self, extension: prost_types::Any) -> String {
-        self.client
+        self.client()
             .add_threadlocal_user_context_extension(extension)
     }
 
     /// Add `extension` to the user context of the requests of all the threads of this session,
     /// and return its ID. Mirrors PySpark's `add_global_user_context_extension`.
     pub fn add_global_user_context_extension(&self, extension: prost_types::Any) -> String {
-        self.client.add_global_user_context_extension(extension)
+        self.client().add_global_user_context_extension(extension)
     }
 
     /// Replace the global user context extensions with `extensions`, of their IDs, in their order.
     /// Mirrors a change of PySpark's `global_user_context_extensions` of a client, which its
     /// requests take.
     pub fn set_global_user_context_extensions(&self, extensions: Vec<(String, prost_types::Any)>) {
-        self.client.set_global_user_context_extensions(extensions);
+        self.client().set_global_user_context_extensions(extensions);
     }
 
     /// Remove the user context extension of `extension_id`. Mirrors PySpark's
     /// `remove_user_context_extension`.
     pub fn remove_user_context_extension(&self, extension_id: &str) {
-        self.client.remove_user_context_extension(extension_id);
+        self.client().remove_user_context_extension(extension_id);
     }
 
     /// The user context extensions of the current thread, of their IDs. Mirrors PySpark's
     /// `thread_local.user_context_extensions` of a client.
     pub fn threadlocal_user_context_extensions(&self) -> Vec<(String, prost_types::Any)> {
-        self.client.threadlocal_user_context_extensions()
+        self.client().threadlocal_user_context_extensions()
     }
 
     /// The global user context extensions, of their IDs. Mirrors PySpark's
     /// `global_user_context_extensions` of a client.
     pub fn global_user_context_extensions(&self) -> Vec<(String, prost_types::Any)> {
-        self.client.global_user_context_extensions()
+        self.client().global_user_context_extensions()
     }
 
     /// Remove the user context extensions of the current thread and the global ones. Mirrors
     /// PySpark's `clear_user_context_extensions`.
     pub fn clear_user_context_extensions(&self) {
-        self.client.clear_user_context_extensions();
+        self.client().clear_user_context_extensions();
     }
 
     /// A copy of the user context extensions of the current thread, which the threads that are
@@ -1836,7 +1838,7 @@ impl SparkSession {
     pub fn copy_threadlocal_user_context_extensions(
         &self,
     ) -> spark_connect_core::client::SharedUserContextExtensions {
-        self.client.copy_threadlocal_user_context_extensions()
+        self.client().copy_threadlocal_user_context_extensions()
     }
 
     /// Make `extensions` the user context extensions of the current thread, which it shares with
@@ -1846,7 +1848,7 @@ impl SparkSession {
         &self,
         extensions: &spark_connect_core::client::SharedUserContextExtensions,
     ) {
-        self.client
+        self.client()
             .share_threadlocal_user_context_extensions(extensions);
     }
 
@@ -1854,7 +1856,7 @@ impl SparkSession {
     /// (see [`SparkConnectClient::client_session_id`]). Not a stable API.
     #[doc(hidden)]
     pub fn client_session_id(&self) -> String {
-        self.client.client_session_id()
+        self.client().client_session_id()
     }
 
     /// Make the requests of this session carry `session_id`, as a set of PySpark's
@@ -1862,28 +1864,28 @@ impl SparkSession {
     /// [`SparkSession::session_id`] stays the ID of the session. Not a stable API.
     #[doc(hidden)]
     pub fn set_client_session_id(&self, session_id: String) {
-        self.client.set_client_session_id(session_id);
+        self.client().set_client_session_id(session_id);
     }
 
     /// The channel builder of the connection of this session, as PySpark's `client._builder`
     /// (see [`SparkConnectClient::channel_builder`]). Not a stable API.
     #[doc(hidden)]
     pub fn channel_builder(&self) -> &ChannelBuilder {
-        self.client.channel_builder()
+        self.client().channel_builder()
     }
 
     /// The user of the connection of this session: of the connection string, else of the
     /// environment, if any, which the requests of its artifacts carry. Not a stable API.
     #[doc(hidden)]
     pub fn user_id(&self) -> Option<&str> {
-        self.client.user_id()
+        self.client().user_id()
     }
 
     /// The user that the other requests of this session carry, as PySpark's `client._user_id`
     /// (see [`SparkConnectClient::request_user_id`]). Not a stable API.
     #[doc(hidden)]
     pub fn request_user_id(&self) -> Option<String> {
-        self.client.request_user_id()
+        self.client().request_user_id()
     }
 
     /// Make the requests of this session but those of its artifacts carry the user `user_id`, or
@@ -1891,7 +1893,7 @@ impl SparkSession {
     /// [`SparkConnectClient::set_request_user_id`]). Not a stable API.
     #[doc(hidden)]
     pub fn set_request_user_id(&self, user_id: Option<String>) {
-        self.client.set_request_user_id(user_id);
+        self.client().set_request_user_id(user_id);
     }
 
     /// Make the requests of the current thread carry the session ID, the user and the global user
@@ -1904,7 +1906,7 @@ impl SparkSession {
         user_id: Option<String>,
         global: Vec<(String, prost_types::Any)>,
     ) {
-        self.client
+        self.client()
             .set_thread_request_context(session_id, user_id, global);
     }
 
@@ -1918,7 +1920,7 @@ impl SparkSession {
         rpc_deadlines: Option<spark_connect_core::client::RpcDeadlines>,
         result_chunking: Option<spark_connect_core::client::ResultChunking>,
     ) {
-        self.client
+        self.client()
             .set_thread_call_settings(rpc_deadlines, result_chunking);
     }
 
@@ -1929,7 +1931,7 @@ impl SparkSession {
     pub fn plan_compression_settings(
         &self,
     ) -> Option<spark_connect_core::client::PlanCompressionSettings> {
-        self.client.plan_compression_settings()
+        self.client().plan_compression_settings()
     }
 
     /// Make `settings` the plan compression of the client of this session and of its clones, or
@@ -1940,7 +1942,7 @@ impl SparkSession {
         &self,
         settings: Option<spark_connect_core::client::PlanCompressionSettings>,
     ) {
-        self.client.set_plan_compression_settings(settings);
+        self.client().set_plan_compression_settings(settings);
     }
 
     /// Keep the context of the requests of the calling thread, as it is now, until the returned
@@ -1953,11 +1955,11 @@ impl SparkSession {
     /// their own client. Not a stable API.
     #[doc(hidden)]
     pub fn keep_thread_request_context(&self) -> KeptThreadRequestContext<'_> {
-        let (thread, tags) = self.tags.of_calling_thread();
+        let (thread, tags) = self.inner.tags.of_calling_thread();
         KeptThreadRequestContext {
             session: self,
             thread,
-            client: Some(self.client.thread_request_state()),
+            client: Some(self.client().thread_request_state()),
             tags,
         }
     }
@@ -1967,8 +1969,8 @@ impl SparkSession {
     /// once `close()` closed it (see [`SparkConnectClient::close`]). Not a stable API.
     #[doc(hidden)]
     pub fn reopen(&self) {
-        self.stopped.store(false, Ordering::SeqCst);
-        self.client.reopen();
+        self.inner.stopped.store(false, Ordering::SeqCst);
+        self.client().reopen();
     }
 
     /// Mark this session closed, as PySpark's `client._closed = True`: it is stopped, and its
@@ -1977,7 +1979,7 @@ impl SparkSession {
     /// others be sent again. Not a stable API.
     #[doc(hidden)]
     pub fn mark_closed(&self) {
-        self.client.set_closed(true);
+        self.client().set_closed(true);
     }
 
     /// The statuses of the operations of this session of `request`, a GetStatus request built
@@ -1988,7 +1990,7 @@ impl SparkSession {
         &self,
         request: proto::GetStatusRequest,
     ) -> Result<proto::GetStatusResponse> {
-        block_on(self.client.get_status_proto(request))
+        block_on(self.client().get_status_proto(request))
     }
 
     /// Keep `refresher`, or none, for this session: what a binding keeps to bring the user
@@ -1999,20 +2001,20 @@ impl SparkSession {
         &self,
         refresher: Option<Arc<dyn std::any::Any + Send + Sync>>,
     ) {
-        self.client.set_user_context_refresher(refresher);
+        self.client().set_user_context_refresher(refresher);
     }
 
     /// The refresher of [`SparkSession::set_user_context_refresher`], if any. Not a stable API.
     #[doc(hidden)]
     pub fn user_context_refresher(&self) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
-        self.client.user_context_refresher()
+        self.client().user_context_refresher()
     }
 
     /// Forget the user context extensions of the current thread, as PySpark's
     /// `thread_local` once its `user_context_extensions` is deleted. Not a stable API.
     #[doc(hidden)]
     pub fn clear_threadlocal_user_context_extensions(&self) {
-        self.client.clear_threadlocal_user_context_extensions();
+        self.client().clear_threadlocal_user_context_extensions();
     }
 
     /// Return the Spark version of the connected server.
@@ -2024,6 +2026,7 @@ impl SparkSession {
         // Serialize the first lookup across clones; errors leave the cache empty.
         // A panicking lookup cannot leave a partially initialized String behind.
         let mut cached = self
+            .inner
             .server_version
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -2031,12 +2034,12 @@ impl SparkSession {
             return Ok(version.clone());
         }
         let mut request = proto::AnalyzePlanRequest::default();
-        request.session_id = self.client.session_id().to_string();
+        request.session_id = self.client().session_id().to_string();
         request.user_context = Some(proto::UserContext::default());
         request.analyze = Some(proto::analyze_plan_request::Analyze::SparkVersion(
             proto::analyze_plan_request::SparkVersion::default(),
         ));
-        let resp = block_on(self.client.analyze_plan(request))?;
+        let resp = block_on(self.client().analyze_plan(request))?;
         match resp.result {
             Some(proto::analyze_plan_response::Result::SparkVersion(v)) => {
                 *cached = Some(v.version.clone());
@@ -2071,34 +2074,34 @@ impl SparkSession {
     ///
     /// Mirrors `pyspark.sql.SparkSession.interruptAll()`. Returns interrupted operation ids.
     pub fn interrupt_all(&self) -> Result<Vec<String>> {
-        block_on(self.client.interrupt_all())
+        block_on(self.client().interrupt_all())
     }
 
     /// Interrupt all operations of this session with the given tag.
     ///
     /// Mirrors `pyspark.sql.SparkSession.interruptTag(tag)`.
     pub fn interrupt_tag(&self, tag: &str) -> Result<Vec<String>> {
-        block_on(self.client.interrupt_tag(tag))
+        block_on(self.client().interrupt_tag(tag))
     }
 
     /// Interrupt the operation with the given operation id.
     ///
     /// Mirrors `pyspark.sql.SparkSession.interruptOperation(opId)`.
     pub fn interrupt_operation(&self, operation_id: &str) -> Result<Vec<String>> {
-        block_on(self.client.interrupt_operation(operation_id))
+        block_on(self.client().interrupt_operation(operation_id))
     }
 
     /// Interrupt the operation with the given operation id, as a future, for a wait that drives
     /// it (see [`spark_connect_core::runtime::with_wait_watch`]).
     pub async fn interrupt_operation_async(&self, operation_id: &str) -> Result<Vec<String>> {
-        self.client.interrupt_operation(operation_id).await
+        self.client().interrupt_operation(operation_id).await
     }
 
     /// The operation ID of the innermost execution in flight that the calling thread started, if
     /// any. A wait for an execution interrupts it with [`Self::interrupt_operation_async`] when a
     /// signal of the process raises, as PySpark's `KeyboardInterrupt` does.
     pub fn running_operation_id(&self) -> Option<String> {
-        self.client.running_operation_id()
+        self.client().running_operation_id()
     }
 
     /// Whether the calling thread converts the failure of a call of the session now, during which
@@ -2107,7 +2110,7 @@ impl SparkSession {
     /// API.
     #[doc(hidden)]
     pub fn inside_error_handling(&self) -> bool {
-        self.client.inside_error_handling()
+        self.client().inside_error_handling()
     }
 
     /// Add local files, or `file:` URIs, as artifacts of the session, mirroring
@@ -2155,7 +2158,7 @@ impl SparkSession {
         archive: bool,
         file: bool,
     ) -> Result<()> {
-        block_on(self.client.add_artifacts(paths, pyfile, archive, file))
+        block_on(self.client().add_artifacts(paths, pyfile, archive, file))
     }
 
     /// Add a single local file as an artifact to the session.
@@ -2172,7 +2175,7 @@ impl SparkSession {
     /// reference, `dest_path` is an absolute path, so the name is the prefix and the path.
     pub fn copy_from_local_to_fs(&self, local_path: &str, dest_path: &str) -> Result<()> {
         block_on(
-            self.client
+            self.client()
                 .add_named_artifact(&forward_to_fs_artifact_name(dest_path), local_path),
         )
     }
@@ -2280,12 +2283,14 @@ impl SparkSession {
     /// of which the UDF profilers send their results, as PySpark Connect's client unpickles each
     /// into its `ConnectProfilerCollector`.
     pub fn set_python_accumulator_handler(&self, handler: impl Fn(&[u8]) + Send + Sync + 'static) {
-        self.python_accumulators.set_handler(Arc::new(handler));
+        self.inner
+            .python_accumulators
+            .set_handler(Arc::new(handler));
     }
 
     /// The handler of the updates of the Python accumulators, of the executions.
     pub(crate) fn python_accumulators(&self) -> &PythonAccumulators {
-        &self.python_accumulators
+        &self.inner.python_accumulators
     }
 
     /// Set the check of the metrics that the executions of this session, and of its clones,
@@ -2302,6 +2307,7 @@ impl SparkSession {
             + 'static,
     ) {
         *self
+            .inner
             .observation_metrics_check
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(check));
@@ -2309,7 +2315,8 @@ impl SparkSession {
 
     /// The check of the metrics of the Observations of the executions, if one is set.
     pub(crate) fn observation_metrics_check(&self) -> Option<ObservationMetricsCheck> {
-        self.observation_metrics_check
+        self.inner
+            .observation_metrics_check
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
@@ -2331,6 +2338,7 @@ impl SparkSession {
         handler: impl Fn(&str) -> Result<()> + Send + Sync + 'static,
     ) {
         *self
+            .inner
             .ml_fit_warning_handler
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(handler));
@@ -2341,6 +2349,7 @@ impl SparkSession {
     pub(crate) fn report_ml_fit_warning(&self, warning: &str) -> Result<()> {
         // Called out of the lock, so that the handler may set another one.
         let handler = self
+            .inner
             .ml_fit_warning_handler
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -2377,10 +2386,10 @@ impl SparkSession {
                 "the wait for the stop of the session on another thread was interrupted",
             ));
         };
-        if self.stopped.load(Ordering::SeqCst) {
+        if self.inner.stopped.load(Ordering::SeqCst) {
             return Ok(());
         }
-        let released = if self.client.is_closed() {
+        let released = if self.client().is_closed() {
             Ok(())
         } else {
             let interrupted = || {
@@ -2388,7 +2397,7 @@ impl SparkSession {
                     "the release of the session was interrupted; the session is still open",
                 )
             };
-            match spark_connect_core::runtime::block_on_abortable(self.client.release_session()) {
+            match spark_connect_core::runtime::block_on_abortable(self.client().release_session()) {
                 Some(Err(error)) if spark_connect_core::client::is_wait_aborted(&error) => {
                     return Err(interrupted());
                 }
@@ -2404,7 +2413,7 @@ impl SparkSession {
         // of the client before it closes the channel (see `SparkSession::close`): a signal of the
         // process that ends the wait leaves the session open, as the exception of the signal
         // leaves PySpark's `close`.
-        if spark_connect_core::runtime::block_on_abortable(self.client.wait_for_releases())
+        if spark_connect_core::runtime::block_on_abortable(self.client().wait_for_releases())
             .is_none()
         {
             return Err(SparkError::connect_msg(
@@ -2414,11 +2423,11 @@ impl SparkSession {
         }
         // Before the listener bus is cancelled: an add of a listener that the cancellation ends
         // finds the session stopped.
-        self.stopped.store(true, Ordering::SeqCst);
+        self.inner.stopped.store(true, Ordering::SeqCst);
         self.streams().cancel_listener_bus();
         // As PySpark's `stop()`, close the client even if server cleanup fails, so its
         // future requests raise `NO_ACTIVE_SESSION`.
-        self.client.close();
+        self.client().close();
         released
     }
 
@@ -2427,14 +2436,14 @@ impl SparkSession {
     /// [`SparkSession::close`], it sends nothing and is the `NO_ACTIVE_SESSION` error, as the
     /// `_stub` of PySpark's closed client raises it.
     pub fn release_session(&self) -> Result<()> {
-        if self.client.is_closed() {
+        if self.client().is_closed() {
             return Err(SparkError::classed(
                 spark_connect_core::error::SparkErrorKind::Connect,
                 "NO_ACTIVE_SESSION",
                 &[],
             ));
         }
-        block_on(self.client.release_session())
+        block_on(self.client().release_session())
     }
 
     /// Close this session without releasing it on the server, as `SparkConnectClient.close`
@@ -2447,7 +2456,7 @@ impl SparkSession {
     /// [`spark_connect_core::client::SparkConnectClient::wait_for_releases`]), which the close of
     /// the channel would cancel.
     pub fn close(&self) {
-        let _ = spark_connect_core::runtime::block_on_abortable(self.client.wait_for_releases());
+        let _ = spark_connect_core::runtime::block_on_abortable(self.client().wait_for_releases());
         self.close_at_once();
     }
 
@@ -2456,7 +2465,7 @@ impl SparkSession {
     /// signal leaves PySpark's `close` before it closes the channel. Not a stable API.
     #[doc(hidden)]
     pub fn close_after_releases(&self) -> Option<()> {
-        spark_connect_core::runtime::block_on_abortable(self.client.wait_for_releases())?;
+        spark_connect_core::runtime::block_on_abortable(self.client().wait_for_releases())?;
         self.close_at_once();
         Some(())
     }
@@ -2465,16 +2474,16 @@ impl SparkSession {
     /// [`SparkSession::close`]). Not a stable API.
     #[doc(hidden)]
     pub fn has_releases_to_wait_for(&self) -> bool {
-        self.client.has_releases_to_wait_for()
+        self.client().has_releases_to_wait_for()
     }
 
     /// As [`SparkSession::close`], at once, of no wait for the releases of its executions, which
     /// the close of the channel cancels if they are in flight. Not a stable API.
     #[doc(hidden)]
     pub fn close_at_once(&self) {
-        self.stopped.store(true, Ordering::SeqCst);
+        self.inner.stopped.store(true, Ordering::SeqCst);
         self.streams().cancel_listener_bus();
-        self.client.close();
+        self.client().close();
     }
 
     /// Whether this session was stopped by `stop()`, once its release ended, or by `close()`, or
@@ -2482,7 +2491,7 @@ impl SparkSession {
     /// `pyspark.sql.connect.session.SparkSession.is_stopped`, which is the client's `is_closed`:
     /// a session whose release is in flight is not stopped yet.
     pub fn is_stopped(&self) -> bool {
-        self.stopped.load(Ordering::SeqCst) || self.client.is_closed()
+        self.inner.stopped.load(Ordering::SeqCst) || self.client().is_closed()
     }
 }
 
@@ -2490,25 +2499,6 @@ impl SparkSession {
 /// `FORWARD_TO_FS_PREFIX + dest_path`: the prefix is followed by the absolute path itself.
 fn forward_to_fs_artifact_name(dest_path: &str) -> String {
     format!("forward_to_fs{}", dest_path)
-}
-
-impl Clone for SparkSession {
-    fn clone(&self) -> Self {
-        SparkSession {
-            client: Arc::clone(&self.client),
-            plan_ids: Arc::clone(&self.plan_ids),
-            tags: Arc::clone(&self.tags),
-            last_execution: Arc::clone(&self.last_execution),
-            progress_handlers: Arc::clone(&self.progress_handlers),
-            progress_handler_id: Arc::clone(&self.progress_handler_id),
-            python_accumulators: self.python_accumulators.clone(),
-            observation_metrics_check: Arc::clone(&self.observation_metrics_check),
-            ml_fit_warning_handler: Arc::clone(&self.ml_fit_warning_handler),
-            stopped: Arc::clone(&self.stopped),
-            server_version: Arc::clone(&self.server_version),
-            listener_bus: Arc::clone(&self.listener_bus),
-        }
-    }
 }
 
 /// A handle of a session that does not keep it alive, of [`SparkSession::downgrade`], as a
@@ -2521,18 +2511,7 @@ impl Clone for SparkSession {
 #[doc(hidden)]
 #[derive(Clone)]
 pub struct WeakSparkSession {
-    client: Weak<SparkConnectClient>,
-    plan_ids: Weak<PlanIds>,
-    tags: Weak<ThreadTags>,
-    last_execution: Weak<Mutex<Option<ExecutionInfo>>>,
-    progress_handlers: Weak<Mutex<Vec<(u64, FallibleProgressHandler)>>>,
-    progress_handler_id: Weak<AtomicU64>,
-    python_accumulators: WeakPythonAccumulators,
-    observation_metrics_check: Weak<Mutex<Option<ObservationMetricsCheck>>>,
-    ml_fit_warning_handler: Weak<Mutex<Option<MlFitWarningHandler>>>,
-    stopped: Weak<AtomicBool>,
-    server_version: Weak<Mutex<Option<String>>>,
-    listener_bus: Weak<crate::streaming::ListenerBus>,
+    inner: Weak<SessionInner>,
 }
 
 impl WeakSparkSession {
@@ -2540,18 +2519,7 @@ impl WeakSparkSession {
     /// handle holds all of the state of the session, so the state is alive as long as one is.
     pub fn upgrade(&self) -> Option<SparkSession> {
         Some(SparkSession {
-            client: self.client.upgrade()?,
-            plan_ids: self.plan_ids.upgrade()?,
-            tags: self.tags.upgrade()?,
-            last_execution: self.last_execution.upgrade()?,
-            progress_handlers: self.progress_handlers.upgrade()?,
-            progress_handler_id: self.progress_handler_id.upgrade()?,
-            python_accumulators: self.python_accumulators.upgrade()?,
-            observation_metrics_check: self.observation_metrics_check.upgrade()?,
-            ml_fit_warning_handler: self.ml_fit_warning_handler.upgrade()?,
-            stopped: self.stopped.upgrade()?,
-            server_version: self.server_version.upgrade()?,
-            listener_bus: self.listener_bus.upgrade()?,
+            inner: self.inner.upgrade()?,
         })
     }
 }
@@ -4432,7 +4400,7 @@ mod tests {
         assert_eq!(spark.tags().unwrap(), vec!["main".to_string()]);
         spark.clear_tags();
         assert!(spark.get_tags().is_empty());
-        assert!(spark.tags.by_thread.lock().unwrap().is_empty());
+        assert!(spark.inner.tags.by_thread.lock().unwrap().is_empty());
     }
 
     /// A tag of a str that UTF-8 cannot encode, as PySpark's client keeps it: the requests that
@@ -4583,7 +4551,7 @@ mod tests {
             .join()
             .unwrap();
         }
-        assert!(spark.tags.by_thread.lock().unwrap().is_empty());
+        assert!(spark.inner.tags.by_thread.lock().unwrap().is_empty());
         assert!(spark.get_tags().is_empty());
     }
 
@@ -4612,7 +4580,7 @@ mod tests {
         })
         .join()
         .unwrap();
-        assert!(spark.tags.by_thread.lock().unwrap().is_empty());
+        assert!(spark.inner.tags.by_thread.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -4650,10 +4618,10 @@ mod tests {
             assert_eq!(spark.client_session_id(), "outer-session");
             assert_eq!(spark.request_user_id().as_deref(), Some("alice"));
             assert!(spark
-                .client
+                .client()
                 .threadlocal_user_context_extensions()
                 .is_empty());
-            assert_eq!(spark.client.global_user_context_extensions().len(), 1);
+            assert_eq!(spark.client().global_user_context_extensions().len(), 1);
             // Of a thread of no tags, the tags of the call during it are gone with it.
             spark.clear_tags();
             {
@@ -4683,10 +4651,10 @@ mod tests {
             })
         };
         assert_eq!(tags_rx.recv().unwrap(), vec!["a"]);
-        assert_eq!(spark.tags.by_thread.lock().unwrap().len(), 1);
+        assert_eq!(spark.inner.tags.by_thread.lock().unwrap().len(), 1);
         end_tx.send(()).unwrap();
         assert_eq!(child.join().unwrap(), vec!["a"]);
-        assert!(spark.tags.by_thread.lock().unwrap().is_empty());
+        assert!(spark.inner.tags.by_thread.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -4994,7 +4962,7 @@ mod tests {
             "an interrupted stop marked the session stopped"
         );
         assert!(
-            !spark.client.is_closed(),
+            !spark.client().is_closed(),
             "an interrupted stop closed the client"
         );
         ended.store(true, Ordering::SeqCst);
@@ -5101,14 +5069,20 @@ mod tests {
     fn version_cache_follows_session_identity() {
         let spark = session();
         let handle = spark.clone();
-        *spark.server_version.lock().unwrap() = Some("4.3.0".into());
+        *spark.inner.server_version.lock().unwrap() = Some("4.3.0".into());
         assert_eq!(handle.version().unwrap(), "4.3.0");
-        assert!(Arc::ptr_eq(&spark.server_version, &handle.server_version));
+        assert!(std::ptr::eq(
+            &spark.inner.server_version,
+            &handle.inner.server_version
+        ));
         for other in [spark.new_session(), session()] {
-            assert!(!Arc::ptr_eq(&spark.server_version, &other.server_version));
-            assert!(other.server_version.lock().unwrap().is_none());
+            assert!(!std::ptr::eq(
+                &spark.inner.server_version,
+                &other.inner.server_version
+            ));
+            assert!(other.inner.server_version.lock().unwrap().is_none());
         }
-        spark.stopped.store(true, Ordering::SeqCst);
+        spark.inner.stopped.store(true, Ordering::SeqCst);
         assert_eq!(handle.version().unwrap(), "4.3.0");
     }
 
@@ -5118,15 +5092,14 @@ mod tests {
         let handle = spark.clone();
         // A panic under the cache lock, as a panicking lookup leaves it, must not permanently
         // break this session's cache.
-        let cache = std::sync::Arc::clone(&spark.server_version);
+        let cache = &spark.inner.server_version;
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _held = cache.lock().unwrap();
             panic!("a lookup panics while the cache lock is held");
         }));
         assert!(result.is_err());
-        assert!(spark.server_version.is_poisoned());
-        let mut cached = spark
-            .server_version
+        assert!(cache.is_poisoned());
+        let mut cached = cache
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert!(cached.is_none());
@@ -5378,6 +5351,49 @@ mod tests {
         let new_session = spark.new_session().downgrade();
         assert!(new_session.upgrade().is_none());
         assert!(spark.downgrade().upgrade().is_some());
+    }
+
+    #[test]
+    fn a_clone_of_a_session_is_one_reference_to_its_state() {
+        // A clone, an upgraded weak handle and the session of a DataFrame are references to the
+        // one state of the session, of all of its fields: a clone counts that state once, and
+        // none of the parts that the state holds. A session is that one reference.
+        assert_eq!(
+            std::mem::size_of::<SparkSession>(),
+            std::mem::size_of::<usize>()
+        );
+        let spark = session();
+        assert_eq!(Arc::strong_count(&spark.inner), 1);
+        let df = spark.range(3).unwrap();
+        let client = Arc::strong_count(spark.client());
+        let plan_ids = Arc::strong_count(spark.plan_ids_shared());
+        let progress_handlers = Arc::strong_count(&spark.progress_handlers());
+        let listener_bus = Arc::strong_count(&spark.listener_bus());
+        let clone = spark.clone();
+        let upgraded = spark.downgrade().upgrade().expect("the session is alive");
+        for other in [&clone, &upgraded, &df.session] {
+            assert!(Arc::ptr_eq(&spark.inner, &other.inner));
+        }
+        assert_eq!(Arc::strong_count(&spark.inner), 4);
+        assert_eq!(Arc::strong_count(spark.client()), client);
+        assert_eq!(Arc::strong_count(spark.plan_ids_shared()), plan_ids);
+        assert_eq!(
+            Arc::strong_count(&spark.progress_handlers()),
+            progress_handlers
+        );
+        assert_eq!(Arc::strong_count(&spark.listener_bus()), listener_bus);
+        drop((clone, upgraded, df));
+        assert_eq!(Arc::strong_count(&spark.inner), 1);
+    }
+
+    #[test]
+    fn sessions_and_their_weak_handles_are_send_and_sync() {
+        // A session and its weak handles are sent to and shared by other threads, as the classes
+        // of the Python binding that hold them, and the static list of the weak handles of its
+        // exit hook, need.
+        fn send_and_sync<T: Send + Sync>() {}
+        send_and_sync::<SparkSession>();
+        send_and_sync::<WeakSparkSession>();
     }
 
     #[test]
@@ -6277,7 +6293,7 @@ mod tests {
             .get_or_create()
             .expect("failed to build session");
         let other = spark.clone();
-        spark.client.close();
+        spark.client().close();
         assert!(
             spark.is_stopped(),
             "a closed client makes the session stopped"
@@ -6290,7 +6306,7 @@ mod tests {
             spark.stop().is_ok(),
             "stop() does not release a closed client"
         );
-        assert!(spark.stopped.load(Ordering::SeqCst));
+        assert!(spark.inner.stopped.load(Ordering::SeqCst));
     }
 
     #[test]
