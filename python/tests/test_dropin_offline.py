@@ -16427,11 +16427,11 @@ def test_requests_that_build_plans_without_the_gil_keep_their_functions_as_the_c
 
 def test_cycles_are_collected_while_calls_run_that_clone_no_part_of_them(mock_connect):
     # Without the GIL, a request of a DataFrame clones and drops only the parts of its plan, which
-    # the DataFrame keeps alive anyway, a write of writeTo only those of the copy of the writer's
-    # state that it runs on, and a call of the configuration clones none: while any of them waits
-    # for the server, a collection frees the cycles through the UDFs of other DataFrames, of one
-    # holder and of two, as PySpark's collector does. The parts of the write itself are busy
-    # meanwhile: the collector does not see them through the writer's DataFrame until it ends.
+    # the DataFrame keeps alive anyway, and a call of the configuration and a write of writeTo,
+    # whose command PySpark's writer builds of the plan of its DataFrame at the call, with the GIL
+    # held, clone none: while any of them waits for the server, a collection frees the cycles
+    # through the UDFs of other DataFrames, of one holder and of two, as PySpark's collector does.
+    # The collector sees the parts of the DataFrame of the write meanwhile, as nothing clones them.
     import gc
     import threading
     import time
@@ -16516,7 +16516,7 @@ def test_cycles_are_collected_while_calls_run_that_clone_no_part_of_them(mock_co
     try:
         write = in_flight(writer.append, lambda: service.execute_started > started)
         assert alive(kept) == 0
-        assert not shared_parts(frame)
+        assert shared_parts(frame)
     finally:
         service.release_response()
     write.join(10)
@@ -37251,7 +37251,8 @@ def test_a_command_expression_too_deep_to_send_raises_recursion_error_as_pyspark
     # about 1,000 levels as a merge condition, a condition or an assignment of a merge clause (as
     # the clause method adds the clause, which is not added then), a partitioning column or an
     # overwrite condition, and as it pickles a Column or builds its to_plan; 20,000 levels killed
-    # the process, and pickling took minutes. 744 additions, the 745 levels of the bound, are sent.
+    # the process, and pickling took minutes. 744 additions, the 745 levels of the bound, are sent,
+    # but as a partitioning column of writeTo, whose command is PySpark's (see below).
     import pickle
 
     from pyspark.sql import functions as F
@@ -37294,8 +37295,19 @@ def test_a_command_expression_too_deep_to_send_raises_recursion_error_as_pyspark
     assert [len(merge.get(field, [])) for field in [4, 5, 6]] == [1, 0, 0]
     at_bound = chained(744)
     df.mergeInto("t", at_bound).whenMatched(at_bound).update({"v": at_bound}).merge()
-    df.writeTo("t").partitionedBy(at_bound).overwrite(at_bound)
+    df.writeTo("t").overwrite(at_bound)
     assert len(service.execute_requests) == 3
+    # The command of DataFrameWriterV2 is PySpark's, which extends its repeated field with the
+    # messages of the partitioning columns: protobuf copies each of its parse, which refuses one of
+    # more than 100 levels, of about 50 additions, with its DecodeError, as PySpark's does.
+    from google.protobuf.message import DecodeError
+
+    df.writeTo("t").partitionedBy(chained(40)).create()
+    assert len(service.execute_requests) == 4
+    for additions in [60, 744]:
+        with pytest.raises(DecodeError, match="Exceeded upb_DecodeOptions_MaxDepth"):
+            df.writeTo("t").partitionedBy(chained(additions)).create()
+    assert len(service.execute_requests) == 4
     assert pickle.dumps(at_bound)
 
 

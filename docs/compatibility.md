@@ -3051,18 +3051,23 @@ the `debug_error_string` of an older grpcio (`UNKNOWN:Error received from peer {
 
 The drop-in also sends a plan that PySpark's client cannot encode: from about 50 nested expressions,
 PySpark raises upb's `DecodeError: Exceeded upb_DecodeOptions_MaxDepth` before it sends the plan,
-where the drop-in sends it, and the server runs it within its own limits. It parses a request of up
-to `spark.connect.grpc.marshallerRecursionLimit` nested messages (1024), so 508 nested `abs` of a
-`select` run and 509 fail, with the `SparkConnectGrpcException` of `UNKNOWN` (`Application error
-processing RPC`), and its analyzer resolves a plan in up to `spark.sql.analyzer.maxIterations` (100)
-iterations, so a chain of 98 `+` fails with its `AnalysisException` ("Max iterations (100) reached
-for batch Resolution"). A Column of more than 745 levels raises a `RecursionError` when it is
-pickled, of the drop-in's own message (`an expression may be at most 745 levels deep`). On Python
-3.11, PySpark's pickler raises one from about 200 levels, under Python's default recursion limit, so
-a Column of about 200 to 745 levels pickles in the drop-in only. `copy.copy` and `copy.deepcopy` of
-a Column share its expression, of which a deep copy makes again only the levels above the UDFs whose
-functions it copies, so they copy a Column of any depth, as PySpark's `copy.copy` does; PySpark's
-`copy.deepcopy` raises a `RecursionError` from about 165 levels.
+where the drop-in sends it, and the server runs it within its own limits. The command of
+`DataFrameWriterV2` is PySpark's, over the drop-in's message of each Column, which holds an
+expression of any depth, but PySpark's command extends its repeated field with the messages of the
+partitioning columns of `partitionedBy`, which protobuf copies of their parse: one of more than 100
+levels, such as a chain of about 50 `+`, raises that `DecodeError`, as PySpark's does. The server
+parses a request of up to `spark.connect.grpc.marshallerRecursionLimit` nested messages (1024), so
+508 nested `abs` of a `select` run and 509 fail, with the `SparkConnectGrpcException` of `UNKNOWN`
+(`Application error processing RPC`), and its analyzer resolves a plan in up to
+`spark.sql.analyzer.maxIterations` (100) iterations, so a chain of 98 `+` fails with its
+`AnalysisException` ("Max iterations (100) reached for batch Resolution"). A Column of more than 745
+levels raises a `RecursionError` when it is pickled, of the drop-in's own message
+(`an expression may be at most 745 levels deep`). On Python 3.11, PySpark's pickler raises one from
+about 200 levels, under Python's default recursion limit, so a Column of about 200 to 745 levels
+pickles in the drop-in only. `copy.copy` and `copy.deepcopy` of a Column share its expression, of
+which a deep copy makes again only the levels above the UDFs whose functions it copies, so they copy
+a Column of any depth, as PySpark's `copy.copy` does; PySpark's `copy.deepcopy` raises a
+`RecursionError` from about 165 levels.
 
 The frame bounds of `Window.rowsBetween` and `rangeBetween` are converted when the plan is built,
 as in PySpark: a bound of a row frame beyond an int, such as a start of `-2**40` or of
