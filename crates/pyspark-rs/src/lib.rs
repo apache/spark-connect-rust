@@ -425,18 +425,15 @@ fn bare_type_names(m: &Bound<'_, PyModule>) -> PyResult<()> {
 /// The native classes that are not attributes of the module, of objects that it makes: the
 /// expression of a Column (`Column._expr`), the attribute of a param of an ML class, the exit
 /// hook and the active session of the sessions (`SparkSession._active_session`), the handle of a
-/// session that a client holds, the objects of the
-/// options and the kept arguments that the copies of a reader, a writer or a builder share, and
-/// the objects that the garbage collector sees of the parts of plans and expressions and of the
-/// states of the writers (see `gc`).
-fn classes_outside_module(py: Python<'_>) -> [Bound<'_, pyo3::types::PyType>; 8] {
+/// session that a client holds, and the objects that the garbage collector sees of the parts of
+/// plans and expressions and of the states of the writers (see `gc`).
+fn classes_outside_module(py: Python<'_>) -> [Bound<'_, pyo3::types::PyType>; 7] {
     [
         py.get_type::<column::PyColumnExpression>(),
         py.get_type::<ml::params_api::PyParamAttribute>(),
         py.get_type::<session::PyExitHook>(),
         py.get_type::<session::PyActiveSession>(),
         py.get_type::<session::PyWeakSession>(),
-        py.get_type::<options::PySharedObjects>(),
         py.get_type::<gc::SharedPart>(),
         py.get_type::<dataframe::WriterParts>(),
     ]

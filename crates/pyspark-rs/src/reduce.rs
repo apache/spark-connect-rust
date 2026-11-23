@@ -195,14 +195,3 @@ pub(crate) fn str_dict<'py>(
     }
     Ok(dict)
 }
-
-/// The Python object of an optional Python object, None if there is none.
-pub(crate) fn optional_object<'py>(
-    py: Python<'py>,
-    object: Option<&Py<PyAny>>,
-) -> Bound<'py, PyAny> {
-    match object {
-        Some(object) => object.clone_ref(py).into_bound(py),
-        None => py.None().into_bound(py),
-    }
-}

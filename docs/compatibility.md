@@ -3891,13 +3891,13 @@ session, and the builder of `pyspark.sql.connect.session.SparkSession` holds the
 options, its channel builder and the list of its hook factories in its `__dict__`, which its shallow
 copies share, as PySpark's plain objects hold them, so a session that keeps its `dataSource`, or an
 option, a channel builder or a hook factory that keeps its builder or a copy of it, is collected.
-The readers and the writers report the keys and the values of their options that are objects, which
-PySpark's dicts of options keep as they are, such as a key that is not a str, and the format, the
-save mode, the partitioning and clustering columns and the provider that the writers keep as they
-are, through one object of them that their shallow copies share, as PySpark's copies share the dict
-of their options and the `_write` of a writer: so a cycle through one, such as a key of an option
-that keeps its reader, is collected, also with a copy of the reader, and freed with the last of the
-copies.
+The readers and the writers of `read`, `readStream`, `write` and `writeTo`, PySpark's classes, hold
+the dict of their options, whose keys and values may be any objects, such as a key that is not a
+str, and the writers the format, the save mode, the partitioning and clustering columns and the
+provider as they are, in their `__dict__` (a writer in its `_write`), which their shallow copies
+share, as PySpark's copies share the dict of their options and the `_write` of a writer: so a cycle
+through one, such as a key of an option that keeps its reader, is collected, also with a copy of the
+reader, and freed with the last of the copies.
 
 The condition and the assignments of a clause of `mergeInto` are built, and the functions of their
 UDFs pickled, when the clause is added, which raises there, and the merge sends them as they were

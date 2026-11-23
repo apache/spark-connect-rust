@@ -16929,13 +16929,14 @@ def test_option_keys_compared_as_python_code_stop_no_call_and_lose_no_option_as_
     # As PySpark's readers, writers and session builder, whose options are dicts: a dict compares
     # a key with the keys that it holds by their `__eq__`, Python code, which may release the GIL,
     # as any Python function may, or set an option of the same object again. Neither stops a call
-    # of another thread, nor fails its own, nor loses an option. The drop-in compared the kept
-    # keys of a writer while it held the locks of the writer's state, so another thread's call of
-    # the writer waited for them with the GIL held, which the first thread needed back: the two
-    # deadlocked, and so did a comparison that set an option of the writer again. It compared
-    # those of a reader while it held a borrow of the reader, so another thread's call raised
-    # "Already borrowed", and an option that the comparison set was lost. In a process of its own,
-    # which a deadlock would hang, with the check of the clones on (see `crate::gc::GilMutex`).
+    # of another thread, nor fails its own, nor loses an option. So do the drop-in's, which keep
+    # their options in dicts too. Its former native writers compared the kept keys of a writer
+    # while they held the locks of the writer's state, so another thread's call of the writer
+    # waited for them with the GIL held, which the first thread needed back: the two deadlocked,
+    # and so did a comparison that set an option of the writer again. Its former native readers
+    # compared those of a reader while they held a borrow of the reader, so another thread's call
+    # raised "Already borrowed", and an option that the comparison set was lost. In a process of
+    # its own, which a deadlock would hang, with the check of the clones on.
     import subprocess
     import sys
     import textwrap
