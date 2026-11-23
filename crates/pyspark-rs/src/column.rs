@@ -1542,7 +1542,14 @@ fn cast_column(column: &Column, data_type: &Bound<'_, PyAny>, try_: bool) -> PyR
         Some(error) => error,
         None => {
             let py = data_type.py();
-            let parsed = match crate::types::py_to_data_type(data_type) {
+            // Of the lowering that the cast makes, of the walk of the foreign fields only of a
+            // type that may hold them (see `crate::types::lower_noting_subclasses`).
+            let (lowered, maybe_foreign) =
+                crate::types::lower_noting_subclasses(data_type, crate::types::MetadataOf::Strict);
+            if crate::types::foreign_of_lowering(data_type, maybe_foreign)? {
+                return foreign_cast_column(column, data_type, try_);
+            }
+            let parsed = match lowered {
                 Ok(parsed) => parsed,
                 // A type that does not lower now, such as an array of a `UserDefinedType` whose
                 // `module()` is not implemented, or a struct of metadata that `json.dumps` refuses,
@@ -1608,6 +1615,69 @@ fn cast_column(column: &Column, data_type: &Bound<'_, PyAny>, try_: bool) -> PyR
     };
     let text: String = data_type.call_method0(name)?.extract()?;
     Ok(PyColumn::new(args.column_after(unparsed(&text))))
+}
+
+/// A cast to a type that holds a struct whose fields hold an element that is not a `StructField`
+/// (see `crate::types::holds_foreign_field`): the Column is made, its repr shows the
+/// `simpleString()` of the object in upper case, of the error of that, and each request sends the
+/// type that PySpark's `pyspark_types_to_proto_types` reads of its elements, of the error of that,
+/// after those of the expression (see `crate::types::py_to_proto_data_type`). Both are read at
+/// the call, where PySpark's `CastExpression` of the type object reads it when it renders and when
+/// it builds (see the known differences, SPARK-62228).
+fn foreign_cast_column(
+    column: &Column,
+    data_type: &Bound<'_, PyAny>,
+    try_: bool,
+) -> PyResult<PyColumn> {
+    let py = data_type.py();
+    let parsed = match crate::types::py_to_proto_data_type(data_type) {
+        Ok(parsed) => Ok(parsed),
+        Err(err) => Err(reading_error(py, err)?),
+    };
+    let shown = match data_type
+        .call_method0(pyo3::intern!(py, "simpleString"))
+        .and_then(|shown| shown.extract::<String>())
+    {
+        Ok(shown) => Ok(shown),
+        Err(err) => Err(reading_error(py, err)?),
+    };
+    let cast = match (&parsed, &shown) {
+        (Ok(parsed), shown) => {
+            let shown = shown.as_deref().unwrap_or_default();
+            column.clone().cast_shown(parsed.clone(), shown, try_)
+        }
+        (Err(_), shown) => {
+            let shown = shown.as_deref().unwrap_or_default();
+            match try_ {
+                false => column.clone().cast_str(shown),
+                true => column.clone().try_cast_str(shown),
+            }
+        }
+    };
+    Ok(PyColumn::new(Column::new(
+        spark_connect::expression::Expression::unbuildable(
+            cast.expression().clone(),
+            None,
+            parsed.err(),
+            shown.err(),
+        ),
+    )))
+}
+
+/// The error `err` of a value that PySpark reads when it builds or renders a Column, as a request
+/// or the repr of it raises it again, as [`crate::plan_args::PlanArgs::raised`] takes it: an
+/// `AttributeError`, a `TypeError`, a `ValueError`, an `OverflowError` or a `RecursionError` of
+/// Python, or an exception of one of PySpark's error classes, such as the `PySparkValueError` of
+/// `UNSUPPORTED_OPERATION`; another is given back, for the call to raise.
+fn reading_error(py: Python<'_>, err: PyErr) -> PyResult<spark_connect_core::error::SparkError> {
+    let mut args = crate::plan_args::PlanArgs::new();
+    args.raised(py, err)?;
+    match args.error() {
+        Some(error) => Ok(error.clone()),
+        None => Err(pyo3::exceptions::PyRuntimeError::new_err(
+            "the error of a value of a cast was not recorded",
+        )),
+    }
 }
 
 /// The description of `error`, of an expression that a request does not build or whose

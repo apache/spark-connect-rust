@@ -3151,22 +3151,45 @@ raises for another number of names than columns.
 
 `createDataFrame` under a struct whose fields hold an element that is not a `StructField`, as
 `s.fields.append("x")` gives, at any level (in a struct inside it changed in place, also of a
-struct, an array or a map that is itself an element of `fields`), is PySpark's, of any data. It
-converts the data as PySpark's conversion does, of its errors: of local rows or a pyarrow Table, it
-reads the fields, of the `AttributeError` of the first attribute that an element lacks, and takes
-local rows apart by the cached names first, of `AXIS_LENGTH_MISMATCH`; of a pandas DataFrame of
-rows, it deduplicates the names of the fields first (`_deduplicate_field_names`), of the
-`IndexError` of an element past the cached `names`, and zips the columns with the fields (see
-above); and of an array of rows, it reads no field and checks the width of the array. It then writes
-the `json()` of the schema object as PySpark's does, of no rows too, of the `jsonValue` of each
-element of the fields of its structs in their order, so it raises the `AttributeError` of an element
-of none, and of an element that has one sends the converted data of that JSON, with the names of the
-struct of a pandas DataFrame (`toDF`). A field of such a struct writes the collations of the strings
-of its arrays and maps into its metadata (`__COLLATIONS`), and its type without them, as PySpark's
+struct, an array or a map that is itself an element of `fields`, and in the `sqlType()` of a
+`UserDefinedType`), is PySpark's, of any data; the width of a pandas DataFrame is zipped with the
+fields as of any struct (see above). It converts the data as PySpark's conversion does,
+of its errors: of local rows or a pyarrow Table, it reads the fields, of the `AttributeError` of the
+first attribute that an element lacks, and takes local rows apart by the cached names first, of
+`AXIS_LENGTH_MISMATCH`; of a pandas DataFrame of rows, it deduplicates the names of the fields first
+(`_deduplicate_field_names`), of the `IndexError` of an element past the cached `names`; and of an
+array of rows, it reads no field and checks the width of the array. It then writes the `json()` of
+the schema object as PySpark's does, of no rows too, of the `jsonValue` of each element of the
+fields of its structs in their order, so it raises the `AttributeError` of an element of none, and
+of an element that has one sends the converted data of that JSON, with the names of the struct of a
+pandas DataFrame (`toDF`). A field of such a struct writes the collations of the strings of its
+arrays and maps into its metadata (`__COLLATIONS`), and its type without them, as PySpark's
 `StructField.jsonValue`, which reads the attributes of the types in its order, so a type of a Python
 subclass of a property of its own, such as a `dataType` that makes a new struct at each read, is
-written of what each read gives. Its other uses lower the struct, which raises (see
-`dev/parity/known-differences.md`).
+written of what each read gives.
+
+The other uses of such a struct read its elements as PySpark's `StructType` reads them, of each
+element as it is: of one that lacks the attribute that a use reads, its `AttributeError`, and of one
+that has it, the use of it. `json()` and `jsonValue()` write the `jsonValue` of each element, as
+above; `simpleString()` joins the `simpleString()` of each element; `treeString()` calls the
+`_build_formatted_string` of each element, as PySpark's `treeString` of its `StringConcat`; a lookup
+by name compares the `name` of each element, and a slice is `StructType(...)` of the elements, of
+the errors of its `__init__`; `add` appends the field and its name and then reads the
+`needConversion()` of each element; and `toNullable()` reads the `name`, the `dataType` and the
+`metadata` of each element, in that order. An assignment of `fields` takes any elements; pickles and
+copies keep them, as PySpark's pickle of the `__dict__` of the struct (of a struct at the top
+level, a shallow copy shares the list); and a `StructField`, an `ArrayType` and a `MapType` of such a
+struct keep it as it is. The plans of a UDF, of a map or group function and of `transformWithState`
+and `transformWithStateInPandas` send the type that PySpark's `pyspark_types_to_proto_types` reads
+of the elements when the request builds the plan, of each its `name`, `dataType`, `nullable` and
+`metadata` (of a sibling field of a type that it has no proto of, such as `AtomicType()`, its
+`UNSUPPORTED_OPERATION`), and each request raises the error of that. A cast and `DataFrame.to`
+send what those reads give at the call, which a request raises the error of, and the repr of the
+cast shows the `simpleString()` of the object in upper case that the call read (see "A cast and
+`DataFrame.to` of a struct" in `dev/parity/known-differences.md`); `from_json`, a reader's schema
+and `catalog.createTable` read the `json()` or the elements of the object at the call, as
+PySpark's. A struct whose fields hold the struct itself has levels that no walk ends, and its uses
+raise `RecursionError` as PySpark's do (see "A type that holds itself" above).
 
 The parameters of a type are its attributes, as PySpark's: `t.scale = 3` makes a
 `DecimalType(10, 2)` a `DecimalType(10, 3)`, as its repr, JSON, `==` and hash show, also in the

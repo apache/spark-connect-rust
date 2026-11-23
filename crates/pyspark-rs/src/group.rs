@@ -891,13 +891,25 @@ fn transform_with_state_of(
     let session = grouped.spark_session();
     let cols = this.frame_columns(py)?;
     let udf = build_map_udf(py, &session, &func, output_struct_type, et, &cols)?;
-    // As PySpark's, which sends a DDL string as an `UnparsedDataType`, for the server to parse.
+    // As PySpark's, which sends a DDL string as an `UnparsedDataType`, for the server to parse. A
+    // struct whose fields hold an element that is not a `StructField` stands as the types that
+    // stand for its elements, as the output type of the function does (see `map_udf_of`): the
+    // plan sends the output type that the function's pickler converts as the request builds it,
+    // of PySpark's reads of the elements and their errors, as PySpark's plan converts its output
+    // schema then (see `transform_with_state_output_schema`).
     let out = if output_struct_type.is_instance_of::<pyo3::types::PyString>() {
         spark_connect::types::DataType::Unparsed {
             data_type_string: output_struct_type.extract()?,
         }
     } else {
-        crate::types::py_to_data_type(output_struct_type)?
+        let (lowered, maybe_foreign) = crate::types::lower_noting_subclasses(
+            output_struct_type,
+            crate::types::MetadataOf::Strict,
+        );
+        match crate::types::foreign_of_lowering(output_struct_type, maybe_foreign)? {
+            true => crate::types::lenient_type(output_struct_type)?,
+            false => lowered?,
+        }
     };
     let event_time_column_name = match event_time_column_name {
         DefaultedOption::Omitted => pyo3::types::PyString::new(py, "").into_any(),

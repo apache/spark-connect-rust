@@ -825,7 +825,7 @@ impl KeptType {
 /// such as a `KeyboardInterrupt`, is raised. A type of more levels than Python's recursion limit,
 /// such as one that holds itself (see [`type_level`]), stands as the null type too: each use
 /// that reads its levels raises its `RecursionError`, as PySpark's do.
-fn lenient_type(obj: &Bound<'_, PyAny>) -> PyResult<DataType> {
+pub(crate) fn lenient_type(obj: &Bound<'_, PyAny>) -> PyResult<DataType> {
     match stand_in_type(obj) {
         Err(error)
             if error.is_instance_of::<pyo3::exceptions::PyRecursionError>(obj.py())
@@ -837,23 +837,46 @@ fn lenient_type(obj: &Bound<'_, PyAny>) -> PyResult<DataType> {
     }
 }
 
+std::thread_local! {
+    /// Whether the thread walks the types that stand for a type that does not lower (see
+    /// [`stand_in_type`]).
+    static STANDING_IN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// The core type of the type object `obj`, or the type that stands for it, as [`lenient_type`]
 /// gives them, of the `RecursionError` of a type of more levels than Python's recursion limit:
 /// of its lowering, or of the levels of the types that stand for it, which are walks of its type
 /// objects too (see [`type_level`]), as a type that holds itself and a type that does not lower
 /// now has levels that no walk ends.
 fn stand_in_type(obj: &Bound<'_, PyAny>) -> PyResult<DataType> {
-    let error = match py_to_data_type(obj) {
-        Ok(data_type) => return Ok(data_type),
-        Err(error) => error,
-    };
     let py = obj.py();
-    if !is_exception(py, &error)
-        || !obj.is_instance_of::<PyDataType>()
-        || error.is_instance_of::<pyo3::exceptions::PyRecursionError>(py)
-    {
-        return Err(error);
+    // Below a type that does not lower, its structs, arrays and maps stand of the types that they
+    // hold, of no lowering of each again, which would read the levels below each as many times as
+    // there are levels above them (cubic in the levels of a type made a level at a time); the other
+    // types are lowered, of a stand-in if they do not lower now.
+    let container = obj.is_instance_of::<PyStructType>()
+        || obj.is_instance_of::<PyArrayType>()
+        || obj.is_instance_of::<PyMapType>();
+    if !(container && STANDING_IN.with(std::cell::Cell::get)) {
+        let error = match py_to_data_type(obj) {
+            Ok(data_type) => return Ok(data_type),
+            Err(error) => error,
+        };
+        if !is_exception(py, &error)
+            || !obj.is_instance_of::<PyDataType>()
+            || error.is_instance_of::<pyo3::exceptions::PyRecursionError>(py)
+        {
+            return Err(error);
+        }
     }
+    /// The walk of the types that stand for a type, until it is dropped (see [`STANDING_IN`]).
+    struct StandingIn(bool);
+    impl Drop for StandingIn {
+        fn drop(&mut self) {
+            STANDING_IN.with(|standing_in| standing_in.set(self.0));
+        }
+    }
+    let _standing_in = StandingIn(STANDING_IN.with(|standing_in| standing_in.replace(true)));
     type_level(py, || {
         if let Ok(array) = obj.cast::<PyArrayType>() {
             let array = array.borrow();
@@ -1014,15 +1037,21 @@ fn struct_parts(py: Python<'_>, fields: Bound<'_, PyList>) -> PyResult<(DataType
 /// PySpark's `_needConversion`, `[f.needConversion() for f in self]`: of a field of a Python
 /// subclass, of its own method.
 fn need_conversion_of_fields(py: Python<'_>, fields: &Bound<'_, PyList>) -> PyResult<Vec<bool>> {
+    // Of an iterator of the list, as PySpark's comprehension reads it, which sees an element that
+    // the Python code of an element appends.
     fields
-        .iter()
+        .as_any()
+        .try_iter()?
         .map(|item| {
-            if is_subclass_object(&item) {
-                return item
+            let item = item?;
+            match item.cast::<PyStructField>() {
+                Ok(field) if !is_subclass_object(&item) => field.borrow().need_conversion_now(py),
+                // Of the field's own method, of a Python subclass or of an element that is not a
+                // `StructField`, as PySpark calls it, of its `AttributeError` of none.
+                _ => item
                     .call_method0(pyo3::intern!(py, "needConversion"))?
-                    .is_truthy();
+                    .is_truthy(),
             }
-            as_struct_field(&item)?.borrow().need_conversion_now(py)
         })
         .collect()
 }
@@ -1304,7 +1333,14 @@ pub(crate) fn shown_simple_string(
 /// type of its class only, such as `AtomicType()`: it is the `UNSUPPORTED_OPERATION` of the
 /// first one, `obj` itself or else the first in its fields.
 pub(crate) fn py_to_proto_data_type(obj: &Bound<'_, PyAny>) -> PyResult<DataType> {
-    let data_type = py_to_data_type(obj)?;
+    let (lowered, maybe_foreign) = lower_noting_subclasses(obj, MetadataOf::Strict);
+    if maybe_foreign {
+        let mut foreign = ForeignFields::default();
+        if foreign.holds(obj)? {
+            return foreign_proto_type(obj, &mut foreign);
+        }
+    }
+    let data_type = lowered?;
     if let Some(field) = unsendable_field_repr(obj, &data_type)? {
         return Err(crate::column::raise_pyspark(
             obj.py(),
@@ -1314,6 +1350,102 @@ pub(crate) fn py_to_proto_data_type(obj: &Bound<'_, PyAny>) -> PyResult<DataType
         ));
     }
     Ok(data_type)
+}
+
+/// The core type that PySpark's `pyspark_types_to_proto_types` sends of the type object `obj`,
+/// which holds a struct whose fields hold an element that is not a `StructField` (see
+/// `holds_foreign_field`): of each element of the `fields` of a struct, its `name`, as protobuf's
+/// string field takes it, its `dataType`, in turn, its `nullable`, as protobuf's bool field takes
+/// it, and `json.dumps` of its `metadata` when there is one, in that order, of the errors of each;
+/// of a field that holds no such struct, as it lowers; and of an array and a map, of their types
+/// in turn and their flags.
+fn foreign_proto_type(obj: &Bound<'_, PyAny>, foreign: &mut ForeignFields) -> PyResult<DataType> {
+    // A level of a type of many levels, on a stack with room, of the bound of the walks.
+    type_level(obj.py(), || foreign_proto_type_level(obj, foreign))
+}
+
+/// [`foreign_proto_type`] of one level: of a type that holds no such struct, of
+/// [`py_to_proto_data_type`], and of a value that is not a data type, of PySpark's
+/// `UNSUPPORTED_OPERATION`.
+fn foreign_proto_type_level(
+    obj: &Bound<'_, PyAny>,
+    foreign: &mut ForeignFields,
+) -> PyResult<DataType> {
+    let py = obj.py();
+    if !obj.is_instance_of::<PyDataType>() {
+        return Err(not_a_type_error(obj));
+    }
+    if !foreign.holds(obj)? {
+        return py_to_proto_data_type(obj);
+    }
+    if obj.is_instance_of::<PyStructType>() {
+        let mut fields = Vec::new();
+        for element in obj.getattr(pyo3::intern!(py, "fields"))?.try_iter()? {
+            let element = element?;
+            if let Ok(field) = element.cast::<PyStructField>() {
+                if !foreign.holds(&element)? {
+                    // A field of a type that PySpark's conversion has no proto of, such as
+                    // `AtomicType()` or a `StructField` as a type, raises its
+                    // `UNSUPPORTED_OPERATION`, as of a field of a struct of no foreign element.
+                    py_to_proto_data_type(&element.getattr(pyo3::intern!(py, "dataType"))?)?;
+                    fields.push(field.borrow().current_field(py)?);
+                    continue;
+                }
+            }
+            let name = crate::options::str_argument(&element.getattr(pyo3::intern!(py, "name"))?)?;
+            let data_type =
+                foreign_proto_type(&element.getattr(pyo3::intern!(py, "dataType"))?, foreign)?;
+            let nullable =
+                crate::streaming::proto_bool(&element.getattr(pyo3::intern!(py, "nullable"))?)?;
+            let metadata = element.getattr(pyo3::intern!(py, "metadata"))?;
+            let metadata = if !metadata.is_none() && metadata.len()? > 0 {
+                let text: String = py
+                    .import("json")?
+                    .call_method1("dumps", (&metadata,))?
+                    .extract()?;
+                Metadata::from_json(&text)
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
+            } else {
+                Metadata::new()
+            };
+            fields.push(StructField {
+                name,
+                data_type,
+                nullable,
+                metadata,
+            });
+        }
+        return Ok(DataType::Struct { fields });
+    }
+    if obj.is_instance_of::<PyArrayType>() {
+        let element_type =
+            foreign_proto_type(&obj.getattr(pyo3::intern!(py, "elementType"))?, foreign)?;
+        let contains_null =
+            crate::streaming::proto_bool(&obj.getattr(pyo3::intern!(py, "containsNull"))?)?;
+        return Ok(DataType::Array {
+            element_type: Box::new(element_type),
+            contains_null,
+        });
+    }
+    if obj.is_instance_of::<PyMapType>() {
+        let key_type = foreign_proto_type(&obj.getattr(pyo3::intern!(py, "keyType"))?, foreign)?;
+        let value_type =
+            foreign_proto_type(&obj.getattr(pyo3::intern!(py, "valueType"))?, foreign)?;
+        let value_contains_null =
+            crate::streaming::proto_bool(&obj.getattr(pyo3::intern!(py, "valueContainsNull"))?)?;
+        return Ok(DataType::Map {
+            key_type: Box::new(key_type),
+            value_type: Box::new(value_type),
+            value_contains_null,
+        });
+    }
+    // A user-defined type, of its JSON and of the proto of its `sqlType()`, as PySpark's
+    // conversion writes it.
+    if is_udt(obj)? {
+        return udt_of(obj, |sql_type| foreign_proto_type(sql_type, foreign));
+    }
+    // A `StructField` as a type, which PySpark's conversion does not take.
+    Err(not_a_type_error(obj))
 }
 
 /// The core type of `value`, the return type of a UDTF, as PySpark's `PythonUDTF.to_plan` converts
@@ -1854,7 +1986,16 @@ fn type_json_value_level<'py>(
     py: Python<'py>,
     obj: &Bound<'py, PyAny>,
 ) -> PyResult<(Bound<'py, PyAny>, bool)> {
-    let json = py_json_value(py, py_to_data_type_as_given(obj)?.json_value(), false)?;
+    // Of a struct whose fields hold an element that is not a `StructField`, at any level, as
+    // PySpark's `jsonValue` writes it, of the `jsonValue` of each element.
+    let (lowered, maybe_foreign) = lower_noting_subclasses(obj, MetadataOf::AsGiven);
+    if maybe_foreign {
+        let mut foreign = ForeignFields::default();
+        if foreign.holds(obj)? {
+            return Ok((foreign.json_value_of_native(py, obj)?, true));
+        }
+    }
+    let json = py_json_value(py, lowered?.json_value(), false)?;
     let mut other = keep_flags_in_json(py, &json, obj, false)?;
     // As PySpark's `jsonValue` of an array, a map and a struct, of `self.typeName()`: of a Python
     // subclass, the name of its class, or its own `typeName`.
@@ -1969,7 +2110,9 @@ impl ForeignFields {
         // adds nothing to the answer of the walk that is looking at it.
         self.0.insert(key, (obj.clone().unbind(), false));
         let holds = type_level(obj.py(), || self.holds_level(obj))?;
-        self.0.insert(key, (obj.clone().unbind(), holds));
+        if let Some(entry) = self.0.get_mut(&key) {
+            entry.1 = holds;
+        }
         Ok(holds)
     }
 
@@ -2000,6 +2143,14 @@ impl ForeignFields {
             let native = py.get_type::<PyMapType>();
             Ok(self.holds_child(obj, key, "keyType", &native)?
                 || self.holds_child(obj, value, "valueType", &native)?)
+        } else if !obj.is_instance_of::<PyAtomicType>() && is_udt(obj)? {
+            // Of the `sqlType()` of a user-defined type, whose JSON and proto PySpark writes of
+            // it; of one that is not implemented, none, whose uses raise its error. An atomic type,
+            // which no user-defined type is, is not looked up as one.
+            match obj.call_method0(pyo3::intern!(py, "sqlType")) {
+                Ok(sql_type) => self.holds(&sql_type),
+                Err(_) => Ok(false),
+            }
         } else {
             Ok(false)
         }
@@ -2053,17 +2204,31 @@ impl ForeignFields {
     ) -> PyResult<Bound<'py, PyAny>> {
         // Of a type of many levels, whose JSON values recurse over its levels as they are made, on
         // a stack with room for a level.
-        type_level(py, || self.json_value_level(py, obj))
+        type_level(py, || self.json_value_level(py, obj, true))
     }
 
-    /// [`ForeignFields::json_value`] of one level.
-    fn json_value_level<'py>(
+    /// [`ForeignFields::json_value`] of `obj` itself, which the native `jsonValue` of its class
+    /// writes: not of a `jsonValue` of a Python subclass of its own, which may call the native one.
+    fn json_value_of_native<'py>(
         &mut self,
         py: Python<'py>,
         obj: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        type_level(py, || self.json_value_level(py, obj, false))
+    }
+
+    /// [`ForeignFields::json_value`] of one level, of the `jsonValue` of a Python subclass of its
+    /// own if `of_its_own`.
+    fn json_value_level<'py>(
+        &mut self,
+        py: Python<'py>,
+        obj: &Bound<'py, PyAny>,
+        of_its_own: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let json_value = pyo3::intern!(py, "jsonValue");
-        let own = |native: Bound<'_, pyo3::types::PyType>| overrides(obj, "jsonValue", &native);
+        let own = |native: Bound<'_, pyo3::types::PyType>| {
+            Ok::<bool, PyErr>(of_its_own && overrides(obj, "jsonValue", &native)?)
+        };
         let json = pyo3::types::PyDict::new(py);
         if obj.is_instance_of::<PyStructType>() {
             if own(py.get_type::<PyStructType>())? {
@@ -2267,6 +2432,25 @@ fn collation_value<'py>(
     )
 }
 
+/// Whether the type object `obj` holds an element that is not a `StructField` in the `fields` of
+/// one of its structs, at any level (see `ForeignFields`).
+pub(crate) fn holds_foreign_field(obj: &Bound<'_, PyAny>) -> PyResult<bool> {
+    ForeignFields::default().holds(obj)
+}
+
+/// Whether the `fields` of the struct `obj` themselves hold an element that is not a
+/// `StructField`, as PySpark's struct holds what its list holds.
+fn holds_foreign_element(obj: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let Ok(st) = obj.cast::<PyStructType>() else {
+        return Ok(false);
+    };
+    let fields = st.borrow().fields.clone_ref(obj.py());
+    Ok(fields
+        .bind(obj.py())
+        .iter()
+        .any(|element| !element.is_instance_of::<PyStructField>()))
+}
+
 /// Whether the class of `obj` overrides the attribute `name` of the native class `native`, as a
 /// Python subclass of its own method does.
 fn overrides(
@@ -2274,7 +2458,12 @@ fn overrides(
     name: &str,
     native: &Bound<'_, pyo3::types::PyType>,
 ) -> PyResult<bool> {
-    Ok(!obj.get_type().getattr(name)?.is(&native.getattr(name)?))
+    // Of the native class itself, whose attribute is its own, of no lookup.
+    let class = obj.get_type();
+    if class.is(native) {
+        return Ok(false);
+    }
+    Ok(!class.getattr(name)?.is(&native.getattr(name)?))
 }
 
 /// The `jsonValue` of the field `field`, with its nullable flags as given, and whether one of
@@ -2293,10 +2482,22 @@ fn field_json_value_level<'py>(
     py: Python<'py>,
     field: &Bound<'py, PyStructField>,
 ) -> PyResult<(Bound<'py, PyAny>, bool)> {
-    let v = field
-        .borrow()
-        .current_field_of(py, MetadataOf::AsGiven)?
-        .json_value();
+    // Of a type that holds a struct whose fields hold an element that is not a `StructField`, of
+    // the walk of the foreign fields only of a field that may hold one, as the lowering of its type
+    // tells (see `lower_noting_subclasses`).
+    let before = LOWERED_SUBCLASS.with(|lowered| lowered.replace(false));
+    note_subclass(field.as_any(), &py.get_type::<PyStructField>());
+    let current = field.borrow().current_field_of(py, MetadataOf::AsGiven);
+    let subclass = LOWERED_SUBCLASS.with(|lowered| lowered.replace(before || lowered.get()));
+    if subclass
+        || matches!(&current, Err(error) if error.is_instance_of::<pyo3::exceptions::PyTypeError>(py))
+    {
+        let mut foreign = ForeignFields::default();
+        if foreign.holds(field.as_any())? {
+            return Ok((foreign.json_value_of_native(py, field.as_any())?, true));
+        }
+    }
+    let v = current?.json_value();
     let json = py_json_value(py, v, true)?;
     let other = keep_flags_in_json(py, &json, field.as_any(), false)?;
     Ok((json, other))
@@ -5626,13 +5827,14 @@ impl PyStructType {
         py: Python<'_>,
         metadata: MetadataOf,
     ) -> PyResult<Vec<StructField>> {
+        let native = py.get_type::<PyStructField>();
         self.fields
             .bind(py)
             .iter()
             .map(|item| {
-                as_struct_field(&item)?
-                    .borrow()
-                    .current_field_of(py, metadata)
+                let field = as_struct_field(&item)?;
+                note_subclass(&item, &native);
+                field.borrow().current_field_of(py, metadata)
             })
             .collect()
     }
@@ -5646,7 +5848,17 @@ impl PyStructType {
             .fields
             .bind(py)
             .iter()
-            .map(|item| as_struct_field(&item)?.borrow().stand_in_level(py))
+            .map(|item| match item.cast::<PyStructField>() {
+                Ok(field) => field.borrow().stand_in_level(py),
+                // An element that is not a `StructField`, of which the uses read the object, as
+                // PySpark's, stands as a field of the null type.
+                Err(_) => Ok(StructField {
+                    name: String::new(),
+                    data_type: DataType::Null,
+                    nullable: true,
+                    metadata: Metadata::new(),
+                }),
+            })
             .collect::<PyResult<Vec<_>>>()?;
         Ok(DataType::Struct { fields })
     }
@@ -5803,7 +6015,10 @@ impl PyStructType {
     /// PySpark's `__init__` sets (see `reduce_of`).
     fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
         let py = slf.py();
-        if !is_native(slf) || has_dict_state(slf.as_any())? {
+        // A struct whose fields hold an element that is not a `StructField` pickles of its
+        // `__dict__`, as PySpark's, which keeps the elements as they are.
+        if !is_native(slf) || has_dict_state(slf.as_any())? || holds_foreign_element(slf.as_any())?
+        {
             return Self::reduce_of_dict(slf);
         }
         let this = slf.borrow();
@@ -5963,12 +6178,16 @@ impl PyStructType {
         // Only the types are read here, not the metadata: `add` is then linear in the fields
         // (a loop of adds with metadata would otherwise encode every field's metadata each time).
         let new_field = as_struct_field(&object)?.borrow().stand_in_field(py)?;
-        let need_conversion = {
+        // As PySpark's, which appends to `fields` and `names`, and then reads the
+        // `needConversion()` of each field, of Python code that may edit the struct: it is not
+        // borrowed while that code runs.
+        let (fields, names) = {
             let me = slf.borrow();
-            me.fields.bind(py).append(object)?;
-            me.names.bind(py).append(name)?;
-            need_conversion_of_fields(py, me.fields.bind(py))?
+            (me.fields.clone_ref(py), me.names.clone_ref(py))
         };
+        fields.bind(py).append(object)?;
+        names.bind(py).append(name)?;
+        let need_conversion = need_conversion_of_fields(py, fields.bind(py))?;
         // The base `DataType` is a snapshot, which only the bare-base fallback of
         // `py_to_data_type` reads (a struct is read from its live fields), so it takes the new
         // field, as the fields of `add` do.
@@ -5988,14 +6207,11 @@ impl PyStructType {
         self.fields.clone_ref(py)
     }
     /// An assignment of `fields` is the struct's, as PySpark's: `names` and `needConversion` are
-    /// not recomputed by it. A value that is not a list is a list of its items.
+    /// not recomputed by it, and it takes any elements, which the uses read as they are. A value
+    /// that is not a list is a list of its items.
     #[setter]
     fn set_fields(&mut self, py: Python<'_>, fields: &Bound<'_, PyAny>) -> PyResult<()> {
-        let list = list_of(py, fields)?;
-        for item in list.iter() {
-            as_struct_field(&item)?;
-        }
-        self.fields = list.unbind();
+        self.fields = list_of(py, fields)?.unbind();
         Ok(())
     }
 
@@ -6018,13 +6234,25 @@ impl PyStructType {
     /// (mirrors `StructType.__getitem__`; a slice yields a new `StructType`), with the errors of
     /// PySpark's: `KEY_NOT_EXISTS` of a name, `INDEX_OUT_OF_RANGE` of an index, and
     /// `NOT_EXPECTED_TYPE` of another key. A name is looked up in the fields, as PySpark does.
-    fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    ///
+    /// The struct is not borrowed while the elements are read, whose `name` may be Python code
+    /// that edits the struct, as PySpark's reads them; the elements are those of an iterator of the
+    /// list, which sees what that code appends.
+    fn __getitem__(slf: &Bound<'_, Self>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         use crate::column::raise_pyspark;
-        let fields = self.fields.bind(py);
-        if let Ok(name) = key.cast::<pyo3::types::PyString>() {
-            let name = name.to_cow()?;
-            for item in fields.iter() {
-                if as_struct_field(&item)?.borrow().field.name == *name {
+        let py = slf.py();
+        let fields = slf.borrow().fields.clone_ref(py);
+        let fields = fields.bind(py);
+        if let Ok(key) = key.cast::<pyo3::types::PyString>() {
+            let name = key.to_cow()?;
+            for item in fields.as_any().try_iter()? {
+                let item = item?;
+                let found = match item.cast::<PyStructField>() {
+                    Ok(field) => field.borrow().field.name == *name,
+                    // As PySpark's `field.name == key`, of the `AttributeError` of none.
+                    Err(_) => item.getattr(pyo3::intern!(py, "name"))?.eq(key)?,
+                };
+                if found {
                     return Ok(item.unbind());
                 }
             }
@@ -6036,8 +6264,15 @@ impl PyStructType {
             ));
         }
         if key.is_instance_of::<pyo3::types::PySlice>() {
-            // As PySpark's `StructType(self.fields[key])`: a new struct of the same fields.
+            // As PySpark's `StructType(self.fields[key])`: a new struct of the same fields, of the
+            // errors of its `__init__` of an element that is not a `StructField`.
             let sliced = fields.as_any().get_item(key)?.cast_into::<PyList>()?;
+            if sliced
+                .iter()
+                .any(|item| !item.is_instance_of::<PyStructField>())
+            {
+                return Ok(py.get_type::<PyStructType>().call1((sliced,))?.unbind());
+            }
             return Ok(struct_of_list(py, sliced)?.into_any());
         }
         if !key.is_instance_of::<pyo3::types::PyInt>() {
@@ -6066,21 +6301,50 @@ impl PyStructType {
 
     // As PySpark's, of the `simpleString()` of each field object, which names its type by the
     // type object that it holds (see `child_simple_string`), of a field of a Python subclass its
-    // own.
+    // own. The struct is not borrowed while the elements are read, as their methods may edit it,
+    // and the elements are those of an iterator of the list, as PySpark's comprehension reads it.
     #[pyo3(name = "simpleString")]
-    fn simple_string(&self, py: Python<'_>) -> PyResult<String> {
-        let mut parts = Vec::with_capacity(self.fields.bind(py).len());
-        for item in self.fields.bind(py).iter() {
-            if is_subclass_object(&item) {
-                parts.push(
-                    item.call_method0(pyo3::intern!(py, "simpleString"))?
-                        .extract()?,
-                );
-                continue;
+    fn simple_string(slf: &Bound<'_, Self>) -> PyResult<String> {
+        let py = slf.py();
+        let fields = slf.borrow().fields.clone_ref(py);
+        // The texts of the fields, and, from a text that is not a str, the list of the texts that
+        // PySpark's `",".join` takes, of its `TypeError` of such a text.
+        let mut texts: Vec<String> = Vec::new();
+        let mut joined: Option<Bound<'_, PyList>> = None;
+        for item in fields.bind(py).as_any().try_iter()? {
+            let item = item?;
+            match item.cast::<PyStructField>() {
+                Ok(field) if !is_subclass_object(&item) => {
+                    let text = field.borrow().__sf_simple_string(py)?;
+                    match &joined {
+                        Some(parts) => parts.append(text)?,
+                        None => texts.push(text),
+                    }
+                }
+                // Of the element's own method, of its `AttributeError` of none: of a text that
+                // is not a str, the texts are joined as PySpark's are, after every element gave
+                // its own.
+                _ => {
+                    let text = item.call_method0(pyo3::intern!(py, "simpleString"))?;
+                    match (&joined, text.cast::<pyo3::types::PyString>()) {
+                        (None, Ok(text)) => texts.push(text.to_cow()?.into_owned()),
+                        (Some(parts), _) => parts.append(text)?,
+                        (None, Err(_)) => {
+                            let parts = PyList::new(py, &texts)?;
+                            parts.append(text)?;
+                            joined = Some(parts);
+                        }
+                    }
+                }
             }
-            parts.push(as_struct_field(&item)?.borrow().__sf_simple_string(py)?);
         }
-        Ok(format!("struct<{}>", parts.join(",")))
+        match joined {
+            Some(parts) => {
+                let text = pyo3::types::PyString::new(py, ",").call_method1("join", (parts,))?;
+                Ok(format!("struct<{}>", text.extract::<String>()?))
+            }
+            None => Ok(format!("struct<{}>", texts.join(","))),
+        }
     }
 
     // Field names, as a copy of the `names` list. Mirrors `StructType.fieldNames()`, which is
@@ -6129,13 +6393,26 @@ impl PyStructType {
     fn __st_tree_string(slf: &Bound<'_, Self>, maxDepth: Py<PyAny>) -> PyResult<String> {
         let py = slf.py();
         let depth = normalize_tree_depth(maxDepth.bind(py))?;
+        // Of a struct whose fields hold an element that is not a `StructField`, at any level, as
+        // PySpark's, of the `_build_formatted_string` of each element, of its `AttributeError`
+        // of none (`_foreign_tree_string` of the shim).
+        // Of the lowering that the tree string reads, of the walk of the foreign fields only of a
+        // type that may hold them (see `lower_noting_subclasses`).
+        let (lowered, maybe_foreign) = lower_noting_subclasses(slf.as_any(), MetadataOf::Strict);
+        if foreign_of_lowering(slf.as_any(), maybe_foreign)? {
+            return py
+                .import("pyspark.sql.types")?
+                .getattr("_foreign_tree_string")?
+                .call1((slf, depth))?
+                .extract();
+        }
         // As PySpark's, which reads the type objects, not their JSON: a type that does not lower
         // now stands as the null type, and its name is its object's (see `lenient_type`). A type
         // of more levels than Python's recursion limit, such as one that holds itself, is read to
         // the levels that the string holds, as PySpark's walk of the objects reads them, which
         // raises its `RecursionError` of more (see `tree_stand_in`): its flags and names are
         // those of its objects, as the walks of them would not end.
-        let (data_type, stand_ins, walked) = match slf.borrow().current_data_type(py) {
+        let (data_type, stand_ins, walked) = match lowered {
             Ok(data_type) => (data_type, false, false),
             Err(error) if error.is_instance_of::<pyo3::exceptions::PyRecursionError>(py) => {
                 let levels = usize::try_from(depth).unwrap_or(usize::MAX);
@@ -7822,9 +8099,18 @@ fn as_nullable_level<'py>(obj: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>
         let fields = PyList::empty(py);
         for field in obj.getattr(pyo3::intern!(py, "fields"))?.try_iter()? {
             let field = field?;
-            let data_type = as_nullable(&field.getattr(pyo3::intern!(py, "dataType"))?)?;
+            // As PySpark's `StructField(field.name, field.dataType._as_nullable(), nullable=True,
+            // metadata=field.metadata)`, in its order, of the `_as_nullable` of a type that is
+            // not a data type of its own.
+            let name = field.getattr(pyo3::intern!(py, "name"))?;
+            let data_type = field.getattr(pyo3::intern!(py, "dataType"))?;
+            let data_type = if data_type.is_instance_of::<PyDataType>() {
+                as_nullable(&data_type)?
+            } else {
+                data_type.call_method0(pyo3::intern!(py, "_as_nullable"))?
+            };
             fields.append(py.get_type::<PyStructField>().call1((
-                field.getattr(pyo3::intern!(py, "name"))?,
+                name,
                 data_type,
                 true,
                 field.getattr(pyo3::intern!(py, "metadata"))?,
@@ -8542,8 +8828,75 @@ fn type_level<T>(_py: Python<'_>, f: impl FnOnce() -> PyResult<T>) -> PyResult<T
 /// recursion limit (see [`type_level`]).
 const TYPE_LEVELS_UNCHECKED: usize = 32;
 
+/// The core type of the `UserDefinedType` object `obj`, of its `jsonValue()` and of the core type
+/// that `lower` makes of its `sqlType()`, in that order, as PySpark's conversion reads them; the
+/// object is kept by the JSON of the type (see `lowered_udts`).
+fn udt_of(
+    obj: &Bound<'_, PyAny>,
+    lower: impl FnOnce(&Bound<'_, PyAny>) -> PyResult<DataType>,
+) -> PyResult<DataType> {
+    let jv = obj.call_method0("jsonValue")?;
+    let get = |k: &str| -> PyResult<Option<String>> {
+        let v = jv.call_method1("get", (k,))?;
+        if v.is_none() {
+            Ok(None)
+        } else {
+            Ok(Some(v.extract()?))
+        }
+    };
+    let sql_type = lower(&obj.call_method0("sqlType")?)?;
+    let udt = DataType::Udt {
+        type_str: "udt".to_string(),
+        jvm_class: get("class")?,
+        python_class: get("pyClass")?,
+        serialized_python_class: get("serializedClass")?,
+        sql_type: Some(Box::new(sql_type)),
+    };
+    lowered_udts(obj.py()).set_item(udt.json(), obj)?;
+    Ok(udt)
+}
+
 pub(crate) fn py_to_data_type(obj: &Bound<'_, PyAny>) -> PyResult<DataType> {
     lower_type(obj, MetadataOf::Strict)
+}
+
+std::thread_local! {
+    /// Whether a lowering of the thread read a struct, a field, an array or a map of a Python
+    /// subclass, whose own reads may give elements that the lowering does not read (see
+    /// [`lower_noting_subclasses`]).
+    static LOWERED_SUBCLASS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Mark that the lowering reads an object of a class of `obj` other than `native`, a Python
+/// subclass (see [`lower_noting_subclasses`]).
+fn note_subclass(obj: &Bound<'_, PyAny>, native: &Bound<'_, pyo3::types::PyType>) {
+    if !obj.get_type().is(native) {
+        LOWERED_SUBCLASS.with(|lowered| lowered.set(true));
+    }
+}
+
+/// The lowering of `obj`, of the metadata as `metadata` takes it, and whether the type may hold a
+/// struct whose fields hold an element that is not a `StructField` (see `ForeignFields`): of its
+/// `TypeError`, such as that of such an element of a struct, or of a struct, a field, an array or
+/// a map of a Python subclass in it, whose own reads may give such elements. Of an ordinary type,
+/// the walk of the foreign fields is not made, and its lowering is the one that the use makes.
+pub(crate) fn lower_noting_subclasses(
+    obj: &Bound<'_, PyAny>,
+    metadata: MetadataOf,
+) -> (PyResult<DataType>, bool) {
+    let before = LOWERED_SUBCLASS.with(|lowered| lowered.replace(false));
+    let lowered = lower_type(obj, metadata);
+    let subclass = LOWERED_SUBCLASS.with(|lowered| lowered.replace(before || lowered.get()));
+    let maybe_foreign = subclass
+        || matches!(&lowered, Err(error) if error.is_instance_of::<pyo3::exceptions::PyTypeError>(obj.py()));
+    (lowered, maybe_foreign)
+}
+
+/// Whether the type object `obj`, of the lowering `lowered` of [`lower_noting_subclasses`], holds a
+/// struct whose fields hold an element that is not a `StructField`, as
+/// [`holds_foreign_field`] tells, of no walk of an ordinary type.
+pub(crate) fn foreign_of_lowering(obj: &Bound<'_, PyAny>, maybe_foreign: bool) -> PyResult<bool> {
+    Ok(maybe_foreign && holds_foreign_field(obj)?)
 }
 
 /// [`py_to_data_type`] of the metadata of the fields as they were given (see
@@ -8627,6 +8980,7 @@ fn lower_type_level(obj: &Bound<'_, PyAny>, metadata: MetadataOf) -> PyResult<Da
         });
     }
     if let Ok(a) = obj.extract::<PyRef<PyArrayType>>() {
+        note_subclass(obj, &obj.py().get_type::<PyArrayType>());
         return Ok(DataType::Array {
             element_type: Box::new(a.element_object.live_of(
                 obj.py(),
@@ -8637,6 +8991,7 @@ fn lower_type_level(obj: &Bound<'_, PyAny>, metadata: MetadataOf) -> PyResult<Da
         });
     }
     if let Ok(m) = obj.extract::<PyRef<PyMapType>>() {
+        note_subclass(obj, &obj.py().get_type::<PyMapType>());
         return Ok(DataType::Map {
             key_type: Box::new(m.key_object.live_of(obj.py(), &m.key_type, metadata)?),
             value_type: Box::new(m.value_object.live_of(obj.py(), &m.value_type, metadata)?),
@@ -8644,6 +8999,7 @@ fn lower_type_level(obj: &Bound<'_, PyAny>, metadata: MetadataOf) -> PyResult<Da
         });
     }
     if let Ok(st) = obj.extract::<PyRef<PyStructType>>() {
+        note_subclass(obj, &obj.py().get_type::<PyStructType>());
         return Ok(DataType::Struct {
             fields: st.current_fields_of(obj.py(), metadata)?,
         });
@@ -8686,25 +9042,7 @@ fn lower_type_level(obj: &Bound<'_, PyAny>, metadata: MetadataOf) -> PyResult<Da
         .and_then(|m| m.getattr("UserDefinedType"))
     {
         if obj.is_instance(&udt_cls)? {
-            let jv = obj.call_method0("jsonValue")?;
-            let get = |k: &str| -> PyResult<Option<String>> {
-                let v = jv.call_method1("get", (k,))?;
-                if v.is_none() {
-                    Ok(None)
-                } else {
-                    Ok(Some(v.extract()?))
-                }
-            };
-            let sql_type = lower_type(&obj.call_method0("sqlType")?, metadata)?;
-            let udt = DataType::Udt {
-                type_str: "udt".to_string(),
-                jvm_class: get("class")?,
-                python_class: get("pyClass")?,
-                serialized_python_class: get("serializedClass")?,
-                sql_type: Some(Box::new(sql_type)),
-            };
-            lowered_udts(obj.py()).set_item(udt.json(), obj)?;
-            return Ok(udt);
+            return udt_of(obj, |sql_type| lower_type(sql_type, metadata));
         }
     }
     // A `StructField` as a type, which PySpark allows in a nested position: its JSON is the
