@@ -160,9 +160,31 @@ pub(crate) enum Roots<'a> {
     /// The certificates of this PEM only, as grpcio trusts those of the file of
     /// `GRPC_DEFAULT_SSL_ROOTS_FILE_PATH` alone.
     Only(&'a [u8]),
-    /// The roots of the system's store, and the certificates of this PEM too, if there is one,
-    /// which the Python binding gives: grpcio's own bundle.
-    System(Option<&'a [u8]>),
+    /// The roots of the system's store, `native`, as the process read them once (see
+    /// [`system_roots`]), and the certificates of the PEM `bundle` too, if there is one, which the
+    /// Python binding gives: grpcio's own bundle.
+    System {
+        native: &'a [SystemRoot],
+        bundle: Option<&'a [u8]>,
+    },
+}
+
+/// A certificate of the system's store (see [`system_roots`]).
+pub(crate) type SystemRoot = rustls::pki_types::CertificateDer<'static>;
+
+/// The certificates of the system's store, as `rustls-native-certs` reads them now, which the
+/// process reads once, as grpcio computes its default roots once (see `crate::client::ssl_roots`),
+/// so that all its channels trust the same roots, which the subchannels of the process share (see
+/// [`SubchannelArgs`]).
+pub(crate) fn system_roots() -> Vec<SystemRoot> {
+    let native = rustls_native_certs::load_native_certs();
+    if !native.errors.is_empty() {
+        tracing::debug!(
+            "errors loading the native certificates: {:?}",
+            native.errors
+        );
+    }
+    native.certs
 }
 
 /// The TLS of a channel: the configuration of its sessions and the verifier of the certificates
@@ -274,15 +296,8 @@ impl Tls {
             Roots::Only(pem) => {
                 store.add_parsable_certificates(certificates(pem));
             }
-            Roots::System(bundle) => {
-                let native = rustls_native_certs::load_native_certs();
-                if !native.errors.is_empty() {
-                    tracing::debug!(
-                        "errors loading the native certificates: {:?}",
-                        native.errors
-                    );
-                }
-                store.add_parsable_certificates(native.certs);
+            Roots::System { native, bundle } => {
+                store.add_parsable_certificates(native.iter().cloned());
                 if let Some(bundle) = bundle {
                     store.add_parsable_certificates(certificates(bundle));
                 }

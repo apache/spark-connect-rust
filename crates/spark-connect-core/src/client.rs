@@ -109,27 +109,37 @@ fn bundled_roots_pem() -> Option<Vec<u8>> {
 }
 
 /// The roots of the TLS channels, read when the first TLS channel of the process is made, as
-/// grpcio computes its default roots once, so that a later change of the variable or of the files
-/// is not seen, nor logged again: those of [`ssl_roots_pem`] alone, else the system's store and
+/// grpcio computes its default roots once, so that a later change of the variable, of the files or
+/// of the system's store is not seen, nor logged again, and every channel of the process trusts the
+/// same roots, of which its subchannels are shared (see `crate::connector::SubchannelArgs`): those
+/// of [`ssl_roots_pem`] alone, else the system's store (see `crate::connector::system_roots`) and
 /// the bundled roots file (see [`set_bundled_ssl_roots_file`]).
 fn ssl_roots() -> crate::connector::Roots<'static> {
     struct Read {
         file: Option<Vec<u8>>,
+        native: Vec<crate::connector::SystemRoot>,
         bundle: Option<Vec<u8>>,
     }
     static ROOTS: std::sync::OnceLock<Read> = std::sync::OnceLock::new();
     let read = ROOTS.get_or_init(|| {
         let file = ssl_roots_pem(std::env::var_os(SSL_ROOTS_FILE_VAR));
-        let bundle = if file.is_none() {
-            bundled_roots_pem()
+        let (native, bundle) = if file.is_none() {
+            (crate::connector::system_roots(), bundled_roots_pem())
         } else {
-            None
+            (Vec::new(), None)
         };
-        Read { file, bundle }
+        Read {
+            file,
+            native,
+            bundle,
+        }
     });
     match &read.file {
         Some(file) => crate::connector::Roots::Only(file),
-        None => crate::connector::Roots::System(read.bundle.as_deref()),
+        None => crate::connector::Roots::System {
+            native: &read.native,
+            bundle: read.bundle.as_deref(),
+        },
     }
 }
 
@@ -6335,6 +6345,21 @@ mod tests {
         ] {
             assert_eq!(ssl_roots_pem(path), None);
         }
+    }
+
+    #[test]
+    fn the_roots_of_the_tls_channels_are_read_once_per_process() {
+        // As grpcio computes its default roots once: the system's store too is read as the first
+        // TLS channel of the process is made, and never again, so that every channel of the process
+        // trusts the same roots, of which the subchannels are shared (see
+        // `crate::connector::SubchannelArgs`).
+        let read = |roots: crate::connector::Roots<'static>| match roots {
+            crate::connector::Roots::Only(file) => (file.as_ptr(), None),
+            crate::connector::Roots::System { native, bundle } => {
+                (native.as_ptr().cast::<u8>(), bundle.map(<[u8]>::as_ptr))
+            }
+        };
+        assert_eq!(read(ssl_roots()), read(ssl_roots()));
     }
 
     #[test]

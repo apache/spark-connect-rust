@@ -48,7 +48,8 @@ static FAILURES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::ne
 /// and its credentials, the name that TLS verifies and how, local credentials, the dialect, and the
 /// call credentials of a channel of its own credentials (of a token), which no other channel shares,
 /// as grpcio's channel credentials of a token are of each channel. The roots that TLS trusts are
-/// those of the process.
+/// those of the process, which it reads once, the system's store too (see [`super::system_roots`]),
+/// as grpcio computes its default roots once: the same of every channel of the process.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct SubchannelArgs {
     origin: String,

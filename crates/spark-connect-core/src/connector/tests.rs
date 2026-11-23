@@ -1290,9 +1290,33 @@ async fn the_bundled_roots_are_trusted_besides_those_of_the_system() {
     // grpcio's: the CA of the tests, in the bundle, is trusted.
     let address = tls_server(&certs().localhost, true, true).await;
     let ca = pem(&certs().ca);
-    let tls = Tls::new("localhost", Roots::System(Some(ca.as_bytes()))).unwrap();
+    let native = system_roots();
+    let roots = Roots::System {
+        native: &native,
+        bundle: Some(ca.as_bytes()),
+    };
+    let tls = Tls::new("localhost", roots).unwrap();
     let target = Target {
         tls: Some(tls),
+        ..target(vec![address], true)
+    };
+    let ready = attempt(&target, Duration::from_secs(5)).await;
+    assert!(ready.is_ok(), "{:?}", ready.err());
+}
+
+#[tokio::test]
+async fn a_tls_of_the_system_s_roots_trusts_those_that_the_process_read() {
+    // The roots of the system's store are those that the process read once, as grpcio computes
+    // its default roots once (see `crate::client::ssl_roots`), which the TLS of a channel trusts as
+    // they are given, where it read the store again as each client was made.
+    let address = tls_server(&certs().localhost, true, true).await;
+    let native = vec![certs().ca.clone()];
+    let roots = Roots::System {
+        native: &native,
+        bundle: None,
+    };
+    let target = Target {
+        tls: Some(Tls::new("localhost", roots).unwrap()),
         ..target(vec![address], true)
     };
     let ready = attempt(&target, Duration::from_secs(5)).await;
