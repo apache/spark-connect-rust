@@ -8677,3 +8677,46 @@ def test_copies_into_unset_children_of_many_levels_keep_what_they_copied_as_upbs
     # copy set, where a change of an unset child below the first level replaced the copied
     # message with the unset child, of the change only.
     assert _copy_into_unset_children_cases(ours) == _copy_into_unset_children_cases(upb)
+
+
+
+def test_copies_of_many_levels_of_maps_grow_the_stack_at_their_entries():
+    # A native copy grows its stack every 16 levels, a map entry a level of its own: of a chain of
+    # maps whose entries are at the levels of a multiple of 16, the copy grows it at the entries,
+    # which it did not, so a copy of many such levels on a small stack (a thread of 256 KiB)
+    # overflowed it. Of a process of its own, of 4 GB. (The plugin's type of maps of itself needs
+    # protobuf's descriptor pool and builder.)
+    pytest.importorskip("google.protobuf")
+    script = textwrap.dedent(
+        """
+        import copy, json, threading
+        from tests.test_proto_rust_offline import _alias_classes
+        N = _alias_classes("ours")("tests.alias.Node")
+        out = {}
+        def run():
+            n = N()
+            m = n.next  # the entries at the even levels, the messages at the odd ones
+            for _ in range(20000):
+                m = m.children["k"]
+            m.v = 7
+            data = n.SerializeToString()
+            twin = copy.deepcopy(n)
+            out["deepcopy"] = twin.SerializeToString() == data
+            other = N()
+            other.CopyFrom(n)
+            out["CopyFrom"] = other.SerializeToString() == data
+            del twin, other, n, m
+        threading.stack_size(256 * 1024)
+        thread = threading.Thread(target=run)
+        thread.start()
+        thread.join()
+        print(json.dumps(out))
+        """
+    )
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    result = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, timeout=600, cwd=str(root), preexec_fn=_capped_to_4_gb
+    )
+    assert result.returncode == 0, result.stderr[-2000:]
+    assert json.loads(result.stdout.strip().splitlines()[-1]) == {"deepcopy": True, "CopyFrom": True}

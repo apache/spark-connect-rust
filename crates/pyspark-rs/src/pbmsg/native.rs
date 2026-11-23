@@ -156,9 +156,9 @@ impl At {
         })
     }
 
-    /// `copy` of the message that the copy is at, on a stack with room for the levels of the
-    /// messages below it, up to the next level that grows it.
-    fn grown<T>(self, copy: impl FnOnce() -> T) -> T {
+    /// `copy` of the message (or the map entry) that the copy is at, on a stack with room for the
+    /// levels of the messages below it, up to the next level that grows it.
+    pub(crate) fn grown<T>(self, copy: impl FnOnce() -> T) -> T {
         if self.level.is_multiple_of(16) {
             grow(copy)
         } else {
