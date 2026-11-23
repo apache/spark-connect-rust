@@ -9117,6 +9117,7 @@ mod writer_state_tests {
 
     #[test]
     fn the_parts_of_an_earlier_state_take_no_place_of_those_of_a_later_one() {
+        let _alone = crate::gc::tests_of_the_state_alone();
         Python::initialize();
         Python::attach(|py| {
             let object = |py| PyTuple::new(py, [py.None()]).unwrap().into_any().unbind();
