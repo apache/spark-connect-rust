@@ -8619,6 +8619,9 @@ def test_udf_defaults_and_registration():
             return SparkConnectClient._of_session(self)
 
         def _registerPythonUdf(self, name, returnType, evalType, command, python_ver, deterministic):
+            # The command is pickled once the return type is converted, as PySpark's
+            # PythonUDF.to_plan pickles it last: a function of no arguments that gives it.
+            command = command() if callable(command) else command
             self.calls.append((name, evalType, isinstance(command, (bytes, bytearray))))
 
     stub = _StubSession()
@@ -29710,6 +29713,144 @@ def _run_dropin_script(script):
                             text=True, timeout=300, cwd=root, env=environment)
     assert result.returncode == 0, result.stdout[-2000:] + result.stderr[-3000:]
     return json.loads(result.stdout.strip().splitlines()[-1])
+
+
+def test_a_type_that_holds_itself_raises_pysparks_recursion_error():
+    # SPARK-62224: a type that holds itself, as a struct whose fields hold a field of it, of an
+    # append to its `fields` or of `add`, an array or a map set to be its own element or value,
+    # or a field set to the type of the struct that holds it, has levels that no walk ends. As
+    # PySpark's methods, which walk the levels in Python, each use that reads them raises
+    # RecursionError, of the walks of the drop-in that it bounds by Python's recursion limit, and
+    # the uses that do not, read as PySpark's: `==` of the type itself, the constructors that
+    # keep it, the tree string of a few levels, the pickles and copies, which keep the cycle,
+    # and a cast and DataFrame.to, whose repr and requests raise it. A type of more levels than
+    # the limit raises it too, and takes a higher limit. Each ran without a bound before, which
+    # ended the process or exhausted its memory: under a cap, in a process of its own.
+    out = _run_dropin_script(
+        """
+        import copy, json, pickle, resource, sys, threading
+        resource.setrlimit(resource.RLIMIT_AS, (4 << 30, 4 << 30))
+        sys.path.insert(0, "tests")
+        from _mock_connect_server import mock_connect_session
+        from pyspark.sql import functions as F, types as T
+
+        def outcome(call):
+            try:
+                result = call()
+            except Exception as error:
+                return type(error).__name__
+            return result if isinstance(result, (bool, str)) else type(result).__name__
+
+        def holders():
+            appended = T.StructType([T.StructField("a", T.LongType())])
+            appended.fields.append(T.StructField("b", appended))
+            appended.names.append("b")
+            added = T.StructType([T.StructField("a", T.LongType())])
+            added.add("b", added)
+            array = T.ArrayType(T.LongType())
+            array.elementType = array
+            mapped = T.MapType(T.StringType(), T.LongType())
+            mapped.valueType = mapped
+            field = T.StructField("x", T.LongType())
+            held = T.StructType([field])
+            field.dataType = held
+            return {"appended": appended, "added": added, "array": array, "map": mapped,
+                    "field": held}
+
+        out = {}
+        for name, x in holders().items():
+            uses = {
+                "json": x.json, "jsonValue": x.jsonValue, "simpleString": x.simpleString,
+                "repr": lambda: repr(x), "hash": lambda: hash(x), "eq": lambda: x == x,
+                "needConversion": x.needConversion,
+                "pickle": lambda: type(pickle.loads(pickle.dumps(x))).__name__,
+                "deepcopy": lambda: type(copy.deepcopy(x)).__name__,
+                "StructField": lambda: T.StructField("y", x).name,
+                "StructField simpleString": lambda: T.StructField("y", x).simpleString(),
+                "ArrayType": lambda: type(T.ArrayType(x)).__name__,
+                "StructType": lambda: type(T.StructType([T.StructField("y", x)])).__name__,
+            }
+            out[name] = {use: outcome(call) for use, call in uses.items()}
+        holder = holders()["appended"]
+        out["tree"] = [outcome(lambda: holder.treeString(depth)) for depth in (1, 2, 5000)]
+        out["toNullable"] = outcome(holder.toNullable)
+        out["cycles kept"] = [
+            (lambda copied: copied.fields[1].dataType is copied)(
+                pickle.loads(pickle.dumps(holder))),
+            (lambda copied: copied.fields[1].dataType is copied)(copy.deepcopy(holder)),
+            (lambda copied: copied.fields[1].dataType is copied)(
+                pickle.loads(pickle.dumps(holders()["added"]))),
+            (lambda copied: copied.elementType is copied)(
+                pickle.loads(pickle.dumps(holders()["array"]))),
+        ]
+        # On a thread of a small stack too, of the stacks of the walks that grow.
+        threading.stack_size(256 * 1024)
+        on_thread = []
+        thread = threading.Thread(target=lambda: on_thread.append(outcome(holder.json)))
+        thread.start()
+        thread.join()
+        out["on a small thread"] = on_thread
+        # Past the recursion limit of levels, and within a higher one.
+        deep = T.LongType()
+        for _ in range(1500):
+            deep = T.ArrayType(deep)
+        out["deep"] = outcome(deep.simpleString)
+        limit = sys.getrecursionlimit()
+        sys.setrecursionlimit(10_000)
+        out["deep of a higher limit"] = outcome(
+            lambda: deep.simpleString() == "array<" * 1500 + "bigint" + ">" * 1500)
+        sys.setrecursionlimit(limit)
+        with mock_connect_session() as (spark, service):
+            requests = len(service.execute_requests), len(service.analyze_requests)
+            cast = F.lit(None).cast(holder)
+            out["plans"] = {
+                "cast": type(cast).__name__,
+                "cast repr": outcome(lambda: repr(cast)),
+                "cast collect": outcome(lambda: spark.range(1).select(cast).collect()),
+                "to": outcome(lambda: type(spark.range(1).to(holder)).__name__),
+                "to collect": outcome(lambda: spark.range(1).to(holder).collect()),
+                "createDataFrame": outcome(lambda: spark.createDataFrame([], holder)),
+                "from_json": outcome(lambda: F.from_json(F.col("v"), holder)),
+                "udf": outcome(lambda: F.udf(lambda: None, holder)),
+            }
+            out["requests"] = [len(service.execute_requests), len(service.analyze_requests)] == list(
+                requests)
+        print(json.dumps(out))
+        """
+    )
+    raised = "RecursionError"
+    struct_uses = {
+        "json": raised, "jsonValue": raised, "simpleString": raised, "repr": raised,
+        "hash": raised, "eq": True, "needConversion": True, "pickle": "StructType",
+        "deepcopy": "StructType", "StructField": "y", "StructField simpleString": raised,
+        "ArrayType": "ArrayType", "StructType": "StructType",
+    }
+    # Of an array or a map, whose needConversion reads its element or value, as its struct's
+    # constructor reads it.
+    container_uses = {**struct_uses, "needConversion": raised, "StructType": raised}
+    assert out.pop("appended") == struct_uses
+    assert out.pop("added") == struct_uses
+    assert out.pop("field") == struct_uses
+    assert out.pop("array") == {**container_uses, "pickle": "ArrayType", "deepcopy": "ArrayType"}
+    assert out.pop("map") == {**container_uses, "pickle": "MapType", "deepcopy": "MapType"}
+    assert out == {
+        "tree": [
+            "root\n |-- a: long (nullable = true)\n |-- b: struct (nullable = true)\n",
+            "root\n |-- a: long (nullable = true)\n |-- b: struct (nullable = true)\n"
+            " |    |-- a: long (nullable = true)\n |    |-- b: struct (nullable = true)\n",
+            raised,
+        ],
+        "toNullable": raised,
+        "cycles kept": [True, True, True, True],
+        "on a small thread": [raised],
+        "deep": raised,
+        "deep of a higher limit": True,
+        "plans": {
+            "cast": "Column", "cast repr": raised, "cast collect": raised, "to": "DataFrame",
+            "to collect": raised, "createDataFrame": raised, "from_json": raised, "udf": raised,
+        },
+        "requests": True,
+    }
 
 
 def test_client_executes_the_plans_and_commands_it_is_given_as_pyspark(mock_connect):

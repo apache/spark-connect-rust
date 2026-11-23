@@ -104,15 +104,22 @@ impl PlanArgs {
 
     /// Record `err`, an exception that PySpark raises when it builds the plan: an
     /// `AttributeError`, a `TypeError`, a `ValueError` or an `OverflowError` of Python itself, the
-    /// last three as [`PlanArgs::converted`] takes them, or an exception of one of PySpark's error
-    /// classes, as [`crate::errors::pyspark_class_error`] gives it. Another, such as a `KeyError`,
-    /// which the core does not raise again, is given back, for the call to raise.
+    /// last three as [`PlanArgs::converted`] takes them, a `RecursionError`, such as that of a
+    /// type that holds itself, or an exception of one of PySpark's error classes, as
+    /// [`crate::errors::pyspark_class_error`] gives it. Another, such as a `KeyError`, which the
+    /// core does not raise again, is given back, for the call to raise.
     pub(crate) fn raised(&mut self, py: Python<'_>, err: PyErr) -> PyResult<()> {
-        use pyo3::exceptions::{PyAttributeError, PyOverflowError, PyTypeError, PyValueError};
+        use pyo3::exceptions::{
+            PyAttributeError, PyOverflowError, PyRecursionError, PyTypeError, PyValueError,
+        };
         let kind = err.get_type(py);
         if kind.is(py.get_type::<PyAttributeError>()) {
             let message = err.value(py).str()?.to_string();
             self.record(SparkError::builtin_attribute(message));
+            return Ok(());
+        }
+        if kind.is(py.get_type::<PyRecursionError>()) {
+            self.record(recursion_error(py, &err)?);
             return Ok(());
         }
         let builtins = [
@@ -188,6 +195,12 @@ impl PlanArgs {
             )),
         }
     }
+}
+
+/// The error of `err`, a `RecursionError`, which the core raises again as it is: of the message of
+/// its text.
+pub(crate) fn recursion_error(py: Python<'_>, err: &PyErr) -> PyResult<SparkError> {
+    Ok(SparkError::recursion_msg(err.value(py).str()?.to_string()))
 }
 
 /// The classes of the data types of `pyspark.sql.types` that PySpark's

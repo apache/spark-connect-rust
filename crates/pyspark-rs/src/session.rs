@@ -4195,6 +4195,10 @@ impl PySparkSession {
     /// `CommonInlineUserDefinedFunction` carrying a `PythonUDF` (cloudpickled command +
     /// output type + eval type) with NO arguments, and send it as the `RegisterFunction`
     /// command so the server's session function registry resolves `name` in SQL.
+    /// `command` is the cloudpickled function and return type, or a function of no arguments that
+    /// pickles them, which is called after the name and the return type are converted, as
+    /// PySpark's `PythonUDF.to_plan` converts the type before it pickles: of a type of more levels
+    /// than Python's recursion limit, its conversion's `RecursionError` comes first.
     #[pyo3(name = "_registerPythonUdf", signature = (name, return_type, eval_type, command, python_ver, deterministic=true))]
     #[allow(non_snake_case)]
     fn register_python_udf_py(
@@ -4203,7 +4207,7 @@ impl PySparkSession {
         name: &Bound<'_, PyAny>,
         return_type: &Bound<'_, PyAny>,
         eval_type: i32,
-        command: Vec<u8>,
+        command: &Bound<'_, PyAny>,
         python_ver: String,
         deterministic: bool,
     ) -> PyResult<()> {
@@ -4211,6 +4215,11 @@ impl PySparkSession {
         // first, as protobuf converts it: bytes of UTF-8 too.
         let name = crate::str_argument(name)?;
         let return_data_type = crate::types::py_to_proto_data_type(return_type)?;
+        let command: Vec<u8> = if command.is_callable() {
+            command.call0()?.extract()?
+        } else {
+            command.extract()?
+        };
         let payload = PythonUDFPayload::new(return_data_type, eval_type, command, python_ver);
         let udf_expr = CommonInlineUserDefinedFunctionExpression::new(
             name,

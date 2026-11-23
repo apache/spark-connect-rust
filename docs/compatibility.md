@@ -2971,11 +2971,13 @@ on one of 256 KiB (they overflow one of 128 KiB from about 200 nested structs, w
 PySpark's overflow it from about 100). On the main thread, `json()`, `jsonValue()` and `fromJson`
 raise the `RecursionError` of Python's `json` module of a JSON of more than about 1,000 levels (of
 about 330 nested structs), `copy.deepcopy` and unpickling raise one from about 250 nested structs,
-and `hash()` and `repr()` raise their own of about 500 structs, while `==`, `simpleString()`,
-`treeString()`, `toNullable()` and pickling take the types of 600 structs, as far as tried. On
-Python 3.11, PySpark's raise their `RecursionError` from about 100 nested structs (`copy.deepcopy`),
-125 (pickling), 145 (`==`), 165 (`hash()` and `repr()`), 250 (`json()` and `simpleString()`) and 330
-(`treeString()`), and its `repr()` overflows a thread of 256 KiB from about 150. The
+and the walks of the type objects raise theirs past Python's recursion limit of their levels, a
+level for each struct and each field: `==`, pickling, `treeString()`, `hash()` and `repr()` from
+about 500 nested structs, and `simpleString()` and `toNullable()` from about 1,000, of more of a
+higher limit (`sys.setrecursionlimit`), as PySpark's walks take. On Python 3.11, PySpark's raise
+their `RecursionError` from about 100 nested structs (`copy.deepcopy`), 125 (pickling), 145 (`==`),
+165 (`hash()` and `repr()`), 250 (`json()` and `simpleString()`) and 330 (`treeString()`), and its
+`repr()` overflows a thread of 256 KiB from about 150. The
 `grpc-status-details-bin` of a failure is read within the same limit, as upb reads it where
 PySpark's `rpc_status.from_call` does: a `google.rpc.Status` nested past it, as of 101 nested groups
 of a field that the type does not know, or of 100 in a detail, which is a level of its own, raises
@@ -2983,6 +2985,22 @@ protobuf's `DecodeError` (`Error parsing message with type 'google.rpc.Status': 
 corrupt`) in both clients, whatever its code and message, as details that are not a
 `google.rpc.Status` do (see below). The server is trusted, as SECURITY.md sets out, so the limit is
 not a bound on the size of the responses.
+
+A type that holds itself, as a struct whose `fields` hold a field of it (an append to its
+`fields`, or `add`), an array or a map set to be its own element or value, or a field set to the
+type of the struct that holds it, has levels that no walk ends. As PySpark's methods, which walk
+the levels in Python, each use that reads them raises `RecursionError`, of the bound of the walks
+by Python's recursion limit: `json()`, `jsonValue()`, `simpleString()`, `repr()`, `hash()`,
+`toNullable()`, `treeString()` of more levels than the limit, and the uses that convert the type,
+such as `createDataFrame`, `from_json`, `udf` and the readers' `schema`. The others work as
+PySpark's: `==` of the type itself, `needConversion()` of a struct, the constructors and the
+setters that keep it (`StructField("x", s)`, `ArrayType(s)`), `treeString(maxDepth)` of the levels
+that it prints, and pickles and copies, which keep the cycle (of the class and the `__dict__` of
+the type, as PySpark pickles it). A cast and `DataFrame.to` return their Column and DataFrame, as
+PySpark's do, whose repr and requests raise the error. Of an array or a map that holds itself,
+`needConversion()` raises it, and so does a `StructType` of a field of it, whose constructor reads
+it, as PySpark's does. The text of the error may differ from PySpark's (see "The message of the
+`RecursionError` of a type that holds itself" in `dev/parity/known-differences.md`).
 
 The error of grpcio of a response that the client fails to decode, of the details "Exception
 deserializing response!" and no `debug_error_string`, is also the one that PySpark's client sees
