@@ -1,173 +1,145 @@
-//! PyO3 wrapper for spark_connect::group::StatFunctions (`df.stat`).
+//! PyO3 wrapper of PySpark Connect's `DataFrameStatFunctions` (`df.stat`).
 
 use pyo3::prelude::*;
-use spark_connect::group::StatFunctions;
+use pyo3::types::{PyDict, PyTuple};
 
-use crate::dataframe::{python_random_seed, PyDataFrame};
-use crate::errors::ResultExt;
+use crate::dataframe::python_random_seed;
 
-// Python wrapper for DataFrame statistical functions.
+// Python wrapper for DataFrame statistical functions. As PySpark's plain class, it keeps its state
+// in its `__dict__`, its `df`, whose methods of the same names its methods call, as PySpark's do,
+// and it is subclassed and constructed of PySpark's arguments (see `crate::state`).
 #[doc = connect_doc!(DataFrameStatFunctions)]
 #[pyclass(
     name = "DataFrameStatFunctions",
     module = "pyspark.sql.connect.dataframe",
+    subclass,
     weakref,
     dict
 )]
-pub struct PyStatFunctions {
-    /// The references of the statistics to the parts of the plan of their DataFrame, of which
-    /// `stat` holds a clone, which `__traverse__` reports (see [`crate::gc::Parts`]).
-    parts: crate::gc::Parts,
-    stat: StatFunctions,
-    /// The DataFrame of `df.stat`, as PySpark's `DataFrameStatFunctions.df`.
-    frame: Py<PyDataFrame>,
-    /// Set once the value is written, as `__traverse__` reads `frame`, which is not valid while
-    /// the object is created (see [`crate::gc::GcReady`]).
-    gc_ready: crate::gc::GcReady,
-}
+pub struct PyStatFunctions {}
 
 impl PyStatFunctions {
-    pub fn new(stat: StatFunctions, frame: Py<PyDataFrame>) -> Self {
-        PyStatFunctions {
-            parts: Python::attach(|py| crate::gc::Parts::of(py, stat.held_parts())),
-            stat,
-            frame,
-            gc_ready: crate::gc::GcReady::new(),
-        }
+    /// The statistics functions of `df`, as `df.stat` makes them: `DataFrameStatFunctions(df)`,
+    /// of the DataFrame object, which PySpark's `__init__` keeps as its `df`.
+    pub(crate) fn of_frame<'py>(df: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyStatFunctions>> {
+        let stat = Bound::new(df.py(), PyStatFunctions {})?;
+        Self::__init__(&stat, df)?;
+        Ok(stat)
+    }
+
+    /// The `df` of the functions, which each of PySpark's methods reads, `self.df`, to call its
+    /// method of the same name: of the `AttributeError` of functions whose `__init__` never ran.
+    fn frame<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        crate::state::attr(slf.as_any(), pyo3::intern!(slf.py(), "df"))
     }
 }
 
 #[pymethods]
 impl PyStatFunctions {
-    /// The shallow copy of the statistics functions, as PySpark's `copy.copy`: of the same
-    /// DataFrame, with the instance attributes of these.
-    fn __copy__(slf: &Bound<'_, Self>) -> PyResult<Py<Self>> {
-        let py = slf.py();
-        let frame = slf.borrow().frame.clone_ref(py);
-        let stat = frame.borrow(py).dataframe.stat();
-        let copy = Py::new(py, PyStatFunctions::new(stat, frame))?;
-        crate::reduce::copy_instance_dict(slf.as_any(), copy.bind(py).as_any())?;
-        Ok(copy)
+    /// Statistics functions of no state, as the `object.__new__` of PySpark's plain class: of
+    /// any arguments, which `__init__` takes, so that a subclass of another `__init__` is built as
+    /// it is in PySpark. The class shows the signature of `__init__`, as `inspect.signature` of
+    /// PySpark's class does.
+    #[new]
+    #[pyo3(signature = (*_args, **_kwargs), text_signature = "(df)")]
+    fn py_new(_args: &Bound<'_, PyTuple>, _kwargs: Option<&Bound<'_, PyDict>>) -> Self {
+        PyStatFunctions {}
     }
 
-    /// The reduce of the statistics functions, as PySpark's: `stat` of their DataFrame, which
-    /// unpickles with it, and their instance attributes.
-    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
-        let py = slf.py();
-        let frame = slf.borrow().frame.clone_ref(py).into_any().into_bound(py);
-        let reduced = crate::reduce::getattr_reduce(py, frame, "stat")?;
-        crate::reduce::reduce_with_instance_dict(slf.as_any(), reduced.into_any())
+    /// `DataFrameStatFunctions(df)`, as PySpark Connect's `__init__`, which keeps its argument as
+    /// it is, as the `df` of the functions: `df.stat.df` is `df`.
+    fn __init__(slf: &Bound<'_, Self>, df: &Bound<'_, PyAny>) -> PyResult<()> {
+        crate::state::assign(slf.as_any(), &[(pyo3::intern!(slf.py(), "df"), df)])
     }
 
-    /// The DataFrame of these functions, as PySpark's `DataFrameStatFunctions.df`: `df.stat.df`
-    /// is `df`.
-    #[getter(df)]
-    fn frame(&self, py: Python<'_>) -> Py<PyDataFrame> {
-        self.frame.clone_ref(py)
+    /// The state of the functions, their `__dict__`, as `object.__getstate__` gives that of
+    /// PySpark's plain object, which a copy and a pickle keep (see `state::getstate`).
+    fn __getstate__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        crate::state::getstate(slf.as_any())
     }
 
-    /// As PySpark's statistics functions, a Python object that holds its DataFrame, which
-    /// Python's garbage collector sees: the DataFrame is reported, and the parts of the plan of
-    /// which these functions hold a clone (see [`crate::gc`]).
-    fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
-        if !self.gc_ready.get() {
-            return Ok(());
-        }
-        visit.call(&self.frame)?;
-        self.parts.visit(&visit)
+    /// The reduce of the functions, as PySpark's plain object's: `copyreg.__newobj__` of their
+    /// class, of their `__dict__`, so a copy is of the same DataFrame, and a deep copy and a pickle
+    /// of a copy of it (see `state::reduce_ex`).
+    fn __reduce_ex__<'py>(slf: &Bound<'py, Self>, protocol: i32) -> PyResult<Bound<'py, PyAny>> {
+        crate::state::reduce_ex(slf.as_any(), protocol)
     }
 
-    /// Break a reference cycle that the garbage collector found unreachable: the statistics
-    /// functions drop their clone of the plan, and their references to its parts.
-    fn __clear__(&mut self) {
-        if self.gc_ready.get() {
-            self.parts.release();
-            self.stat.clear_plan();
-        }
-    }
-
-    // Pearson correlation between two numeric columns, as PySpark's, whose `method` is only
-    // "pearson".
-    //
-    // `corr`/`cov` execute a plan (server round-trip via `scalar()`), so they release
-    // the GIL across the call - otherwise a Python thread is blocked for the whole
-    // RPC.
+    // Pearson correlation between two numeric columns, as PySpark's
+    // `self.df.corr(col1, col2, method)`, a call of the method of the DataFrame, of a subclass or
+    // of any object too, whose `method` is only "pearson".
     #[pyo3(signature = (col1, col2, method=None))]
     #[doc = connect_doc!(DataFrameStatFunctions.corr)]
-    fn corr(
-        &self,
-        py: Python<'_>,
-        col1: &Bound<'_, PyAny>,
-        col2: &Bound<'_, PyAny>,
-        method: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<f64> {
-        crate::stat_arguments::corr(py, &self.stat, col1, col2, method)
+    fn corr<'py>(
+        slf: &Bound<'py, Self>,
+        col1: &Bound<'py, PyAny>,
+        col2: &Bound<'py, PyAny>,
+        method: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        Self::frame(slf)?.call_method1(pyo3::intern!(slf.py(), "corr"), (col1, col2, method))
     }
 
-    // Sample covariance between two numeric columns.
+    // Sample covariance between two numeric columns, as PySpark's `self.df.cov(col1, col2)`.
     #[doc = connect_doc!(DataFrameStatFunctions.cov)]
-    fn cov(
-        &self,
-        py: Python<'_>,
-        col1: &Bound<'_, PyAny>,
-        col2: &Bound<'_, PyAny>,
-    ) -> PyResult<f64> {
-        crate::stat_arguments::cov(py, &self.stat, col1, col2)
+    fn cov<'py>(
+        slf: &Bound<'py, Self>,
+        col1: &Bound<'py, PyAny>,
+        col2: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        Self::frame(slf)?.call_method1(pyo3::intern!(slf.py(), "cov"), (col1, col2))
     }
 
-    // Contingency table (cross-tabulation) of two columns.
+    // Contingency table (cross-tabulation) of two columns, as PySpark's
+    // `self.df.crosstab(col1, col2)`.
     #[doc = connect_doc!(DataFrameStatFunctions.crosstab)]
-    fn crosstab(&self, col1: &Bound<'_, PyAny>, col2: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        crate::stat_arguments::crosstab(&self.stat, col1, col2)
+    fn crosstab<'py>(
+        slf: &Bound<'py, Self>,
+        col1: &Bound<'py, PyAny>,
+        col2: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        Self::frame(slf)?.call_method1(pyo3::intern!(slf.py(), "crosstab"), (col1, col2))
     }
 
-    // Frequent items for the given columns.
+    // Frequent items for the given columns, as PySpark's `self.df.freqItems(cols, support)`.
     #[pyo3(name = "freqItems", signature = (cols, support=None))]
     #[doc = connect_doc!(DataFrameStatFunctions.freqItems)]
-    fn freq_items(
-        &self,
-        cols: &Bound<'_, PyAny>,
-        support: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<PyDataFrame> {
-        crate::stat_arguments::freq_items(&self.stat, cols, support)
+    fn freq_items<'py>(
+        slf: &Bound<'py, Self>,
+        cols: &Bound<'py, PyAny>,
+        support: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        Self::frame(slf)?.call_method1(pyo3::intern!(slf.py(), "freqItems"), (cols, support))
     }
 
-    // Stratified sample without replacement. Mirrors `DataFrameStatFunctions.sampleBy(
-    // col, fractions, seed)`; `fractions` maps stratum values to sampling fractions.
+    // Stratified sample without replacement, as PySpark's
+    // `self.df.sampleBy(col, fractions, seed)`; `fractions` maps stratum values to sampling
+    // fractions.
     #[pyo3(name = "sampleBy", signature = (col, fractions, seed=None))]
     #[doc = connect_doc!(DataFrameStatFunctions.sampleBy)]
-    fn sample_by(
-        &self,
-        col: &Bound<'_, PyAny>,
-        fractions: &Bound<'_, PyAny>,
-        seed: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<PyDataFrame> {
-        let py = col.py();
-        let (col, fractions) = sample_by_arguments(col, fractions)?;
-        // The long of the seed is converted as the plan is sent, as in `DataFrame.sampleBy`.
-        let (seed, plan_error) = match sample_by_seed(py, seed) {
-            Ok(seed) => (seed, None),
-            Err(err) => (0, Some(crate::dataframe::unbuildable_error(py, err)?)),
-        };
-        let df = self.stat.sample_by(col, fractions, Some(seed)).to_pyerr()?;
-        Ok(PyDataFrame::new(match plan_error {
-            Some(error) => df.unbuildable(error),
-            None => df,
-        }))
+    fn sample_by<'py>(
+        slf: &Bound<'py, Self>,
+        col: &Bound<'py, PyAny>,
+        fractions: &Bound<'py, PyAny>,
+        seed: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        Self::frame(slf)?.call_method1(pyo3::intern!(slf.py(), "sampleBy"), (col, fractions, seed))
     }
 
     // Approximate quantiles of a column, or of each of a list or tuple of columns, at the
-    // given probabilities, as PySpark's `DataFrameStatFunctions.approxQuantile`.
+    // given probabilities, as PySpark's
+    // `self.df.approxQuantile(col, probabilities, relativeError)`.
     #[pyo3(name = "approxQuantile")]
     #[doc = connect_doc!(DataFrameStatFunctions.approxQuantile)]
-    fn approx_quantile(
-        &self,
-        py: Python<'_>,
-        col: &Bound<'_, PyAny>,
-        probabilities: &Bound<'_, PyAny>,
-        relativeError: &Bound<'_, PyAny>,
-    ) -> PyResult<Py<PyAny>> {
-        crate::stat_arguments::approx_quantile(py, &self.stat, col, probabilities, relativeError)
+    fn approx_quantile<'py>(
+        slf: &Bound<'py, Self>,
+        col: &Bound<'py, PyAny>,
+        probabilities: &Bound<'py, PyAny>,
+        relativeError: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        Self::frame(slf)?.call_method1(
+            pyo3::intern!(slf.py(), "approxQuantile"),
+            (col, probabilities, relativeError),
+        )
     }
 }
 

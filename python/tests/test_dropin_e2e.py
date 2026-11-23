@@ -8182,3 +8182,47 @@ def test_the_streaming_queries_and_their_manager_make_the_requests_of_their_dict
     finally:
         query.stop()
     assert not StreamingQuery(Proxy(session), query.id, query.runId).isActive
+
+
+def test_grouped_data_na_and_stat_make_their_dataframes_of_their_dict_as_pysparks(session):
+    # As official PySpark 4.3.0, whose GroupedData, PandasCogroupedOps, DataFrameNaFunctions and
+    # DataFrameStatFunctions keep their state in their __dict__, which their methods read when they
+    # make their DataFrames: an assigned grouping is that of the aggregation, grouped data of
+    # PySpark's constructor and of a pivot aggregate, cogrouped data of grouped data of any class
+    # map their cogroups, and the null and statistics functions of a proxy of a DataFrame call its
+    # methods.
+    from pyspark.sql.connect.dataframe import DataFrameNaFunctions, DataFrameStatFunctions
+    from pyspark.sql.connect.group import GroupedData
+
+    class Proxy:
+        def __init__(self, df):
+            self.df = df
+
+        def __getattr__(self, name):
+            return getattr(self.df, name)
+
+    class Grouped:
+        pass
+
+    df = session.createDataFrame(
+        [(1, "a", 1.0), (1, "b", None), (2, "a", 3.0)], "k int, s string, v double"
+    )
+    grouped = df.groupBy("k")
+    assert vars(grouped)["_df"] is df and vars(df.na) == {"df": df}
+    grouped._grouping_cols = [F.col("s")]
+    assert sorted(grouped.count().collect()) == [Row(s="a", count=2), Row(s="b", count=1)]
+    rolled = GroupedData(df, "rollup", [F.col("k")]).count().collect()
+    assert sorted(rolled, key=lambda row: (row.k is None, row.k)) == [
+        Row(k=1, count=2),
+        Row(k=2, count=1),
+        Row(k=None, count=3),
+    ]
+    pivoted = GroupedData(df, "groupby", [df.k]).pivot("s", ["a"]).sum("v")
+    assert sorted(pivoted.collect()) == [Row(k=1, a=1.0), Row(k=2, a=3.0)]
+    duck = Grouped()
+    duck._df, duck._grouping_cols = df, [F.col("k")]
+    mapped = df.groupBy("k").cogroup(duck).applyInPandas(lambda left, right: left, df.schema)
+    assert mapped.count() == 3
+    assert DataFrameNaFunctions(Proxy(df)).drop().count() == 2
+    assert DataFrameNaFunctions(Proxy(df)).fill(0.0).where("v = 0.0").count() == 1
+    assert DataFrameStatFunctions(Proxy(df)).crosstab("k", "s").count() == 2

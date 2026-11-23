@@ -3789,8 +3789,8 @@ Column of the subquery of a DataFrame of a plan that did not build keeps, to bui
 requests, the plan and the exception of a build that failed, which a plan keeps, and the Python
 Observations of `observe`. Each object that holds a reference to such a part holds a reference to
 its `SharedPart` and reports it, as each of PySpark's objects holds its plan objects: a DataFrame, a
-Column, grouped data and their cogroups, a table argument, a window specification, `na` and `stat`,
-a merge clause, the generator of `toLocalIterator`, which holds its DataFrame until it ends, as
+Column, a table argument, a window specification, a merge clause, the generator of
+`toLocalIterator`, which holds its DataFrame until it ends, as
 PySpark's generator holds `self`, and the expression of a Column (`Column._expr`) and of a table
 argument (`TableArg._subquery_expr`), which `copy.copy` and `copy.deepcopy` copy as they copy a
 Column; the writers of `write`, `writeTo`, `writeStream` and `mergeInto` and their shallow copies,
@@ -3801,8 +3801,10 @@ bound method of an object that keeps a Column and a DataFrame of it, a DataFrame
 from it, or two shallow copies of a writer; through a plan of the Python client whose attribute
 keeps both its DataFrame and a Column of its subquery, or a table argument of it. A function or a
 plan that a live object reaches is kept as it is, and pickled at the requests of that object. Those
-that hold their DataFrame report it too, so a cycle through the DataFrame alone, such as
-`df.back = df.groupBy("id")`, is collected. The DataFrames of the plan of another,
+that hold their DataFrame report it too, and grouped data, their cogroups, `na` and `stat` hold
+their DataFrames, Columns and grouped data in their `__dict__`, as PySpark's, which the collector
+sees, so a cycle through the DataFrame alone, such as `df.back = df.groupBy("id")`, is collected.
+The DataFrames of the plan of another,
 `DataFrame(df._plan, session)`, `copy.copy(df)` and a `copy.deepcopy(df)` that copies no function or
 Observation of the plan, and the stream writer of `df.writeStream`, hold the plan of `df` and not
 `df`, as PySpark's hold its plan object, so `df` is freed at its last reference, its attributes with
@@ -3957,8 +3959,10 @@ of a Column, `df` of `na`) and the patch is not a data descriptor; deleting it g
 class its own attribute back. What stays different: these classic classes are of an `ABCMeta`
 subclass, of an `_abc_impl` among their attributes, and a class that subclasses one of them is
 of `abc.ABCMeta`, where PySpark's are of `type`; and of a data descriptor without a setter
-patched over such an attribute of the objects, PySpark's `__init__` of a Connect object raises
-its `AttributeError`, where the drop-in's object reads the patch. The readers and writers of
+patched over such an attribute of the objects of a Column, a WindowSpec or a TableArg, PySpark's
+`__init__` of a Connect object raises its `AttributeError`, where the drop-in's object reads the
+patch (the `__init__` of `na` and `stat` sets their `df`, and raises it as PySpark's). The readers
+and writers of
 PySpark Connect are
 subclasses of the `OptionUtils` of `pyspark.sql.connect.readwriter`, a class of private methods
 only, of which the drop-in's native readers and writers are not: their MRO is their class and
@@ -3967,10 +3971,12 @@ only, of which the drop-in's native readers and writers are not: their MRO is th
 PySpark's classes are plain Python classes, which a user subclasses. So are these of the drop-in:
 the DataFrame, `Observation`, and the `SparkSession`, `Catalog`, `TableValuedFunction`,
 `DataSourceRegistration`, `RuntimeConf`, `StreamingQuery`, `StreamingQueryManager`,
-`StreamingQueryListenerBus`, `DataFrameReader` and `DataStreamReader` of `pyspark.sql.connect`,
-which construct of their PySpark arguments (`SparkSession(connection=...)`, `Catalog(spark)`,
-`RuntimeConf(spark.client)`, `StreamingQuery(spark, id, runId)`, `DataFrameReader(spark)`), also a
-subclass of an
+`StreamingQueryListenerBus`, `DataFrameReader`, `DataStreamReader`, `GroupedData`,
+`PandasCogroupedOps`, `DataFrameNaFunctions` and `DataFrameStatFunctions` of
+`pyspark.sql.connect`, which construct of their PySpark arguments (`SparkSession(connection=...)`,
+`Catalog(spark)`, `RuntimeConf(spark.client)`, `StreamingQuery(spark, id, runId)`,
+`DataFrameReader(spark)`, `GroupedData(df, "groupby", [F.col("id")])`,
+`DataFrameNaFunctions(df)`), also a subclass of an
 `__init__` of its own, and whose setters, copies and pickles are of the subclass (but those of a
 session, which are the active session of its ID, as PySpark's); `SparkSession.Hook`,
 `StorageLevel` and `PythonEvalType`; and the data types, from `StringType` and `DecimalType` to
@@ -4019,6 +4025,30 @@ pickle of `spark.streams`, its bus or a query fails with the `AttributeError` of
 session of its `_session`, and a deep copy and cloudpickle of the manager or its bus with the
 `TypeError` of its lock.
 
+The grouped data, the cogrouped data and the null and statistics functions of a DataFrame keep
+their state in their `__dict__` too, as PySpark's: the `_df`, `_group_type`, `_grouping_cols`,
+`_pivot_col`, `_pivot_values` and `_grouping_sets` of `GroupedData`, the grouped data `_gd1` and
+`_gd2` of `PandasCogroupedOps`, and the `df` of `DataFrameNaFunctions` and
+`DataFrameStatFunctions`, which their `__init__` sets of PySpark's arguments. The `__init__` of
+grouped data asserts them as PySpark's (a bare `AssertionError` of an argument that is not a
+DataFrame, a grouping of PySpark's names or a list of Columns), and makes the pivot values the
+`F.lit` of each; that of cogrouped data checks `gd1._df._check_same_session(gd2._df)` first, of
+any objects of a `_df`. Their methods read that state where PySpark's read it, of a property, a
+`__getattr__` or an assignment of a subclass too: an aggregation of grouped data is of the
+grouping that they hold then, with the assertions of PySpark's plans, `count` and `apply` call the
+`agg` and the `applyInPandas` of the object, a `pivot` makes grouped data of the same DataFrame and
+the same list of grouping columns, of `self._df[pivot_col]`, and a `_df` that is not a DataFrame,
+such as a proxy of one, is grouped as the DataFrame of its `_plan` and its `_session`. The null and
+statistics functions call the method of their `df` of each of theirs, as PySpark's
+(`df.na.drop()` is `df.dropna(how="any", thresh=None, subset=None)`, of any object, and an omitted
+`value` of `replace` is PySpark's `_NoValue`, which a DataFrame takes for an omitted value). An
+object whose `__init__` never ran raises the `AttributeError` of its first attribute that
+PySpark's method reads (`_df`, `_gd1`, `df`), and their copies and pickles are those of their
+`__dict__`, which reach the DataFrame first, as PySpark's. What differs is the plan that a method
+of grouped data makes, a value of the core, of the state at the call: a later change of the lists
+of the state, such as `gd._grouping_cols.clear()` after `agg = gd.count()`, is not of `agg`, where
+PySpark's plan holds the list and builds its message of it at each request.
+
 The `__init__` of a session or a reader gives it its session, as PySpark's `__init__` sets it: the
 session of a new client, of `SparkSession(connection, userId=None, hook_factories=None)`, and the
 session of its argument for a reader, which must be a session, where PySpark's keeps any object
@@ -4032,8 +4062,8 @@ pickle of PySpark, which makes an object of its class without arguments and then
 (and `_source_name`) of its state, which it sets as its setters do, a catalog of its `_sparkSession`
 and a registration of its `sparkSession`; and the drop-in's pickles of them load in PySpark, of
 their classes, as PySpark's own do: where the session of their ID is active. The other native
-classes, of which the Connect `Column`, `DataFrameNaFunctions`, `DataFrameStatFunctions`,
-`WindowSpec` and `TableArg` are, cannot be subclassed (`TypeError: type 'Column' is not an
+classes, of which the Connect `Column`, `WindowSpec` and `TableArg` are, cannot be subclassed
+(`TypeError: type 'Column' is not an
 acceptable base type`), and do not construct (`TypeError: cannot create '...' instances`): their
 objects are made of the state of the Rust core, a plan, an expression or a query, which the
 arguments of PySpark's constructors, the Python objects of its client, do not give, as the drop-in
@@ -4042,10 +4072,6 @@ does not have them, so a subclass would have no `__init__` to call:
   are the Rust core's.
 - `DataFrameWriter`, `DataFrameWriterV2`, `DataStreamWriter` and `MergeIntoWriter` take the
   `LogicalPlan` of a DataFrame, which the drop-in's `_plan` stands in for.
-- `GroupedData` and `PandasCogroupedOps` take a DataFrame and the expressions of its grouping, of
-  the plan of the Rust core.
-- `DataFrameNaFunctions` and `DataFrameStatFunctions` take a DataFrame, of whose native plan they
-  are.
 - `WindowSpec` takes the expressions of its partitioning and ordering and a `WindowFrame`, and
   `TableArg` a `SubqueryExpression`, of the plan of the Rust core. A WindowSpec has PySpark's
   `_partitionSpec`, `_orderSpec` and `_frame` as properties of the native object, not in its

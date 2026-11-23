@@ -14,8 +14,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""The ``__reduce__`` of the readers, the writers, the grouped data and the stream readers and
-writers of the drop-in, of their state.
+"""The ``__reduce__`` of the readers, the writers and the stream readers and writers of the
+drop-in, of their state.
 
 Each ``*_reduce`` function gives the reduce of an object of its state: a function, which
 cloudpickle pickles by value, and the state. On the drop-in, the function gives back the
@@ -33,15 +33,6 @@ from typing import Any, Callable, Optional
 from pyspark import cloudpickle as _cloudpickle
 
 _cloudpickle.register_pickle_by_value(sys.modules[__name__])
-
-# The names of the groupings of the drop-in, as PySpark's GroupedData takes them.
-_GROUP_TYPES = {
-    "groupBy": "groupby",
-    "rollup": "rollup",
-    "cube": "cube",
-    "pivot": "pivot",
-    "groupingSets": "grouping_sets",
-}
 
 
 def _state_reduce(
@@ -298,58 +289,6 @@ def writer_v2_reduce(
             kept_properties,
         ),
     )
-
-
-def _worker_grouped(  # pragma: no cover - only the server's worker runs it
-    frame: Any,
-    group_type: str,
-    cols: list[Any],
-    pivot_col: Any,
-    pivot_values: list[Any],
-    grouping_sets: list[list[Any]],
-) -> Any:
-    """PySpark's GroupedData of ``frame`` through its constructor, which takes the same state.
-    PySpark's pivot values are None when none were given, not an empty list."""
-    from pyspark.sql.connect.group import GroupedData
-
-    return GroupedData(
-        frame,
-        _GROUP_TYPES[group_type],
-        list(cols),
-        pivot_col,
-        list(pivot_values) if pivot_values else None,
-        grouping_sets if grouping_sets else None,
-    )
-
-
-def grouped_reduce(
-    frame: Any,
-    group_type: str,
-    cols: list[Any],
-    pivot_col: Any,
-    pivot_values: list[Any],
-    grouping_sets: list[list[Any]],
-) -> tuple[Callable[..., Any], tuple[Any, ...]]:
-    """The reduce of GroupedData of ``frame``, of the state that ``_of_state`` takes."""
-    return _state_reduce(
-        "GroupedData",
-        _worker_grouped,
-        (frame, group_type, cols, pivot_col, pivot_values, grouping_sets),
-    )
-
-
-def _worker_cogrouped(  # pragma: no cover - only the server's worker runs it
-    left: Any, right: Any
-) -> Any:
-    """PySpark's PandasCogroupedOps of the two grouped data ``left`` and ``right``."""
-    from pyspark.sql.connect.group import PandasCogroupedOps
-
-    return PandasCogroupedOps(left, right)
-
-
-def cogrouped_reduce(left: Any, right: Any) -> tuple[Callable[..., Any], tuple[Any, ...]]:
-    """The reduce of the cogrouped ops of the grouped data ``left`` and ``right``."""
-    return _state_reduce("PandasCogroupedOps", _worker_cogrouped, (left, right))
 
 
 def _worker_stream_reader(

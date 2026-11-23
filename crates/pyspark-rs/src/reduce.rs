@@ -6,7 +6,6 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyString, PyTuple};
 use spark_connect::column::Column;
-use spark_connect::plan::AggregateGroupType;
 
 use crate::column::PyColumn;
 
@@ -57,18 +56,6 @@ pub(crate) fn with_subclass<'py>(
     let mut items: Vec<Bound<'py, PyAny>> = args.iter().collect();
     items.push(cls.into_any());
     PyTuple::new(object.py(), items)
-}
-
-/// The reduce of an object that pickles as `getattr(holder, name)`, such as a catalog as the
-/// attribute of its session.
-pub(crate) fn getattr_reduce<'py>(
-    py: Python<'py>,
-    holder: Bound<'py, PyAny>,
-    name: &str,
-) -> PyResult<Bound<'py, PyTuple>> {
-    let getattr = py.import("builtins")?.getattr("getattr")?;
-    let args = PyTuple::new(py, [holder, name.into_pyobject(py)?.into_any()])?;
-    PyTuple::new(py, [getattr, args.into_any()])
 }
 
 /// The reduce of an object of its state `args`, through the reconstructor `name` of
@@ -202,7 +189,8 @@ pub(crate) fn check_plain_new(
     Ok(())
 }
 
-/// The Python list of the columns, each a Column of the wrapper of `Column`.
+/// The Python list of the columns, each a Column of the wrapper of `Column`, as the grouping
+/// columns and the grouping sets of grouped data hold them.
 pub(crate) fn column_list<'py>(
     py: Python<'py>,
     columns: &[Column],
@@ -220,31 +208,6 @@ pub(crate) fn columns_of(items: &Bound<'_, PyAny>) -> PyResult<Vec<Column>> {
         .try_iter()?
         .map(|item| Ok(item?.extract::<PyRef<'_, PyColumn>>()?.column.clone()))
         .collect()
-}
-
-/// The name of the type of a grouping, which `_of_state` of grouped data takes back.
-pub(crate) fn group_type_name(group_type: AggregateGroupType) -> &'static str {
-    match group_type {
-        AggregateGroupType::GroupBy => "groupBy",
-        AggregateGroupType::Rollup => "rollup",
-        AggregateGroupType::Cube => "cube",
-        AggregateGroupType::Pivot => "pivot",
-        AggregateGroupType::GroupingSets => "groupingSets",
-    }
-}
-
-/// The type of a grouping of its name, as `group_type_name` gives it.
-pub(crate) fn group_type_of(name: &str) -> PyResult<AggregateGroupType> {
-    match name {
-        "groupBy" => Ok(AggregateGroupType::GroupBy),
-        "rollup" => Ok(AggregateGroupType::Rollup),
-        "cube" => Ok(AggregateGroupType::Cube),
-        "pivot" => Ok(AggregateGroupType::Pivot),
-        "groupingSets" => Ok(AggregateGroupType::GroupingSets),
-        _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
-            "unknown grouping type: {name}"
-        ))),
-    }
 }
 
 /// The Python dict of the string pairs of `map`.

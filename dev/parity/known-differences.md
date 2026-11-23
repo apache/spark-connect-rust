@@ -396,8 +396,9 @@ difference is intentional or tracked for a fix.
   metaclass, of `pyspark.sql._classic_bases`, registers each native class with its classic class
   and forwards a patch of them to it where PySpark's Connect objects inherit the patch (see
   "Public class mutation and dispatch" and `docs/compatibility.md`). Of a data descriptor without
-  a setter patched over an attribute that PySpark's Connect `__init__` sets (`_expr`, `df`),
-  PySpark's objects do not construct, where the drop-in's, which no `__init__` makes, read it.
+  a setter patched over an attribute that PySpark's Connect `__init__` sets (`_expr`), PySpark's
+  objects do not construct, where the drop-in's, which no `__init__` makes, read it; the `df` of
+  `DataFrameNaFunctions` and `DataFrameStatFunctions`, which their `__init__` sets, is PySpark's.
 
 - **Metaclass and subclass serialization.** The public base uses an `ABCMeta`
   subclass for virtual registration and attribute forwarding, while official
@@ -1203,11 +1204,15 @@ requests of the unpickled object pickle as it is then. This case still differs:
   `_options`). These are not of them, and hold their state in their `__dict__`, as PySpark's: an
   `Observation`, of its `_name`, `_result` and `_error`; the `Catalog`, the `TableValuedFunction`,
   the `DataSourceRegistration` and the `RuntimeConf` of a session, of the session of their
-  `_sparkSession` (`sparkSession` of a registration) and of the client of their `_client`; and the
+  `_sparkSession` (`sparkSession` of a registration) and of the client of their `_client`; the
   `StreamingQueryManager` of `spark.streams`, of its `_session` and its `_sqlb`, its
   `StreamingQueryListenerBus`, of its `_sqm`, `_listener_bus`, `_execution_thread` and `_lock`,
-  and a `StreamingQuery`, of its `_session`, `_query_id`, `_run_id` and `_name`. Their methods read
-  their state when they make their requests, as PySpark's, and the events of the listeners of
+  and a `StreamingQuery`, of its `_session`, `_query_id`, `_run_id` and `_name`; and the
+  `GroupedData` of a DataFrame, of its `_df`, `_group_type`, `_grouping_cols`, `_pivot_col`,
+  `_pivot_values` and `_grouping_sets`, its `PandasCogroupedOps`, of the grouped data of its `_gd1`
+  and `_gd2`, and its `DataFrameNaFunctions` and `DataFrameStatFunctions`, of their `df`, whose
+  methods theirs call. Their methods read their state when they make their requests or their
+  plans, as PySpark's, and the events of the listeners of
   streaming queries are posted to the listeners of the `_listener_bus` as they are then (see
   `docs/compatibility.md`). Of the listener bus, the subscription of the session to the events is
   the native listener bus's, of which Rust programs get the events too, whose thread posts them and
@@ -1218,8 +1223,13 @@ requests of the unpickled object pickle as it is then. This case still differs:
   callbacks, where PySpark's waits for ever. The end of the events, of the server, of a stop of the
   session or of a close of its client, takes the listeners off the list, as PySpark's handler
   clears it when its events fail, and `close()` removes every listener, where PySpark's removes
-  each other one, as it removes them from the list that it iterates. What remains of these is
-  inherent, as the transport is native: the requests of a catalog, of the table-valued functions,
+  each other one, as it removes them from the list that it iterates. The plan that a method of
+  grouped data makes is a value of the core, of the state that the grouped data hold at the call: a
+  later change of the lists of that state, such as `gd._grouping_cols.clear()` after
+  `agg = gd.count()`, is not of `agg`, whose grouping is kept, where PySpark's `Aggregate` and
+  `GroupMap` hold the lists and build their messages of them at each request, as the plans are the
+  core's (see "Plans of a DataFrame's relation"). What remains of these is inherent, as the
+  transport is native: the requests of a catalog, of the table-valued functions,
   of a streaming query and of a manager are made by the native transport of the session that they
   hold, or, of another object, as a proxy of a session, of the session of the drop-in's client of
   its `client`, where PySpark's call the methods of that client, such as its `to_table` and its
@@ -1236,7 +1246,8 @@ requests of the unpickled object pickle as it is then. This case still differs:
 - **Subclasses** (intentional; the state is native). PySpark's classes are plain classes that a user
   subclasses. The drop-in's DataFrame, `Observation`, the `SparkSession`, `Catalog`,
   `TableValuedFunction`, `DataSourceRegistration`, `RuntimeConf`, `StreamingQuery`,
-  `StreamingQueryManager`, `StreamingQueryListenerBus`, `DataFrameReader` and `DataStreamReader` of
+  `StreamingQueryManager`, `StreamingQueryListenerBus`, `DataFrameReader`, `DataStreamReader`,
+  `GroupedData`, `PandasCogroupedOps`, `DataFrameNaFunctions` and `DataFrameStatFunctions` of
   `pyspark.sql.connect`, `SparkSession.Hook`, `StorageLevel`,
   `PythonEvalType` and the data types are subclassed as PySpark's: a subclass constructs of the
   arguments of its `__init__`, and its copies and pickles are of the subclass (but those of a
@@ -1245,11 +1256,15 @@ requests of the unpickled object pickle as it is then. This case still differs:
   The `Window` of `pyspark.sql.window` and of `pyspark.sql.connect.window`, and the classic
   `Column`, `DataFrameNaFunctions`, `DataFrameStatFunctions`, `WindowSpec` and `TableArg`, are
   PySpark's classes, which construct and subclass as PySpark's. The catalog, the table-valued
-  functions, the registration, the runtime configuration and the streaming queries, their manager
-  and its listener bus keep their state in their `__dict__`, as PySpark's (see the row above): their
-  `__init__` keeps any object, which their first use reads, and one whose `__init__` never ran
+  functions, the registration, the runtime configuration, the streaming queries, their manager
+  and its listener bus, the grouped data, the cogrouped data and the null and statistics functions
+  keep their state in their `__dict__`, as PySpark's (see the row above): their `__init__` keeps any
+  object, which their first use reads, but for the assertions of the `__init__` of `GroupedData` (a
+  DataFrame, a grouping and a list of Columns) and the `_check_same_session` of the `_df` of the
+  grouped data of `PandasCogroupedOps`, which raise as PySpark's, and one whose `__init__` never ran
   raises the `AttributeError` of the first attribute that PySpark's method reads (`_sparkSession`,
-  `sparkSession`, `_client`, `_query_id`, `_session`, `_lock`). The session and the readers
+  `sparkSession`, `_client`, `_query_id`, `_session`, `_lock`, `_df`, `_gd1`, `df`). The session
+  and the readers
   are of the native state of a session, which the `__init__` of the class, of PySpark's arguments,
   gives them: one whose `__init__` never ran, as of a subclass whose `__init__` does not call it,
   is of the session of no server, whose requests raise `NO_ACTIVE_SESSION` and whose `is_stopped`
@@ -1266,8 +1281,6 @@ requests of the unpickled object pickle as it is then. This case still differs:
   - `Column`: an `Expression` of `pyspark.sql.connect.expressions`;
   - `DataFrameWriter`, `DataFrameWriterV2`, `DataStreamWriter`, `MergeIntoWriter`: the
     `LogicalPlan` of a DataFrame;
-  - `GroupedData`, `PandasCogroupedOps`: a DataFrame and the expressions of its grouping;
-  - `DataFrameNaFunctions`, `DataFrameStatFunctions`: a DataFrame of a native plan;
   - `WindowSpec`, `TableArg`: expressions and a `WindowFrame`, a `SubqueryExpression`.
 
   A Python subclass of a data type (`StringType`, `DecimalType`, `ArrayType`, `StructField`,
