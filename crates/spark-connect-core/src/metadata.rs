@@ -519,21 +519,20 @@ pub(crate) fn metadata_failure(status: &tonic::Status) -> Option<crate::error::S
 
 /// The channel of a client, whose responses of metadata past the limits of gRPC fail their calls
 /// (see the module): their headers as they come, and their trailers as the body ends; whose
-/// calls in flight end when the client is closed; and whose request of [`PendingMetadata`] is sent
-/// once its source gave its metadata, or fails of the error of the source, unsent.
+/// calls in flight end when the client is closed; whose request of [`PendingMetadata`] is sent
+/// once its source gave its metadata, or fails of the error of the source, unsent; and whose
+/// calls take the connection of the subchannel that the channel of the client picks (see
+/// `crate::connector::ClientChannel`), once it resolved its name and connected.
 #[derive(Clone)]
 pub(crate) struct Checked {
-    pub(crate) channel: Channel,
+    /// The channel of the client: its resolver and its `pick_first`, over the subchannels that it
+    /// shares with the other channels of the process.
+    pub(crate) channel: Arc<crate::connector::ClientChannel>,
     /// Whether the client of the calls closed its channel (see `SparkConnectClient::close`).
     pub(crate) closed: Arc<crate::client::ChannelClosed>,
     /// Whether the channel is of a target that gRPC refuses, whose status the transport makes
     /// itself, as gRPC's channel fails its calls of no response, of no limit of the metadata.
     pub(crate) refused: bool,
-    /// The connector of the channel, which the client shares with the other channels of the
-    /// process, and the resolution of the name of its target of the client's own channel, before
-    /// its first call (see `crate::connector::ChannelResolution`).
-    pub(crate) connector: crate::connector::Connector,
-    pub(crate) resolution: Arc<crate::connector::ChannelResolution>,
 }
 
 impl Service<http::Request<tonic::body::Body>> for Checked {
@@ -541,32 +540,16 @@ impl Service<http::Request<tonic::body::Body>> for Checked {
     type Error = StdError;
     type Future = BoxFuture<Self::Response, Self::Error>;
 
-    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.channel.poll_ready(cx).map_err(Into::into)
+    /// Ready at once: a call waits for its connection as it is made (see [`Checked::call`]).
+    fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
     }
 
     fn call(&mut self, mut request: http::Request<tonic::body::Body>) -> Self::Future {
         let closed = Arc::clone(&self.closed);
         let refused = self.refused;
+        let channel = Arc::clone(&self.channel);
         let pending = request.extensions_mut().remove::<PendingMetadata>();
-        let resolution = (!self.resolution.is_ready())
-            .then(|| (Arc::clone(&self.resolution), self.connector.clone()));
-        if pending.is_none() && resolution.is_none() {
-            if let Some(status) =
-                of_connection_fields(request.headers(), crate::connector::grpcio_dialect())
-            {
-                return Box::pin(async move { Err(Box::new(status) as StdError) });
-            }
-            return Box::pin(checked_response(
-                self.channel.call(request),
-                closed,
-                refused,
-            ));
-        }
-        // The channel that `poll_ready` made ready, which takes the request once its metadata is
-        // read and its name resolved, as tower's services are called once ready.
-        let fresh = self.channel.clone();
-        let mut channel = std::mem::replace(&mut self.channel, fresh);
         Box::pin(async move {
             if let Some(PendingMetadata { source, after }) = pending {
                 let pairs = match source.metadata().await {
@@ -587,22 +570,26 @@ impl Service<http::Request<tonic::body::Body>> for Checked {
             {
                 return Err(Box::new(status) as StdError);
             }
-            // Of a channel that did not resolve its name yet, its own resolution first, which the
-            // close of the client ends, as the call that waits for it.
-            if let Some((resolution, connector)) = resolution {
-                let resolved = tokio::select! {
-                    biased;
-                    resolved = resolution.ready(&connector) => resolved,
-                    () = closed.closed() => {
-                        return Err(Box::new(tonic::Status::cancelled(crate::client::CLOSED_CHANNEL))
-                            as StdError);
-                    }
-                };
-                if let Err(error) = resolved {
-                    return Err(Box::new(tonic::Status::unavailable(error.to_string())) as StdError);
+            // The connection that the channel picks, which its name resolved first, of its own
+            // resolution, and which the close of the client ends, as the call that waits for it.
+            let picked = tokio::select! {
+                biased;
+                picked = channel.pick() => picked,
+                () = closed.closed() => {
+                    return Err(Box::new(tonic::Status::cancelled(crate::client::CLOSED_CHANNEL))
+                        as StdError);
                 }
-            }
-            checked_response(channel.call(request), closed, refused).await
+            };
+            let mut connection = match picked {
+                Ok(connection) => connection,
+                Err(unpicked) => {
+                    return Err(Box::new(unpicked.status(channel.grpcio())) as StdError);
+                }
+            };
+            std::future::poll_fn(|cx| connection.poll_ready(cx))
+                .await
+                .map_err(StdError::from)?;
+            checked_response(connection.call(request), closed, refused).await
         })
     }
 }

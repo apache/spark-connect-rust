@@ -318,79 +318,49 @@ impl Stub {
 }
 
 /// What the channels of a client are made of: the endpoint, of its keepalive and its origin, and
-/// what its connector connects to. A client of a new session gets the channel of the process of
-/// them (see [`ChannelFactory::channel`]).
+/// what its connections connect to. A client of a new session gets a channel of its own of them
+/// (see [`ChannelFactory::channel`]).
 #[derive(Clone)]
 struct ChannelFactory {
     endpoint: tonic::transport::Endpoint,
-    /// The origin of the requests and the keepalive of the endpoint, which the channels of the
-    /// process are told apart by, with the target.
+    /// The origin of the requests and the keepalive of the endpoint, which the subchannels of the
+    /// process are told apart by, with their addresses and the target.
     origin: String,
     keepalive: Option<crate::channel::Keepalive>,
-    /// Whether each channel of the factory has a connection of its own: of a connection string of
-    /// a token, whose sessions grpcio gives channels of their own credentials, which share no
+    /// Whether each channel of the factory has call credentials of its own: of a connection string
+    /// of a token, whose sessions grpcio gives channels of their own credentials, which share no
     /// connection, as the token of each is its own.
     own_connection: bool,
     target: crate::connector::Target,
 }
 
-/// A channel of the process, and its connector, which the clients of the same server, proxy, TLS
-/// and keepalive share, as gRPC's global subchannel pool shares the connections of the channels
-/// of a process: PySpark's sessions of `newSession()` and `cloneSession()`, and every other
-/// channel of the same target, have one connection between them; but the sessions of a token,
-/// each of which has a connection of its own, as grpcio's channels of credentials of their own.
-struct PooledChannel {
-    channel: Channel,
-    connector: crate::connector::Connector,
-}
-
-/// What the connections of a channel are made of.
-#[derive(Clone, PartialEq, Eq, Hash)]
-struct ChannelKey {
-    origin: String,
-    keepalive: Option<(Duration, Duration, bool)>,
-    target: crate::connector::TargetKey,
-}
-
-/// The channels of the process by what they connect to, while a client uses them, of each
-/// generation of the process (see [`crate::fork`]): a child of a `fork()` has channels of its own.
-static CHANNELS: crate::fork::PerGeneration<
-    std::sync::Mutex<std::collections::HashMap<ChannelKey, std::sync::Weak<PooledChannel>>>,
-> = crate::fork::PerGeneration::new();
-
 /// The use of its channel by a client of a session and by its clones: open until the client is
-/// closed, or gone, which the connector of the channel counts, so that it stops connecting in
-/// the background once no open client uses it (see [`crate::connector::Connector::release`]).
+/// closed, or gone, which shuts the channel down, so that it lets go of its subchannels (see
+/// [`crate::connector::ClientChannel::shutdown`]).
 ///
 /// A lease is of the generation of the process that made it: in a child of a `fork()`, a lease of
-/// the parent, and its channel, are left as they are when it drops, as the connector and the
-/// connection of the channel are of the runtime of the parent, whose epoll instance the child
+/// the parent, and its channel, are left as they are when it drops, as the subchannels and the
+/// connections of the channel are of the runtime of the parent, whose epoll instance the child
 /// shares (see [`crate::fork`]).
 struct ChannelLease {
-    pooled: crate::fork::ForkLocal<std::sync::Arc<PooledChannel>>,
+    /// The channel of the client, as each client of PySpark has a channel of grpcio of its own:
+    /// its resolver, and its `pick_first` over the subchannels of the process, which it shares
+    /// with the other channels of the process.
+    channel: crate::fork::ForkLocal<std::sync::Arc<crate::connector::ClientChannel>>,
     open: std::sync::atomic::AtomicBool,
-    /// The resolution of the name of the target of the client's own channel, as each channel of
-    /// grpcio resolves its name before its first call, of the connection of the process that it
-    /// shares (see [`crate::connector::ChannelResolution`]).
-    resolution: std::sync::Arc<crate::connector::ChannelResolution>,
 }
 
 impl ChannelLease {
-    fn new(pooled: std::sync::Arc<PooledChannel>) -> Self {
-        pooled.connector.acquire();
-        let resolution = std::sync::Arc::new(crate::connector::ChannelResolution::new(
-            pooled.connector.grpcio(),
-        ));
+    fn new(channel: std::sync::Arc<crate::connector::ClientChannel>) -> Self {
         Self {
-            pooled: crate::fork::ForkLocal::new(pooled),
+            channel: crate::fork::ForkLocal::new(channel),
             open: std::sync::atomic::AtomicBool::new(true),
-            resolution,
         }
     }
 
     fn close(&self) {
         if self.open.swap(false, std::sync::atomic::Ordering::SeqCst) {
-            self.pooled.connector.release();
+            self.channel.shutdown();
         }
     }
 
@@ -434,9 +404,9 @@ impl Transport {
 
 impl Drop for ChannelLease {
     fn drop(&mut self) {
-        // A lease of a parent is left as it is: its connector is of the parent's runtime.
-        if self.pooled.is_current() && *self.open.get_mut() {
-            self.pooled.connector.release();
+        // A lease of a parent is left as it is: its channel is of the parent's runtime.
+        if self.channel.is_current() && *self.open.get_mut() {
+            self.channel.shutdown();
         }
     }
 }
@@ -480,40 +450,26 @@ impl ChannelFactory {
         }
     }
 
-    /// The channel of the process of this factory, which a client uses: the one that another
-    /// client of the same target uses, else a new lazy channel, with a connector of its own (see
-    /// [`crate::connector`]), whose worker tonic spawns on the shared runtime, as the channel is
-    /// the process's, which outlives the runtime of the caller.
-    fn channel(&self) -> std::sync::Arc<PooledChannel> {
-        let new = || {
-            let connector = crate::connector::Connector::new(self.target.clone());
-            let channel = {
-                let _runtime = crate::runtime::get_runtime().enter();
-                self.endpoint.connect_with_connector_lazy(connector.clone())
-            };
-            std::sync::Arc::new(PooledChannel { channel, connector })
-        };
-        if self.own_connection {
-            return new();
-        }
-        let key = ChannelKey {
-            origin: self.origin.clone(),
-            keepalive: self
-                .keepalive
-                .map(|keepalive| (keepalive.time, keepalive.timeout, keepalive.without_calls)),
-            target: self.target.key(),
-        };
-        let mut channels = CHANNELS
-            .get_or_init(|_| Default::default())
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if let Some(pooled) = channels.get(&key).and_then(std::sync::Weak::upgrade) {
-            return pooled;
-        }
-        channels.retain(|_, pooled| pooled.strong_count() > 0);
-        let pooled = new();
-        channels.insert(key, std::sync::Arc::downgrade(&pooled));
-        pooled
+    /// A channel of a client of this factory (see [`crate::connector::ClientChannel`]), of the
+    /// subchannels of the process, of its call credentials of its own of a token, whose work in
+    /// the background and whose connections run on the shared runtime, as the subchannels are the
+    /// process's, which outlive the runtime of the caller.
+    fn channel(&self) -> std::sync::Arc<crate::connector::ClientChannel> {
+        let keepalive = self
+            .keepalive
+            .map(|keepalive| (keepalive.time, keepalive.timeout, keepalive.without_calls));
+        crate::connector::ClientChannel::new(
+            self.target.clone(),
+            crate::connector::SubchannelArgs::new(
+                &self.target,
+                &self.origin,
+                keepalive,
+                self.own_connection,
+            ),
+            self.endpoint.clone(),
+            crate::connector::Pool::of_the_process(),
+            crate::runtime::get_runtime().handle().clone(),
+        )
     }
 }
 
@@ -1388,8 +1344,8 @@ pub(crate) async fn log_response(response: &ExecutePlanResponse) -> Result<()> {
 /// Mirrors `pyspark.sql.connect.client.core.SparkConnectClient`.
 #[derive(Clone)]
 pub struct SparkConnectClient {
-    /// The channel of the client and its clones, the process's channel of the target (see
-    /// [`PooledChannel`]), of each generation of the process (see [`Transport`]).
+    /// The channel of the client and its clones, of the subchannels of the process (see
+    /// [`ChannelLease`]), of each generation of the process (see [`Transport`]).
     transport: std::sync::Arc<Transport>,
     /// What the channel was made of, of which a client of a new session gets its own.
     channel_factory: std::sync::Arc<ChannelFactory>,
@@ -2380,28 +2336,29 @@ impl SparkConnectClient {
         }
     }
 
-    /// The channel of the client, of the generation of the process (see [`Transport`]), of the
-    /// tests, which call it without [`crate::metadata::Checked`].
+    /// The channel of tonic of the connection of the client, of the generation of the process (see
+    /// [`Transport`]), of the tests, which call it without [`crate::metadata::Checked`].
     #[cfg(test)]
-    fn channel(&self) -> Channel {
-        self.transport.lease().pooled.channel.clone()
+    async fn channel(&self) -> Channel {
+        match self.transport.lease().channel.pick().await {
+            Ok(channel) => channel,
+            Err(_) => panic!("the client did not connect"),
+        }
     }
 
     /// The channel of the client for its calls, of the generation of the process (see
-    /// [`Transport`]), whose metadata is checked as gRPC's core checks it, whose name its own
-    /// resolution resolves before its first call, and which the close of the client ends while they
-    /// are in flight (see [`crate::metadata::Checked`]).
+    /// [`Transport`]), whose metadata is checked as gRPC's core checks it, whose resolver and
+    /// `pick_first` pick the subchannel whose connection each call takes, and which the close of the
+    /// client ends while they are in flight (see [`crate::metadata::Checked`]).
     fn checked_channel(&self) -> crate::metadata::Checked {
         let lease = self.transport.lease();
         crate::metadata::Checked {
-            channel: lease.pooled.channel.clone(),
+            channel: std::sync::Arc::clone(&lease.channel),
             closed: std::sync::Arc::clone(&self.channel_closed),
             refused: matches!(
                 self.builder.target(),
                 Some(crate::channel::ChannelTarget::Refused { .. })
             ),
-            connector: lease.pooled.connector.clone(),
-            resolution: std::sync::Arc::clone(&lease.resolution),
         }
     }
 
@@ -2435,7 +2392,8 @@ impl SparkConnectClient {
         self.channel_closed.mark_closed();
         self.closed.store(true, std::sync::atomic::Ordering::SeqCst);
         self.channel_closed.wake_up();
-        // Once no open client uses the channel, it stops connecting in the background.
+        // As grpcio's `close` of the channel: it lets go of its subchannels, whose connections end
+        // once no other channel holds them.
         self.transport.lease().close();
     }
 
@@ -9168,7 +9126,7 @@ mod request_fields_tests {
         let client = SparkConnectClient::connect(&builder).await.unwrap();
         drop(env);
         let mut small =
-            SparkConnectServiceClient::new(client.channel()).max_decoding_message_size(1024);
+            SparkConnectServiceClient::new(client.channel().await).max_decoding_message_size(1024);
         let mut stream = small
             .execute_plan(ExecutePlanRequest::default())
             .await
@@ -9254,13 +9212,6 @@ mod request_fields_tests {
         }
         again.get_configs(&["k"]).await.unwrap();
         assert_eq!(accepted(), 1);
-        assert!(sessions
-            .iter()
-            .chain([&again])
-            .all(|session| std::sync::Arc::ptr_eq(
-                &*session.transport.lease().pooled,
-                &*client.transport.lease().pooled
-            )));
         apart.get_configs(&["k"]).await.unwrap();
         assert_eq!(accepted(), 2);
         // A closed client of the channel does not end it for the others.
@@ -9289,6 +9240,163 @@ mod request_fields_tests {
         // The clones of a client are of its session, of its channel.
         tokened.clone().get_configs(&["k"]).await.unwrap();
         assert_eq!(accepted(), 5);
+    }
+
+    /// The method, the `authorization` header and the port of the client of each request that a
+    /// server received, in order.
+    type Peers = std::sync::Arc<std::sync::Mutex<Vec<(String, Option<String>, u16)>>>;
+
+    /// A [`Recorder`] that records the connection of each request too, of the port of its client.
+    #[derive(Clone)]
+    struct PeerRecorder(Recorder, Peers);
+
+    impl NamedService for PeerRecorder {
+        const NAME: &'static str = "spark.connect.SparkConnectService";
+    }
+
+    impl tonic::codegen::Service<http::Request<tonic::body::Body>> for PeerRecorder {
+        type Response = http::Response<tonic::body::Body>;
+        type Error = std::convert::Infallible;
+        type Future = BoxFuture<Self::Response, Self::Error>;
+
+        fn poll_ready(
+            &mut self,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::result::Result<(), Self::Error>> {
+            self.0.poll_ready(cx)
+        }
+
+        fn call(&mut self, request: http::Request<tonic::body::Body>) -> Self::Future {
+            let method = request
+                .uri()
+                .path()
+                .trim_start_matches("/spark.connect.SparkConnectService/")
+                .to_string();
+            let authorization = request
+                .headers()
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                .map(String::from);
+            let port = request
+                .extensions()
+                .get::<tonic::transport::server::TcpConnectInfo>()
+                .and_then(|info| info.remote_addr())
+                .map_or(0, |address| address.port());
+            self.1.lock().unwrap().push((method, authorization, port));
+            self.0.call(request)
+        }
+    }
+
+    /// A server of a [`PeerRecorder`] on the loopback, its port, what it received of the
+    /// connections of the requests, and the count of the connections that it accepted.
+    async fn peer_server() -> (u16, Peers, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let accepted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = std::sync::Arc::clone(&accepted);
+        let incoming = futures::stream::unfold(listener, move |listener| {
+            let counted = std::sync::Arc::clone(&counted);
+            async move {
+                let socket = listener.accept().await.map(|(socket, _)| {
+                    counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    socket
+                });
+                Some((socket, listener))
+            }
+        });
+        let peers: Peers = Default::default();
+        let service = PeerRecorder(
+            Recorder(Default::default(), Default::default()),
+            peers.clone(),
+        );
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(service)
+                .serve_with_incoming(incoming)
+                .await
+                .unwrap();
+        });
+        (port, peers, accepted)
+    }
+
+    /// As grpcio's channels of the credentials of their tokens, each of which has subchannels of
+    /// its own (SPARK-62257): the calls of a client, and the releases of its executions in the
+    /// background, go over the connection of its own channel, of its own token, and those of
+    /// another client of another token over another.
+    #[tokio::test]
+    async fn the_calls_and_the_releases_of_a_client_go_over_the_connection_of_its_channel() {
+        let (port, peers, accepted) = peer_server().await;
+        let env = crate::channel::set_env(&[("SPARK_CONNECT_AUTHENTICATE_TOKEN", None)]);
+        // Of `localhost`, whose token is sent in plaintext (see `ChannelBuilder::secure`).
+        let client_of = |token: &str| {
+            ChannelBuilder::parse(&format!("sc://localhost:{port}/;token={token}")).unwrap()
+        };
+        let first = SparkConnectClient::connect(&client_of("AAA"))
+            .await
+            .unwrap();
+        let second = SparkConnectClient::connect(&client_of("BBB"))
+            .await
+            .unwrap();
+        drop(env);
+        let mut stream = first
+            .execute_plan_reattachable(ExecutePlanRequest {
+                session_id: first.session_id().to_string(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        while stream.message().await.unwrap().is_some() {}
+        drop(stream);
+        second.get_configs(&["k"]).await.unwrap();
+        first.wait_for_releases().await;
+        first.get_configs(&["k"]).await.unwrap();
+        assert_eq!(accepted.load(std::sync::atomic::Ordering::SeqCst), 2);
+        let peers = peers.lock().unwrap().clone();
+        let ports_of = |token: &str| -> std::collections::BTreeSet<u16> {
+            let bearer = format!("Bearer {token}");
+            peers
+                .iter()
+                .filter(|(_, authorization, _)| authorization.as_deref() == Some(bearer.as_str()))
+                .map(|(_, _, port)| *port)
+                .collect()
+        };
+        let (of_first, of_second) = (ports_of("AAA"), ports_of("BBB"));
+        assert_eq!((of_first.len(), of_second.len()), (1, 1), "{peers:?}");
+        assert!(of_first.is_disjoint(&of_second), "{peers:?}");
+        assert!(
+            peers
+                .iter()
+                .any(|(method, authorization, port)| method == "ReleaseExecute"
+                    && authorization.as_deref() == Some("Bearer AAA")
+                    && of_first.contains(port)),
+            "{peers:?}"
+        );
+    }
+
+    /// As grpcio's `close` of the channel of a client, which lets go of its subchannels (Q5 of
+    /// the probes of SPARK-62257): the connection of two clients stays while one of them is open,
+    /// and ends once the last one is closed, so that a new client of the target connects again.
+    #[tokio::test]
+    async fn the_close_of_the_last_client_of_a_connection_ends_it() {
+        let (port, _, accepted) = peer_server().await;
+        let env = crate::channel::set_env(&[("SPARK_CONNECT_AUTHENTICATE_TOKEN", None)]);
+        let builder = ChannelBuilder::parse(&format!("sc://127.0.0.1:{port}/")).unwrap();
+        let first = SparkConnectClient::connect(&builder).await.unwrap();
+        let second = first.with_new_session_id();
+        drop(env);
+        first.get_configs(&["k"]).await.unwrap();
+        second.get_configs(&["k"]).await.unwrap();
+        let accepted = || accepted.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(accepted(), 1);
+        first.close();
+        let third = second.with_new_session_id();
+        third.get_configs(&["k"]).await.unwrap();
+        assert_eq!(accepted(), 1);
+        second.close();
+        third.close();
+        let fourth = first.with_new_session_id();
+        fourth.get_configs(&["k"]).await.unwrap();
+        assert_eq!(accepted(), 2);
     }
 
     /// As PySpark's executions, which send the request that the hooks return as it is: a plan that

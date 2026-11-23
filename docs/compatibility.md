@@ -432,15 +432,22 @@ A channel connects to the addresses of its host, or of its proxy, as grpcio's: t
 after the previous one or once the previous one failed, each with a connect deadline of 20 s of its
 own, which its TCP connection, the tunnel of a proxy, its TLS handshake and the HTTP/2 settings that
 the server sends first share, of a TLS connection too, and which bounds the lookup of the name too.
-A connection is the process's: the clients of the same target, of the same host and port, proxy and
-its credentials, TLS and keepalive, and of no token, share it, as gRPC's global subchannel pool
-shares the connections of the channels of a process: the clients of
-`SparkConnectClient::with_new_session_id` and `clone_session` share the connection of their client,
-as before, and so does a client of another `connect` of the same target, which had a connection of
-its own. A client of a connection string of a token has a connection of its own, also of a new
-session or a clone of it, and of another `connect` of the same token, as grpcio's channels of the
-credentials of a token share no connection, where its new sessions shared the connection of the
-client; the clones of a client (`Clone`) share its connection. The window of a connection is the
+A connection is the process's, of one address, as a subchannel of gRPC's global subchannel pool:
+the clients whose channels resolve the target to that address, of the same proxy and its
+credentials, TLS and keepalive, and of no token, share it, as gRPC's pool shares the subchannels of
+the channels of a process. Each client has a channel of its own, which resolves the name of the
+target as each call that needs a connection connects, and takes a connection of its addresses that
+another client made, the first of them in their order, else connects to them in turn: the clients
+of `SparkConnectClient::with_new_session_id` and `clone_session` share the connection of their
+client, as before, and so does a client of another `connect` of the same target, which had a
+connection of its own, while their names resolve to its address; a client whose name resolves to
+other addresses connects to them, where it took the connection of the target that the process had.
+A client of a connection string of a token has a connection of its own, also of a new session or a
+clone of it, and of another `connect` of the same token, as grpcio's channels of the credentials of
+a token share no connection, where its new sessions shared the connection of the client; the clones
+of a client (`Clone`) share its channel. A connection ends once no open client holds it:
+`SparkConnectClient::close` lets go of it, as grpcio's `close` of a channel, where it stayed while
+the closed client lived. The window of a connection is the
 largest of HTTP/2, so that the results that a client does not read on, as of executions that it
 holds open, do not hold the calls of the other clients of the connection, nor its other calls, where
 a connection of five such results of 2 MiB waited, as gRPC's connections, whose windows grow with
@@ -492,10 +499,12 @@ call that the end of its connection fails has tonic's message of it. The Python 
 dialect of grpcio instead, with `set_grpcio_dialect` (not a stable API): the texts of grpcio, the
 `User-Agent: grpc-httpcli/0.0` of grpcio's `CONNECT` request of a proxy, `localhost` and the names
 under it as the loopback of both families, as c-ares resolves them, and the state of gRPC's channel,
-whose calls fail at once once it failed to connect, while it connects again in the background with
-gRPC's backoff, until a call takes the connection that it made there, until 30 minutes without a
-call, or until no open client uses the channel (`SparkConnectClient::close`), which a Rust client
-does not have, as its calls recover from an outage at once. The binding sets the end of the user
+whose calls fail at once once it failed to connect, while its subchannels connect again in the
+background with gRPC's backoff, until a call takes the connection that one made there, until 30
+minutes without a call, or until its client is closed (`SparkConnectClient::close`), and whose
+resolver resolves the name of the target before the first call, and again as its connection ends
+or fails, no sooner than 30 s after its last resolution, as gRPC's, which a Rust client does not
+have, as its calls recover from an outage at once. The binding sets the end of the user
 agent too, `python/<version>` where the Rust API's is `python/rust`, with
 `channel::set_user_agent_language` (not a stable API either). The user agent is sent as the client
 type of the requests only, as PySpark sends it, and the HTTP `user-agent` header is tonic's own, so
@@ -3559,11 +3568,12 @@ object of it. PySpark's session object closes its client when it is freed, and t
 nothing for a closed client. The drop-in drops such a session, closes its client, and closes the
 connection of the process to its server once no session uses it, which the sessions of
 `newSession()` and `cloneSession()` share, as PySpark's channels share their subchannels, but a
-session of a token, whose connection is its own. Once its `catalog` or its `streams` is read, the
-session object of either client is in a reference cycle with its catalog, the `catalog` of its
-`__dict__`, which holds it as its `_sparkSession`, or with its `StreamingQueryManager`, its `_sqm`,
-which holds it as its `_session`, and which only the garbage collector frees, so that until a
-collection its exit still cleans its ML cache, as PySpark's.
+session of a token, whose connection is its own; so does the `stop()` of the last session of the
+connection, as grpcio's `close` of the channel of its client. Once its `catalog` or its `streams` is
+read, the session object of either client is in a reference cycle with its catalog, the `catalog` of
+its `__dict__`, which holds it as its `_sparkSession`, or with its `StreamingQueryManager`, its
+`_sqm`, which holds it as its `_session`, and which only the garbage collector frees, so that until
+a collection its exit still cleans its ML cache, as PySpark's.
 A client that no session object owns, of `SparkConnectClient(...)` or of its `newSession()` or
 `clone()`, lives until the exit, as PySpark's `atexit` registration keeps it, so its ML cache
 is cleaned at exit unless it is closed, even when the program dropped it.
@@ -4364,13 +4374,18 @@ it, the loopback of both families, as c-ares, grpcio's resolver, gives them (`::
 previous one failed, while none is done, each with a connect deadline of 20 s of its own, which its
 TCP connection, the tunnel of the proxy, the TLS handshake and the HTTP/2 settings that the server
 sends first share. The first to complete is the connection, and the others are dropped. The
-connection is the process's: the sessions of the same server, proxy, TLS and keepalive, and of no
-token, share it, as gRPC's global subchannel pool shares the subchannels of PySpark's channels, so a
-session of `newSession()`, `cloneSession()` or the `clone` of a client, and any other session of the
-same connection string, uses the connection of its session, while each reads the variables of the
-proxy again, as grpcio's channel of a new client does; a session of a token has a connection of its
-own, also of `newSession()` and `cloneSession()`, as grpcio's channels of the credentials of a
-token, of each session, share none. The window of a connection is the largest of HTTP/2, so that the
+connection is the process's, of one address, as a subchannel of gRPC's global subchannel pool,
+which the sessions of the same proxy, TLS and keepalive, and of no token, whose channels resolve the
+target to that address, share: the channel of each session resolves the name of its target of its
+own and takes at once a connection of its addresses that another session made, the first of them in
+their order, as grpcio's `pick_first` over the subchannels of the pool, else connects to its
+addresses in turn, so a session of `newSession()`, `cloneSession()` or the `clone` of a client, and
+any other session of the same connection string, uses the connection of its session while its name
+resolves to its address, and connects to the addresses that its resolution gives otherwise, while
+each reads the variables of the proxy again, as grpcio's channel of a new client does; a session of
+a token has a connection of its own, also of `newSession()` and `cloneSession()`, as grpcio's
+channels of the credentials of a token, of each session, share none. The window of a connection is
+the largest of HTTP/2, so that the
 results that a session holds open and does not read on, as of `toLocalIterator()`, do not hold the
 calls of the other sessions of the connection, nor its other calls, as gRPC's connections, whose
 windows grow with those of their streams; the window of each stream, of 2 MiB, bounds what it holds
@@ -4461,18 +4476,24 @@ connect fails its calls with
 `UNAVAILABLE`, which the retry policy retries, of the last error of its addresses: of a plaintext
 server that accepts the connection and never answers, grpcio's `failed to connect to all addresses;
 last error: UNKNOWN: ipv4:127.0.0.1:15002: connection attempt timed out before receiving SETTINGS
-frame`. Once it failed, it fails the later calls at once, of that error, while it connects again in
-the background with gRPC's backoff, 1 s and then 1.6 times longer each time up to 120 s, with a
-jitter of 20 %, each attempt with the longer of its backoff and 20 s as its deadline, of the
-addresses of the last resolution of its name for 30 s from the start of that resolution, as
-gRPC's resolver resolves a name again no sooner (`grpc.dns_min_time_between_resolutions_ms`), and
-of a resolution that failed, a backoff after its end, as gRPC's resolver tries it again, until a
-connection succeeds, which the next call takes; the channel of each client, of a new session or a
-clone too, resolves the name of its target of its own before its first call, as the resolver of
-each channel of grpcio does, whose calls fail of the error of it until it resolves, and then
-shares the connection of the process; once no call came for 30 min, or once every session
-of the connection is stopped, it stops, and the next call connects, as grpcio's channel goes idle,
-or shuts down. A connection that ends is made again by the next call. The Python client logs the
+frame`. Once it failed, it fails the later calls at once, of that error, while each of its addresses
+connects again in the background with gRPC's backoff, 1 s and then 1.6 times longer each time up to
+120 s, with a jitter of 20 %, each attempt with the longer of its backoff and 20 s as its deadline,
+once for each address of the process, whatever the sessions that wait for it, until a connection
+succeeds, which the next call takes. The channel of each session, of a new session or a clone too,
+resolves the name of its target of its own before its first call, as the resolver of each channel of
+grpcio does, whose calls fail of the error of it, at once, while it tries it again in the background
+a backoff after its end, as gRPC's resolver does, and connects once it resolves; and it resolves the
+name again of its own, in the background, as its connection ends, or as a GOAWAY of the server ends
+it for new calls, which then connect again while the calls in flight go on, and each time its
+addresses failed again, no sooner than 30 s after the start of its last resolution, as gRPC's
+resolver resolves a name again no sooner (`grpc.dns_min_time_between_resolutions_ms`), of whose
+addresses it connects meanwhile: a resolution that fails after one that succeeded leaves it the
+addresses of that one, and a resolution that no longer gives the address of its connection while it
+is connected makes it connect to the new addresses in the background, and take one once it connects.
+Once no call came for 30 min to a channel that failed, or once its session is stopped, it stops
+connecting, as grpcio's channel goes idle, or shuts down, and the next call connects. A connection
+that ends is made again by the next call. The Python client logs the
 failures of the connections that gRPC's core logs, on stderr (see [Errors on
 stderr](configuration.md#errors-on-stderr)), and its `CONNECT` request of a proxy has grpcio's
 `User-Agent: grpc-httpcli/0.0`. What stays different, such as the keepalive pings, which are
