@@ -2201,47 +2201,83 @@ async fn each_channel_connects_to_the_subchannels_of_its_own_addresses() {
     );
 }
 
-#[tokio::test]
-async fn a_ready_channel_moves_to_the_addresses_of_a_resolution_that_no_longer_gives_its_own() {
-    // As gRPC's `pick_first`, of a resolution that comes while its channel is ready, which it asked
-    // for as its last connection ended: it connects to the new addresses in the background, and
-    // moves to them once one is ready, letting go of its subchannel, whose connection ends once no
-    // other channel holds it; of a resolution that still gives its address, it stays.
-    let (one, one_accepted) = settings_server().await;
-    let (two, two_accepted) = settings_server().await;
-    let target = target(vec![one], true);
-    let addresses = Arc::clone(target.addresses.as_ref().unwrap());
-    let lookups = Arc::clone(&target.lookups);
-    let channel = channel_of(target);
-    assert!(picked(&channel).await.is_ok());
-    // The connection ends, which asks for a resolution 30 s after the first, and the next call
-    // connects to the addresses of the first.
+/// Resolve the name of the target of `channel` again while it is ready, of `addresses` from then
+/// on, of `lookups`, its count of resolutions, which is `before` before: end its connection, which
+/// asks for a resolution 30 s after the last one, connect again of its next call, and let the 30 s
+/// pass.
+async fn resolve_while_ready(
+    channel: &Arc<ClientChannel>,
+    resolved: &Arc<Mutex<Vec<SocketAddr>>>,
+    addresses: Vec<SocketAddr>,
+    lookups: &Arc<AtomicUsize>,
+    before: usize,
+) {
     tokio::time::pause();
-    end_connection(&channel).await;
+    end_connection(channel).await;
     tokio::time::resume();
-    assert!(picked(&channel).await.is_ok());
-    assert_eq!(one_accepted.load(Ordering::SeqCst), 2);
-    let old = channel.picked_subchannel().unwrap();
-    *addresses.lock().unwrap() = vec![two];
+    assert!(picked(channel).await.is_ok());
+    *resolved.lock().unwrap() = addresses;
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(31)).await;
     tokio::time::resume();
     until(Duration::from_secs(5), || {
-        lookups.load(Ordering::SeqCst) == 2
+        lookups.load(Ordering::SeqCst) == before + 1
     })
     .await;
-    until(Duration::from_secs(5), || {
-        channel
-            .picked_subchannel()
-            .is_some_and(|picked| !Arc::ptr_eq(&picked, &old))
-    })
-    .await;
+}
+
+#[tokio::test]
+async fn a_ready_channel_takes_a_ready_subchannel_of_a_new_resolution_else_it_goes_idle() {
+    // As gRPC 1.85.1's `pick_first` of a resolution that comes while its channel is ready, which
+    // it asked for as its last connection ended (P7 of the review of SPARK-62257, of grpcio
+    // 1.85.1: its connection to .1 closes at the resolution, and its next call connects to .2): it
+    // replaces its list of subchannels at once; the first subchannel of the new addresses that is
+    // ready, of any channel, is picked, also of an address before it that is not, and the others
+    // are let go; if none is ready, the channel lets go of its subchannel, whose connection ends
+    // once no other channel holds it, and is idle, of no attempt to the new addresses, which its
+    // next call connects to.
+    let (one, one_accepted) = settings_server().await;
+    let (two, two_accepted) = settings_server().await;
+    let (three, three_accepted) = settings_server().await;
+    let pool: Arc<Pool> = Arc::default();
+    let first_target = target(vec![one], true);
+    let resolved = Arc::clone(first_target.addresses.as_ref().unwrap());
+    let lookups = Arc::clone(&first_target.lookups);
+    let channel = channel_in(first_target, Arc::clone(&pool));
+    assert!(picked(&channel).await.is_ok());
+    // Of `two` alone, which no channel connected: idle, of the subchannel of `one` let go.
+    resolve_while_ready(&channel, &resolved, vec![two], &lookups, 1).await;
+    assert_eq!(one_accepted.load(Ordering::SeqCst), 2);
+    until(Duration::from_secs(5), || channel.is_idle()).await;
+    assert_eq!(channel.subchannel_addresses(), (vec![], false));
+    assert_eq!(pool.len(), 0);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(two_accepted.load(Ordering::SeqCst), 0);
+    assert!(picked(&channel).await.is_ok());
     assert_eq!(two_accepted.load(Ordering::SeqCst), 1);
     assert_eq!(
         channel.subchannel_addresses(),
         (vec![two.to_string()], true)
     );
-    assert_eq!(old.watches(), 0);
+    // Of `three`, which no channel connected, and `one`, which another channel did: `one` at once,
+    // of no attempt to `three`, and the subchannel of `two` let go.
+    let other = channel_in(target(vec![one], true), Arc::clone(&pool));
+    assert!(picked(&other).await.is_ok());
+    assert_eq!(one_accepted.load(Ordering::SeqCst), 3);
+    resolve_while_ready(&channel, &resolved, vec![three, one], &lookups, 2).await;
+    until(Duration::from_secs(5), || {
+        channel.subchannel_addresses() == (vec![one.to_string()], true)
+    })
+    .await;
+    assert!(Arc::ptr_eq(
+        &channel.picked_subchannel().unwrap(),
+        &other.picked_subchannel().unwrap()
+    ));
+    assert_eq!(pool.len(), 1);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(three_accepted.load(Ordering::SeqCst), 0);
+    assert_eq!(two_accepted.load(Ordering::SeqCst), 2);
+    assert_eq!(one_accepted.load(Ordering::SeqCst), 3);
 }
 
 #[tokio::test]

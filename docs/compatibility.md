@@ -4489,9 +4489,10 @@ it for new calls, which then connect again while the calls in flight go on, and 
 addresses failed again, no sooner than 30 s after the start of its last resolution, as gRPC's
 resolver resolves a name again no sooner (`grpc.dns_min_time_between_resolutions_ms`), of whose
 addresses it connects meanwhile: a resolution that fails after one that succeeded leaves it the
-addresses of that one, and a resolution that no longer gives the address of its connection while it
-is connected makes it connect to the new addresses in the background, and take one once it connects.
-Once no call came for 30 min to a channel that failed, or once its session is stopped, it stops
+addresses of that one, and a resolution that comes while it is connected makes it take at once the
+first connection of the new addresses that the process has, its own too, or, of none, close its own
+once no other session uses it and connect to the new addresses at its next call, as gRPC's
+`pick_first` drops its connection and goes idle then. Once no call came for 30 min to a channel that failed, or once its session is stopped, it stops
 connecting, as grpcio's channel goes idle, or shuts down, and the next call connects. A connection
 that ends is made again by the next call. The Python client logs the
 failures of the connections that gRPC's core logs, on stderr (see [Errors on

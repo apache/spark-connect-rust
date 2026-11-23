@@ -39,9 +39,12 @@
 //! - The resolver resolves the name again when the channel asks it to, no sooner than 30 s after
 //!   the start of its last resolution, as gRPC's (`grpc.dns_min_time_between_resolutions_ms`), in
 //!   the background; the channel takes the addresses that it gives as it connects next, or at once
-//!   while it connects or failed; while it is ready, it connects to those of a resolution that no
-//!   longer gives its address in the background, and moves to them once one is ready, or fails once
-//!   all failed. A resolution that fails after one that succeeded leaves the channel with the
+//!   while it connects or failed, as gRPC's `pick_first` replaces its list of subchannels at once.
+//!   While it is ready, it moves at once to the first subchannel of the new addresses that is
+//!   ready, of any channel, its own too; if none is, it lets go of its subchannel, whose
+//!   connection ends once no other channel holds it, and is idle, so that its next call connects
+//!   to the new addresses, as gRPC's `pick_first` "drops the existing connection and goes IDLE"
+//!   (gRPC 1.85.1). A resolution that fails after one that succeeded leaves the channel with the
 //!   addresses of that one, and is tried again a backoff after its end.
 //! - After 30 minutes without a call, a channel in transient failure stops connecting and
 //!   resolving, as gRPC's channel goes idle, and the next call resolves the name again.
@@ -283,6 +286,18 @@ impl List {
         }
     }
 
+    /// The first subchannel of the list that is ready, of any channel, of the number of its
+    /// connection, as gRPC's `pick_first` selects the first subchannel of a new list that reports
+    /// `READY`.
+    fn first_ready(&self) -> Option<(usize, u64)> {
+        self.entries.iter().enumerate().find_map(|(index, entry)| {
+            entry
+                .subchannel
+                .ready()
+                .map(|connection| (index, connection))
+        })
+    }
+
     /// A step of `pick_first` over the list, at `now`, of the states of its subchannels now, of
     /// happy eyeballs of `delay`, [`ATTEMPT_DELAY`] (see the module).
     fn step(&mut self, now: Instant, delay: Duration) -> Outcome {
@@ -400,9 +415,6 @@ struct State {
     resolver: Resolver,
     /// The subchannels of the current pass, or the picked one.
     list: Option<List>,
-    /// The subchannels of a resolution of a channel that is ready, which replace the picked one
-    /// once one is ready.
-    pending: Option<List>,
     /// The picked subchannel, and the number of its connection that the channel took.
     picked: Option<(Arc<Subchannel>, u64)>,
     /// The subchannel that was picked, of a channel idle since its connection ended, until the next
@@ -416,7 +428,6 @@ impl State {
     /// Idle, of `failed`, the failure of the pass of a Rust client: the next call connects.
     fn go_idle(&mut self, failed: Option<ChannelFailure>) {
         self.list = None;
-        self.pending = None;
         self.picked = None;
         self.last_picked = None;
         self.phase = Phase::Idle;
@@ -503,7 +514,6 @@ impl ClientChannel {
                 failed: None,
                 resolver: Resolver::new(0),
                 list: None,
-                pending: None,
                 picked: None,
                 last_picked: None,
             }),
@@ -580,7 +590,6 @@ impl ClientChannel {
         let mut state = self.state();
         state.open = false;
         state.list = None;
-        state.pending = None;
         state.picked = None;
         state.last_picked = None;
         state.resolver = Resolver::new(state.resolver.generation + 1);
@@ -652,7 +661,7 @@ impl ClientChannel {
         }
         self.pick_first(&mut state, now);
         let mut next = self.resolve_when_due(&mut state, now);
-        for list in [&state.list, &state.pending].into_iter().flatten() {
+        if let Some(list) = &state.list {
             next = earliest(next, list.timer);
         }
         if grpcio && matches!(state.phase, Phase::TransientFailure(_)) {
@@ -793,15 +802,17 @@ impl ClientChannel {
         state.resolver.retry = Some(now + state.resolver.backoff.next());
         if state.resolver.addresses.is_none() && !matches!(state.phase, Phase::Idle) {
             state.list = None;
-            state.pending = None;
             state.picked = None;
             state.phase = Phase::TransientFailure(failure);
         }
     }
 
-    /// Connect to the subchannels of `addresses`, of a new resolution: at once, as gRPC's
-    /// `pick_first`, but of a channel that is ready, which goes on until one of them is (see the
-    /// module).
+    /// Connect to the subchannels of `addresses`, of a new resolution, at once, as gRPC's
+    /// `pick_first` replaces its list of subchannels: of a channel that picked a subchannel, the
+    /// first subchannel of the list that is ready is picked at once, and if none is, the channel
+    /// lets go of its own and is idle, so that its next call connects to the addresses, as gRPC's
+    /// `pick_first` of an update of no subchannel in `READY` ("dropping existing connection and
+    /// going IDLE"); else the channel connects to the list.
     fn connect_to(&self, state: &mut State, mut addresses: Vec<Address>) {
         let mut seen = Vec::with_capacity(addresses.len());
         addresses.retain(|address| {
@@ -827,57 +838,32 @@ impl ClientChannel {
         let list = List::new(subchannels, &self.wake);
         state.last_picked = None;
         if state.picked.is_some() {
-            state.pending = Some(list);
+            match list.first_ready() {
+                Some((index, connection)) => self.picked(state, list, index, connection),
+                None => state.go_idle(None),
+            }
             return;
         }
         // A failure of the resolver, of no subchannel, ends with it; that of the subchannels stays,
         // as gRPC's `pick_first` reports no change while it connects in transient failure.
         let of_the_resolver = state.list.is_none();
-        state.pending = None;
         state.list = Some(list);
         if of_the_resolver || !matches!(state.phase, Phase::TransientFailure(_)) {
             state.phase = Phase::Connecting;
         }
     }
 
-    /// The connection of the picked subchannel ended (see the module).
+    /// The connection of the picked subchannel ended (see the module): a re-resolution, in the
+    /// dialect of grpcio, and idle, as gRPC's `pick_first` whose selected subchannel is idle.
     fn lost(&self, state: &mut State) {
         let last_picked = state.picked.take().map(|(subchannel, _)| subchannel);
-        if self.grpcio() {
-            self.request_resolution(state);
-            if let Some(pending) = state.pending.take() {
-                state.phase = if pending.complete {
-                    Phase::TransientFailure(pending.last_failure())
-                } else {
-                    Phase::Connecting
-                };
-                state.list = Some(pending);
-                return;
-            }
-        }
+        self.request_resolution(state);
         state.go_idle(None);
         state.last_picked = last_picked;
     }
 
     /// A step of `pick_first` over the subchannels of the channel (see [`List::step`]).
     fn pick_first(&self, state: &mut State, now: Instant) {
-        if let Some(pending) = &mut state.pending {
-            match pending.step(now, self.attempt_delay) {
-                Outcome::Ready(index, connection) => {
-                    let pending = state.pending.take().expect("a pending list");
-                    self.picked(state, pending, index, connection);
-                }
-                Outcome::Failed(failure) => {
-                    // As gRPC's `pick_first`, which takes the addresses of the resolution all the
-                    // same, and lets go of the connection that it has.
-                    state.list = state.pending.take();
-                    state.picked = None;
-                    state.phase = Phase::TransientFailure(failure);
-                    self.request_resolution(state);
-                }
-                Outcome::Pending => {}
-            }
-        }
         if state.picked.is_some() {
             return;
         }
@@ -904,7 +890,6 @@ impl ClientChannel {
         let list = list.of_the_picked(index);
         state.picked = Some((Arc::clone(&list.entries[0].subchannel), connection));
         state.list = Some(list);
-        state.pending = None;
         state.phase = Phase::Ready;
     }
 
