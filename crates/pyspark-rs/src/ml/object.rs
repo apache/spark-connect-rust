@@ -1649,6 +1649,15 @@ pub(crate) enum SummaryDataset {
 /// that it holds itself (see [`params_api::OwnDefaults`]: of its estimator, or of the uid that a
 /// loaded model was made of).
 pub(super) struct ModelCore {
+    /// The references of `summary` to the parts of plans, of its summary dataset, which
+    /// `__traverse__` reports (see `crate::gc::Parts`), as PySpark's summary holds its
+    /// `_summary_dataset`. Dropped before `summary`, as it is declared first.
+    summary_parts: crate::gc::Parts,
+    /// The references of `model` to the parts of plans (see `Model::held_parts`): of the summary
+    /// dataset of the core model's own training summary, and of those of the models that it holds
+    /// (the binary training sets of the models of a OneVsRestModel's classes). Released before
+    /// `model` is replaced, by a model of none.
+    model_parts: crate::gc::Parts,
     pub(super) model: Box<dyn Model>,
     pub(super) session_id: String,
     pub(super) summary: Option<MlTarget>,
@@ -1695,14 +1704,20 @@ impl TransformJob {
         match self {
             TransformJob::Done(transformed) => Ok(transformed),
             TransformJob::Run(mut model, summary) => {
-                // Of the plans of `df`, which the transform is built over, and of the summary of
-                // the model, which a model may read.
+                // Of the plans of `df`, which the transform is built over, of the summary of the
+                // model, which a model may read, and of the summary datasets that the copy of the
+                // model holds, which its transform may clone: as `gc::detach_of_values`, of the
+                // parts named before the call borrows the model.
                 let parts = df
                     .held_parts()
                     .into_iter()
-                    .chain(summary.iter().flat_map(MlTarget::held_parts));
-                crate::gc::detach_of_values(py, parts, || model.transform(df).map_err(Box::new))
-                    .to_pyerr()
+                    .chain(summary.iter().flat_map(MlTarget::held_parts))
+                    .chain(model.held_parts());
+                let _in_use = crate::gc::in_use_of_values(py, parts);
+                crate::gc::run_detached(py, crate::gc::take_counting(), || {
+                    model.transform(df).map_err(Box::new)
+                })
+                .to_pyerr()
             }
         }
     }
@@ -1900,6 +1915,8 @@ impl ModelCore {
             }
         };
         let core = Self {
+            summary_parts: crate::gc::Parts::of(py, summary.iter().flat_map(MlTarget::held_parts)),
+            model_parts: crate::gc::Parts::of(py, model.held_parts()),
             model,
             session_id,
             summary,
@@ -1929,6 +1946,8 @@ impl ModelCore {
         let operator = self.model.operator().clone();
         let params = self.model.params().clone();
         self.session_id = object.session().session_id().to_string();
+        // Of a model of no summary dataset.
+        self.model_parts.release();
         self.model = Box::new(spark_connect::ml::ObjectModel::new(
             object, operator, params,
         ));
@@ -1951,6 +1970,8 @@ impl ModelCore {
         let session_id = object.session().session_id().to_string();
         let operator = MlOperator::with_uid(jvm_class, &read.uid, OperatorType::Model);
         Ok(Self {
+            summary_parts: crate::gc::Parts::none(),
+            model_parts: crate::gc::Parts::none(),
             model: Box::new(spark_connect::ml::ObjectModel::new(
                 object,
                 operator,
@@ -1991,6 +2012,8 @@ impl ModelCore {
         let uid = params_api::random_uid(py, uid_class)?;
         let operator = MlOperator::with_uid(jvm_class, &uid, OperatorType::Model);
         Ok(Self {
+            summary_parts: crate::gc::Parts::none(),
+            model_parts: crate::gc::Parts::none(),
             model: Box::new(UnboundModel {
                 operator,
                 params: Params::new(),
@@ -2159,6 +2182,8 @@ impl ModelCore {
         if !self.is_unbound() {
             let operator = self.model.operator().clone();
             let params = self.model.params().clone();
+            // Of a model of no summary dataset.
+            self.model_parts.release();
             self.model = Box::new(UnboundModel { operator, params });
         }
         self.java_obj = Default::default();
@@ -2230,9 +2255,10 @@ impl ModelCore {
     /// `_java_obj`), of a reference of its own (a copy has its own of the same object), and the
     /// `RemoteModelRef` that it was made of while it alone holds its obligation (see
     /// [`ModelCore::exclusive_reference`], whose invariant keeps each decision of this traverse
-    /// from losing a reference between the passes of a collection). The Python objects below the
-    /// plan of the summary dataset of its training summary (`summary`, an `MlTarget`) are not
-    /// reported: a cycle through them is not collected.
+    /// from losing a reference between the passes of a collection); and the parts of the plans of
+    /// the summary datasets that it holds, of its training summary (`summary`, an `MlTarget`) and
+    /// of its core model (see `crate::gc::Parts`), as PySpark's summary holds its
+    /// `_summary_dataset`: a cycle through a UDF of the training dataset is collected.
     pub(super) fn traverse(&self, visit: &pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
         if !self.gc_ready.get() {
             return Ok(());
@@ -2256,12 +2282,13 @@ impl ModelCore {
         if let Some(held) = self.exclusive_reference() {
             held.visit(visit)?;
         }
-        Ok(())
+        self.summary_parts.visit(visit)?;
+        self.model_parts.visit(visit)
     }
 
     /// Break a reference cycle that the garbage collector found unreachable: the model drops the
-    /// Python objects that [`ModelCore::traverse`] reported. Its `__del__` ran before, which
-    /// released the reference of its `RemoteModelRef`.
+    /// Python objects that [`ModelCore::traverse`] reported, and its summary datasets. Its
+    /// `__del__` ran before, which released the reference of its `RemoteModelRef`.
     pub(super) fn clear(&mut self) {
         if !self.gc_ready.get() {
             return;
@@ -2277,6 +2304,11 @@ impl ModelCore {
         if self.exclusive_reference().is_some() {
             self.reference = None;
         }
+        // The summary datasets, as a DataFrame drops its plan (`DataFrame::clear_plan`).
+        self.summary_parts.release();
+        self.model_parts.release();
+        self.summary = None;
+        self.model.clear_held_parts();
     }
 
     /// Make the model of [`ModelCore::of_reference`] the model of the object of the id of its
@@ -2337,10 +2369,14 @@ impl ModelCore {
     }
 
     pub(super) fn duplicate(&self, py: Python<'_>) -> Self {
+        let model = self.model.clone_box();
+        let summary = self.summary.clone();
         Self {
-            model: self.model.clone_box(),
+            summary_parts: crate::gc::Parts::of(py, summary.iter().flat_map(MlTarget::held_parts)),
+            model_parts: crate::gc::Parts::of(py, model.held_parts()),
+            model,
             session_id: self.session_id.clone(),
-            summary: self.summary.clone(),
+            summary,
             // A copy shares the summary object, as `copy.copy` of PySpark's `Params.copy` shares
             // its `_summary`.
             summary_object: match self.summary_object.get() {

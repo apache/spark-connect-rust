@@ -25,7 +25,10 @@ fn linear_regression_summary(
     _model: &object::ModelCore,
     target: spark_connect::ml::MlTarget,
 ) -> PyResult<Py<PyAny>> {
-    Ok(crate::ml::object::new_py(py, PyLinearRegressionTrainingSummary::from(target))?.into_any())
+    Ok(
+        crate::ml::object::new_py(py, PyLinearRegressionTrainingSummary::from(py, target))?
+            .into_any(),
+    )
 }
 
 /// The training summary object of a GeneralizedLinearRegressionModel, as `_summaryCls` makes it.
@@ -36,7 +39,7 @@ fn glr_summary(
 ) -> PyResult<Py<PyAny>> {
     Ok(crate::ml::object::new_py(
         py,
-        PyGeneralizedLinearRegressionTrainingSummary::from(target),
+        PyGeneralizedLinearRegressionTrainingSummary::from(py, target),
     )?
     .into_any())
 }
@@ -351,7 +354,7 @@ native_model! {
         let target = slf.try_borrow()?.core.target()?;
         let output = object::fetch_py(py, &target, "evaluate", std::slice::from_ref(dataset))?;
         let summary = spark_connect::ml::evaluated_summary(&target, output).to_pyerr()?;
-        let object = crate::ml::object::new_py(py, PyLinearRegressionSummary::from(summary))?;
+        let object = crate::ml::object::new_py(py, PyLinearRegressionSummary::from(py, summary))?;
         crate::ml::object::evaluated(slf.as_any(), object)
     }
 
@@ -433,7 +436,7 @@ native_model! {
         let output = object::fetch_py(py, &target, "evaluate", std::slice::from_ref(dataset))?;
         let summary = spark_connect::ml::evaluated_summary(&target, output).to_pyerr()?;
         let object =
-            crate::ml::object::new_py(py, PyGeneralizedLinearRegressionSummary::from(summary))?;
+            crate::ml::object::new_py(py, PyGeneralizedLinearRegressionSummary::from(py, summary))?;
         crate::ml::object::evaluated(slf.as_any(), object)
     }
 

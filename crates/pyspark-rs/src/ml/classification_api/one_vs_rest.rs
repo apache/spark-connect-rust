@@ -14,7 +14,6 @@ use std::sync::{Mutex, PoisonError};
 /// columns, and the binary training set of each class (of its binary label, PySpark's
 /// `mc2b$<class>`), which the classifier of the class was fitted on, of which the class's model's
 /// training summary is.
-#[derive(Clone)]
 pub(crate) struct OneVsRestFit {
     pub(crate) train: DataFrame,
     pub(crate) datasets: Vec<DataFrame>,
@@ -34,8 +33,6 @@ pub struct PyOneVsRestModel {
     core: object::ModelCore,
     /// The Python values of the identity params: the classifier.
     raw: Vec<(&'static str, Py<PyAny>)>,
-    /// The fit that the submodels are made of; None of a loaded or constructed model.
-    fit: Option<OneVsRestFit>,
     /// The `models` attribute, which PySpark keeps as a plain attribute: the object that the fit,
     /// the load, the copy, the constructor or an assignment gives.
     models: Mutex<Option<Py<PyAny>>>,
@@ -63,13 +60,15 @@ impl PyOneVsRestModel {
         let this = Self {
             core,
             raw: vec![("classifier", classifier)],
-            fit: Some(fit),
             models: Mutex::new(None),
             default_order: MODEL_DEFAULTS,
             set_order: params_api::SetOrder::default(),
         };
         // As PySpark's classifier fits make their models, with their summaries, during the fit.
-        let models = build_submodels(py, &this)?;
+        // The model keeps no dataset of the fit but those of its core's models of the classes
+        // (see `ModelCore`), which its traverse reports, as PySpark's model holds its datasets
+        // through the summaries of its `models` alone.
+        let models = build_submodels(py, &this, &fit)?;
         this.hold_models(models.into_any());
         Ok(this)
     }
@@ -124,10 +123,8 @@ fn generic_submodel(
     model: Box<dyn Model>,
     binary: &DataFrame,
 ) -> PyResult<Py<PyAny>> {
-    let model = crate::ml::PyMLModel {
-        model,
-        session_id: binary.spark_session().session_id().to_string(),
-    };
+    let session_id = binary.spark_session().session_id().to_string();
+    let model = crate::ml::PyMLModel::new(py, model, session_id);
     Ok(crate::ml::object::new_py(py, model)?.into_any())
 }
 
@@ -270,15 +267,14 @@ fn submodel(
     }
 }
 
-/// The submodels of the model `this`, typed as PySpark's classifier fits make them, of the
-/// composite's submodels, in the order of the classes. They are made by the fit, with the
-/// summaries that the classes' fits make.
-fn build_submodels(py: Python<'_>, this: &PyOneVsRestModel) -> PyResult<Py<PyList>> {
-    let Some(fit) = this.fit.as_ref() else {
-        return Err(PyValueError::new_err(
-            "the models of a loaded OneVsRestModel are not held",
-        ));
-    };
+/// The submodels of the model `this` of the fit `fit`, typed as PySpark's classifier fits make
+/// them, of the composite's submodels, in the order of the classes. They are made by the fit, with
+/// the summaries that the classes' fits make.
+fn build_submodels(
+    py: Python<'_>,
+    this: &PyOneVsRestModel,
+    fit: &OneVsRestFit,
+) -> PyResult<Py<PyList>> {
     let Some(composite) = this.core.model.downcast_ref::<CoreOneVsRestModel>() else {
         return Err(PyValueError::new_err(
             "the model of a OneVsRestModel is not a composite of its classes",
@@ -369,7 +365,6 @@ impl params_api::NativeInstance for PyOneVsRestModel {
             Self {
                 core: self.core.duplicate(py),
                 raw,
-                fit: self.fit.clone(),
                 models: Mutex::new(self.models_value(py)),
                 default_order: self.default_order,
                 set_order: self.set_order.clone(),
@@ -417,8 +412,8 @@ native_pymethods! {
 
     /// Visit the Python objects that the model holds, of Python's garbage collector, as PySpark's
     /// model holds its attributes and its param maps: those of its core (see
-    /// `ModelCore::traverse`), its classifier and its `models`. The Python objects below the plans
-    /// of the datasets of its fit (`fit`) are not reported: a cycle through them is not collected.
+    /// `ModelCore::traverse`, of the binary training sets of the core's models of the classes), its
+    /// classifier and its `models`.
     fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
         if !self.core.gc_ready.get() {
             return Ok(());
@@ -464,7 +459,6 @@ native_pymethods! {
         Ok(Self {
             core,
             raw: Vec::new(),
-            fit: None,
             models: Mutex::new(Some(models)),
             default_order: MODEL_DEFAULTS,
             set_order: params_api::SetOrder::default(),
@@ -884,7 +878,6 @@ fn load_one_vs_rest_model(
     let model = PyOneVsRestModel {
         core,
         raw: vec![("classifier", classifier.unbind())],
-        fit: None,
         models: Mutex::new(Some(models.into_any().unbind())),
         default_order: &[],
         set_order: params_api::SetOrder::of(&["classifier"]),

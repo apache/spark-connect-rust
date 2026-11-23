@@ -573,6 +573,19 @@ impl MlTarget {
         held
     }
 
+    /// Drop the references that [`MlTarget::held_parts`] gives, the summary datasets of this
+    /// target and of the targets that it keeps alive, which it then has not: the garbage collector
+    /// of a binding breaks a reference cycle through its wrapper this way (see
+    /// [`DataFrame::clear_plan`]). Not a stable API.
+    #[doc(hidden)]
+    pub fn clear_held_parts(&mut self) {
+        let mut target = Some(self);
+        while let Some(of) = target {
+            of.summary_dataset = None;
+            target = of.keep_alive.as_deref_mut();
+        }
+    }
+
     /// What PySpark's pickle of the object of this target, the `__source_instance__` of the plan
     /// of a DataFrame of one of its methods, reaches first that does not pickle, after the child of
     /// the plan, its summary dataset (see [`pickle_block`]): of a model, the lock of its
@@ -923,8 +936,23 @@ fn relation_target_of(plan: &LogicalPlan) -> Option<&RelationTarget> {
 /// that the summary of an evaluation keeps, and the plans of the DataFrames of its arguments.
 struct RelationTarget {
     target: MlTarget,
-    #[allow(dead_code)] // Kept alive, as the relation refers to their plans.
+    /// Kept alive, as the relation refers to their plans.
     inputs: Vec<Arc<LogicalPlan>>,
+}
+
+/// The references that `owner`, the owner of a relation, holds to the parts of plans, each of its
+/// fields once (see [`crate::gc::Part::held`]): of the owner of the DataFrame of a method of an ML
+/// object, those of its target ([`MlTarget::held_parts`]) and the plans of the DataFrames of its
+/// arguments, as PySpark's plan keeps the object of the method and the plans of its arguments,
+/// which the garbage collector sees; none of another owner.
+pub(crate) fn owner_parts<'a>(
+    owner: &'a (dyn std::any::Any + Send + Sync),
+    held: &mut Vec<crate::gc::PartRef<'a>>,
+) {
+    if let Some(relation) = owner.downcast_ref::<RelationTarget>() {
+        held.extend(relation.target.held_parts());
+        held.extend(relation.inputs.iter().map(crate::gc::PartRef::Plan));
+    }
 }
 
 /// An argument of a method of a fetch, as `serialize` of `pyspark.ml.connect.serialize` sends it.
@@ -1102,10 +1130,16 @@ pub fn attribute_relation(
     method: &str,
     args: Vec<FetchArg>,
 ) -> spark_connect_core::error::Result<DataFrame> {
+    // New references to the plans of the arguments, which the owner keeps (see `owner_parts`), of
+    // which the check of the clones of a binding is told.
+    let told = |plan: &Arc<LogicalPlan>| {
+        crate::gc::cloned(Arc::as_ptr(plan) as usize);
+        Arc::clone(plan)
+    };
     let inputs: Vec<Arc<LogicalPlan>> = args
         .iter()
         .filter_map(|arg| match arg {
-            FetchArg::Input(df) => Some(df.plan.clone()),
+            FetchArg::Input(df) => Some(told(&df.plan)),
             _ => None,
         })
         .collect();
@@ -1124,7 +1158,7 @@ pub fn attribute_relation(
     };
     let owner: Arc<dyn std::any::Any + Send + Sync> = Arc::new(RelationTarget {
         target: target.clone(),
-        inputs: inputs.clone(),
+        inputs: inputs.iter().map(told).collect(),
     });
     match target.summary_dataset() {
         Some(dataset) => Ok(DataFrame::new(

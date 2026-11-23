@@ -1150,6 +1150,22 @@ pub trait Model: Transformer + AsAny {
     /// Clone this model into a boxed trait object.
     fn clone_box(&self) -> Box<dyn Model>;
 
+    /// The references of the model to the parts of plans (see [`crate::gc`]), each field once: of
+    /// the summary dataset of its training summary, and of those of the models that it holds, such
+    /// as the models of the classes of a OneVsRestModel, of their binary training sets. None of a
+    /// model of no summary dataset. Not a stable API.
+    #[doc(hidden)]
+    fn held_parts(&self) -> Vec<crate::gc::PartRef<'_>> {
+        Vec::new()
+    }
+
+    /// Drop the references that [`Model::held_parts`] gives, the training summaries of the model
+    /// and of the models that it holds, which it then has not: the garbage collector of a binding
+    /// breaks a reference cycle through its wrapper this way (see
+    /// [`DataFrame::clear_plan`](crate::DataFrame::clear_plan)). Not a stable API.
+    #[doc(hidden)]
+    fn clear_held_parts(&mut self) {}
+
     /// The server-side object of the model, whose methods [`fetch`] reads (see
     /// [`MlTarget::object`]), of a model that the server holds. None of a model that holds no
     /// single object, such as a pipeline model.
@@ -1200,6 +1216,20 @@ pub trait Model: Transformer + AsAny {
         })?;
         Ok(MlWriter::object(object, self.params()))
     }
+}
+
+/// The [`Model::held_parts`] and [`Model::clear_held_parts`] of a model whose training summary,
+/// the target of a summary dataset, is the field `$field` (an `Option<MlTarget>`).
+macro_rules! training_summary_parts {
+    ($field:ident) => {
+        fn held_parts(&self) -> Vec<crate::gc::PartRef<'_>> {
+            self.$field.iter().flat_map(MlTarget::held_parts).collect()
+        }
+
+        fn clear_held_parts(&mut self) {
+            self.$field = None;
+        }
+    };
 }
 
 /// The concrete type of a boxed model, as `Model` is a supertrait of it: `model.downcast_ref`
@@ -2179,6 +2209,7 @@ impl Model for LogisticRegressionModel {
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }
+    training_summary_parts!(summary);
 }
 
 /// Linear support vector classifier using Spark's JVM implementation.
@@ -2294,6 +2325,7 @@ impl Model for LinearSVCModel {
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }
+    training_summary_parts!(summary);
 }
 
 /// FMClassifier using Spark's JVM implementation and ML vectors.
@@ -2422,6 +2454,7 @@ impl Model for FMClassificationModel {
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }
+    training_summary_parts!(summary_target);
 }
 
 /// MultilayerPerceptronClassifier using Spark's JVM implementation and ML vectors.
@@ -2550,6 +2583,7 @@ impl Model for MultilayerPerceptronClassificationModel {
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }
+    training_summary_parts!(summary_target);
 }
 
 /// A native binary classifier that can be fitted independently for each OneVsRest class.
@@ -3185,6 +3219,20 @@ impl Model for OneVsRestModel {
         Box::new(self.clone())
     }
 
+    /// Of the models of the classes, whose training summaries are of their binary training sets.
+    fn held_parts(&self) -> Vec<crate::gc::PartRef<'_>> {
+        self.models
+            .iter()
+            .flat_map(|model| model.held_parts())
+            .collect()
+    }
+
+    fn clear_held_parts(&mut self) {
+        for model in &mut self.models {
+            model.clear_held_parts();
+        }
+    }
+
     /// The writer of PySpark's Python format, as `OneVsRestModelWriter` (see
     /// `OneVsRestModel::writer`).
     fn write(&self) -> spark_connect_core::error::Result<MlWriter> {
@@ -3364,6 +3412,7 @@ impl Model for LinearRegressionModel {
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }
+    training_summary_parts!(training_summary);
 }
 
 /// Generalized linear regression using Spark's JVM implementation and ML vector features.
@@ -3541,6 +3590,7 @@ impl Model for GeneralizedLinearRegressionModel {
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }
+    training_summary_parts!(training_summary);
 }
 
 /// Weibull accelerated failure time regression using Spark's JVM implementation.
@@ -4483,6 +4533,7 @@ impl Model for RandomForestClassificationModel {
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }
+    training_summary_parts!(training_summary);
 }
 
 /// Gradient-boosted regression using Spark's JVM implementation and ML vectors.
@@ -5241,6 +5292,7 @@ impl Model for KMeansModel {
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }
+    training_summary_parts!(training_summary);
 }
 
 /// Hierarchical bisecting K-means using Spark's JVM implementation and ML vectors.
@@ -5397,6 +5449,7 @@ impl Model for BisectingKMeansModel {
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }
+    training_summary_parts!(training_summary);
 }
 
 /// Gaussian mixture clustering fitted by Spark's JVM implementation using ML vectors.
@@ -5554,6 +5607,7 @@ impl Model for GaussianMixtureModel {
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }
+    training_summary_parts!(training_summary);
 }
 
 /// Latent Dirichlet Allocation, fitted by Spark Connect using the online or EM optimizer.
@@ -9347,5 +9401,117 @@ mod tests {
             ..Default::default()
         };
         assert!(ml_string_array(array(vec![long])).is_err());
+    }
+
+    /// The references that a model gives to the parts of the plans of the summary dataset of its
+    /// training summary, those of a OneVsRestModel, a PipelineModel and the validator models of
+    /// such models, and those that the owner of the DataFrame of a method of a summary gives, of
+    /// the summary dataset and of its arguments, are every reference to those parts, as a Python
+    /// wrapper counts them for the garbage collector (see `crate::gc`); a model cleared of them
+    /// gives none, and the others stay exact.
+    #[test]
+    fn held_parts_of_models_are_every_reference_to_the_parts_of_their_summary_datasets() {
+        use crate::gc::tests::assert_exact;
+        use crate::ml::object::{attribute_relation, FetchArg};
+        let session = SparkSession::builder()
+            .remote("sc://localhost:15002")
+            .get_or_create()
+            .expect("session");
+        let relation = proto::Relation {
+            common: None,
+            rel_type: Some(proto::relation::RelType::Sql(proto::Sql {
+                query: "SELECT 1 AS id".to_string(),
+                ..Default::default()
+            })),
+        };
+        let train = DataFrame::from_relation(session.clone(), relation, Some(Arc::new(7u8)))
+            .expect("relation")
+            .filter(crate::functions::col("id").gt(crate::column::lit(0)));
+        let other = session.range(2).expect("range");
+        let regression_object = MlRef::from_id(&session, "regression");
+        let regression = LinearRegressionModel {
+            operator: MlOperator::new(
+                "org.apache.spark.ml.regression.LinearRegressionModel",
+                OperatorType::Model,
+            ),
+            params: Params::new(),
+            training_summary: Some(training_summary(&regression_object, &train)),
+            cached: regression_object,
+        };
+        let kmeans_object = MlRef::from_id(&session, "kmeans");
+        let kmeans = KMeansModel {
+            operator: MlOperator::new(
+                "org.apache.spark.ml.clustering.KMeansModel",
+                OperatorType::Model,
+            ),
+            params: Params::new(),
+            training_summary: Some(training_summary(&kmeans_object, &train)),
+            cached: kmeans_object,
+        };
+        assert_eq!(regression.held_parts().len(), 1);
+        let one_vs_rest =
+            OneVsRestModel::new(&session, vec![regression.clone_box(), kmeans.clone_box()]);
+        let pipeline = PipelineModel::of_stages(vec![PipelineStage::Model(kmeans.clone_box())]);
+        let cross_validator = CrossValidatorModel::of_models(
+            regression.clone_box(),
+            Some(vec![vec![kmeans.clone_box(), regression.clone_box()]]),
+        );
+        let split = TrainValidationSplitModel::of_models(
+            kmeans.clone_box(),
+            Some(vec![regression.clone_box()]),
+        );
+        let summary = regression.training_summary.clone().expect("a summary");
+        let predictions =
+            attribute_relation(&summary, "predictions", Vec::new()).expect("relation");
+        let of_argument = attribute_relation(&summary, "roc", vec![FetchArg::Input(other.clone())])
+            .expect("relation");
+        let mut regression = regression;
+        assert_exact(
+            &[
+                train.held_parts(),
+                other.held_parts(),
+                regression.held_parts(),
+                kmeans.held_parts(),
+                one_vs_rest.held_parts(),
+                pipeline.held_parts(),
+                cross_validator.held_parts(),
+                split.held_parts(),
+                summary.held_parts(),
+                predictions.held_parts(),
+                of_argument.held_parts(),
+            ]
+            .concat(),
+        );
+        regression.clear_held_parts();
+        assert!(regression.held_parts().is_empty());
+        assert!(!regression.has_summary());
+        assert_exact(
+            &[
+                train.held_parts(),
+                other.held_parts(),
+                kmeans.held_parts(),
+                one_vs_rest.held_parts(),
+                pipeline.held_parts(),
+                cross_validator.held_parts(),
+                split.held_parts(),
+                summary.held_parts(),
+                predictions.held_parts(),
+                of_argument.held_parts(),
+            ]
+            .concat(),
+        );
+        let mut one_vs_rest = one_vs_rest;
+        one_vs_rest.clear_held_parts();
+        assert!(one_vs_rest.held_parts().is_empty());
+        let mut cross_validator = cross_validator;
+        cross_validator.clear_held_parts();
+        assert!(cross_validator.held_parts().is_empty());
+        let mut split = split;
+        split.clear_held_parts();
+        assert!(split.held_parts().is_empty());
+        // The objects of the models, which this test does not delete.
+        std::mem::forget((regression, kmeans, one_vs_rest, pipeline, summary));
+        std::mem::forget((cross_validator, split));
+        std::mem::forget((predictions, of_argument));
     }
 }

@@ -6148,12 +6148,12 @@ def test_native_class_falls_back_only_when_the_native_module_is_absent(monkeypat
         assert error.value is missing
 
 
-def _deleted_ids(service, expected=()):
+def _deleted_ids(service, expected=(), wait=10):
     # The ids of the objects that the Deletes of the server deleted, in their order, once those of
-    # `expected` arrived: a release is sent without waiting for it.
+    # `expected` arrived, or after `wait` seconds: a release is sent without waiting for it.
     import time
 
-    deadline = time.monotonic() + 10
+    deadline = time.monotonic() + wait
     while True:
         deleted = [
             ref.id
@@ -6243,12 +6243,90 @@ def test_the_cycles_through_the_native_ml_objects_are_collected_as_pysparks(ml_m
     assert [ref() for ref in kept] == [None] * len(kept)
 
 
+def test_the_cycles_through_a_udf_of_the_training_dataset_of_a_model_are_collected_as_pysparks(
+    ml_mock,
+):
+    # As PySpark's summary holds its `_summary_dataset` as an attribute, which the garbage
+    # collector sees, and the plan of a DataFrame of a method of the summary the summary: a cycle
+    # through a function of a UDF of the training DataFrame of a model that keeps the model is
+    # freed, and the model's object deleted on the server, of a model of each kind of summary
+    # dataset (the training dataset, of a regression and a classification, and a transform of it,
+    # of a clustering), with or without its summary read, of a copy of it, of the DataFrame of a
+    # method of its summary, and of a OneVsRestModel, whose models of the classes keep the binary
+    # training sets of their summaries. The native objects keep the datasets in Rust.
+    import pyspark.ml.connect as connect
+    from pyspark.ml.linalg import Vectors
+
+    spark, service = ml_mock
+    frame = spark.createDataFrame([(1.0, Vectors.dense(0.0, 1.0))], ["label", "features"])
+
+    class Job:
+        def f(self, x):
+            return 1.0
+
+    gc.collect()
+    alive = {}
+    for name, make in [
+        ("lr", lambda: connect.regression.LinearRegression(maxIter=2)),
+        ("svc", lambda: connect.classification.LinearSVC(maxIter=2)),
+        ("km", lambda: connect.clustering.KMeans(k=2, maxIter=2)),
+        ("glr", lambda: connect.regression.GeneralizedLinearRegression(maxIter=2)),
+    ]:
+        for shape in ["summary", "model", "copy", "predictions"]:
+            refs = []
+            for i in range(5):
+                job = Job()
+                df = frame.withColumn("w", F.udf(job.f, "double")("label"))
+                estimator = make()
+                ref = f"udf-cycle-{name}-{shape}-{i}"
+                _answer_fit(service, estimator, ref=ref)
+                model = estimator.fit(df)
+                # A property of most, and a method of LinearSVCModel's, as PySpark's.
+                summary = model.summary() if callable(model.summary) else model.summary
+                if shape == "summary":
+                    summary.model = model
+                    job.model = model
+                elif shape == "model":
+                    job.model = model
+                elif shape == "copy":
+                    job.model = model.copy()
+                else:
+                    job.predictions = summary.predictions
+                    job.model = model
+                refs.append((ref, weakref.ref(model)))
+                del model, summary, job, df, estimator
+            gc.collect()
+            deleted = _deleted_ids(service, [ref for ref, _ in refs], wait=1)
+            alive[name, shape] = (
+                sum(m() is not None for _, m in refs),
+                sum(deleted.count(ref) != 1 for ref, _ in refs),
+            )
+    assert alive == dict.fromkeys(alive, (0, 0))
+    # A OneVsRestModel that a function of a UDF of its training DataFrame keeps.
+    refs = []
+    for i in range(3):
+        job = Job()
+        df = frame.withColumn("w", F.udf(job.f, "double")("label"))
+        estimator = connect.classification.OneVsRest(classifier=connect.classification.LinearSVC())
+        _answer_fit(service, estimator, ref=f"udf-cycle-ovr-{i}")
+        service.query_payload = _label_query_result(estimator)
+        model = estimator.fit(df)
+        service.query_payload = None
+        assert len(model.models) == 2
+        job.model = model
+        refs.append(weakref.ref(model))
+        del model, job, df, estimator
+    gc.collect()
+    assert [m() for m in refs] == [None] * 3
+
+
 def test_the_native_ml_objects_traversed_while_they_are_created_do_not_crash(ml_mock):
     # As test_objects_traversed_while_they_are_created_do_not_crash of test_dropin_offline.py, of
     # the native ML classes of a `__traverse__` of their own: a collection at every second
     # allocation meets each object while it is created, before its value is written (see
     # `crate::gc::GcReady`), of the models, the summaries, the estimators, the transformers, the
-    # composites, their copies and loads, and the fitMultiple iterators.
+    # composites, their copies and loads, the fits of their summaries, and the fitMultiple
+    # iterators.
     import copy
 
     import pyspark.ml.connect as connect
@@ -6278,7 +6356,15 @@ def test_the_native_ml_objects_traversed_while_they_are_created_do_not_crash(ml_
         lambda: connect.classification.OneVsRestModel([model]),
         lambda: tokenizer.fitMultiple(frame, [{}]) if hasattr(tokenizer, "fitMultiple") else None,
         lambda: connect.classification.LinearSVC().fitMultiple(frame, [{}]),
+        # The summaries, of the parts of their summary datasets: of a fit, of a subclass of a
+        # summary class, and of a OneVsRestModel's models.
+        lambda: connect.regression.LinearRegression().fit(frame),
+        lambda: connect.regression.LinearRegressionTrainingSummary("x.summary"),
+        lambda: connect.classification.BinaryLogisticRegressionTrainingSummary("x.summary"),
+        lambda: connect.classification.OneVsRest(
+            classifier=connect.classification.LinearSVC()).fit(frame),
     ]
+    service.query_payload = _label_query_result(connect.classification.OneVsRest())
     thresholds = gc.get_threshold()
     gc.collect()
     gc.set_threshold(1)
@@ -6291,6 +6377,7 @@ def test_the_native_ml_objects_traversed_while_they_are_created_do_not_crash(ml_
                 del dicts, counted, made
     finally:
         gc.set_threshold(*thresholds)
+        service.query_payload = None
     gc.collect()
 
 
