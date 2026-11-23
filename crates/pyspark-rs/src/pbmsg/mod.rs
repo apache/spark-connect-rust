@@ -160,6 +160,9 @@ fn _proto_set_depth_probe(probe: Option<Py<PyAny>>) {
 
 /// Run `f`, one level of a recursion over a message, on a stack with room for it: deeply nested
 /// plans recurse once per level, and a new segment of stack is taken when this one runs low.
+/// Inlined, so that each recursion (the encoder's, of a level of a message) takes `f` in its own
+/// code, of the unit of code of its caller.
+#[inline]
 pub(crate) fn grow<T>(f: impl FnOnce() -> T) -> T {
     stacker::maybe_grow(128 * 1024, 2 << 20, f)
 }
