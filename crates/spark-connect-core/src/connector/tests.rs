@@ -1843,3 +1843,79 @@ fn a_failed_resolution_is_tried_again_a_backoff_after_its_end() {
         start + delay
     );
 }
+
+#[tokio::test]
+async fn each_new_channel_resolves_its_name_of_its_own_before_its_first_call() {
+    use crate::dns::tests::{Answer, Responder};
+    // As each channel of grpcio, whose resolver resolves its name before its first call, of the
+    // subchannels that it shares with the other channels of the process (SPARK-62234): each
+    // channel of a connector asks the DNS server once, whatever another one asked before, and the
+    // connections of the target take the addresses of the last resolution.
+    let (server, _) = settings_server().await;
+    let dns = Responder::start(
+        move |name: &str, _| match name {
+            "spark.test" => Answer::Addresses(vec![server.ip()]),
+            _ => Answer::Rcode(3),
+        },
+        true,
+    )
+    .await;
+    let port = server.port();
+    let connector_of = |host: &str| {
+        let mut target = form_target(
+            ChannelTarget::Name {
+                host: host.to_string(),
+                port,
+                name: format!("{host}:{port}"),
+                server: Some(dns.address),
+            },
+            true,
+        );
+        target.dns_config = Some(crate::dns::Config::default());
+        Connector::new(target)
+    };
+    let connector = connector_of("spark.test");
+    let asked_a = || {
+        dns.asked()
+            .iter()
+            .filter(|(_, name, kind)| name == "spark.test" && *kind == "A")
+            .count()
+    };
+    let first = ChannelResolution::new(true);
+    assert!(!first.is_ready());
+    assert!(first.ready(&connector).await.is_ok());
+    assert!(first.is_ready());
+    assert_eq!(asked_a(), 1);
+    // Resolved: the next calls of the channel ask nothing, nor does a connection of the target
+    // within 30 s of its resolution.
+    assert!(first.ready(&connector).await.is_ok());
+    assert!(attempt(&connector.0.target, Duration::from_secs(20))
+        .await
+        .is_ok());
+    assert_eq!(asked_a(), 1);
+    // A new channel of the same connector resolves the name again.
+    let second = ChannelResolution::new(true);
+    assert!(second.ready(&connector).await.is_ok());
+    assert_eq!(asked_a(), 2);
+    // A failure fails the calls of the channel of its error, at once, until a backoff after its
+    // end.
+    let connector = connector_of("nx.test");
+    let failed = ChannelResolution::new(true);
+    let error = failed.ready(&connector).await.unwrap_err().to_string();
+    assert_eq!(
+        error,
+        format!(
+            "errors resolving nx.test:{port}: [field:hostname lookup error:address lookup failed \
+             for nx.test:{port}: Domain name not found]"
+        )
+    );
+    let asked = dns.asked().len();
+    assert_eq!(
+        failed.ready(&connector).await.unwrap_err().to_string(),
+        error
+    );
+    assert_eq!(dns.asked().len(), asked);
+    assert!(!failed.is_ready());
+    // A Rust client resolves its name as it connects, as tonic's channel does.
+    assert!(ChannelResolution::new(false).is_ready());
+}
