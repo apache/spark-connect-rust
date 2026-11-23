@@ -583,12 +583,13 @@ impl Service<http::Request<tonic::body::Body>> for Checked {
             let mut connection = match picked {
                 Ok(connection) => connection,
                 Err(unpicked) => {
-                    return Err(Box::new(unpicked.status(channel.grpcio())) as StdError);
+                    let status = Box::new(unpicked.status(channel.grpcio())) as StdError;
+                    return Err(unless_closed(status, &closed));
                 }
             };
             std::future::poll_fn(|cx| connection.poll_ready(cx))
                 .await
-                .map_err(StdError::from)?;
+                .map_err(|error| unless_closed(StdError::from(error), &closed))?;
             checked_response(connection.call(request), closed, refused).await
         })
     }
@@ -643,7 +644,9 @@ async fn checked_response(
 ) -> Result<http::Response<CheckedBody>, StdError> {
     let mut response = tokio::select! {
         biased;
-        response = response => response?,
+        response = response => {
+            response.map_err(|error| unless_closed(StdError::from(error), &closed))?
+        }
         () = closed.closed() => {
             return Err(Box::new(tonic::Status::cancelled(crate::client::CLOSED_CHANNEL)) as StdError);
         }
@@ -657,6 +660,18 @@ async fn checked_response(
         return Err(Box::new(status) as StdError);
     }
     Ok(response.map(|body| CheckedBody::new(body, closed)))
+}
+
+/// `error`, of a call of [`Checked`] that failed before its response, unless the client of the
+/// call closed the channel by then: then `CANCELLED` (`Channel closed!`), as grpcio's `close`
+/// cancels the calls in flight on its channel, whatever ended the call, such as the connector of a
+/// subchannel that the close let go of as the call waited for its attempt (see
+/// `crate::connector`): the close marks the channel closed before it lets go of its subchannels.
+fn unless_closed(error: StdError, closed: &crate::client::ChannelClosed) -> StdError {
+    if closed.is_closed() {
+        return Box::new(tonic::Status::cancelled(crate::client::CLOSED_CHANNEL));
+    }
+    error
 }
 
 /// The body of a response of [`Checked`], whose trailers past the limits fail its call, and which

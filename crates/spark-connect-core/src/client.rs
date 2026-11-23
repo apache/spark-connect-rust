@@ -1470,13 +1470,14 @@ impl ChannelClosed {
         self.closed.load(std::sync::atomic::Ordering::SeqCst)
     }
 
-    /// Mark the channel closed: the calls that start from now on see it closed.
-    fn mark_closed(&self) {
+    /// Mark the channel closed: the calls that start from now on see it closed, and so do those
+    /// that fail from then on (see `crate::metadata::Checked`).
+    pub(crate) fn mark_closed(&self) {
         self.closed.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Wake the calls that wait for the close of the channel, once it is marked closed.
-    fn wake_up(&self) {
+    pub(crate) fn wake_up(&self) {
         self.notify().notify_waiters();
     }
 

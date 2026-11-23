@@ -2614,7 +2614,7 @@ async fn a_goaway_of_the_server_ends_the_connection_of_its_subchannel_for_new_ca
 #[tokio::test]
 async fn a_channel_takes_the_connection_that_its_subchannel_made_for_a_call_as_its_own_ended() {
     // A call that tonic sends on the connection of the picked subchannel as that connection ends
-    // makes the subchannel connect again (see `Subchannel::connection`): the channel, idle as it
+    // makes the subchannel connect again (see `subchannel::connection`): the channel, idle as it
     // sees the end, takes that connection at its next call, of the same subchannel, rather than
     // making another.
     let (server, accepted) = settings_server().await;
@@ -3000,4 +3000,104 @@ async fn a_failed_pass_of_a_rust_client_makes_one_attempt_of_each_address() {
         assert!(held.snapshot().idle);
     }
     assert_eq!(pool.len(), 1);
+}
+
+/// The status of a `Config` call of tonic on `checked`, the channel of the calls of a client (see
+/// [`crate::metadata::Checked`]), of the deadline `timeout`.
+async fn checked_call(
+    checked: crate::metadata::Checked,
+    timeout: Duration,
+) -> Result<(), tonic::Status> {
+    let mut grpc = tonic::client::Grpc::new(checked);
+    grpc.ready()
+        .await
+        .map_err(|error| tonic::Status::unknown(error.to_string()))?;
+    let mut request = tonic::Request::new(spark_connect_proto::ConfigRequest::default());
+    request.set_timeout(timeout);
+    grpc.unary::<spark_connect_proto::ConfigRequest, spark_connect_proto::ConfigResponse, _>(
+        request,
+        tonic::codegen::http::uri::PathAndQuery::from_static(
+            "/spark.connect.SparkConnectService/Config",
+        ),
+        tonic_prost::ProstCodec::default(),
+    )
+    .await
+    .map(|_| ())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_call_that_waits_for_its_connector_as_its_client_closes_is_cancelled() {
+    // As grpcio's `close`, which cancels the calls in flight on its channel: a call that waits in
+    // the connector of its subchannel as its client closes, of a connection that ended before it
+    // took it and of an attempt that the server holds, ends of `CANCELLED` (`Channel closed!`),
+    // which no retry policy retries, whether it sees the close first or the failure of the
+    // connector, whose subchannel the close lets go of, which it had of `UNAVAILABLE` (`Socket
+    // closed`, which a retry policy retried, to `NO_ACTIVE_SESSION`).
+    for grpcio in [true, false] {
+        for failure_first in [true, false] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("spark.sock");
+            let serving = Arc::new(Mutex::new(Serving::Closing));
+            let (accepted, closed) = unix_server(&path, Arc::clone(&serving));
+            let channel = channel_of(unix_target(&path, grpcio));
+            // The connection of the pass of the channel, which the server closes before a call
+            // takes it, and which the subchannel holds, ready, as it reads nothing of it.
+            assert!(picked(&channel).await.is_ok());
+            until(Duration::from_secs(5), || {
+                closed.load(Ordering::SeqCst) == 1
+            })
+            .await;
+            *serving.lock().unwrap() = Serving::Silent;
+            let client_closed: Arc<crate::client::ChannelClosed> = Arc::default();
+            let checked = crate::metadata::Checked {
+                channel: Arc::clone(&channel),
+                closed: Arc::clone(&client_closed),
+                refused: false,
+            };
+            let call = tokio::spawn(checked_call(checked, Duration::from_secs(60)));
+            // The connector connects again, once, to the server that holds the attempt.
+            until(Duration::from_secs(5), || {
+                accepted.load(Ordering::SeqCst) == 2
+            })
+            .await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            assert!(!call.is_finished());
+            // The close of the client (`SparkConnectClient::close`): the channel is marked closed,
+            // its calls are woken, and it lets go of its subchannels; of `failure_first`, the call
+            // sees the failure of its connector before it is woken.
+            client_closed.mark_closed();
+            if failure_first {
+                channel.shutdown();
+                let _ = tokio::time::timeout(Duration::from_secs(1), async {
+                    while !call.is_finished() {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                })
+                .await;
+                client_closed.wake_up();
+            } else {
+                client_closed.wake_up();
+                channel.shutdown();
+            }
+            let status = tokio::time::timeout(Duration::from_secs(5), call)
+                .await
+                .expect("the call ends")
+                .unwrap()
+                .unwrap_err();
+            let case = format!("grpcio={grpcio} failure_first={failure_first}");
+            assert_eq!(status.code(), tonic::Code::Cancelled, "{case}: {status:?}");
+            assert_eq!(status.message(), crate::client::CLOSED_CHANNEL, "{case}");
+            assert_eq!(
+                crate::retries::grpc_python_code(&status),
+                tonic::Code::Cancelled,
+                "{case}"
+            );
+            assert!(
+                !crate::retries::RetryPolicy::default().can_retry(&status),
+                "{case}"
+            );
+            assert_eq!(accepted.load(Ordering::SeqCst), 2, "{case}");
+        }
+    }
 }
