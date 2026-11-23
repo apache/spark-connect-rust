@@ -890,12 +890,16 @@ async fn a_stream_read_after_its_channel_was_closed_fails_as_grpcio_cancels_it()
     // an execution left open across the close of its client, of responses that it did not read,
     // fails at its next read, of the CANCELLED of the cancel, of none of those responses, and its
     // release is refused of the closed channel.
-    let fixture = Fixture::start(
+    let mut fixture = Fixture::start(
         vec![streamed(vec![response("r1", false), response("r2", true)])],
         vec![],
         quick_retries(),
     )
     .await;
+    // Of deadlines past the bound of the test, as the other tests of a closed channel: a read that
+    // a slow runner holds past the fixture's short deadline would reattach at once, which is not
+    // what this test is of.
+    fixture.client.set_rpc_deadlines(RpcDeadlines::default());
     let mut stream = bounded(fixture.client.execute_plan_reattachable(execute_request()))
         .await
         .unwrap();
@@ -918,7 +922,8 @@ async fn a_stream_read_after_its_channel_was_closed_fails_as_grpcio_cancels_it()
     assert!(bounded(stream.message()).await.unwrap().is_none());
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(fixture.state.releases.lock().unwrap().len(), released);
-    assert!(fixture.state.reattaches.lock().unwrap().is_empty());
+    let reattaches = fixture.state.reattaches.lock().unwrap();
+    assert!(reattaches.is_empty(), "{reattaches:?}");
 }
 
 #[tokio::test]
