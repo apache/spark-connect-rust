@@ -3139,6 +3139,25 @@ which zips the columns with the fields too, but raises `AXIS_LENGTH_MISMATCH` of
 columns than the fields, and does not take the columns of an index (see "pandas DataFrames without
 PyArrow" in `dev/parity/known-differences.md`).
 
+PySpark's conversion of a pandas DataFrame, of a struct or without a schema, runs of the conversions
+and the types that the module of the session, `pyspark.sql.connect.session`, binds when it is
+imported, with the first session, as PySpark Connect's module binds them, in PySpark's order, and
+its conversion of each column imports `to_arrow_type` of the converter module of `sys.modules` when
+it is called, as PySpark's does. So a type name rebound in `pyspark.sql.types` or
+`pyspark.sql.pandas.types` before the first session, in that module, or in the converter module,
+changes the conversion as it changes PySpark's, of its values and errors, and a public name rebound
+after the first session, with the converter module removed, only the conversion of each column: a
+public `BooleanType` rebound to `LongType` so makes `[1, 0, 2]` under `a long` `[1, 0, 1]`, of the
+bools of the column that the cast to the schema takes back to longs. A struct whose classes are
+patched converts with PySpark's conversion too, which reads the patch, and `createDataFrame`, of any
+data, checks its schema, of a DDL string as the server parses it, against the `AtomicType` and the
+`StructType` of that module before it reads any setting, as PySpark's does, of PySpark's
+`TypeError` of an `isinstance` of a name that is not a class, and of its `NOT_EXPECTED_TYPE` of a
+schema that they do not take. What differs, of a patched property that PySpark's `__init__` assigns,
+and of the other modules of PySpark Connect, which bind the names with the session too, is in
+"pandas DataFrames under customized or patched types, or rebound type names" and "Type names that
+PySpark Connect's other modules and PySpark's types read" in `dev/parity/known-differences.md`.
+
 A `StructType` caches its `names` as it is made and as `add` adds a field, as PySpark's, so an
 in-place change of its `fields` list, such as a `StructField` appended, leaves `names` and
 `fieldNames()` as they were. `createDataFrame` takes local rows, and the struct values below the

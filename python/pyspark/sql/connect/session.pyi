@@ -34,8 +34,10 @@ from pyspark.sql.connect.profiler import ProfilerCollector
 from pyspark.sql.connect.readwriter import DataFrameReader
 from pyspark.sql.connect.streaming.readwriter import DataStreamReader
 from pyspark.sql.connect.streaming.query import StreamingQueryManager
+from pyspark.sql.pandas.conversion import create_arrow_table_from_pandas as create_arrow_table_from_pandas
+from pyspark.sql.pandas.types import to_arrow_schema as to_arrow_schema, from_arrow_type as from_arrow_type
 from pyspark.sql.profiler import Profile
-from pyspark.sql.types import DataType, StructType, AtomicType
+from pyspark.sql.types import DataType, DayTimeIntervalType as DayTimeIntervalType, StructType as StructType, AtomicType as AtomicType, TimestampType as TimestampType, MapType as MapType, StringType as StringType
 import pyspark.sql.connect.proto as pb2
 from pyspark.sql.connect._typing import OptionalPrimitiveType
 from pyspark.sql.connect.catalog import Catalog

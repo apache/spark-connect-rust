@@ -23408,6 +23408,27 @@ def test_create_dataframe_of_a_pandas_frame_of_another_width_zips_it_as_pyspark(
 
     assert sent(pd.DataFrame(a), StructName([T.StructField("a", T.LongType())])) == (
         [{"a": 1}], ["a"])
+    # Of a class that defines neither `names` nor `fields`, as of a plain StructType, a `fields` or
+    # `names` list changed in place takes PySpark's conversion: `_deduplicate_field_names` raises
+    # the IndexError of a field past the cached names, of a field appended or a name removed, and
+    # of a name appended, the names of `toDF` are one more than the columns, which the server
+    # raises ASSIGNMENT_ARITY_MISMATCH of (see test_dropin_e2e.py).
+    for cls in (T.StructType, Iterated):
+        for change in ("fields.append", "names.pop"):
+            schema = st("a", "b", cls=cls)
+            if change == "fields.append":
+                schema.fields.append(T.StructField("c", T.LongType()))
+            else:
+                schema.names.pop()
+            for frame in (pd.DataFrame(ab), pd.DataFrame({**ab, "c": [3]})):
+                with pytest.raises(IndexError, match="^list index out of range$"):
+                    spark.createDataFrame(frame, schema)
+        schema = st("a", "b", cls=cls)
+        schema.names.append("x")
+        assert sent(pd.DataFrame(ab), schema) == ([{"a": 1, "b": 2}], ["a", "b"])
+        to_df = parse_message(parse_message(parse_message(
+            service.execute_requests[-1])[3][0])[1][0])[18][0]
+        assert [name.decode() for name in parse_message(to_df)[2]] == ["a", "b", "x"]
 
     # A struct of an element that is not a StructField, put in the place of a field within the
     # names that the struct cached, zips the columns with the fields too (SPARK-62189).

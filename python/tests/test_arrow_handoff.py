@@ -758,7 +758,10 @@ def _arrow_input_service(
             pairs = [dict(key=k, value=config[k]) for k in reversed(keys) if k in config]
         else:
             pairs = [dict(key=k, value=config.get(k, defaults[k])) for k in reversed(keys)]
-        response = protocol("ConfigResponse", session_id=request.session_id, pairs=pairs)
+        # Of the server-side session ID of the other responses, as a server sends it, which
+        # PySpark's client checks against them.
+        response = protocol("ConfigResponse", session_id=request.session_id, pairs=pairs,
+                            server_side_session_id=server_id)
         state["config_responses"].append(response)
         return response.SerializeToString()
 
@@ -2600,10 +2603,155 @@ def test_integer_nullable_dtype_and_array_subclasses_take_pyspark_conversion(pro
     assert arrow_calls == ["arrow"]
 
 
-def _integer_guard_process(mode, argument, before_import=False):
-    """Class mutation and converter imports must be isolated from other tests."""
+# The tail of the scripts of the guard tests below, which run in a process of their own, as they
+# patch classes and rebind names: of the frame `frame` and the schema `schema` that the script
+# made, of the classes and the names as it left them, it sends the plan at the mock service as
+# `_to_table` does, of `createDataFrame(frame, schema)`, and prints the outcome as JSON: the error,
+# with the call that raised it, the settings read, the Arrow table of the relation and the
+# relation's schema. The tests compare it with PySpark's, which `_guard_raises` and
+# `_guard_converts` give.
+_GUARD_OUTCOME = r'''
+import json as _json
+import tempfile as _tempfile
+from pathlib import Path as _Path
+
+with _tempfile.TemporaryDirectory(prefix="arrow-handoff-") as _directory:
+    class _Factory:
+        def mktemp(self, name):
+            path = _Path(_directory) / name
+            path.mkdir()
+            return path
+    _messages = capture.protocol.__wrapped__(_Factory())
+_outcome = {"error": None, "configs": None, "table": None, "relation_schema": None}
+with capture._arrow_input_service(_messages) as (_spark, _state):
+    _stage = "createDataFrame"
+    try:
+        _df = _spark.createDataFrame(frame, schema)
+        # toArrow converts the schema to Arrow first, with the classes as they are.
+        _stage = "_to_table"
+        _df._to_table()
+    except Exception as _e:
+        _outcome["error"] = [_stage, type(_e).__module__ + "." + type(_e).__qualname__, str(_e)]
+    _outcome["configs"] = [[operation, keys] for operation, keys in _state["config_requests"]]
+    if _state["input_tables"]:
+        _pa = capture.pa
+        _table = _state["input_tables"][0]
+        _outcome["table"] = {
+            "names": _table.schema.names,
+            "types": [str(field.type) for field in _table.schema],
+            "nullable": [field.nullable for field in _table.schema],
+            "metadata": [
+                None if field.metadata is None
+                else {key.decode(): value.decode() for key, value in field.metadata.items()}
+                for field in _table.schema
+            ],
+            # Of a timestamp, its integer, which does not depend on the class of its time zone.
+            "values": [
+                repr((column.cast(_pa.int64()) if _pa.types.is_timestamp(column.type)
+                      else column).to_pylist())
+                for column in _table.columns
+            ],
+        }
+        _schema_text = _state.get("spark_schema")
+        _outcome["relation_schema"] = None if _schema_text is None else _json.loads(_schema_text)
+print(_json.dumps(_outcome))
+'''
+
+
+def _guard_outcome(script, *args, timeout=60):
+    """The outcome of a guard script (`_GUARD_OUTCOME`), run in a process of its own with `args`
+    and the path of this module, which it loads as `capture`, last."""
+    import json
     import sys
 
+    result = subprocess.run([sys.executable, "-c", script + _GUARD_OUTCOME, *args, __file__],
+                            capture_output=True, text=True, timeout=timeout)
+    assert result.returncode == 0, result.stdout + result.stderr
+    return json.loads(result.stdout.strip().splitlines()[-1])
+
+
+def _guard_raises(error, message, *, configs=True, stage="createDataFrame"):
+    """The outcome of a guard script whose `stage` raises `error` (of its module) of `message`:
+    after the settings that createDataFrame reads in one request, as PySpark's reads them before
+    it converts the frame, or, of `configs=False`, before it reads any, of no relation."""
+    return {
+        "error": [stage, error, message],
+        "configs": [["get", _CREATE_DATAFRAME_KEYS]] if configs else [],
+        "table": None,
+        "relation_schema": None,
+    }
+
+
+def _guard_converts(columns, relation_schema, error=None):
+    """The outcome of a guard script whose createDataFrame sends a relation of `relation_schema`
+    (its JSON) of a table of `columns`, `(name, arrow_type, nullable, values)` or `(name,
+    arrow_type, nullable, values, metadata)` of each, after the settings that it reads in one
+    request: of `error` (`[stage, type, message]`) of `_to_table`, if any."""
+    columns = [column + (None,) * (5 - len(column)) for column in columns]
+    return {
+        "error": error,
+        "configs": [["get", _CREATE_DATAFRAME_KEYS]],
+        "table": {
+            "names": [column[0] for column in columns],
+            "types": [column[1] for column in columns],
+            "nullable": [column[2] for column in columns],
+            "metadata": [column[4] for column in columns],
+            "values": [repr(column[3]) for column in columns],
+        },
+        "relation_schema": relation_schema,
+    }
+
+
+def _conversion_error(error, dtype, name, arrow_type):
+    """PySpark's error of the conversion of a pandas.Series `name` of `dtype` to an Arrow array of
+    `arrow_type` (`create_arrow_array_from_pandas`), of a safe cast: its PySparkValueError names the
+    setting of the safe casts."""
+    message = (f"Exception thrown when converting pandas.Series ({dtype}) with name '{name}' to "
+               f"Arrow Array ({arrow_type}).")
+    if error == "PySparkValueError":
+        message += (" It can be caused by overflows or other unsafe conversions warned by Arrow. "
+                    "Arrow safe type check can be disabled by using SQL config "
+                    "`spark.sql.execution.pandas.convertToArrowArraySafely`.")
+    return ["pyspark.errors.exceptions.base." + error, message]
+
+
+def _unsupported_type(type_repr):
+    """PySpark's error of a type that `to_arrow_type` has no Arrow type of."""
+    return ["pyspark.errors.exceptions.base.PySparkTypeError",
+            f"[UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION] {type_repr} is not supported in "
+            "conversion to Arrow."]
+
+
+def _no_setter(class_name):
+    """The AttributeError of an assignment of PySpark's `__init__` to a property of the class
+    `class_name` that has no setter."""
+    return ["builtins.AttributeError", f"property of '{class_name}' object has no setter"]
+
+
+def _rename_mismatch(name):
+    """PyArrow's error of the cast of PySpark's table of the column `name` to an Arrow schema of
+    the field `changed`."""
+    return ["builtins.ValueError", "Target schema's field names are not matching the table's "
+            f"field names: ['{name}'], ['changed']"]
+
+
+def _assert_guard(outcome, pyspark, known_difference=None):
+    """Assert that the outcome of a guard script is PySpark's, `pyspark`, as the reference client
+    gives it, or, of a known difference (see "Patched classes and rebound names" of the pandas
+    DataFrames in `dev/parity/known-differences.md`), the drop-in's, `known_difference`."""
+    expected = pyspark if known_difference is None else known_difference
+    assert outcome == expected, {"outcome": outcome, "pyspark": pyspark}
+
+
+def _integer_guard_process(mode, argument, before_import=False):
+    """The outcome of `createDataFrame` of a frame of int64s under `renamed long` of a class patched
+    or a name rebound by `mode` and `argument`, in a process of its own (`_guard_outcome`).
+
+    The patches and the rebound names change what PySpark's conversion reads: the session
+    converts the frame with that conversion, of the conversions and the types that its module of
+    the session binds when it is imported, as PySpark's does. `before_import` imports the helper
+    module of the conversions anew, which changes nothing.
+    """
     if mode == "captured_alias":
         import pyspark.sql._arrow_input as importer
         if not hasattr(importer, "to_arrow_schema"):
@@ -2613,14 +2761,12 @@ def _integer_guard_process(mode, argument, before_import=False):
 import importlib
 import importlib.util
 import sys
-import tempfile
-from pathlib import Path
 import numpy as np
 import pandas as pd
 from pyspark.sql import types as T
 from pyspark import _pyspark as native
 
-spec = importlib.util.spec_from_file_location("integer_guard_capture", sys.argv[4])
+spec = importlib.util.spec_from_file_location("integer_guard_capture", sys.argv[-1])
 capture = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = capture
 spec.loader.exec_module(capture)
@@ -2683,28 +2829,52 @@ elif mode == "importer_alias":
     importer.StructType = None if argument == "none" else native.LongType
 else:
     raise AssertionError(mode)
-with tempfile.TemporaryDirectory(prefix="arrow-handoff-") as directory:
-    class Factory:
-        def mktemp(self, name):
-            path = Path(directory) / name
-            path.mkdir()
-            return path
-    messages = capture.protocol.__wrapped__(Factory())
-with capture._arrow_input_service(messages) as (spark, state):
-    # Sends the plan as `_to_table` does: toArrow converts the schema to Arrow first,
-    # with the classes that this script patches.
-    spark.createDataFrame(frame, schema)._to_table()
-    assert state["config_requests"] == [
-        ("get", capture._CREATE_DATAFRAME_KEYS)], state["config_requests"]
-    table = state["input_tables"][0]
-    assert table.schema.names == ["renamed"], table.schema
-    assert table.column(0).type == __import__("pyarrow").int64()
-    assert table.column(0).to_pylist() == values
 '''
-    result = subprocess.run([sys.executable, "-c", script, mode, argument,
-                             str(before_import), __file__],
-                            capture_output=True, text=True, timeout=30)
-    assert result.returncode == 0, result.stdout + result.stderr
+    return _guard_outcome(script, mode, argument, str(before_import))
+
+
+_INTEGER_VALUES = [2**53 + 1, -(2**63), 2**63 - 1, 0] * 250
+_INTEGER_RELATION = {"fields": [{"metadata": {"source": "native"}, "name": "renamed",
+                                 "nullable": False, "type": "long"}], "type": "struct"}
+
+
+def _integer_converts(values=_INTEGER_VALUES, arrow_type="int64", name="renamed", nullable=False,
+                      metadata=None, error=None):
+    return _guard_converts([(name, arrow_type, nullable, values, metadata)], _INTEGER_RELATION,
+                           error)
+
+
+# The outcomes of PySpark's createDataFrame of the patches of `_integer_guard_process`, as the
+# reference client gives them: of each patch of a property of no setter, the AttributeError of
+# PySpark's `__init__` of a field or a struct, which `_deduplicate_field_names` makes, and of a
+# patched iteration, the error of the cast of the table to the Arrow schema of what it iterates.
+# A `StructType` rebound before the session is the type of every response of the results of
+# PySpark's client, whose module binds it with the session, so its `_to_table` finds no table.
+_INTEGER_DESCRIPTORS = {
+    ("StructType", "fields"): _guard_raises(*_no_setter("StructType")),
+    ("StructType", "names"): _guard_raises(*_no_setter("StructType")),
+    ("StructType", "__iter__"): _guard_raises(*_rename_mismatch("renamed")),
+    ("StructField", "name"): _guard_raises(*_no_setter("StructField")),
+    ("StructField", "dataType"): _guard_raises(*_no_setter("StructField")),
+    ("StructField", "nullable"): _guard_raises(*_no_setter("StructField")),
+    ("StructField", "metadata"): _guard_raises(*_no_setter("StructField")),
+    ("StructType", "alias"): _integer_converts(
+        error=["_to_table", "builtins.AssertionError", ""]),
+}
+# The known differences: the native `__init__` does not assign through a property patched over
+# its attributes (SPARK-62231, SPARK-62251), so the conversion goes on and reads the patch where
+# PySpark's reads the attribute, and the drop-in's client is native.
+_INTEGER_DESCRIPTORS_OF_THE_DROP_IN = {
+    ("StructType", "fields"): _guard_converts([], _INTEGER_RELATION),
+    ("StructType", "names"): _integer_converts(name="changed"),
+    ("StructField", "name"): _guard_raises(*_rename_mismatch("renamed")),
+    ("StructField", "dataType"): _integer_converts(
+        [value != 0 for value in _INTEGER_VALUES], "bool"),
+    ("StructField", "nullable"): _integer_converts(nullable=True),
+    ("StructField", "metadata"): _integer_converts(
+        metadata={"SPARK::metadata::json": '{"changed": true}'}),
+    ("StructType", "alias"): _integer_converts(),
+}
 
 
 @pytest.mark.parametrize("class_name,attribute", [
@@ -2716,29 +2886,158 @@ with capture._arrow_input_service(messages) as (spark, state):
     ("StructType", "alias"), ("StructField", "alias"), ("LongType", "alias"),
 ])
 @pytest.mark.parametrize("before_import", [False, True])
-def test_integer_custom_schema_descriptors_keep_native_row_path(class_name, attribute, before_import):
-    _integer_guard_process("descriptor", f"{class_name}:{attribute}", before_import)
+def test_integer_custom_schema_descriptors_take_pyspark_conversion(class_name, attribute,
+                                                                   before_import):
+    outcome = _integer_guard_process("descriptor", f"{class_name}:{attribute}", before_import)
+    _assert_guard(outcome, _INTEGER_DESCRIPTORS.get((class_name, attribute), _integer_converts()),
+                  _INTEGER_DESCRIPTORS_OF_THE_DROP_IN.get((class_name, attribute)))
 
 
-@pytest.mark.parametrize("class_name", ["BooleanType", "ByteType", "ShortType", "IntegerType", "LongType"])
+@pytest.mark.parametrize("mode", ["public_atomic_none", "session_struct_subclass",
+                                  "session_struct_deleted"])
+def test_create_dataframe_checks_its_schema_against_the_names_of_the_session_module(mode):
+    # As PySpark's createDataFrame, which checks its schema, of a DDL string as the server parses
+    # it, against the `AtomicType` and the `StructType` of its module of the session, which binds
+    # them with the first session, of any data and before it reads any setting: of a public
+    # `AtomicType` of None, rebound before the session, `isinstance` raises; of a `StructType` of
+    # that module rebound to a subclass, a struct of the class itself is not expected; and of one
+    # removed from it, the name is not defined. In a process of its own, as it rebinds the names.
+    import json
+    import sys
+
+    script = r'''
+import importlib
+import importlib.util
+import json
+import sys
+import tempfile
+from pathlib import Path
+import numpy as np
+import pandas as pd
+import pyarrow as pa
+from pyspark.sql import types as T
+
+spec = importlib.util.spec_from_file_location("schema_check_capture", sys.argv[-1])
+capture = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = capture
+spec.loader.exec_module(capture)
+mode = sys.argv[1]
+
+
+class Sub(T.StructType):
+    pass
+
+
+if mode == "public_atomic_none":
+    T.AtomicType = None
+with tempfile.TemporaryDirectory(prefix="arrow-handoff-") as directory:
+    class Factory:
+        def mktemp(self, name):
+            path = Path(directory) / name
+            path.mkdir()
+            return path
+    messages = capture.protocol.__wrapped__(Factory())
+outcomes = {}
+with capture._arrow_input_service(messages) as (spark, state):
+    session_module = importlib.import_module("pyspark.sql.connect.session")
+    if mode == "session_struct_subclass":
+        session_module.StructType = Sub
+    elif mode == "session_struct_deleted":
+        del session_module.StructType
+    plain = T.StructType([T.StructField("a", T.LongType())])
+    cases = {
+        "rows_struct": lambda: spark.createDataFrame([(1,)], plain),
+        "rows_ddl": lambda: spark.createDataFrame([(1,)], "a long"),
+        "arrow_none": lambda: spark.createDataFrame(pa.table({"a": [1]})),
+        "arrow_names": lambda: spark.createDataFrame(pa.table({"a": [1]}), ["a"]),
+        "empty_struct": lambda: spark.createDataFrame([], plain),
+        "pandas_struct": lambda: spark.createDataFrame(pd.DataFrame({"a": [1]}), plain),
+        "arrow_struct": lambda: spark.createDataFrame(pa.table({"a": [1]}), plain),
+        "ndarray_bad_dimensions": lambda: spark.createDataFrame(np.zeros((1, 1, 1)), plain),
+    }
+    for name, make in cases.items():
+        configs, ddl_strings = len(state["config_requests"]), len(state["ddl_strings"])
+        try:
+            make()
+            error = None
+        except Exception as e:
+            error = [type(e).__module__ + "." + type(e).__qualname__, str(e)]
+        outcomes[name] = [error, len(state["config_requests"]) - configs,
+                          len(state["ddl_strings"]) - ddl_strings]
+print(json.dumps(outcomes))
+'''
+    result = subprocess.run([sys.executable, "-c", script, mode, __file__],
+                            capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stdout + result.stderr
+    outcomes = json.loads(result.stdout.strip().splitlines()[-1])
+    error = {
+        "public_atomic_none": ["builtins.TypeError",
+                               "isinstance() arg 2 must be a type, a tuple of types, or a union"],
+        "session_struct_subclass": [
+            "pyspark.errors.exceptions.base.PySparkTypeError",
+            "[NOT_EXPECTED_TYPE] Argument `schema` should be list, None or StructType, got "
+            "StructType."],
+        "session_struct_deleted": ["builtins.NameError", "name 'StructType' is not defined"],
+    }[mode]
+    # The DDL string is parsed first, of one request, as PySpark parses it; no setting is read
+    # before the error, nor of data whose conversion reads none (of no rows). Names, and no
+    # schema, are what a `StructType` subclass takes too.
+    expected = {name: [error, 0, 1 if name == "rows_ddl" else 0] for name in outcomes}
+    if mode == "session_struct_subclass":
+        expected["arrow_none"] = expected["arrow_names"] = [None, 1, 0]
+    assert outcomes == expected
+
+# PySpark's outcomes of a name rebound to `LongType` (to `BooleanType` of `LongType`) in
+# `pyspark.sql.types` with its converter module removed, so imported anew of it, or in the
+# converter module: `to_arrow_type` takes the long field of the first class that it matches. A
+# name rebound in a converter module that the module of the session does not hold, as the one of
+# `captured_alias`, which is imported anew, changes nothing.
+_INTEGER_REBOUND = {
+    "BooleanType": _integer_converts([value != 0 for value in _INTEGER_VALUES], "bool"),
+    "ByteType": _guard_raises(*_conversion_error("PySparkValueError", "int64", "renamed", "int8")),
+    "ShortType": _guard_raises(*_conversion_error("PySparkValueError", "int64", "renamed",
+                                                  "int16")),
+    "IntegerType": _guard_raises(*_conversion_error("PySparkValueError", "int64", "renamed",
+                                                    "int32")),
+    "LongType": _guard_raises(*_unsupported_type("LongType()")),
+}
+
+
+@pytest.mark.parametrize("class_name", ["BooleanType", "ByteType", "ShortType", "IntegerType",
+                                        "LongType"])
 @pytest.mark.parametrize("mode", ["public_alias", "converter_alias", "captured_alias"])
-def test_integer_rebound_converter_aliases_keep_native_row_path(class_name, mode):
-    _integer_guard_process(mode, class_name)
+def test_integer_rebound_converter_aliases_take_pyspark_conversion(class_name, mode):
+    _assert_guard(_integer_guard_process(mode, class_name),
+                  _integer_converts() if mode == "captured_alias" else _INTEGER_REBOUND[class_name])
 
 
 @pytest.mark.parametrize("replacement", ["none", "long"])
-def test_integer_rebound_importer_schema_alias_keeps_native_row_path(replacement):
-    _integer_guard_process("importer_alias", replacement)
+def test_integer_rebound_importer_schema_alias_takes_pyspark_conversion(replacement):
+    # The names of the drop-in's own importer are not PySpark's, which has none.
+    _assert_guard(_integer_guard_process("importer_alias", replacement), _integer_converts())
+
+
+# As PySpark's createDataFrame, which checks its schema against the `AtomicType` and the
+# `StructType` of its module of the session, which binds them with the session
+# (`_check_schema` of `pyspark.sql.connect.session`): a public `AtomicType` of None, rebound
+# before, makes its `isinstance` raise, before any setting is read.
+_ATOMIC_ALIAS_OF_PYSPARK = _guard_raises(
+    "builtins.TypeError", "isinstance() arg 2 must be a type, a tuple of types, or a union",
+    configs=False)
 
 
 @pytest.mark.parametrize("scope", ["public_before", "public_after", "importer"])
 @pytest.mark.parametrize("replacement", ["none", "long"])
-def test_integer_rebound_atomic_alias_keeps_native_row_path(scope, replacement):
-    _integer_guard_process("atomic_alias", f"{scope}:{replacement}")
+def test_integer_rebound_atomic_alias_takes_pyspark_conversion(scope, replacement):
+    outcome = _integer_guard_process("atomic_alias", f"{scope}:{replacement}")
+    if scope != "importer" and replacement == "none":
+        _assert_guard(outcome, _ATOMIC_ALIAS_OF_PYSPARK)
+    else:
+        _assert_guard(outcome, _integer_converts())
 
 
-def test_integer_deleted_importer_atomic_alias_keeps_native_row_path():
-    _integer_guard_process("atomic_alias", "importer:missing")
+def test_integer_deleted_importer_atomic_alias_takes_pyspark_conversion():
+    _assert_guard(_integer_guard_process("atomic_alias", "importer:missing"), _integer_converts())
 
 
 def test_integer_warm_importer_without_global_converter_aliases(protocol, monkeypatch):
@@ -3197,9 +3496,9 @@ def test_timestamp_rebound_dataframe_and_duplicate_names_keep_fallback(monkeypat
 
 
 def _timestamp_guard_process(mode, argument, before_import=False):
-    import subprocess
-    import sys
-
+    """The outcome of `createDataFrame` of a frame of aware datetimes under `renamed timestamp` of
+    a class patched or a name rebound by `mode` and `argument`, in a process of its own, which the
+    session converts with PySpark's conversion (see `_integer_guard_process`)."""
     if mode == "captured_alias":
         import pyspark.sql._arrow_input as importer
         if not hasattr(importer, "to_arrow_schema"):
@@ -3207,14 +3506,11 @@ def _timestamp_guard_process(mode, argument, before_import=False):
     script = r'''
 import importlib
 import importlib.util
-import json
 import sys
-import tempfile
-from pathlib import Path
 import pandas as pd
 from pyspark.sql import types as T
 from pyspark import _pyspark as native
-spec = importlib.util.spec_from_file_location("timestamp_guard_capture", sys.argv[4])
+spec = importlib.util.spec_from_file_location("timestamp_guard_capture", sys.argv[-1])
 capture = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = capture
 spec.loader.exec_module(capture)
@@ -3273,29 +3569,46 @@ elif mode == "importer_alias":
     importer.StructType = None
 else:
     raise AssertionError(mode)
-with tempfile.TemporaryDirectory(prefix="arrow-handoff-") as directory:
-    class Factory:
-        def mktemp(self, name):
-            path = Path(directory) / name
-            path.mkdir()
-            return path
-    messages = capture.protocol.__wrapped__(Factory())
-with capture._arrow_input_service(messages, capture_tables=True) as (spark, state):
-    # Sends the plan as `_to_table` does: toArrow converts the schema to Arrow first,
-    # with the classes that this script patches.
-    spark.createDataFrame(frame, schema)._to_table()
-    assert state["config_requests"] == [
-        ("get", capture._CREATE_DATAFRAME_KEYS)], state["config_requests"]
-    table = capture.pa.concat_tables(state["tables"])
-    assert table.column_names == ["renamed"]
-    assert table.column(0).cast(capture.pa.int64()).to_pylist() == [0, 1000, None, -1000]
-    logical = json.loads(state["relations"][0].local_relation.schema)
-    assert logical["fields"][0]["metadata"] == {"source": "native"}
 '''
-    result = subprocess.run([sys.executable, "-c", script, mode, argument,
-                             str(before_import), __file__],
-                            capture_output=True, text=True, timeout=30)
-    assert result.returncode == 0, result.stdout + result.stderr
+    return _guard_outcome(script, mode, argument, str(before_import))
+
+
+_TIMESTAMP_RELATION = {"fields": [{"metadata": {"source": "native"}, "name": "renamed",
+                                   "nullable": True, "type": "timestamp"}], "type": "struct"}
+
+
+def _timestamp_converts(values=(0, 1000, None, -1000), arrow_type="timestamp[us, tz=UTC]",
+                        name="renamed", metadata=None, error=None):
+    """Of the microseconds `values` of the timestamps, or the values of another type."""
+    return _guard_converts([(name, arrow_type, True, list(values), metadata)],
+                           _TIMESTAMP_RELATION, error)
+
+
+# PySpark's outcomes (see `_INTEGER_DESCRIPTORS`), and the drop-in's where they differ.
+_TIMESTAMP_DESCRIPTORS = {
+    ("StructType", "fields"): _guard_raises(*_no_setter("StructType")),
+    ("StructType", "names"): _guard_raises(*_no_setter("StructType")),
+    ("StructType", "__iter__"): _guard_raises(*_rename_mismatch("renamed")),
+    ("StructField", "name"): _guard_raises(*_no_setter("StructField")),
+    ("StructField", "dataType"): _guard_raises(*_no_setter("StructField")),
+    ("StructField", "nullable"): _guard_raises(*_no_setter("StructField")),
+    ("StructField", "metadata"): _guard_raises(*_no_setter("StructField")),
+    ("StructType", "alias"): _timestamp_converts(
+        error=["_to_table", "builtins.AssertionError", ""]),
+}
+_TIMESTAMP_DESCRIPTORS_OF_THE_DROP_IN = {
+    ("StructType", "fields"): _guard_converts([], _TIMESTAMP_RELATION),
+    ("StructType", "names"): _timestamp_converts(name="changed"),
+    ("StructField", "name"): _guard_raises(*_rename_mismatch("renamed")),
+    ("StructField", "dataType"): _guard_raises(
+        "pyarrow.lib.ArrowNotImplementedError",
+        "Unsupported cast from timestamp[ns] to bool using function cast_boolean"),
+    ("StructField", "nullable"): _guard_raises(
+        "builtins.ValueError", "Casting field 'renamed' with null values to non-nullable"),
+    ("StructField", "metadata"): _timestamp_converts(
+        metadata={"SPARK::metadata::json": '{"changed": true}'}),
+    ("StructType", "alias"): _timestamp_converts(),
+}
 
 
 @pytest.mark.parametrize("class_name,attribute", [
@@ -3307,30 +3620,73 @@ with capture._arrow_input_service(messages, capture_tables=True) as (spark, stat
     ("StructType", "alias"), ("StructField", "alias"), ("TimestampType", "alias"),
 ])
 @pytest.mark.parametrize("before_import", [False, True])
-def test_timestamp_custom_schema_descriptors_keep_row_path(class_name, attribute, before_import):
-    _timestamp_guard_process("descriptor", f"{class_name}:{attribute}", before_import)
+def test_timestamp_custom_schema_descriptors_take_pyspark_conversion(class_name, attribute,
+                                                                     before_import):
+    outcome = _timestamp_guard_process("descriptor", f"{class_name}:{attribute}", before_import)
+    _assert_guard(outcome,
+                  _TIMESTAMP_DESCRIPTORS.get((class_name, attribute), _timestamp_converts()),
+                  _TIMESTAMP_DESCRIPTORS_OF_THE_DROP_IN.get((class_name, attribute)))
+
+
+def _timestamp_cast_error(arrow_type, function):
+    return _guard_raises("pyarrow.lib.ArrowNotImplementedError",
+                         f"Unsupported cast from timestamp[ns] to {arrow_type} using function "
+                         f"{function}")
+
+
+# PySpark's outcomes of a name rebound to `TimestampType` (to `BooleanType` of `TimestampType`):
+# `to_arrow_type` takes the timestamp field of the first class that it matches, of which PyArrow
+# casts the nanoseconds of the column, after the conversion of the time zone of a timestamp, or
+# fails to; a `BinaryType` takes the bytes of the integers, and a `DateType`, which it matches
+# before `TimestampType`, the dates of the timestamps.
+_TIMESTAMP_REBOUND = {
+    "BooleanType": _timestamp_cast_error("bool", "cast_boolean"),
+    "ByteType": _timestamp_cast_error("int8", "cast_int8"),
+    "ShortType": _timestamp_cast_error("int16", "cast_int16"),
+    "IntegerType": _timestamp_cast_error("int32", "cast_int32"),
+    "LongType": _timestamp_converts([0, 1000000, None, -1000000], "int64"),
+    "FloatType": _timestamp_cast_error("float", "cast_float"),
+    "DoubleType": _timestamp_cast_error("double", "cast_double"),
+    "DecimalType": _guard_raises("builtins.AttributeError",
+                                 "'TimestampType' object has no attribute 'precision'"),
+    "StringType": _guard_raises(*_conversion_error("PySparkTypeError", "datetime64[ns, UTC]",
+                                                   "a", "string")),
+    "BinaryType": _timestamp_converts(
+        [b"", b"@B\x0f", None, b"\xc0\xbd\xf0\xff\xff\xff\xff\xff"], "binary"),
+    "DateType": _timestamp_converts(
+        [date(1970, 1, 1), date(1970, 1, 1), None, date(1969, 12, 31)], "date32[day]"),
+    "TimestampType": _guard_raises(*_unsupported_type("TimestampType()")),
+}
 
 
 @pytest.mark.parametrize("class_name", ["BooleanType", "ByteType", "ShortType", "IntegerType",
                                         "LongType", "FloatType", "DoubleType", "DecimalType",
                                         "StringType", "BinaryType", "DateType", "TimestampType"])
 @pytest.mark.parametrize("mode", ["public_alias", "converter_alias", "captured_alias"])
-def test_timestamp_rebound_converter_aliases_keep_row_path(class_name, mode):
-    _timestamp_guard_process(mode, class_name)
+def test_timestamp_rebound_converter_aliases_take_pyspark_conversion(class_name, mode):
+    _assert_guard(_timestamp_guard_process(mode, class_name),
+                  _timestamp_converts() if mode == "captured_alias"
+                  else _TIMESTAMP_REBOUND[class_name])
 
 
-def test_timestamp_rebound_importer_schema_alias_keeps_row_path():
-    _timestamp_guard_process("importer_alias", "none")
+def test_timestamp_rebound_importer_schema_alias_takes_pyspark_conversion():
+    _assert_guard(_timestamp_guard_process("importer_alias", "none"), _timestamp_converts())
 
 
 @pytest.mark.parametrize("scope", ["public_before", "public_after", "importer"])
 @pytest.mark.parametrize("replacement", ["none", "long"])
-def test_timestamp_rebound_atomic_alias_keeps_row_path(scope, replacement):
-    _timestamp_guard_process("atomic_alias", f"{scope}:{replacement}")
+def test_timestamp_rebound_atomic_alias_takes_pyspark_conversion(scope, replacement):
+    # See `test_integer_rebound_atomic_alias_takes_pyspark_conversion`.
+    outcome = _timestamp_guard_process("atomic_alias", f"{scope}:{replacement}")
+    if scope != "importer" and replacement == "none":
+        _assert_guard(outcome, _ATOMIC_ALIAS_OF_PYSPARK)
+    else:
+        _assert_guard(outcome, _timestamp_converts())
 
 
-def test_timestamp_deleted_importer_atomic_alias_keeps_row_path():
-    _timestamp_guard_process("atomic_alias", "importer:missing")
+def test_timestamp_deleted_importer_atomic_alias_takes_pyspark_conversion():
+    _assert_guard(_timestamp_guard_process("atomic_alias", "importer:missing"),
+                  _timestamp_converts())
 
 
 def test_timestamp_warm_local_converter_imports_keep_columnar_route(protocol, monkeypatch):
@@ -3880,6 +4236,49 @@ def test_float64_nonnullable_nan_reads_config_before_cast_error(protocol, verify
 
 
 
+_FLOAT64_VALUES = [1.5, -0.0, float("inf"), float("-inf"), None] * 20000
+
+
+def _float64_relation(metadata):
+    return {"fields": [{"metadata": metadata, "name": "x", "nullable": True, "type": "double"}],
+            "type": "struct"}
+
+
+def _float64_converts(values=_FLOAT64_VALUES, arrow_type="double", name="x", metadata=None,
+                      relation_metadata=None, error=None):
+    """Of NaN as null, as PySpark's conversion takes it of a float column (`isnull`)."""
+    return _guard_converts([(name, arrow_type, True, values, metadata)],
+                           _float64_relation(relation_metadata or {}), error)
+
+
+# PySpark's outcomes (see `_INTEGER_DESCRIPTORS`), and the drop-in's where they differ.
+_FLOAT64_DESCRIPTORS = {
+    ("StructType", "fields"): _guard_raises(*_no_setter("StructType")),
+    ("StructType", "names"): _guard_raises(*_no_setter("StructType")),
+    ("StructType", "__iter__"): _guard_raises(*_rename_mismatch("x")),
+    ("StructField", "name"): _guard_raises(*_no_setter("StructField")),
+    ("StructField", "dataType"): _guard_raises(*_no_setter("StructField")),
+    ("StructField", "nullable"): _guard_raises(*_no_setter("StructField")),
+    ("StructField", "metadata"): _guard_raises(*_no_setter("StructField")),
+    ("StructType", "alias"): _float64_converts(
+        relation_metadata={"source": "native"},
+        error=["_to_table", "builtins.AssertionError", ""]),
+}
+_FLOAT64_DESCRIPTORS_OF_THE_DROP_IN = {
+    ("StructType", "fields"): _guard_converts([], _float64_relation({"source": "native"})),
+    ("StructType", "names"): _float64_converts(name="changed",
+                                               relation_metadata={"source": "native"}),
+    ("StructField", "name"): _guard_raises(*_rename_mismatch("x")),
+    ("StructField", "dataType"): _float64_converts(relation_metadata={"source": "native"}),
+    ("StructField", "nullable"): _guard_raises(
+        "builtins.ValueError", "Casting field 'x' with null values to non-nullable"),
+    ("StructField", "metadata"): _float64_converts(
+        metadata={"SPARK::metadata::json": '{"changed": true}'},
+        relation_metadata={"source": "native"}),
+    ("StructType", "alias"): _float64_converts(relation_metadata={"source": "native"}),
+}
+
+
 @pytest.mark.parametrize("class_name,attribute", [
     ("StructType", "names"), ("StructType", "fields"), ("StructType", "__iter__"),
     ("StructField", "name"), ("StructField", "dataType"), ("StructField", "nullable"),
@@ -3890,25 +4289,21 @@ def test_float64_nonnullable_nan_reads_config_before_cast_error(protocol, verify
     ("StructType", "alias"), ("StructField", "alias"), ("DoubleType", "alias"),
 ])
 @pytest.mark.parametrize("before_import", [False, True])
-def test_float64_custom_schema_descriptors_keep_native_row_path(
-    protocol, class_name, attribute, before_import
-):
-    import sys
-
+def test_float64_custom_schema_descriptors_take_pyspark_conversion(class_name, attribute,
+                                                                   before_import):
+    # A patch of a class or a rebound name declines the fast path of double columns: the frame
+    # converts with PySpark's conversion, which reads the patch (see `_integer_guard_process`).
     script = r'''
 import importlib.util
 import sys
-import tempfile
-from pathlib import Path
 import numpy as np
 import pandas as pd
 from pyspark.sql import types as T
 
-spec = importlib.util.spec_from_file_location("float64_schema_capture", sys.argv[4])
+spec = importlib.util.spec_from_file_location("float64_schema_capture", sys.argv[-1])
 capture = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = capture
 spec.loader.exec_module(capture)
-_arrow_input_service, protocol = capture._arrow_input_service, capture.protocol
 values = np.tile(np.array([1.5, -0.0, np.inf, -np.inf, np.nan]), 20000)
 frame = pd.DataFrame({"x": values})
 schema = T.StructType([T.StructField("x", T.DoubleType(), True, {"source": "native"})])
@@ -3934,39 +4329,32 @@ else:
                  "metadata": {"changed": True}}[attribute]
         replacement = property(lambda self: value)
     setattr(cls, attribute, replacement)
-with tempfile.TemporaryDirectory(prefix="arrow-handoff-") as directory:
-    class Factory:
-        def mktemp(self, name):
-            path = Path(directory) / name
-            path.mkdir()
-            return path
-    messages = protocol.__wrapped__(Factory())
-with _arrow_input_service(messages) as (spark, state):
-    # Sends the plan as `_to_table` does: toArrow converts the schema to Arrow first,
-    # with the classes that this script patches.
-    spark.createDataFrame(frame, schema)._to_table()
-    assert len(state["config_requests"]) == 1, state["config_requests"]
-    table = state["input_tables"][0]
-    assert table.schema.names == ["x"], table.schema
-    assert table.schema.field(0).nullable is True
-    assert table.schema.field(0).type == capture.pa.float64()
-    assert capture.T is T
-    mask = np.isnan(values)
-    assert table.column(0).is_null().to_pylist() == mask.tolist()
-    actual = table.column(0).drop_null().combine_chunks().to_numpy(zero_copy_only=False)
-    np.testing.assert_array_equal(actual.view(np.uint64), values[~mask].view(np.uint64))
-    from pyspark.sql.pandas.types import from_arrow_metadata
-    assert from_arrow_metadata(table.schema.field(0).metadata) is None
-    import json
-    assert json.loads(state["relations"][0].local_relation.schema)["fields"][0]["metadata"] == {
-        "source": "native"
-    }
 '''
-    result = subprocess.run([sys.executable, "-c", script, class_name, attribute,
-                             str(before_import), __file__],
-                            capture_output=True, text=True, timeout=30)
-    assert result.returncode == 0, result.stdout + result.stderr
+    outcome = _guard_outcome(script, class_name, attribute, str(before_import))
+    _assert_guard(outcome,
+                  _FLOAT64_DESCRIPTORS.get((class_name, attribute),
+                                           _float64_converts(relation_metadata={"source": "native"})),
+                  _FLOAT64_DESCRIPTORS_OF_THE_DROP_IN.get((class_name, attribute)))
 
+
+# PySpark's outcomes of a name rebound to `DoubleType` (to `object` of `DoubleType`, `StructType`
+# and `StructField`): `to_arrow_type` takes the double field of the first class that it matches,
+# whose cast of the column PyArrow does, as a safe cast; of a `StructType` of `object`,
+# `_deduplicate_field_names` takes the double type for a struct and reads its `names`, and of a
+# `StructField` of `object`, it calls `object(...)` of the field.
+_FLOAT64_REBOUND = {
+    "BooleanType": _float64_converts([True, False, True, True, None] * 20000, "bool"),
+    "ByteType": _guard_raises(*_conversion_error("PySparkValueError", "float64", "x", "int8")),
+    "ShortType": _guard_raises(*_conversion_error("PySparkValueError", "float64", "x", "int16")),
+    "IntegerType": _guard_raises(*_conversion_error("PySparkValueError", "float64", "x",
+                                                    "int32")),
+    "LongType": _guard_raises(*_conversion_error("PySparkValueError", "float64", "x", "int64")),
+    "FloatType": _float64_converts(arrow_type="float"),
+    "DoubleType": _float64_converts(),
+    "StructType": _guard_raises("builtins.AttributeError",
+                                "'DoubleType' object has no attribute 'names'"),
+    "StructField": _guard_raises("builtins.TypeError", "object() takes no arguments"),
+}
 
 
 @pytest.mark.parametrize("class_name", [
@@ -3974,21 +4362,15 @@ with _arrow_input_service(messages) as (spark, state):
     "DoubleType", "StructType", "StructField",
 ])
 @pytest.mark.parametrize("converter_loaded", [False, True])
-def test_float64_rebound_converter_alias_keeps_native_row_path(
-    protocol, class_name, converter_loaded
-):
-    import sys
-
+def test_float64_rebound_converter_alias_takes_pyspark_conversion(class_name, converter_loaded):
     script = r'''
 import importlib.util
 import sys
-import tempfile
-from pathlib import Path
 import numpy as np
 import pandas as pd
 from pyspark.sql import types as T
 
-spec = importlib.util.spec_from_file_location("float64_alias_capture", sys.argv[3])
+spec = importlib.util.spec_from_file_location("float64_alias_capture", sys.argv[-1])
 capture = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = capture
 spec.loader.exec_module(capture)
@@ -4004,30 +4386,9 @@ else:
     sys.modules.pop("pyspark.sql.pandas.types", None)
     setattr(T, class_name, replacement)
     assert "pyspark.sql.pandas.types" not in sys.modules
-with tempfile.TemporaryDirectory(prefix="arrow-handoff-") as directory:
-    class Factory:
-        def mktemp(self, name):
-            path = Path(directory) / name
-            path.mkdir()
-            return path
-    messages = capture.protocol.__wrapped__(Factory())
-with capture._arrow_input_service(messages) as (spark, state):
-    # Sends the plan as `_to_table` does: toArrow converts the schema to Arrow first,
-    # with the classes that this script patches.
-    spark.createDataFrame(frame, schema)._to_table()
-    assert len(state["config_requests"]) == 1, state["config_requests"]
-    table = state["input_tables"][0]
-    assert table.schema.names == ["x"], table.schema
-    assert table.schema.field(0).type == capture.pa.float64()
-    mask = np.isnan(values)
-    assert table.column(0).is_null().to_pylist() == mask.tolist()
-    actual = table.column(0).drop_null().combine_chunks().to_numpy(zero_copy_only=False)
-    np.testing.assert_array_equal(actual.view(np.uint64), values[~mask].view(np.uint64))
 '''
-    result = subprocess.run([sys.executable, "-c", script, class_name,
-                             str(converter_loaded), __file__],
-                            capture_output=True, text=True, timeout=30)
-    assert result.returncode == 0, result.stdout + result.stderr
+    _assert_guard(_guard_outcome(script, class_name, str(converter_loaded)),
+                  _FLOAT64_REBOUND[class_name])
 
 
 
@@ -5206,23 +5567,24 @@ def test_arrow_string_generic_explicit_schema_stays_columnar(
 
 @pytest.mark.parametrize("scope", ["public", "converter", "captured"])
 @pytest.mark.parametrize("class_name", ["BooleanType", "StringType", "StructType"])
-def test_arrow_string_rebound_converter_alias_keeps_native_rows(scope, class_name):
-    import sys
-
+def test_arrow_string_rebound_converter_alias_takes_pyspark_conversion(scope, class_name):
+    # The rebound name declines the fast path of Arrow strings: the frame converts with PySpark's
+    # conversion, of the names as the module of the session and the converter module hold them
+    # (see `_integer_guard_process`): of a name rebound to `StringType`, its Arrow type is that of
+    # the first class that `to_arrow_type` matches, and of a `StructType`, the converter of the
+    # series reads the string type as a struct. A public `StructType` is the one that PySpark's
+    # createDataFrame checks its schema against (see `test_date_rebound_converter_aliases_take_
+    # pyspark_conversion`).
     script = r'''
 import importlib
 import importlib.util
-import json
 import sys
-import tempfile
-from pathlib import Path
 import pandas as pd
-import pytest
 from pyspark import _pyspark as native
 from pyspark.sql import types as T
 
 _pandas_input = importlib.import_module("pyspark.sql._pandas_input")
-spec = importlib.util.spec_from_file_location("arrow_string_alias_capture", sys.argv[3])
+spec = importlib.util.spec_from_file_location("arrow_string_alias_capture", sys.argv[-1])
 capture = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = capture
 spec.loader.exec_module(capture)
@@ -5243,36 +5605,25 @@ else:
         sys.modules.pop("pyspark.sql.pandas.types")
         assert importlib.import_module("pyspark.sql.pandas.types") is not converter
         assert importer.to_arrow_schema.__globals__ is vars(converter)
-# The rebound name declines the fast path and PySpark's conversion, whose importer resolves the
-# types by their names: the frame takes the row path, as it does without PyArrow.
 assert _pandas_input.prepare_string_input(frame, schema) is None
-assert not _pandas_input.accepts_pandas_schema(schema)
-with tempfile.TemporaryDirectory(prefix="arrow-handoff-") as directory:
-    class Factory:
-        def mktemp(self, name):
-            path = Path(directory) / name
-            path.mkdir()
-            return path
-    protocol = capture.protocol.__wrapped__(Factory())
-tables = []
-for row_control in (False, True):
-    with pytest.MonkeyPatch.context() as control:
-        if row_control:
-            capture._without_pyarrow(control)
-        with capture._arrow_input_service(protocol) as (spark, state):
-            spark.createDataFrame(frame, schema).toArrow()
-            # The rows are at least 64 KiB of Arrow data, so the settings are read once.
-            assert state["config_requests"] == [
-                ("get", capture._CREATE_DATAFRAME_KEYS)]
-            assert state["uploads"] == 0
-            assert json.loads(state["spark_schema"]) == json.loads(schema.json())
-            tables.append(state["input_tables"][0])
-assert tables[0].column(0).to_pylist() == texts
-assert tables[0].equals(tables[1], check_metadata=True)
 '''
-    result = subprocess.run([sys.executable, "-c", script, scope, class_name, __file__],
-                            capture_output=True, text=True, timeout=60)
-    assert result.returncode == 0, result.stdout + result.stderr
+    rebound = {
+        "BooleanType": _guard_raises(*_conversion_error("PySparkValueError", "string", "v",
+                                                        "bool")),
+        "StringType": _guard_raises(*_unsupported_type("StringType()")),
+        "StructType": _guard_raises("builtins.AttributeError",
+                                    "'StringType' object has no attribute 'names'"),
+    }
+    outcome = _guard_outcome(script, scope, class_name)
+    if scope == "captured":
+        _assert_guard(outcome, _guard_converts(
+            [("v", "string", True, ["original", None] * 5000)],
+            {"fields": [{"metadata": {"source": "native"}, "name": "v", "nullable": True,
+                         "type": "string"}], "type": "struct"}))
+    elif scope == "public" and class_name == "StructType":
+        _assert_guard(outcome, _NOT_EXPECTED_STRUCT)
+    else:
+        _assert_guard(outcome, rebound[class_name])
 
 
 @pytest.mark.parametrize("storage", ["pyarrow", "numpy_semantics"])
@@ -6279,6 +6630,48 @@ def test_string_surrogate_error_follows_the_settings_read(protocol, monkeypatch,
         assert state["uploads"] == 0
 
 
+_STRING_RELATION = {"fields": [{"metadata": {"source": "native"}, "name": "text", "nullable": True,
+                                "type": "string"}], "type": "struct"}
+
+
+def _string_converts(name="text", nullable=True, metadata=None, relation=_STRING_RELATION,
+                     error=None):
+    return _guard_converts([(name, "string", nullable, ["plain"] * 10000, metadata)], relation,
+                           error)
+
+
+# PySpark's outcomes (see `_INTEGER_DESCRIPTORS`), and the drop-in's where they differ: PySpark's
+# `json()` of the schema reads a patched `isUTF8BinaryCollation` too, of which it writes the
+# collation of the string, where the native `json()` writes the native type.
+_STRING_DESCRIPTORS = {
+    ("StructType", "fields"): _guard_raises(*_no_setter("StructType")),
+    ("StructType", "names"): _guard_raises(*_no_setter("StructType")),
+    ("StructType", "__iter__"): _guard_raises(*_rename_mismatch("text")),
+    ("StructField", "name"): _guard_raises(*_no_setter("StructField")),
+    ("StructField", "dataType"): _guard_raises(*_no_setter("StructField")),
+    ("StructField", "nullable"): _guard_raises(*_no_setter("StructField")),
+    ("StructField", "metadata"): _guard_raises(*_no_setter("StructField")),
+    ("StructType", "alias"): _string_converts(
+        error=["_to_table", "builtins.AssertionError", ""]),
+    ("StringType", "isUTF8BinaryCollation"): _string_converts(relation={
+        "fields": [{"metadata": {"__COLLATIONS": {"text": "spark.UTF8_BINARY"},
+                                 "source": "native"},
+                    "name": "text", "nullable": True, "type": "string collate UTF8_BINARY"}],
+        "type": "struct"}),
+}
+_STRING_DESCRIPTORS_OF_THE_DROP_IN = {
+    ("StructType", "fields"): _guard_converts([], _STRING_RELATION),
+    ("StructType", "names"): _string_converts(name="changed"),
+    ("StructField", "name"): _guard_raises(*_rename_mismatch("text")),
+    ("StructField", "dataType"): _string_converts(),
+    ("StructField", "nullable"): _string_converts(nullable=False),
+    ("StructField", "metadata"): _string_converts(
+        metadata={"SPARK::metadata::json": '{"changed": true}'}),
+    ("StructType", "alias"): _string_converts(),
+    ("StringType", "isUTF8BinaryCollation"): _string_converts(),
+}
+
+
 @pytest.mark.parametrize("class_name,attribute", [
     ("StructType", "names"), ("StructType", "fields"), ("StructType", "__iter__"),
     ("StructField", "name"), ("StructField", "dataType"), ("StructField", "nullable"),
@@ -6289,24 +6682,20 @@ def test_string_surrogate_error_follows_the_settings_read(protocol, monkeypatch,
     ("StructType", "alias"), ("StructField", "alias"), ("StringType", "alias"),
 ])
 @pytest.mark.parametrize("before_import", [False, True])
-def test_string_custom_schema_descriptors_keep_native_row_path(
-    protocol, class_name, attribute, before_import
-):
-    import sys
-
+def test_string_custom_schema_descriptors_take_pyspark_conversion(class_name, attribute,
+                                                                  before_import):
+    # A patch of a class or a rebound name declines the fast path of object strings: the frame
+    # converts with PySpark's conversion, which reads the patch (see `_integer_guard_process`).
     script = r'''
 import sys
-import tempfile
-from pathlib import Path
 import pandas as pd
 from pyspark.sql import types as T
 
 import importlib.util
-spec = importlib.util.spec_from_file_location("string_schema_capture", sys.argv[4])
+spec = importlib.util.spec_from_file_location("string_schema_capture", sys.argv[-1])
 capture = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = capture
 spec.loader.exec_module(capture)
-_arrow_input_service, protocol = capture._arrow_input_service, capture.protocol
 frame = pd.DataFrame({"text": ["plain"] * 10000}, dtype=object)
 schema = T.StructType([T.StructField("text", T.StringType(), True, {"source": "native"})])
 class_name, attribute, before_import = sys.argv[1:4]
@@ -6334,31 +6723,10 @@ else:
                  "dataType": T.StringType(), "nullable": False, "metadata": {"changed": True}}[attribute]
         replacement = property(lambda self: value)
     setattr(cls, attribute, replacement)
-with tempfile.TemporaryDirectory(prefix="arrow-handoff-") as directory:
-    class Factory:
-        def mktemp(self, name):
-            path = Path(directory) / name
-            path.mkdir()
-            return path
-    messages = protocol.__wrapped__(Factory())
-with _arrow_input_service(messages) as (spark, state):
-    # Sends the plan as `_to_table` does: toArrow converts the schema to Arrow first,
-    # with the classes that this script patches.
-    spark.createDataFrame(frame, schema)._to_table()
-    if attribute == "isUTF8BinaryCollation":
-        # As official, which converts this explicit schema with Arrow, after reading the
-        # configuration, and never reads this attribute.
-        assert state["config_requests"][0][0] == "get", state["config_requests"]
-    else:
-        assert len(state["config_requests"]) == 1, state["config_requests"]
-    table = state["input_tables"][0]
-    assert table.schema.names == ["text"], table.schema
-    assert table.column(0).to_pylist() == ["plain"] * 10000
 '''
-    result = subprocess.run([sys.executable, "-c", script, class_name, attribute,
-                             str(before_import), __file__],
-                            capture_output=True, text=True, timeout=30)
-    assert result.returncode == 0, result.stdout + result.stderr
+    outcome = _guard_outcome(script, class_name, attribute, str(before_import))
+    _assert_guard(outcome, _STRING_DESCRIPTORS.get((class_name, attribute), _string_converts()),
+                  _STRING_DESCRIPTORS_OF_THE_DROP_IN.get((class_name, attribute)))
 
 
 
@@ -7092,6 +7460,38 @@ def test_date_public_fallback_converts_as_pyspark(protocol, monkeypatch, reason)
         assert actual == expected
 
 
+_DATE_RELATION = {"fields": [{"metadata": {"source": "native"}, "name": "day", "nullable": True,
+                              "type": "date"}], "type": "struct"}
+
+
+def _date_converts(name="day", nullable=True, metadata=None):
+    from datetime import date
+
+    return _guard_converts([(name, "date32[day]", nullable, [date(2020, 1, 1)] * 10000,
+                             metadata)], _DATE_RELATION)
+
+
+# PySpark's outcomes (see `_INTEGER_DESCRIPTORS`), and the drop-in's where they differ.
+_DATE_DESCRIPTORS = {
+    ("StructType", "fields"): _guard_raises(*_no_setter("StructType")),
+    ("StructType", "names"): _guard_raises(*_no_setter("StructType")),
+    ("StructType", "__iter__"): _guard_raises(*_rename_mismatch("day")),
+    ("StructField", "name"): _guard_raises(*_no_setter("StructField")),
+    ("StructField", "dataType"): _guard_raises(*_no_setter("StructField")),
+    ("StructField", "nullable"): _guard_raises(*_no_setter("StructField")),
+    ("StructField", "metadata"): _guard_raises(*_no_setter("StructField")),
+}
+_DATE_DESCRIPTORS_OF_THE_DROP_IN = {
+    ("StructType", "fields"): _guard_converts([], _DATE_RELATION),
+    ("StructType", "names"): _date_converts(name="changed"),
+    ("StructField", "name"): _guard_raises(*_rename_mismatch("day")),
+    ("StructField", "dataType"): _date_converts(),
+    ("StructField", "nullable"): _date_converts(nullable=False),
+    ("StructField", "metadata"): _date_converts(
+        metadata={"SPARK::metadata::json": '{"changed": true}'}),
+}
+
+
 @pytest.mark.parametrize("class_name,attribute", [
     ("StructType", "names"), ("StructType", "fields"), ("StructType", "__iter__"),
     ("StructField", "name"), ("StructField", "dataType"), ("StructField", "nullable"),
@@ -7101,16 +7501,13 @@ def test_date_public_fallback_converts_as_pyspark(protocol, monkeypatch, reason)
     ("StructField", "__class__"), ("DateType", "__class__"),
 ])
 @pytest.mark.parametrize("before_import", [False, True])
-def test_date_custom_schema_descriptors_keep_native_row_path(
-    protocol, class_name, attribute, before_import
-):
-    import sys
-
+def test_date_custom_schema_descriptors_take_pyspark_conversion(class_name, attribute,
+                                                                before_import):
+    # A patch of a class declines the fast path of object dates: the frame converts with
+    # PySpark's conversion, which reads the patch (see `_integer_guard_process`).
     script = r'''
 import sys
-import tempfile
 from datetime import date
-from pathlib import Path
 import pandas as pd
 from pyspark.sql import types as T
 
@@ -7134,32 +7531,14 @@ else:
     replacement = property(lambda self: value)
 setattr(cls, attribute, replacement)
 import importlib.util
-spec = importlib.util.spec_from_file_location("date_schema_capture", sys.argv[4])
+spec = importlib.util.spec_from_file_location("date_schema_capture", sys.argv[-1])
 capture = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = capture
 spec.loader.exec_module(capture)
-_arrow_input_service, protocol = capture._arrow_input_service, capture.protocol
-with tempfile.TemporaryDirectory(prefix="arrow-handoff-") as directory:
-    class Factory:
-        def mktemp(self, name):
-            path = Path(directory) / name
-            path.mkdir()
-            return path
-    messages = protocol.__wrapped__(Factory())
-with _arrow_input_service(messages) as (spark, state):
-    # Sends the plan as `_to_table` does: toArrow converts the schema to Arrow first,
-    # with the classes that this script patches.
-    spark.createDataFrame(frame, schema)._to_table()
-    assert state["config_requests"] == [
-        ("get", capture._CREATE_DATAFRAME_KEYS)], state["config_requests"]
-    table = state["input_tables"][0]
-    assert table.schema.names == ["day"], table.schema
-    assert table.column(0).to_pylist() == [date(2020, 1, 1)] * 10000
 '''
-    result = subprocess.run([sys.executable, "-c", script, class_name, attribute,
-                             str(before_import), __file__],
-                            capture_output=True, text=True, timeout=30)
-    assert result.returncode == 0, result.stdout + result.stderr
+    outcome = _guard_outcome(script, class_name, attribute, str(before_import))
+    _assert_guard(outcome, _DATE_DESCRIPTORS.get((class_name, attribute), _date_converts()),
+                  _DATE_DESCRIPTORS_OF_THE_DROP_IN.get((class_name, attribute)))
 
 
 @pytest.mark.parametrize("dtype_mode", ["equal", "class_spoof", "exact_numpy"])
@@ -7277,9 +7656,9 @@ def test_date_rebound_dataframe_alias_keeps_subclass_off_the_fast_path(monkeypat
 
 
 def _date_alias_guard_process(mode, argument):
-    """Keep mutations of converter aliases isolated from other tests."""
-    import sys
-
+    """The outcome of `createDataFrame` of a frame of object dates under `renamed date` of a name
+    rebound by `mode` and `argument`, in a process of its own, which the session converts with
+    PySpark's conversion (see `_integer_guard_process`)."""
     if mode == "captured_alias":
         import pyspark.sql._arrow_input as importer
         if not hasattr(importer, "to_arrow_schema"):
@@ -7288,17 +7667,13 @@ def _date_alias_guard_process(mode, argument):
     script = r'''
 import importlib
 import importlib.util
-import json
 import sys
-import tempfile
 from datetime import date
-from pathlib import Path
 import pandas as pd
-import pyarrow as pa
 from pyspark.sql import types as T
 from pyspark import _pyspark as native
 
-spec = importlib.util.spec_from_file_location("date_alias_capture", sys.argv[3])
+spec = importlib.util.spec_from_file_location("date_alias_capture", sys.argv[-1])
 capture = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = capture
 spec.loader.exec_module(capture)
@@ -7344,31 +7719,53 @@ elif mode == "importer_function":
     setattr(importer, argument, None)
 else:
     raise AssertionError(mode)
-with tempfile.TemporaryDirectory(prefix="arrow-handoff-") as directory:
-    class Factory:
-        def mktemp(self, name):
-            path = Path(directory) / name
-            path.mkdir()
-            return path
-    messages = capture.protocol.__wrapped__(Factory())
-with capture._arrow_input_service(messages) as (spark, state):
-    # Sends the plan as `_to_table` does: toArrow converts the schema to Arrow first,
-    # with the classes that this script patches.
-    spark.createDataFrame(frame, schema)._to_table()
-    assert state["config_requests"] == [
-        ("get", capture._CREATE_DATAFRAME_KEYS)], state["config_requests"]
-    table = state["input_tables"][0]
-    assert table.schema.names == ["renamed"], table.schema
-    assert table.column(0).type == pa.date32()
-    assert table.column(0).to_pylist() == values
-    assert table.schema.field(0).nullable
-    assert table.schema.field(0).metadata is None
-    relation_schema = json.loads(state["relations"][0].local_relation.schema)
-    assert relation_schema["fields"][0]["metadata"] == {"source": "native"}
 '''
-    result = subprocess.run([sys.executable, "-c", script, mode, argument, __file__],
-                            capture_output=True, text=True, timeout=30)
-    assert result.returncode == 0, result.stdout + result.stderr
+    return _guard_outcome(script, mode, argument)
+
+
+def _date_alias_converts():
+    from datetime import date
+
+    return _guard_converts(
+        [("renamed", "date32[day]", True, [date.min, date.max, date(1969, 12, 31), None] * 2500)],
+        {"fields": [{"metadata": {"source": "native"}, "name": "renamed", "nullable": True,
+                     "type": "date"}], "type": "struct"})
+
+
+def _date_conversion_error(error, arrow_type):
+    return _guard_raises(*_conversion_error(error, "object", "original", arrow_type))
+
+
+# PySpark's outcomes of a name rebound to `DateType` (to `BooleanType` of `DateType`):
+# `to_arrow_type` takes the date field of the first class that it matches, whose conversion of
+# the column of dates PyArrow fails, or the converter of the series reads it as a decimal or a
+# struct; a `StructField` of `DateType` is called with the arguments of a field. A public
+# `StructType` rebound before the session is the one that PySpark's createDataFrame checks its
+# schema against (see `_ATOMIC_ALIAS_OF_PYSPARK`), which raises `NOT_EXPECTED_TYPE` of a struct
+# before any setting is read.
+_DATE_REBOUND = {
+    "BooleanType": _date_conversion_error("PySparkValueError", "bool"),
+    "ByteType": _date_conversion_error("PySparkValueError", "int8"),
+    "ShortType": _date_conversion_error("PySparkValueError", "int16"),
+    "IntegerType": _date_conversion_error("PySparkValueError", "int32"),
+    "LongType": _date_conversion_error("PySparkValueError", "int64"),
+    "FloatType": _date_conversion_error("PySparkValueError", "float"),
+    "DoubleType": _date_conversion_error("PySparkValueError", "double"),
+    "DecimalType": _guard_raises("builtins.AttributeError",
+                                 "'DateType' object has no attribute 'precision'"),
+    "StringType": _date_conversion_error("PySparkTypeError", "string"),
+    "BinaryType": _date_conversion_error("PySparkTypeError", "binary"),
+    "DateType": _guard_raises(*_unsupported_type("DateType()")),
+    "StructField": _guard_raises(
+        "builtins.TypeError",
+        "DataTypeSingleton.__call__() got an unexpected keyword argument 'nullable'"),
+    "StructType": _guard_raises("builtins.AttributeError",
+                                "'DateType' object has no attribute 'names'"),
+}
+_NOT_EXPECTED_STRUCT = _guard_raises(
+    "pyspark.errors.exceptions.base.PySparkTypeError",
+    "[NOT_EXPECTED_TYPE] Argument `schema` should be list, None or StructType, got StructType.",
+    configs=False)
 
 
 @pytest.mark.parametrize("class_name", [
@@ -7376,28 +7773,40 @@ with capture._arrow_input_service(messages) as (spark, state):
     "DoubleType", "DecimalType", "StringType", "BinaryType", "DateType", "StructField", "StructType",
 ])
 @pytest.mark.parametrize("mode", ["public_alias", "converter_alias", "captured_alias"])
-def test_date_rebound_converter_aliases_keep_native_row_path(class_name, mode):
-    _date_alias_guard_process(mode, class_name)
+def test_date_rebound_converter_aliases_take_pyspark_conversion(class_name, mode):
+    outcome = _date_alias_guard_process(mode, class_name)
+    if mode == "captured_alias":
+        _assert_guard(outcome, _date_alias_converts())
+    elif mode == "public_alias" and class_name == "StructType":
+        _assert_guard(outcome, _NOT_EXPECTED_STRUCT)
+    else:
+        _assert_guard(outcome, _DATE_REBOUND[class_name])
 
 
 @pytest.mark.parametrize("replacement", ["none", "date"])
-def test_date_rebound_importer_schema_alias_keeps_native_row_path(replacement):
-    _date_alias_guard_process("importer_alias", replacement)
+def test_date_rebound_importer_schema_alias_takes_pyspark_conversion(replacement):
+    _assert_guard(_date_alias_guard_process("importer_alias", replacement), _date_alias_converts())
 
 
 @pytest.mark.parametrize("scope", ["public_before", "public_after", "importer"])
 @pytest.mark.parametrize("replacement", ["none", "date"])
-def test_date_rebound_atomic_alias_keeps_native_row_path(scope, replacement):
-    _date_alias_guard_process("atomic_alias", f"{scope}:{replacement}")
+def test_date_rebound_atomic_alias_takes_pyspark_conversion(scope, replacement):
+    # See `test_integer_rebound_atomic_alias_takes_pyspark_conversion`.
+    outcome = _date_alias_guard_process("atomic_alias", f"{scope}:{replacement}")
+    if scope != "importer" and replacement == "none":
+        _assert_guard(outcome, _ATOMIC_ALIAS_OF_PYSPARK)
+    else:
+        _assert_guard(outcome, _date_alias_converts())
 
 
-def test_date_deleted_importer_atomic_alias_keeps_native_row_path():
-    _date_alias_guard_process("atomic_alias", "importer:missing")
+def test_date_deleted_importer_atomic_alias_takes_pyspark_conversion():
+    _assert_guard(_date_alias_guard_process("atomic_alias", "importer:missing"),
+                  _date_alias_converts())
 
 
 @pytest.mark.parametrize("name", ["from_arrow_schema", "to_arrow_schema"])
-def test_date_present_invalid_importer_function_keeps_native_row_path(name):
-    _date_alias_guard_process("importer_function", name)
+def test_date_present_invalid_importer_function_takes_pyspark_conversion(name):
+    _assert_guard(_date_alias_guard_process("importer_function", name), _date_alias_converts())
 
 
 def test_date_warm_importer_without_global_converter_aliases(protocol, monkeypatch):
