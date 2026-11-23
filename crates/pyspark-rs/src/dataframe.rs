@@ -2958,7 +2958,19 @@ impl PyDataFrame {
         // it, which that conversion (`pyspark_types_to_proto_types`) does not take either.
         let mut unsendable = None;
         if !schema.is_instance_of::<pyo3::types::PyString>() {
-            match crate::types::py_to_data_type(schema) {
+            // A struct whose fields hold an element that is not a `StructField`, at any level,
+            // whose `schema` is the object, as PySpark's: the type that PySpark's
+            // `pyspark_types_to_proto_types` reads of its elements, which this call reads, and
+            // each request raises the error of that (see `crate::types::py_to_proto_data_type`),
+            // where PySpark's `ToSchema` reads it when it builds (see the known differences,
+            // SPARK-62228).
+            let (lowered, maybe_foreign) =
+                crate::types::lower_noting_subclasses(schema, crate::types::MetadataOf::Strict);
+            let lowered = match crate::types::foreign_of_lowering(schema, maybe_foreign)? {
+                true => crate::types::py_to_proto_data_type(schema),
+                false => lowered,
+            };
+            match lowered {
                 Ok(dt) => match crate::types::unsendable_field_repr(schema, &dt)? {
                     None => {
                         let reader = crate::udf_command::data_type_pickler(schema.clone().unbind());
@@ -7642,7 +7654,17 @@ pub(crate) fn map_udf_of(
         .call_method1("_check_return_type", (checked, eval_type_id))?;
     let return_type = match return_type {
         Some(return_type) => return_type,
-        None => crate::types::py_to_data_type(schema)?,
+        // A struct whose fields hold an element that is not a `StructField`, which the build
+        // reads as PySpark's does (see `crate::types::py_to_proto_data_type`), stands as the types
+        // that stand for its elements until then.
+        None => {
+            let (lowered, maybe_foreign) =
+                crate::types::lower_noting_subclasses(schema, crate::types::MetadataOf::Strict);
+            match crate::types::foreign_of_lowering(schema, maybe_foreign)? {
+                true => crate::types::lenient_type(schema)?,
+                false => lowered?,
+            }
+        }
     };
     // The worker reads the pickled type as a `DataType`, so a DDL string is pickled as the
     // type it parses to, as the reference client pickles the type of `_parse_ddl`.

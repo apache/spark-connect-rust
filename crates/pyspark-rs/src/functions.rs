@@ -61,7 +61,19 @@ fn pyfunc_make_udf(
         // and pickles them when it builds the plan: a type that the build refuses fails the
         // requests and not this call. The type of the payload stands for it until then.
         Err(_) => PythonUDFPayload::pickled_at_build(
-            crate::types::py_to_data_type(return_type)?,
+            // A struct whose fields hold an element that is not a `StructField`, which the build
+            // reads as PySpark's does (see `crate::types::py_to_proto_data_type`), stands as the
+            // types that stand for its elements until then.
+            {
+                let (lowered, maybe_foreign) = crate::types::lower_noting_subclasses(
+                    return_type,
+                    crate::types::MetadataOf::Strict,
+                );
+                match crate::types::foreign_of_lowering(return_type, maybe_foreign)? {
+                    true => crate::types::lenient_type(return_type)?,
+                    false => lowered?,
+                }
+            },
             eval_type,
             crate::udf_command::udf_pickler(
                 pyo3::types::PyTuple::new(return_type.py(), [command, return_type])?

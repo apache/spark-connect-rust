@@ -121,6 +121,28 @@ difference is intentional or tracked for a fix.
 
 ## `DataFrame`
 
+- **A cast and `DataFrame.to` of a struct read it at the call** (tracked: SPARK-62228). PySpark's
+  `CastExpression` and `ToSchema` keep the type object and read it when the Column renders and when
+  the plan is built. The drop-in reads it at the call and keeps what it read, of a plain struct and
+  of a struct whose fields hold an element that is not a `StructField`. So an edit of the struct
+  in place after the call is not seen: of a cast of `[a long]` and then a field appended, PySpark's
+  repr is `CAST(NULL AS STRUCT<A:BIGINT,B:BIGINT>)` and the drop-in's `STRUCT<A:BIGINT>`, and of an
+  element `'x'` appended or popped after it, PySpark's repr and collect raise or work as the struct
+  is then, where the drop-in's are as it was at the call. The errors of the reads are of their
+  time too: of an element whose reads raise an error that a plan does not hold, such as a
+  `KeyError`, PySpark's cast returns a Column whose repr raises it (`KeyError: 'boom
+  simpleString'`), and the drop-in's call raises it (`KeyError: 'boom name'`); and of
+  `to().collect()` of such an element, PySpark raises that `KeyError`, where the drop-in raises
+  `UNSUPPORTED_OPERATION` of the type.
+
+- **The metadata of an element of the fields of a struct that is not a JSON object** (tracked:
+  SPARK-62230). PySpark's plans send `json.dumps` of the `metadata` of each element, and the server
+  raises `UnknownException: (java.lang.ClassCastException) class org.json4s.JArray cannot be cast
+  to class org.json4s.JObject` of a list such as `[1, 2]`; the drop-in's core metadata is a JSON
+  object, so its plans raise `ValueError: the metadata of a field is not a JSON object: [1, 2]` on
+  the client, and `toNullable()` raises the `TypeError` of the `StructField` that it makes of it.
+
+
 - **A session time zone that the server takes and Python's zone databases do not, and a timestamp
   out of Python's range in the session time zone** (intentional; the values are those of any other
   zone and timestamp). The zones are such as `Z`, `PST`, `GMT+08:00` or `UTC+01:00`. PySpark's
@@ -137,19 +159,6 @@ difference is intentional or tracked for a fix.
   `timestamp_seconds(-62135596800)`, 0001-01-01 00:00:00 UTC, with the session time zone
   `America/Los_Angeles` on a host in UTC, this client returns `datetime(1, 1, 1, 0, 0)`. Both raise
   the `OverflowError` of a wall clock out of the range in the local time zone.
-- **A `StructType` whose `fields` hold an element that is not a `StructField`** (inherent; the uses
-  of the native type lower its fields into the core's struct type, which holds fields only).
-  PySpark's `StructType` methods read the attributes of each element of `fields` as they go, so of a
-  list that a str or another object was appended to in place, each use raises the `AttributeError`
-  of the first attribute that it reads (`simpleString`, `jsonValue`, `name`, `dataType`,
-  `needConversion`), or uses an object that has them, and its pickles and copies keep the element.
-  This client lowers the list into the core's struct type at each use that needs the type (its JSON,
-  simple string and tree string, a lookup by name, `add`, its pickles and copies, and the plans of
-  `to`, `cast`, `from_json` and a reader's schema), and raises `TypeError: StructType fields must be
-  StructField objects` there, and an assignment of `fields` of such an element, and a `StructField`,
-  an `ArrayType` or a `MapType` made of a struct of one, raise it at once. `createDataFrame` under
-  such a struct is PySpark's, of any data, and so are the cached `names` of a list of `StructField`s
-  changed in place and their uses (see `docs/compatibility.md`).
 - **A schema that PySpark does not convert is requested once** (intentional; the errors are the
   same). PySpark's `_schema` keeps the schema that it requested only once its conversion of it
   succeeded, so of a schema that it does not convert, such as of a user-defined type whose

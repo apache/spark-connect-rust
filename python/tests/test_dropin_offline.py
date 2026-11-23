@@ -4842,6 +4842,264 @@ def test_empty_dataframe_takes_a_schema_as_pysparks(mock_connect):
         assert not relation.HasField("data") and json.loads(relation.schema) == schema.jsonValue()
 
 
+class _ForeignDuck:
+    """An element of the fields of a struct that is not a StructField and reads as one."""
+
+    name, dataType, nullable, metadata = "d", T.LongType(), True, {}
+
+    def jsonValue(self):
+        return {"name": "d", "type": "long", "nullable": True, "metadata": {}}
+
+    def simpleString(self):
+        return "d:bigint"
+
+    def needConversion(self):
+        return False
+
+    def __repr__(self):
+        return "Duck()"
+
+
+def _foreign_struct(*elements):
+    """A struct of a long field `a`, whose fields list has `elements` appended in place."""
+    s = T.StructType([T.StructField("a", T.LongType())])
+    s.fields.extend(elements or ("x",))
+    return s
+
+
+def _no_attribute(name):
+    return pytest.raises(AttributeError, match=f"^'str' object has no attribute '{name}'$")
+
+
+def test_the_methods_of_a_struct_of_a_foreign_element_read_it_as_pyspark():
+    # As PySpark's StructType, whose methods read each element of `fields` as they go, of the
+    # element as it is: of one that is not a StructField (a str appended in place), the
+    # AttributeError of the first attribute that a use reads, and of one that has them (a
+    # duck-typed field), the use of them.
+    from pyspark.errors import PySparkKeyError
+
+    long_a = {"name": "a", "type": "long", "nullable": True, "metadata": {}}
+    duck = _ForeignDuck().jsonValue()
+    for use, name in [(lambda s: s.json(), "jsonValue"), (lambda s: s.jsonValue(), "jsonValue"),
+                      (lambda s: s.simpleString(), "simpleString"),
+                      (lambda s: s.treeString(), "_build_formatted_string"),
+                      (lambda s: s["x"], "name"), (lambda s: s[0:2], "name"),
+                      (lambda s: s.toNullable(), "name")]:
+        with _no_attribute(name):
+            use(_foreign_struct())
+    ducked = _foreign_struct(_ForeignDuck())
+    assert json.loads(ducked.json()) == {"type": "struct", "fields": [long_a, duck]}
+    assert ducked.simpleString() == "struct<a:bigint,d:bigint>"
+    assert ducked["a"] == T.StructField("a", T.LongType())
+    with pytest.raises(PySparkKeyError):
+        ducked["x"]
+    with pytest.raises(AssertionError, match="^fields should be a list of StructField$"):
+        ducked[0:2]
+    assert ducked.toNullable() == T.StructType(
+        [T.StructField("a", T.LongType()), T.StructField("d", T.LongType())])
+    # `add` appends the field and its name before it reads the `needConversion` of each element.
+    s = _foreign_struct()
+    with _no_attribute("needConversion"):
+        s.add("b", T.LongType())
+    assert s.fields[1:] == ["x", T.StructField("b", T.LongType())] and s.names == ["a", "b"]
+    assert _foreign_struct(_ForeignDuck()).add("b", T.LongType()).names == ["a", "b"]
+    # Of a simple string of an element that is not a str, PySpark's join raises, after every
+    # element gave its own.
+    class IntText(_ForeignDuck):
+        def simpleString(self):
+            return 5
+
+    with pytest.raises(TypeError, match="^sequence item 1: expected str instance, int found$"):
+        _foreign_struct(IntText()).simpleString()
+
+
+def test_pickles_copies_and_the_types_of_a_struct_of_a_foreign_element_keep_it():
+    # Pickles and copies keep the element, as PySpark's pickle of the `__dict__`; an assignment of
+    # `fields` takes any element; and the types made of such a struct keep it, and their JSON and
+    # simple string are of it.
+    import copy
+    import pickle
+
+    for element in ("x", 5, _ForeignDuck()):
+        s = _foreign_struct(element)
+        if not isinstance(element, _ForeignDuck):  # A class of the test, which pickle does not reach.
+            fields = pickle.loads(pickle.dumps(s)).fields
+            assert fields == [T.StructField("a", T.LongType()), element]
+        assert copy.copy(s).fields is s.fields
+        assert repr(copy.deepcopy(s).fields[1]) == repr(element)
+        s.fields = [element]
+        assert s.fields == [element] and s.names == ["a"]
+    for wrap in (lambda i: T.StructField("s", i), lambda i: T.ArrayType(i),
+                 lambda i: T.MapType(T.StringType(), i)):
+        with _no_attribute("jsonValue"):
+            wrap(_foreign_struct()).json()
+        with _no_attribute("simpleString"):
+            wrap(_foreign_struct()).simpleString()
+        assert "struct<a:bigint,d:bigint>" in wrap(_foreign_struct(_ForeignDuck())).simpleString()
+    with _no_attribute("_build_formatted_string"):
+        T.StructType([T.StructField("s", T.ArrayType(_foreign_struct()))]).treeString()
+
+
+def _sent_root(service, df):
+    """The root relation of the plan that `df.collect()` sends."""
+    import pyspark.sql.connect.proto as pb2
+
+    df.collect()
+    return pb2.ExecutePlanRequest.FromString(service.execute_requests[-1]).plan.root
+
+
+def test_the_plans_of_a_struct_of_a_foreign_element_read_it_as_pyspark(mock_connect):
+    # The plans of `to`, a cast, `from_json`, a reader's schema and a UDF send the type that
+    # PySpark's `pyspark_types_to_proto_types` reads of the elements, of each its name, type,
+    # nullable and metadata, and raise its errors before any request. A cast and `to` read the
+    # struct at the call (SPARK-62228); a UDF reads it when the request builds the plan, so an
+    # element appended after the call is sent, as PySpark's.
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+    before = len(service.execute_requests)
+    assert spark.range(1).to(_foreign_struct()).schema.fields[1] == "x"
+    with _no_attribute("name"):
+        spark.range(1).to(_foreign_struct()).collect()
+    cast = F.lit(None).cast(_foreign_struct())
+    with _no_attribute("simpleString"):
+        repr(cast)
+    with _no_attribute("name"):
+        spark.range(1).select(cast).collect()
+    with _no_attribute("jsonValue"):
+        F.from_json(F.lit("{}"), _foreign_struct())
+    with _no_attribute("jsonValue"):
+        spark.read.schema(_foreign_struct())
+    assert len(service.execute_requests) == before
+    fields = _sent_root(service, spark.range(1).to(_foreign_struct(_ForeignDuck()))).to_schema
+    assert [(f.name, f.data_type.HasField("long")) for f in fields.schema.struct.fields] == [
+        ("a", True), ("d", True)]
+    cast = F.lit(None).cast(_foreign_struct(_ForeignDuck()))
+    assert repr(cast) == "Column<'CAST(NULL AS STRUCT<A:BIGINT,D:BIGINT>)'>"
+    root = _sent_root(service, spark.range(1).select(cast))
+    assert [f.name for f in root.project.expressions[0].cast.type.struct.fields] == ["a", "d"]
+    inner = _foreign_struct(_ForeignDuck())
+    udf = F.udf(lambda x: None, T.StructType([T.StructField("s", inner)]))
+    column = udf("id")
+    inner.fields.append(T.StructField("e", T.LongType()))
+    output = _sent_root(service, spark.range(1).select(column)).project.expressions[0]
+    struct = output.common_inline_user_defined_function.python_udf.output_type.struct
+    assert [f.name for f in struct.fields[0].data_type.struct.fields] == ["a", "d", "e"]
+
+
+def test_the_proto_of_a_struct_of_a_foreign_element_raises_pysparks_errors(mock_connect):
+    # Of a sibling field of a type that PySpark's conversion has no proto of, its
+    # UNSUPPORTED_OPERATION on the client, and of an element of a `dataType` that is not a data
+    # type, the cast raises PySpark's PySparkValueError of it at each request.
+    from pyspark.errors import PySparkValueError
+    from pyspark.sql import functions as F
+    from pyspark.sql.connect.types import pyspark_types_to_proto_types
+
+    spark, service = mock_connect
+    for sibling in (T.AtomicType(), T.NumericType(), T.StructField("r", T.LongType())):
+        s = T.StructType([T.StructField("q", sibling)])
+        s.fields.append(_ForeignDuck())
+        with pytest.raises(PySparkValueError, match="UNSUPPORTED_OPERATION"):
+            pyspark_types_to_proto_types(s)
+        before = len(service.execute_requests)
+        with pytest.raises(PySparkValueError, match="UNSUPPORTED_OPERATION"):
+            spark.range(1).select(F.lit(None).cast(s)).collect()
+        assert len(service.execute_requests) == before
+
+    class IntType(_ForeignDuck):
+        dataType = "int"
+
+    with pytest.raises(PySparkValueError, match="UNSUPPORTED_OPERATION.*data type int"):
+        spark.range(1).select(F.lit(None).cast(_foreign_struct(IntType()))).collect()
+
+
+def test_a_struct_of_a_foreign_element_is_read_without_a_borrow_as_pyspark():
+    # The elements are read without a borrow of the struct, of an iterator of its list, as
+    # PySpark's: an element whose reads edit the struct sees the struct as it is then.
+    from pyspark.errors import PySparkKeyError
+
+    holder = {}
+
+    class Editing(_ForeignDuck):
+        def __init__(self, edit):
+            self._edit, self._done = edit, False
+
+        def _once(self):
+            if not self._done:
+                self._done = True
+                self._edit(holder["struct"])
+
+        @property
+        def name(self):
+            self._once()
+            return "m"
+
+        def simpleString(self):
+            self._once()
+            return "m:bigint"
+
+        def needConversion(self):
+            self._once()
+            return False
+
+    def struct_of(edit):
+        holder["struct"] = s = _foreign_struct(Editing(edit))
+        return s
+
+    def assign(s):
+        s.fields = [T.StructField("z", T.LongType())]
+
+    with pytest.raises(PySparkKeyError):
+        struct_of(assign)["zz"]
+    s = struct_of(lambda s: s.fields.append(T.StructField("p", T.LongType())))
+    assert s.simpleString() == "struct<a:bigint,m:bigint,p:bigint>"
+    # `add` appends `b`, and the `needConversion` of the element then adds `q`, as PySpark's.
+    s = struct_of(lambda s: s.add("q", T.LongType()))
+    s.add("b", T.LongType())
+    assert s.names == ["a", "b", "q"]
+
+
+def test_transform_with_state_and_a_udt_of_a_foreign_struct_read_it_as_pyspark(mock_connect):
+    # transformWithState and transformWithStateInPandas read the output schema when the request
+    # builds the plan, as PySpark's: of a str element, the call returns a DataFrame and its
+    # request raises the AttributeError of its `name`. The sqlType() of a user-defined type that
+    # holds a struct of a duck-typed element is written of the element.
+    from pyspark.sql.connect.types import pyspark_types_to_proto_types
+    from pyspark.sql.streaming.stateful_processor import StatefulProcessor
+
+    spark, service = mock_connect
+
+    class Processor(StatefulProcessor):
+        def init(self, handle):
+            pass
+
+        def handleInputRows(self, key, rows, timerValues):
+            yield from ()
+
+        def close(self):
+            pass
+
+    grouped = spark.range(1).groupBy("id")
+    for api in ("transformWithStateInPandas", "transformWithState"):
+        df = getattr(grouped, api)(Processor(), _foreign_struct(), "Update", "None")
+        with _no_attribute("name"):
+            df.collect()
+
+    class DuckUDT(T.UserDefinedType):
+        @classmethod
+        def sqlType(cls):
+            return _foreign_struct(_ForeignDuck())
+
+        @classmethod
+        def module(cls):
+            return "__main__"
+
+    s = T.StructType([T.StructField("u", DuckUDT())])
+    assert json.loads(s.json())["fields"][0]["type"]["sqlType"]["fields"][1]["name"] == "d"
+    udt = pyspark_types_to_proto_types(s).struct.fields[0].data_type.udt
+    assert [f.name for f in udt.sql_type.struct.fields] == ["a", "d"]
+
+
 def test_create_dataframe_of_a_struct_of_a_foreign_field_is_pysparks(mock_connect):
     # As PySpark's createDataFrame of no rows, of any data that it takes the length of, which
     # sends the json() of the schema object: of a struct whose fields hold an element that is not
@@ -30231,6 +30489,53 @@ def test_a_type_that_holds_itself_raises_pysparks_recursion_error():
             "to collect": raised, "createDataFrame": raised, "from_json": raised, "udf": raised,
         },
         "requests": True,
+    }
+
+
+def test_a_struct_whose_fields_hold_the_struct_itself_raises_recursion_error_as_pyspark():
+    # A struct whose fields hold the struct itself, an element that is not a StructField, has
+    # levels that no walk ends: as PySpark's, its JSON, the JSON of an array and a field of it,
+    # from_json and createDataFrame raise RecursionError, of the bound of the walks of the type
+    # objects (SPARK-62224), where the walks of the foreign elements recursed until the memory of
+    # their stacks ran out; its proto raises the AttributeError of the element's `name` first.
+    # Under a cap, in a process of its own.
+    out = _run_dropin_script(
+        """
+        import json, resource, sys
+        resource.setrlimit(resource.RLIMIT_AS, (4 << 30, 4 << 30))
+        sys.path.insert(0, "tests")
+        from _mock_connect_server import mock_connect_session
+        from pyspark.sql import functions as F, types as T
+
+        def outcome(call):
+            try:
+                call()
+                return "ok"
+            except Exception as error:
+                return type(error).__name__
+
+        holder = T.StructType([T.StructField("a", T.LongType())])
+        holder.fields.append(holder)
+        out = {
+            "json": outcome(holder.json),
+            "jsonValue": outcome(holder.jsonValue),
+            "array json": outcome(lambda: T.ArrayType(holder).json()),
+            "field json": outcome(lambda: T.StructField("s", holder).json()),
+            "from_json": outcome(lambda: F.from_json(F.col("v"), holder)),
+            "proto": outcome(lambda: __import__(
+                "pyspark.sql.connect.types", fromlist=["x"]).pyspark_types_to_proto_types(holder)),
+        }
+        with mock_connect_session() as (spark, service):
+            out["createDataFrame"] = outcome(lambda: spark.createDataFrame([], holder))
+        print(json.dumps(out))
+        """
+    )
+    assert out == {
+        **dict.fromkeys(
+            ["json", "jsonValue", "array json", "field json", "from_json", "createDataFrame"],
+            "RecursionError",
+        ),
+        "proto": "AttributeError",
     }
 
 

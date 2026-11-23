@@ -519,6 +519,85 @@ def _struct_type_from_json(json_value):
     return StructType([_struct_field_from_json(f) for f in json_value["fields"]])
 
 
+def _foreign_tree_string(struct, max_depth):
+    """``StructType.treeString(maxDepth)`` of ``struct``, whose fields hold an element that is not
+    a ``StructField`` at some level, as PySpark's: of the ``_build_formatted_string`` of each
+    element, in turn, so of the ``AttributeError`` of an element of none, of ``max_depth`` as the
+    native method takes it."""
+    from pyspark.sql.utils import StringConcat
+
+    string_concat = StringConcat()
+    string_concat.append("root\n")
+    for field in struct.fields:
+        _build_formatted_string(field, " |", string_concat, max_depth)
+    return string_concat.toString()
+
+
+def _build_formatted_string(obj, prefix, string_concat, max_depth):
+    """PySpark's ``_build_formatted_string`` of ``obj``: of the native field, struct, array and
+    map as PySpark's are, of a Python subclass of its own method, and of another object, as
+    PySpark calls it, of its own method or of its ``AttributeError``."""
+    from pyspark.sql.utils import escape_meta_characters
+
+    if getattr(type(obj), "_build_formatted_string", None) is not None:
+        obj._build_formatted_string(prefix, string_concat, max_depth)
+    elif isinstance(obj, StructField):
+        if max_depth > 0:
+            string_concat.append(
+                f"{prefix}-- {escape_meta_characters(obj.name)}: "
+                + f"{_jvm_type_name(obj.dataType)} "
+                + f"(nullable = {str(obj.nullable).lower()})\n"
+            )
+            _data_type_build_formatted_string(
+                obj.dataType, f"{prefix}    |", string_concat, max_depth
+            )
+    elif isinstance(obj, StructType):
+        for field in obj.fields:
+            _build_formatted_string(field, prefix, string_concat, max_depth)
+    elif isinstance(obj, ArrayType):
+        if max_depth > 0:
+            string_concat.append(
+                f"{prefix}-- element: {_jvm_type_name(obj.elementType)} "
+                + f"(containsNull = {str(obj.containsNull).lower()})\n"
+            )
+            _data_type_build_formatted_string(
+                obj.elementType, f"{prefix}    |", string_concat, max_depth
+            )
+    elif isinstance(obj, MapType):
+        if max_depth > 0:
+            string_concat.append(f"{prefix}-- key: {_jvm_type_name(obj.keyType)}\n")
+            _data_type_build_formatted_string(
+                obj.keyType, f"{prefix}    |", string_concat, max_depth
+            )
+            string_concat.append(
+                f"{prefix}-- value: {_jvm_type_name(obj.valueType)} "
+                + f"(valueContainsNull = {str(obj.valueContainsNull).lower()})\n"
+            )
+            _data_type_build_formatted_string(
+                obj.valueType, f"{prefix}    |", string_concat, max_depth
+            )
+    else:
+        obj._build_formatted_string(prefix, string_concat, max_depth)
+
+
+def _data_type_build_formatted_string(data_type, prefix, string_concat, max_depth):
+    """PySpark's ``DataType._data_type_build_formatted_string``: of the levels of an array, a
+    struct and a map, one level deeper."""
+    if isinstance(data_type, (ArrayType, StructType, MapType)):
+        _build_formatted_string(data_type, prefix, string_concat, max_depth - 1)
+
+
+def _jvm_type_name(data_type):
+    """PySpark's ``DataType._get_jvm_type_name``: the simple string of a type of parameters, and
+    else the type name."""
+    if isinstance(
+        data_type,
+        (DecimalType, CharType, VarcharType, DayTimeIntervalType, YearMonthIntervalType, TimeType),
+    ):
+        return data_type.simpleString()
+    return data_type.typeName()
+
+
 def _assert_valid_type_for_collation(fieldPath, fieldType, collationMap):
     """As PySpark's: a collation is of a string."""
     if fieldPath in collationMap and fieldType != "string":
