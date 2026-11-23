@@ -16,15 +16,18 @@
 #
 
 # The streaming queries of Spark Connect, as PySpark Connect's
-# ``pyspark.sql.connect.streaming.query``: the native StreamingQuery and StreamingQueryManager of the
-# Rust core, and the Python side of the listener bus of the client, which decodes and dispatches the
-# events of the listeners.
+# ``pyspark.sql.connect.streaming.query``: the native StreamingQuery, StreamingQueryManager and
+# StreamingQueryListenerBus, whose states are their ``__dict__``s, as PySpark's, and the Python side
+# of the listener bus of the client, which decodes and dispatches the events of the listeners.
 
 import json
 import warnings
 
 from pyspark._pyspark import (
     StreamingQuery as _StreamingQuery,
+)
+from pyspark._pyspark import (
+    StreamingQueryListenerBus as _StreamingQueryListenerBus,
 )
 from pyspark._pyspark import (
     StreamingQueryManager as _StreamingQueryManager,
@@ -94,11 +97,11 @@ def _dispatch_listener_event(listener, event):
         warnings.warn(f"Listener {str(listener)} threw an exception\n{e}")
 
 
-# ``spark.streams`` returns the native (Rust) StreamingQueryManager, which owns the
-# client-side listener bus: addListener / removeListener / close are implemented in the
-# Rust core (so Rust clients get the listener feature too). Re-export it as the public
-# class.
+# ``spark.streams`` returns the native StreamingQueryManager of the session, whose ``_sqlb`` is its
+# StreamingQueryListenerBus, which registers its listeners in the native listener bus of the session,
+# of the Rust core (so Rust clients get the listener feature too).
 StreamingQueryManager = _StreamingQueryManager
+StreamingQueryListenerBus = _StreamingQueryListenerBus
 
 
 __all__ = ["StreamingQuery", "StreamingQueryManager"]

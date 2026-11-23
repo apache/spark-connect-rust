@@ -256,6 +256,7 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyTrigger>()?;
     m.add_class::<PyStreamingQuery>()?;
     m.add_class::<PyStreamingQueryManager>()?;
+    m.add_class::<streaming::PyStreamingQueryListenerBus>()?;
     m.add_class::<PyListenerEventStream>()?;
 
     // Data source and profiler classes
@@ -379,7 +380,21 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_submodule(&functions_module)?;
 
     bare_type_names(m)?;
+    for cls in classes_of_no_docstring(m.py()) {
+        cls.setattr(pyo3::intern!(m.py(), "__doc__"), m.py().None())?;
+    }
     Ok(())
+}
+
+/// The native classes of PySpark Connect's classes of no docstring that carry the text signature
+/// of PySpark's `__init__` (`text_signature` of their `#[new]`), whose `__doc__` CPython makes the
+/// empty str of the rest of that text: None, as PySpark's. Their `__text_signature__`, of the text,
+/// stays, which `inspect.signature` reads.
+fn classes_of_no_docstring(py: Python<'_>) -> [Bound<'_, pyo3::types::PyType>; 2] {
+    [
+        py.get_type::<PyStreamingQuery>(),
+        py.get_type::<PyStreamingQueryManager>(),
+    ]
 }
 
 /// Give each class of the module, and each native class outside it (`classes_outside_module`),
@@ -406,18 +421,17 @@ fn bare_type_names(m: &Bound<'_, PyModule>) -> PyResult<()> {
 /// The native classes that are not attributes of the module, of objects that it makes: the
 /// expression of a Column (`Column._expr`), the attribute of a param of an ML class, the exit
 /// hook and the active session of the sessions (`SparkSession._active_session`), the handle of a
-/// session that a client holds, the listener bus of a stream manager, the objects of the
+/// session that a client holds, the objects of the
 /// options and the kept arguments that the copies of a reader, a writer or a builder share, and
 /// the objects that the garbage collector sees of the parts of plans and expressions and of the
 /// states of the writers (see `gc`).
-fn classes_outside_module(py: Python<'_>) -> [Bound<'_, pyo3::types::PyType>; 9] {
+fn classes_outside_module(py: Python<'_>) -> [Bound<'_, pyo3::types::PyType>; 8] {
     [
         py.get_type::<column::PyColumnExpression>(),
         py.get_type::<ml::params_api::PyParamAttribute>(),
         py.get_type::<session::PyExitHook>(),
         py.get_type::<session::PyActiveSession>(),
         py.get_type::<session::PyWeakSession>(),
-        py.get_type::<streaming::PyStreamingQueryListenerBus>(),
         py.get_type::<options::PySharedObjects>(),
         py.get_type::<gc::SharedPart>(),
         py.get_type::<dataframe::WriterParts>(),

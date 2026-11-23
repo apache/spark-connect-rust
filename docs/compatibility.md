@@ -2869,8 +2869,8 @@ pysparkfuncs.col.__doc__`), which the test compares with those of `pyspark-clien
   time: `DataFrame.rdd`, which PySpark defines when not `is_remote_only()`, so that type checkers
   of `pyspark-client` see it too, and neither client has it; and the classes of PySpark Connect
   that the drop-in implements natively in another way, `OptionUtils`, the base of its readers and
-  writers, and the `StreamingQueryListenerBus` of its `StreamingQueryManager` (`TYPE_ONLY` of the
-  test lists them with their reasons). `pyspark.sql.types` has `DataTypeSingleton`, the metaclass
+  writers (`TYPE_ONLY` of the test lists them with their reasons). `pyspark.sql.types` has
+  `DataTypeSingleton`, the metaclass
   of the singleton types of the stubs, at run time too, of which the native classes are not. The
   `SparkContext`, `RDD` and the other names of classic PySpark that PySpark's `pyspark` module
   imports of `pyspark.core` when not `is_remote_only()`, which `pyspark-client` does not ship,
@@ -3441,11 +3441,11 @@ object of it. PySpark's session object closes its client when it is freed, and t
 nothing for a closed client. The drop-in drops such a session, closes its client, and closes the
 connection of the process to its server once no session uses it, which the sessions of
 `newSession()` and `cloneSession()` share, as PySpark's channels share their subchannels, but a
-session of a token, whose connection is its own. Once its `catalog` is read, the session object
-of either client is in a reference cycle with its catalog, which holds it as its `_sparkSession`,
-and which only the garbage collector frees, so that until a collection its exit still cleans its
-ML cache, as PySpark's. PySpark's is so once its `streams` is read too, of whose cycle the
-drop-in's session has none: it is freed at once, as PySpark's is by a collection.
+session of a token, whose connection is its own. Once its `catalog` or its `streams` is read, the
+session object of either client is in a reference cycle with its catalog, which holds it as its
+`_sparkSession`, or with its `StreamingQueryManager`, which holds it as its `_session`, and which
+only the garbage collector frees, so that until a collection its exit still cleans its ML cache, as
+PySpark's.
 A client that no session object owns, of `SparkConnectClient(...)` or of its `newSession()` or
 `clone()`, lives until the exit, as PySpark's `atexit` registration keeps it, so its ML cache
 is cleaned at exit unless it is closed, even when the program dropped it.
@@ -3923,9 +3923,11 @@ only, of which the drop-in's native readers and writers are not: their MRO is th
 
 PySpark's classes are plain Python classes, which a user subclasses. So are these of the drop-in:
 the DataFrame, `Observation`, and the `SparkSession`, `Catalog`, `TableValuedFunction`,
-`DataSourceRegistration`, `RuntimeConf`, `DataFrameReader` and `DataStreamReader` of
-`pyspark.sql.connect`, which construct of their PySpark arguments (`SparkSession(connection=...)`,
-`Catalog(spark)`, `RuntimeConf(spark.client)`, `DataFrameReader(spark)`), also a subclass of an
+`DataSourceRegistration`, `RuntimeConf`, `StreamingQuery`, `StreamingQueryManager`,
+`StreamingQueryListenerBus`, `DataFrameReader` and `DataStreamReader` of `pyspark.sql.connect`,
+which construct of their PySpark arguments (`SparkSession(connection=...)`, `Catalog(spark)`,
+`RuntimeConf(spark.client)`, `StreamingQuery(spark, id, runId)`, `DataFrameReader(spark)`), also a
+subclass of an
 `__init__` of its own, and whose setters, copies and pickles are of the subclass (but those of a
 session, which are the active session of its ID, as PySpark's); `SparkSession.Hook`,
 `StorageLevel` and `PythonEvalType`; and the data types, from `StringType` and `DecimalType` to
@@ -3951,6 +3953,28 @@ them otherwise. A catalog and the table-valued functions of a client of another 
 `TypeError`, and the DataFrames that they make are of the session of the client, where PySpark's
 call the methods of the client and make DataFrames of the object (see
 `dev/parity/known-differences.md`).
+
+So do the streaming queries, `spark.streams` and its listener bus, of PySpark's state: a
+`StreamingQuery` of its `_session`, `_query_id`, `_run_id` and `_name`, which `id`, `runId` and
+`name` give back and its methods read at each request, as `_session.client`; the
+`StreamingQueryManager` of its `_session` and its `_sqlb`, the `StreamingQueryListenerBus(self)` of
+its `__init__`, to which `addListener` and `removeListener` add and remove the listeners, as
+`self._sqlb.append(listener)` and `self._sqlb.remove(listener)`; and the bus, of its `_sqm`, its
+`_listener_bus` list, its `_execution_thread` and its `_lock`. The listeners of the bus are the
+entries of `_listener_bus`, in its order, which `append` and `remove` change as PySpark's do (of the
+first entry that is the listener or equal to it), and to which the events are posted, of
+`post_to_all`, as the list is then: so a listener that a user puts on the list gets the events too,
+and one of two entries gets each event twice. The bus subscribes the session to the events of the
+server with the first listener of the native listener bus of the session, and ends the
+subscription with its last, whose thread posts the events: `_execution_thread` stays None, and the
+`_lock` is not held while the listeners are called, so that a listener may add or remove listeners
+of its callbacks, where PySpark's waits for ever. The end of the events, of a failure, of the end of
+the stream of the server, or of a stop of the session or a close of its client, takes the listeners
+off the list, as PySpark's handler clears it when its events fail. The copies and the pickles of
+these are those of their `__dict__`, as PySpark's: a shallow copy shares the state, and a plain
+pickle of `spark.streams`, its bus or a query fails with the `AttributeError` of the creator of the
+session of its `_session`, and a deep copy and cloudpickle of the manager or its bus with the
+`TypeError` of its lock.
 
 The `__init__` of a session or a reader gives it its session, as PySpark's `__init__` sets it: the
 session of a new client, of `SparkSession(connection, userId=None, hook_factories=None)`, and the
@@ -3985,8 +4009,6 @@ does not have them, so a subclass would have no `__init__` to call:
   `__dict__`: lists of the `_expr` of Columns, whose `repr` is that of PySpark's expressions (`[a]`,
   `[a ASC NULLS FIRST]`), made at each read, and the `WindowFrame` of `pyspark.sql.connect.window`,
   or None.
-- `StreamingQueryManager` and `StreamingQuery` take a session and the IDs of a query, of the
-  listener bus and the queries of the Rust core.
 
 A `copy.copy` or `copy.deepcopy` of a DataFrame requests its schema as PySpark's does, one request
 for the copy, and one more for the DataFrame in a deep copy when it has no schema yet, so a stopped
@@ -4023,14 +4045,13 @@ the cached schema of their input in PySpark copy that of `to` too: `alias`, `fil
 `repartitionById` and `coalesce`, `distinct` and `dropDuplicates`, `sample`, `randomSplit` and
 `observe`, as do the set operations of equal ones.
 
-The other objects of a session above, a streaming query and the Connect builder,
+The other objects of a session above and the Connect builder,
 `pyspark.sql.connect.session.SparkSession.builder`, keep the
 attributes that are set on them through copies and pickles, as PySpark's copy and pickle their
 `__dict__`: a shallow copy shares them, and a deep copy, a pickle and cloudpickle copy them, where
-they copy the object at all. Where PySpark's fail, the drop-in's fail with the same errors, such as
-the `AttributeError` of the creator of the session of a plain pickle of `spark.streams`, and the
-`TypeError` of its lock of a deep copy and of cloudpickle. Their `__dict__` holds only those
-attributes, where PySpark's holds the state of the object too, as the `_options` of a builder. A
+they copy the object at all, and where PySpark's fail, the drop-in's fail with the same errors.
+Their `__dict__` holds only those attributes, where PySpark's holds the state of the object too, as
+the `_options` of a builder. A
 shallow copy of the builder of `pyspark.sql.connect.session.SparkSession` shares its options and
 its hook factories all the same, as PySpark's copy shares its `_options` dict and its
 `_hook_factories` list: a `remote`, a `config` or a `_registerHook` of either one is seen by both,

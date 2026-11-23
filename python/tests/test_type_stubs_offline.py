@@ -76,10 +76,6 @@ TYPE_ONLY = {
     ),
     "pyspark.sql.types.T": "a type variable of PySpark's annotations of the module",
     "pyspark.sql.types.U": "a type variable of PySpark's annotations of the module",
-    "pyspark.sql.connect.streaming.query.StreamingQueryListenerBus": (
-        "PySpark Connect's listener bus, which types the private _sqlb of its "
-        "StreamingQueryManager; the drop-in's bus is in Rust"
-    ),
 }
 
 # The public members of the drop-in's classes that their stubs do not declare, with the reason,

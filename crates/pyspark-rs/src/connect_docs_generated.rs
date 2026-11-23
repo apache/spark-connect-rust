@@ -5135,6 +5135,32 @@ macro_rules! connect_doc {
     receive listener events and invoke correct listener call backs.
     "#
     };
+    (StreamingQueryListenerBus . append) => {
+        r#"
+        Append a listener to the local listener bus. When the added listener is
+        the first listener, request the server to create the server side listener
+        and start a thread to handle query events.
+        "#
+    };
+    (StreamingQueryListenerBus . remove) => {
+        r#"
+        Remove the listener from the local listener bus.
+
+        When the listener is not presented in the listener bus, do nothing.
+
+        When the removed listener is the last listener, ask the server to remove
+        the server side listener.
+        As a result, the listener handling thread created before
+        will return after processing remaining listener events. This function blocks until
+        all events are processed.
+        "#
+    };
+    (StreamingQueryListenerBus . post_to_all) => {
+        r#"
+        Post listener events to all active listeners, note that if one listener throws,
+        it should not affect other listeners.
+        "#
+    };
     (DataStreamReader . format) => {
         r#"Specifies the input data source format.
 
