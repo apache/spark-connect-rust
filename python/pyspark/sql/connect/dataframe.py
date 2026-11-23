@@ -73,10 +73,9 @@ def _reduce_dataframe(
     not build is pickled of ``build_error``, the description of its error, which the unpickle
     raises. So a plain pickle fails at the first function that it does not pickle, such as a
     lambda, and else at the session, of a local function, as PySpark's pickle fails at its plan
-    and then at its session. The last of the arguments is whether the unpickle requests the
-    schema, which ``_state_reduce._PlanOfDataFrame`` replaces; the one before it, of holes, the
-    function that fills them on a Python worker of the server (``_column_reduce.fill_holes``), so
-    that only the pickle of a DataFrame of holes carries its code."""
+    and then at its session. The last of the arguments, of holes, is the function that fills them
+    on a Python worker of the server (``_column_reduce.fill_holes``), so that only the pickle of a
+    DataFrame of holes carries its code."""
     return _column_reduce.dataframe_of, (
         list(holes or []),
         session,
@@ -86,5 +85,4 @@ def _reduce_dataframe(
         cached_schema,
         build_error,
         _column_reduce.fill_holes if holes else None,
-        True,
     )

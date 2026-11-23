@@ -11,6 +11,7 @@ import collections
 import contextlib
 import datetime
 import decimal
+import importlib.util
 import io
 import json
 import os
@@ -14096,8 +14097,8 @@ def test_the_holes_of_pickled_udfs_are_filled_on_a_python_worker_as_pyspark(mock
     _, args = df.__reduce__()
     holes, relation = args[0], args[2]
     assert [kind for _, kind, _ in holes] == ["udtf", "datatype"]
-    # The function that fills the holes, before whether the unpickle requests the schema.
-    assert args[-2] is fill_holes and args[-1] is True
+    # The function that fills the holes, the last of the arguments.
+    assert args[-1] is fill_holes
     plan = sent_plan(relation, holes=holes, fill=fill_holes).plan(None)
     assert plan.to_schema.schema == pyspark_types_to_proto_types(schema)
     udtf = plan.to_schema.input.with_relations.root.common_inline_user_defined_table_function
@@ -16742,9 +16743,9 @@ def test_cycles_through_the_shallow_copies_of_a_writer_are_collected_as_pyspark(
 
 
 def test_a_dataframe_of_the_plan_of_another_does_not_keep_it_as_pyspark(mock_connect):
-    # As PySpark's DataFrame(df._plan, session), copy.copy(df) and its stream writer, which hold
-    # the plan object of `df` and not `df`: `df` is freed at its last reference, its attributes
-    # with it, while they live, and they send its plan.
+    # As PySpark's DataFrame(df._plan, session) and copy.copy(df), which hold the plan object of
+    # `df` and not `df`: `df` is freed at its last reference, its attributes with it, while they
+    # live, and they send its plan.
     import copy
     import gc
     import weakref
@@ -16757,7 +16758,6 @@ def test_a_dataframe_of_the_plan_of_another_does_not_keep_it_as_pyspark(mock_con
         "DataFrame(df._plan, session)": lambda df: DataFrame(df._plan, spark),
         "copy.copy": copy.copy,
         "a deep copy of nothing to copy": copy.deepcopy,
-        "writeStream": lambda df: df.writeStream,
     }
     gc.disable()
     try:
@@ -16768,15 +16768,40 @@ def test_a_dataframe_of_the_plan_of_another_does_not_keep_it_as_pyspark(mock_con
             freed = weakref.ref(df.attribute)
             del df
             assert freed() is None, name
-            if name != "writeStream":
-                assert made._plan.plan(spark.client).HasField("extension"), name
+            assert made._plan.plan(spark.client).HasField("extension"), name
             del made
-        # A DataFrame that keeps its stream writer is freed at its last reference too.
+    finally:
+        gc.enable()
+
+
+@pytest.mark.xfail(
+    importlib.util.find_spec("pyspark._pyspark") is not None,
+    strict=True,
+    reason="SPARK-62218: the plan object of `df._plan` holds `df`, where PySpark's does not",
+)
+def test_a_stream_writer_does_not_keep_its_dataframe_as_pyspark(mock_connect):
+    # As PySpark's stream writer, which holds the plan object of `df` and not `df`: `df` is freed at
+    # its last reference, its attributes with it, while the writer lives, and a DataFrame that keeps
+    # its stream writer is freed at its last reference too. The drop-in's stream writer is
+    # PySpark's, of the plan object that `df._plan` gives, which holds `df` until SPARK-62218.
+    import gc
+    import weakref
+
+    spark, _ = mock_connect
+    gc.disable()
+    try:
+        df = spark.range(3)
+        df.attribute = type("Attribute", (), {})()
+        writer = df.writeStream
+        freed = weakref.ref(df.attribute)
+        del df
+        kept = freed() is None
+        del writer
         df = spark.range(3)
         df.back = df.writeStream
         freed = weakref.ref(df.back)
         del df
-        assert freed() is None
+        assert kept and freed() is None
     finally:
         gc.enable()
 
@@ -17338,10 +17363,9 @@ def test_stream_writers_keep_the_pickles_of_their_functions_as_pyspark(mock_conn
     writer = stream.writeStream.format("memory").queryName("q").foreachBatch(sink)
     sink.state = "after"
     for copied in (writer, copy.copy(writer), copy.deepcopy(writer)):
-        state = copied.__reduce__()[1][-1]
-        (kind, command, python_ver), = state
-        assert kind == "foreachBatch" and python_ver == "{}.{}".format(*sys.version_info[:2])
-        assert pickle.loads(command).state == "at the call"
+        function = copied._write_proto.foreach_batch.python_function
+        assert function.python_ver == "{}.{}".format(*sys.version_info[:2])
+        assert pickle.loads(function.command).state == "at the call"
 
 
 def test_freed_instances_given_attributes_keep_no_memory_as_pyspark(mock_connect):
@@ -46036,13 +46060,10 @@ def test_worker_reconstructors_rebuild_the_readers_writers_and_streams_as_pyspar
     writer = df.write.format("parquet").mode("overwrite").option("k", "v").partitionBy("id")
     stream_reader = spark.readStream.format("rate").option("b", "2").name("rate_src")
     stream_writer = df.writeStream.format("memory").outputMode("append").queryName("q")
-    # Each reduce of a native object gives a reconstructor of its state, not the drop-in's
-    # `_of_state` by name; the readers and the writers, PySpark's classes, pickle as PySpark's
-    # plain objects.
+    # The readers and the writers, PySpark's classes, pickle as PySpark's plain objects.
     import copyreg
 
-    assert stream_writer.__reduce__()[0].__name__ == "creator"
-    for obj in (reader, writer, stream_reader):
+    for obj in (reader, writer, stream_reader, stream_writer):
         assert obj.__reduce_ex__(2)[0] is copyreg.__newobj__
     # The modules of the DataFrame of a writer's callback, which its pickle holds as PySpark's
     # does, and of its client, which the worker's PySpark has.
@@ -46066,39 +46087,51 @@ def test_worker_reconstructors_rebuild_the_readers_writers_and_streams_as_pyspar
     assert (rebuilt._format, rebuilt._options) == ("rate", {"b": "2"})
     rebuilt = cloudpickle.loads(cloudpickle.dumps(stream_writer))
     assert type(rebuilt).__name__ == "DataStreamWriter"
+    sent = rebuilt._write_proto
+    assert (sent.format, sent.output_mode, sent.query_name) == ("memory", "append", "q")
 
 
 def test_worker_reconstructors_replay_every_setting_as_pyspark(mock_connect, monkeypatch):
     # As the test above, for the settings that it does not set: with pyspark._pyspark hidden, the
-    # reconstructor of each object replays its buckets, its sorting, its clustering, the table
-    # settings of a V2 writer, the schema of a stream reader, and the partitioning and the trigger
-    # of a stream writer, so that the rebuilt object has the same state. A bucket count that the
-    # proto refuses fails the write of the rebuilt writer, as PySpark's. A Column of the state,
-    # such as a V2 writer's partitioning, is rebuilt by PySpark's own Column classes, which only a
-    # worker has: the e2e tests of foreachBatch cover it. The pickles of the functions of
-    # foreachBatch and foreach, which a stream writer keeps as PySpark's does, are set in the
-    # WriteStreamOperationStart of PySpark's writer, where its foreachBatch and foreach set them.
+    # pickle of each writer, stream reader and stream writer, PySpark's classes, rebuilds an object
+    # of the same state, of its buckets, its sorting, its clustering, the table settings of a V2
+    # writer, the schema of a stream reader, and the partitioning, the trigger and the pickles of
+    # the functions of foreachBatch and foreach of a stream writer, which its
+    # WriteStreamOperationStart keeps, as PySpark's does. A bucket count that the proto refuses
+    # fails the write of the rebuilt writer, as PySpark's. A Column of the state, such as a V2
+    # writer's partitioning, is rebuilt by PySpark's own Column classes, which only a worker has:
+    # the e2e tests of foreachBatch cover it.
     import sys
-    import types
 
     import cloudpickle
     import pyspark
     from pyspark.sql import Column
-    from pyspark.sql.connect import _state_reduce
-    from pyspark.sql.connect import proto as pb2
     from pyspark.sql.connect.session import SparkSession
 
+    # The entries of the state that are of the DataFrame, the plan or the session that it starts
+    # with.
+    started_with = {"_df", "_spark", "_session", "_client", "_child", "_callback"}
+
     def comparable(value):
-        # The state, without the DataFrame or session that it starts with, and with each Column
-        # and function as its text and name, which a copy keeps.
+        # The state, without what it starts with, and with each Column and function as its text and
+        # name, each message as its bytes, and each other plain object, such as a write operation,
+        # as its own state.
         if isinstance(value, Column):
             return str(value)
+        if hasattr(value, "SerializeToString"):
+            return value.SerializeToString(deterministic=True)
         if callable(value):
             return value.__name__
         if isinstance(value, (list, tuple)):
             return [comparable(item) for item in value]
         if isinstance(value, dict):
             return {key: comparable(item) for key, item in value.items()}
+        if hasattr(value, "__dict__"):
+            return {
+                key: comparable(item)
+                for key, item in vars(value).items()
+                if key not in started_with
+            }
         return value
 
     def on_batch(batch_df, batch_id):
@@ -46116,10 +46149,9 @@ def test_worker_reconstructors_replay_every_setting_as_pyspark(mock_connect, mon
         spark.readStream.format("rate").schema("id LONG"),
         df.writeStream.partitionBy("id").trigger(processingTime="1 second"),
         df.writeStream.clusterBy("id").trigger(once=True),
+        df.writeStream.foreachBatch(on_batch).foreach(on_row),
     ]
-    states = [comparable(obj.__reduce__()[1][1:]) for obj in objects]
-    commands = df.writeStream.foreachBatch(on_batch).foreach(on_row).__reduce__()[1][-1]
-    worker_writer = types.SimpleNamespace(_write_proto=pb2.WriteStreamOperationStart())
+    states = [comparable(obj) for obj in objects]
     refused = df.write.bucketBy(2**40, "id")
     builder = SparkSession.Builder().config("k", "v")
     builder._registerHook(lambda session: None)
@@ -46128,16 +46160,13 @@ def test_worker_reconstructors_replay_every_setting_as_pyspark(mock_connect, mon
     for obj, state in zip(objects, states):
         rebuilt = cloudpickle.loads(cloudpickle.dumps(obj))
         assert type(rebuilt) is type(obj)
-        assert comparable(rebuilt.__reduce__()[1][1:]) == state
+        assert comparable(rebuilt) == state
     with pytest.raises(ValueError):
         cloudpickle.loads(cloudpickle.dumps(refused)).save("p")
-    assert [kind for kind, _, _ in commands] == ["foreachBatch", "foreach"]
-    _state_reduce._worker_foreach_commands(worker_writer, commands)
-    sent = worker_writer._write_proto
+    sent = rebuilt._write_proto
     sinks = [sent.foreach_batch.python_function, sent.foreach_writer.python_function]
-    assert [(sink.command, sink.python_ver) for sink in sinks] == [
-        (command, python_ver) for _, command, python_ver in commands]
-    assert cloudpickle.loads(commands[0][1]).__name__ == "on_batch"
+    assert all(sink.command and sink.python_ver for sink in sinks)
+    assert cloudpickle.loads(sinks[0].command).__name__ == "on_batch"
     # The builder pickles as PySpark's, of its class and its __dict__, which the PySpark of a
     # worker loads as it is: of its options and its hooks.
     rebuilt = cloudpickle.loads(cloudpickle.dumps(builder))

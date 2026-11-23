@@ -13,7 +13,7 @@ use crate::interrupt::{interruptible, interruptible_of};
 use crate::options::DefaultedOption;
 use crate::row::{FieldConverters, NestedFieldNames};
 use crate::stat_arguments::proto_int;
-use crate::streaming::{proto_bool, ProtoBool, PyDataStreamWriter};
+use crate::streaming::{proto_bool, ProtoBool};
 use crate::types::PyDataType;
 
 // Python wrapper for a Spark DataFrame.
@@ -1316,10 +1316,9 @@ impl PyDataFrame {
     /// its columns, it requests the schema of the relation, whose error it raises, also that of
     /// its conversion (see `check_python_schema`), and keeps it (see `copy_schema`), and then the
     /// DataFrame has the cached schema of the pickled one, the objects that it is of, or none
-    /// when it had none, so that its `schema` requests it again then. Without
-    /// `request_schema`, of an object that PySpark pickles of the plan of the DataFrame, as a
-    /// DataStreamWriter, the schema is not requested. `holes` are those of the relation, of the
-    /// functions of its UDFs, which each request pickles (see `udf_command::sent_holes`).
+    /// when it had none, so that its `schema` requests it again then. `holes` are those of the
+    /// relation, of the functions of its UDFs, which each request pickles (see
+    /// `udf_command::sent_holes`).
     #[staticmethod]
     #[pyo3(signature = (
         session,
@@ -1327,7 +1326,6 @@ impl PyDataFrame {
         levels=1,
         support_repr_html=false,
         cached_schema=None,
-        request_schema=true,
         holes=None
     ))]
     #[allow(clippy::too_many_arguments)]
@@ -1338,7 +1336,6 @@ impl PyDataFrame {
         levels: usize,
         support_repr_html: bool,
         cached_schema: Option<&Bound<'_, PyAny>>,
-        request_schema: bool,
         holes: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
         let holes = crate::udf_command::sent_holes(holes)?;
@@ -1358,20 +1355,15 @@ impl PyDataFrame {
         })
         .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?
         .to_pyerr()?;
-        let requested = if request_schema {
-            // Of the plan of the unpickled DataFrame, which holds the functions of its holes, and
-            // the Observations of a live DataFrame of its plan ID.
-            let schema = crate::interrupt::interruptible_of_values(
-                py,
-                &dataframe.spark_session(),
-                dataframe.held_parts(),
-                || dataframe.schema(),
-            )?;
-            check_python_schema(py, &schema)?;
-            Some(schema)
-        } else {
-            None
-        };
+        // Of the plan of the unpickled DataFrame, which holds the functions of its holes, and the
+        // Observations of a live DataFrame of its plan ID.
+        let requested = crate::interrupt::interruptible_of_values(
+            py,
+            &dataframe.spark_session(),
+            dataframe.held_parts(),
+            || dataframe.schema(),
+        )?;
+        check_python_schema(py, &requested)?;
         let mut dataframe = PyDataFrame::new(dataframe.with_known_schema(known_schema));
         // The `StructType` of the state as the object that it is, as PySpark's `_cached_schema`,
         // which `columns`, `dtypes` and the methods that copy the cached schema read: of the
@@ -1379,9 +1371,7 @@ impl PyDataFrame {
         dataframe.schema_object = cached_schema
             .filter(|schema| schema.is_instance_of::<crate::types::PyStructType>())
             .map(|schema| schema.clone().unbind());
-        if let Some(requested) = requested {
-            dataframe.keep_copy_schema(requested);
-        }
+        dataframe.keep_copy_schema(requested);
         dataframe
             .support_repr_html
             .store(support_repr_html, std::sync::atomic::Ordering::SeqCst);
@@ -4051,13 +4041,24 @@ impl PyDataFrame {
         let _ = py;
     }
 
-    // The streaming writer interface (`df.writeStream`).
+    // The streaming writer interface (`df.writeStream`): PySpark Connect's
+    // `DataStreamWriter(self._plan, self._session)`.
     #[getter]
     #[pyo3(name = "writeStream")]
     #[doc = connect_doc!(DataFrame.writeStream)]
-    fn write_stream(slf: &Bound<'_, Self>) -> PyDataStreamWriter {
-        let writer = slf.borrow().dataframe.write_stream();
-        PyDataStreamWriter::new(writer)
+    fn write_stream<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        let py = slf.py();
+        static WRITER: pyo3::sync::PyOnceLock<Py<pyo3::types::PyType>> =
+            pyo3::sync::PyOnceLock::new();
+        let plan = slf.getattr(pyo3::intern!(py, "_plan"))?;
+        let session = slf.getattr(pyo3::intern!(py, "_session"))?;
+        WRITER
+            .import(
+                py,
+                "pyspark.sql.connect.streaming.readwriter",
+                "DataStreamWriter",
+            )?
+            .call1((plan, session))
     }
 
     // Null-handling functions (`df.na.drop()/fill()/replace()`): a new object at each access,
@@ -5601,17 +5602,6 @@ impl<T: Clone> WriterState<T> {
     /// A copy of the state, to run a request or a builder step on.
     pub(crate) fn get(&self) -> T {
         self.lock().clone()
-    }
-
-    pub(crate) fn set(&self, state: T) {
-        let replaced = {
-            let mut current = self.lock();
-            self.generation
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            std::mem::replace(&mut *current, state)
-        };
-        drop(replaced);
-        self.refresh_parts();
     }
 
     /// Replace the state by `f` of it, as the builder methods do (`f` only builds, no Python).
@@ -7265,7 +7255,8 @@ mod writer_state_tests {
             let (generation, copy) = (state.generation.load(Ordering::SeqCst), state.get());
             let stale = crate::gc::Parts::of(py, held(&copy));
             drop(copy);
-            state.set(Some(udf_of(object(py))));
+            let next = Some(udf_of(object(py)));
+            state.update(|_| next);
             assert_eq!(state.generation.load(Ordering::SeqCst), generation + 1);
             assert_eq!(state.parts.lock().unwrap().0, generation + 1);
             state.give_parts(generation, stale);

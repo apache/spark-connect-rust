@@ -1,39 +1,11 @@
-//! The options of the writers, the session builder and the catalog, as PySpark converts them, and
-//! those of the plans of the reads of PySpark's readers (see `reader_plans`).
-//!
-//! PySpark's writers leave an option of `None` out, and whatever the builder already holds under
-//! that key stays (**skip**): `OptionUtils._set_opts`, which the format methods (`csv`, `json`,
-//! ...) pass their keyword arguments to, and the `option` and `options` of the writers.
-//!
-//! Every other value goes through [`coerce_option_value`], as PySpark's `to_str` converts it.
+//! The options of the session builder and the catalog, as PySpark converts them, and those of the
+//! plans of the reads of PySpark's readers (see `reader_plans`).
 
 use std::collections::HashMap;
 
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyBytes, PyDict, PyString};
 use spark_connect_core::error::SparkError;
-
-/// Coerce a Python option value the way reference pyspark's `to_str` does:
-/// `None` -> `None` (the option is left unset, NOT the literal string "None"), a
-/// bool -> lowercase `"true"`/`"false"` (not Python's `"True"`/`"False"`), and
-/// everything else -> its `str()`. Used by every reader/writer/conf `option(s)`
-/// binding so option handling matches the reference client.
-pub(crate) fn coerce_option_value(v: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
-    if v.is_none() {
-        return Ok(None);
-    }
-    if let Ok(b) = v.cast::<PyBool>() {
-        return Ok(Some(if b.is_true() { "true" } else { "false" }.to_string()));
-    }
-    Ok(Some(str_text(v)?))
-}
-
-/// The `str()` of `v`, as the reference client sends it in a protobuf string field, which raises
-/// the `UnicodeEncodeError` of a str that UTF-8 cannot encode (a lone surrogate), as
-/// [`str_argument`], where a lossy conversion would send another text, such as another path.
-pub(crate) fn str_text(v: &Bound<'_, PyAny>) -> PyResult<String> {
-    str_argument(v.str()?.as_any())
-}
 
 /// The text of `v` that PySpark sets in a protobuf string field as it is, as protobuf's default
 /// (upb) backend converts it: a str as its UTF-8, and bytes decoded as UTF-8, with the error of
@@ -249,22 +221,6 @@ pub(crate) fn plan_entry(
         (Some(key), Some(value)) => Ok((key, value)),
         _ => Err(builtin_type_error()),
     })
-}
-
-/// The `**options` of a call as a map of strings, **skipping** those that are None.
-pub(crate) fn kwargs_skip_none(
-    options: Option<&Bound<'_, PyDict>>,
-) -> PyResult<HashMap<String, String>> {
-    check_keyword_keys(options)?;
-    let mut map = HashMap::new();
-    if let Some(options) = options {
-        for (key, value) in options.iter() {
-            if let Some(value) = coerce_option_value(&value)? {
-                map.insert(str_text(&key)?, value);
-            }
-        }
-    }
-    Ok(map)
 }
 
 /// The `**options` of `Catalog.createTable`, **skipping** those that are None. Unlike the

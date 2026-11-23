@@ -71,12 +71,10 @@ use dataframe::{
 };
 use datasource::PyDataSourceRegistration;
 use group::{PyCoGroupedData, PyGroupedData};
-pub(crate) use options::{coerce_option_value, str_argument};
+pub(crate) use options::str_argument;
 use session::{PyHook, PySparkSession, PySparkSessionBuilder};
 use stat::PyStatFunctions;
-use streaming::{
-    PyDataStreamWriter, PyListenerEventStream, PyStreamingQuery, PyStreamingQueryManager, PyTrigger,
-};
+use streaming::{PyListenerEventStream, PyStreamingQuery, PyStreamingQueryManager, PyTrigger};
 use types::{
     PyAnsiIntervalType, PyAnyTimeType, PyArrayType, PyAtomicType, PyBinaryType, PyBooleanType,
     PyByteType, PyCalendarIntervalType, PyCharType, PyDataType, PyDateType, PyDatetimeType,
@@ -253,11 +251,12 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(pipelines::pipeline_start_run, m)?)?;
 
     // Streaming classes
-    m.add_class::<PyDataStreamWriter>()?;
+    m.add_function(wrap_pyfunction!(streaming::post_query_started, m)?)?;
     m.add_class::<PyTrigger>()?;
     m.add_class::<PyStreamingQuery>()?;
     m.add_class::<PyStreamingQueryManager>()?;
     m.add_class::<streaming::PyStreamingQueryListenerBus>()?;
+    streaming::keep_native_post_to_all(m.py())?;
     m.add_class::<PyListenerEventStream>()?;
 
     // Data source and profiler classes

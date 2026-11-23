@@ -1961,6 +1961,16 @@ impl StreamingQueryManager {
         }
     }
 
+    /// Run `on_started`, which posts the synchronous started event of a query that a client of this
+    /// crate started itself, as the start of a query of [`DataStreamWriter`] posts it: a removal
+    /// from another thread waits for the delivery, as PySpark's bus holds its lock for it. Not a
+    /// stable API.
+    #[doc(hidden)]
+    pub fn post_started<R>(&self, on_started: impl FnOnce(&StreamingQueryManager) -> R) -> R {
+        let _dispatch = self.started_dispatch();
+        on_started(self)
+    }
+
     /// Post `event` to the client-side listeners of the session.
     pub(crate) fn post_to_all(&self, event: &StreamingQueryListenerEvent) {
         self.bus.post_to_all(event);

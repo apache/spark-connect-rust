@@ -269,8 +269,6 @@ EXTRAS = {
     # drop-in's does not, and of the triggers.
     "pyspark.sql.window": Extra("class FrameBound: ...\n"),
     "pyspark.sql.connect.streaming.readwriter": Extra(
-        "from pyspark.errors import PySparkAttributeError as PySparkAttributeError\n"
-        "from pyspark.errors import PySparkRuntimeError as PySparkRuntimeError\n"
         "class Trigger:\n"
         "    @staticmethod\n"
         "    def processingTime(interval: str) -> Trigger: ...\n"
@@ -314,7 +312,6 @@ UNRESOLVED_IMPORTS = {
     "pyspark.sql.connect.plan.ChunkedCachedLocalRelation": _CONNECT,
     "pyspark.sql.connect.plan.CommonInlineUserDefinedTableFunction": _CONNECT,
     "pyspark.sql.connect.plan.LocalRelation": _CONNECT,
-    "pyspark.sql.connect.plan.WriteStreamOperation": _CONNECT,
 }
 
 # The names of PySpark's modules, and members of their classes ("Class.member"), that the

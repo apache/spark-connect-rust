@@ -19,11 +19,14 @@
 
 import re
 from typing import overload, Callable, Dict, List, Optional, Union
-from pyspark.sql.connect.plan import LogicalPlan as LogicalPlan, WriteStreamOperation
+from pyspark.serializers import CloudPickleSerializer as CloudPickleSerializer
+from pyspark.sql.connect.plan import LogicalPlan as LogicalPlan, WriteStreamOperation as WriteStreamOperation
 from pyspark.sql.connect.readwriter import OptionUtils as OptionUtils, to_str as to_str
-from pyspark.sql.connect.streaming.query import StreamingQuery
-from pyspark.sql.types import Row, StructType as StructType
-from pyspark.errors import AnalysisException as AnalysisException, PySparkTypeError as PySparkTypeError, PySparkValueError as PySparkValueError
+from pyspark.sql.connect.streaming.query import StreamingQuery as StreamingQuery
+from pyspark.sql.streaming.listener import QueryStartedEvent as QueryStartedEvent
+from pyspark.sql.connect.utils import get_python_ver as get_python_ver
+from pyspark.sql.types import Row as Row, StructType as StructType
+from pyspark.errors import AnalysisException as AnalysisException, PySparkTypeError as PySparkTypeError, PySparkValueError as PySparkValueError, PySparkPicklingError as PySparkPicklingError
 from pyspark.sql.connect.session import SparkSession
 from pyspark.sql.connect._typing import OptionalPrimitiveType
 from pyspark.sql.connect.dataframe import DataFrame
@@ -1684,8 +1687,6 @@ class DataStreamWriter:
         """
 
 # Names of the drop-in's module that PySpark's does not have.
-from pyspark.errors import PySparkAttributeError as PySparkAttributeError
-from pyspark.errors import PySparkRuntimeError as PySparkRuntimeError
 class Trigger:
     @staticmethod
     def processingTime(interval: str) -> Trigger: ...

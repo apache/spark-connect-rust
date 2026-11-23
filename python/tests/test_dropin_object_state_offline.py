@@ -60,36 +60,6 @@ except ImportError:
 # and "Subclasses" of dev/parity/known-differences.md say: each change removes its own, and a test
 # of one of them that passes fails the run (strict).
 _DIFFERS_BY_CHANGE = {
-    "the stream writer": {
-        "vars": [
-            "DataStreamWriter",
-            "DataStreamWriter of its setters",
-        ],
-        "attributes": [
-            "DataStreamWriter",
-            "DataStreamWriter of its setters",
-        ],
-        "copies": [
-            "DataStreamWriter: copy",
-            "DataStreamWriter: deepcopy",
-            "DataStreamWriter: cloudpickle",
-            "DataStreamWriter of its setters: copy",
-            "DataStreamWriter of its setters: deepcopy",
-            "DataStreamWriter of its setters: cloudpickle",
-        ],
-        "construct": [
-            "pyspark.sql.connect.streaming.readwriter.DataStreamWriter",
-        ],
-        "uninit": [
-            "pyspark.sql.connect.streaming.readwriter.DataStreamWriter",
-        ],
-        "foreign": [
-            "pyspark.sql.connect.streaming.readwriter.DataStreamWriter",
-        ],
-        "specific": [
-            "test_the_message_of_a_stream_writer_is_the_message_of_its_operation",
-        ],
-    },
     "the merge writer and its clauses": {
         "vars": [
             "MergeIntoWriter",
@@ -193,6 +163,10 @@ _DIFFERS_BY_CHANGE = {
             "DataFrameWriter of its setters",
             "DataFrameWriterV2",
             "DataFrameWriterV2 of its setters",
+            # And the stream writer of `df.writeStream`, the `_child` of whose `_write_stream` is the
+            # `df._plan` of its making.
+            "DataStreamWriter",
+            "DataStreamWriter of its setters",
             "DataFrame",
             "DataFrame of schema and isStreaming",
             "DataFrame of select",
@@ -235,6 +209,7 @@ _DIFFERS_BY_CHANGE = {
             "test_the_private_state_of_a_dataframe_is_not_a_column",
             # Of `writer._write._child is df._plan`, as the cases above.
             "test_the_write_operation_of_a_writer_is_what_its_save_builds",
+            "test_the_message_of_a_stream_writer_is_the_message_of_its_operation",
         ],
     },
 }
@@ -691,6 +666,94 @@ def test_the_null_and_statistics_functions_call_the_methods_of_their_df_as_pyspa
     assert type(df.na.replace({1: 2})) is type(df)
     assert type(DataFrameNaFunctions(_Proxy(df)).drop()) is type(df)
     assert type(DataFrameStatFunctions(_Proxy(df)).crosstab("id", "id")) is type(df)
+
+
+@pytest.mark.parametrize("method", ["start", "toTable"])
+@pytest.mark.parametrize("change", ["none", "instance", "class", "subclass", "replaced"])
+def test_the_started_event_is_posted_to_the_post_to_all_of_the_bus(
+    objects, monkeypatch, method, change
+):
+    # As PySpark's DataStreamWriter, which posts the started event of the query that it starts to
+    # `self._session.streams._sqlb.post_to_all(start_event)`, as the attribute resolves then: the
+    # method of the session's bus, which calls the listeners of its list, here one put on the list
+    # itself; and else a patch of the method on the bus or on its class, the method of a subclass of
+    # the bus, or that of a bus of another class, which gets the decoded event, once. The listeners
+    # of the list get it if what is called posts it to them, as the original method or `super()`.
+    import json
+
+    from pyspark.sql.streaming.listener import StreamingQueryListener
+    from streaming_listener_cases import start_response
+
+    spark, service = objects.spark, objects.service
+    manager = spark.streams
+    original = manager._sqlb
+    posted, received = [], []
+
+    class Listener(StreamingQueryListener):
+        def onQueryStarted(self, event):
+            received.append(event)
+
+        def onQueryProgress(self, event):
+            pass
+
+        def onQueryIdle(self, event):
+            pass
+
+        def onQueryTerminated(self, event):
+            pass
+
+    class Bus(type(original)):
+        def post_to_all(self, event):
+            posted.append(event)
+            super().post_to_all(event)
+
+    class Recorder:
+        def post_to_all(self, event):
+            posted.append(event)
+
+    own = type(original).__dict__["post_to_all"]
+
+    def post_to_all(self, event):
+        posted.append(event)
+        own(self, event)
+
+    listener = Listener()
+    bus = Bus(manager) if change == "subclass" else original
+    bus._listener_bus.append(listener)
+    try:
+        if change == "instance":
+            original.post_to_all = posted.append
+        elif change == "class":
+            monkeypatch.setattr(type(original), "post_to_all", post_to_all)
+        elif change == "subclass":
+            manager._sqlb = bus
+        elif change == "replaced":
+            manager._sqlb = Recorder()
+        service.execute_payload = start_response(
+            json.dumps(
+                {
+                    "id": "00000000-0000-4000-8000-000000000001",
+                    "runId": "00000000-0000-4000-8000-000000000002",
+                    "name": "query",
+                    "timestamp": "started",
+                    "jobTags": ["tag"],
+                }
+            )
+        )
+        writer = objects.sdf.writeStream
+        query = getattr(writer, method)(*(["t"] if method == "toTable" else []))
+        assert query.id == "q"
+        called = [] if change == "none" else ["QueryStartedEvent"]
+        assert [type(event).__name__ for event in posted] == called
+        delivered = change in ("none", "class", "subclass")
+        assert [event.timestamp for event in received] == (["started"] if delivered else [])
+        if posted and received:
+            assert received[0] is posted[0]
+    finally:
+        if "post_to_all" in vars(original):
+            del original.post_to_all
+        bus._listener_bus.remove(listener)
+        manager._sqlb = original
 
 
 class _ConfigResult:
@@ -1990,20 +2053,955 @@ def test_the_writes_send_what_pysparks_writers_send(objects, case):
     assert _write_outcome(objects.service, call) == _WRITE_OUTCOMES[case]
 
 
-@pytest.mark.parametrize("kind", ["write", "writeTo"])
+@pytest.mark.parametrize("kind", ["write", "writeTo", "writeStream"])
 def test_a_writer_in_a_cycle_through_a_udf_is_collected(objects, kind):
-    # As PySpark's writer, a plain object of its DataFrame's plan (`_df`, and the `_child` of its
-    # `_write`) and of the callback of the DataFrame: a cycle of the writer, its DataFrame and a
-    # function of a UDF of the plan, which refers to the writer, is freed by a collection.
+    # As PySpark's writers, plain objects of their DataFrame's plan (the `_df` and the `_child` of
+    # the `_write` of a writer, and the callback of its DataFrame; the `_child` of the
+    # `_write_stream` of a stream writer): a cycle of the writer, its DataFrame and a function of a
+    # UDF of the plan, which refers to the writer, is freed by a collection.
     from pyspark.sql.functions import udf
 
     def f(x):
         return x
 
     df = objects.spark.range(1).select(udf(f, "long")("id"))
-    writer = df.write if kind == "write" else df.writeTo("t")
+    if kind == "write":
+        writer = df.write
+    elif kind == "writeTo":
+        writer = df.writeTo("t")
+    else:
+        writer = df.writeStream
     f.writer = writer
     freed = [weakref.ref(writer), weakref.ref(df), weakref.ref(f)]
     del df, writer, f
     gc.collect()
     assert [ref() for ref in freed] == [None, None, None]
+
+
+# The starts of the stream writer, as PySpark's DataStreamWriter and its WriteStreamOperation make
+# them, of PySpark 4.3.0: what the call raises, and else the start command that the server receives
+# of it and the query that it gives, of the start result of the server, without a started event.
+def _start_result():
+    from _mock_connect_server import message_field
+
+    # ExecutePlanResponse.write_stream_operation_start_result=8 of query_id=1 (id=1, run_id=2)
+    # and name=2.
+    return message_field(
+        8, message_field(1, message_field(1, "q") + message_field(2, "r")) + message_field(2, "n")
+    )
+
+
+def _sent_stream_write(service):
+    import sys
+
+    import pyspark.sql.connect.proto as pb2
+
+    request = pb2.ExecutePlanRequest.FromString(service.execute_requests[-1])
+    command = request.plan.command
+    kind = command.WhichOneof("command_type")
+    if kind != "write_stream_operation_start":
+        return {"kind": kind}
+    w = command.write_stream_operation_start
+    trigger = w.WhichOneof("trigger")
+    sink = w.WhichOneof("sink_destination")
+
+    def function(f):
+        python = f.python_function
+        return [
+            f.WhichOneof("function"),
+            bool(python.command),
+            python.python_ver == "{}.{}".format(*sys.version_info[:2]),
+        ]
+
+    return {
+        "kind": kind,
+        "input": w.HasField("input"),
+        "format": w.format,
+        "options": [list(item) for item in sorted(w.options.items())],
+        "partitioning": list(w.partitioning_column_names),
+        "clustering": list(w.clustering_column_names),
+        "trigger": [trigger, getattr(w, trigger)] if trigger else None,
+        "output_mode": w.output_mode,
+        "query_name": w.query_name,
+        "sink": [sink, getattr(w, sink)] if sink else None,
+        "foreach_writer": function(w.foreach_writer) if w.HasField("foreach_writer") else None,
+        "foreach_batch": function(w.foreach_batch) if w.HasField("foreach_batch") else None,
+    }
+
+
+class _Rows:
+    def process(self, row):
+        pass
+
+
+class _Opened:
+    def open(self, partition_id, epoch_id):
+        return True
+
+    def process(self, row):
+        pass
+
+    def close(self, error):
+        pass
+
+
+class _NoProcess:
+    def open(self, partition_id, epoch_id):
+        return True
+
+
+class _ProcessNotCallable:
+    process = 5
+
+
+def _stream_write_cases(sdf):
+    import threading
+
+    BAD = _BAD_STR
+    lock = threading.Lock()
+
+    def f(*args):
+        return None
+
+    def unpicklable(*args):
+        return lock
+
+    w = lambda: sdf.writeStream  # noqa: E731
+    return {
+        "start()": lambda: w().start(),
+        "start(p)": lambda: w().start("p"),
+        "start('')": lambda: w().start(""),
+        "start(5)": lambda: w().start(5),
+        "start(bad)": lambda: w().start(BAD),
+        "start(p, format=json, outputMode=append, partitionBy=a, queryName=q, k=1)": lambda: w().start(
+            "p", format="json", outputMode="append", partitionBy="a", queryName="q", k=1
+        ),
+        "start(k=None)": lambda: w().start(k=None),
+        "start(k=True)": lambda: w().start(k=True),
+        "start(k=bad)": lambda: w().start(k=BAD),
+        "start(**{1: v})": lambda: w().start(**{1: "v"}),
+        "start(queryName='')": lambda: w().start(queryName=""),
+        "start(partitionBy=[a, b])": lambda: w().start(partitionBy=["a", "b"]),
+        "toTable(t)": lambda: w().toTable("t"),
+        "toTable('')": lambda: w().toTable(""),
+        "toTable(5)": lambda: w().toTable(5),
+        "toTable(bad)": lambda: w().toTable(BAD),
+        "toTable(t, format=delta, outputMode=complete, partitionBy=[a, b], queryName=q, k=v)": lambda: w().toTable(
+            "t", format="delta", outputMode="complete", partitionBy=["a", "b"], queryName="q", k="v"
+        ),
+        "outputMode(append).start()": lambda: w().outputMode("append").start(),
+        "outputMode(b'append').start()": lambda: w().outputMode(b"append").start(),
+        "outputMode(5)": lambda: w().outputMode(5),
+        "outputMode(None)": lambda: w().outputMode(None),
+        "outputMode(bad)": lambda: w().outputMode(BAD),
+        "format(console).start()": lambda: w().format("console").start(),
+        "format(5)": lambda: w().format(5),
+        "format(None)": lambda: w().format(None),
+        "format(bad)": lambda: w().format(BAD),
+        "option(k, v).start()": lambda: w().option("k", "v").start(),
+        "option(k, None).start()": lambda: w().option("k", None).start(),
+        "option(k, True).start()": lambda: w().option("k", True).start(),
+        "option(k, 1.5).start()": lambda: w().option("k", 1.5).start(),
+        "option(5, v)": lambda: w().option(5, "v"),
+        "option(b'k', v).start()": lambda: w().option(b"k", "v").start(),
+        "option(bad, v)": lambda: w().option(BAD, "v"),
+        "option(k, bad)": lambda: w().option("k", BAD),
+        "option(k, b'v').start()": lambda: w().option("k", b"v").start(),
+        "options(a=1, b=None).start()": lambda: w().options(a=1, b=None).start(),
+        "options(**{1: v})": lambda: w().options(**{1: "v"}),
+        "partitionBy(a, b).start()": lambda: w().partitionBy("a", "b").start(),
+        "partitionBy([a, b]).start()": lambda: w().partitionBy(["a", "b"]).start(),
+        "partitionBy((a,)).start()": lambda: w().partitionBy(("a",)).start(),
+        "partitionBy(a).partitionBy(b).start()": lambda: w().partitionBy("a").partitionBy("b").start(),
+        "partitionBy().start()": lambda: w().partitionBy().start(),
+        "partitionBy(5)": lambda: w().partitionBy(5),
+        "partitionBy(a, 5)": lambda: w().partitionBy("a", 5),
+        "partitionBy(bad)": lambda: w().partitionBy(BAD),
+        "partitionBy([a], b)": lambda: w().partitionBy(["a"], "b"),
+        "clusterBy(a).start()": lambda: w().clusterBy("a").start(),
+        "clusterBy([a, b]).start()": lambda: w().clusterBy(["a", "b"]).start(),
+        "clusterBy(5)": lambda: w().clusterBy(5),
+        "queryName(q).start()": lambda: w().queryName("q").start(),
+        "queryName('')": lambda: w().queryName(""),
+        "queryName('  ')": lambda: w().queryName("  "),
+        "queryName(5)": lambda: w().queryName(5),
+        "queryName(None)": lambda: w().queryName(None),
+        "queryName(bad)": lambda: w().queryName(BAD),
+        "trigger()": lambda: w().trigger(),
+        "trigger(5)": lambda: w().trigger(5),
+        "trigger(processingTime=1 second).start()": lambda: w().trigger(processingTime="1 second").start(),
+        "trigger(processingTime=' 1 second ').start()": lambda: w().trigger(processingTime=" 1 second ").start(),
+        "trigger(processingTime='')": lambda: w().trigger(processingTime=""),
+        "trigger(processingTime=5)": lambda: w().trigger(processingTime=5),
+        "trigger(processingTime=bad)": lambda: w().trigger(processingTime=BAD),
+        "trigger(once=True).start()": lambda: w().trigger(once=True).start(),
+        "trigger(once=False)": lambda: w().trigger(once=False),
+        "trigger(once=1)": lambda: w().trigger(once=1),
+        "trigger(availableNow=True).start()": lambda: w().trigger(availableNow=True).start(),
+        "trigger(availableNow=False)": lambda: w().trigger(availableNow=False),
+        "trigger(continuous=1 second).start()": lambda: w().trigger(continuous="1 second").start(),
+        "trigger(continuous='')": lambda: w().trigger(continuous=""),
+        "trigger(realTime=5 seconds).start()": lambda: w().trigger(realTime="5 seconds").start(),
+        "trigger(realTime=5)": lambda: w().trigger(realTime=5),
+        "trigger(processingTime=1 s, once=True)": lambda: w().trigger(processingTime="1 s", once=True),
+        "trigger(once=True).trigger(availableNow=True).start()": lambda: w().trigger(once=True).trigger(availableNow=True).start(),
+        "foreach(f).start()": lambda: w().foreach(f).start(),
+        "foreach(process).start()": lambda: w().foreach(_Rows()).start(),
+        "foreach(open, process, close).start()": lambda: w().foreach(_Opened()).start(),
+        "foreach(no process)": lambda: w().foreach(_NoProcess()),
+        "foreach(process not callable)": lambda: w().foreach(_ProcessNotCallable()),
+        "foreach(5)": lambda: w().foreach(5),
+        "foreach(unpicklable)": lambda: w().foreach(unpicklable),
+        "foreachBatch(f).start()": lambda: w().foreachBatch(f).start(),
+        "foreachBatch(5).start()": lambda: w().foreachBatch(5).start(),
+        "foreachBatch(unpicklable)": lambda: w().foreachBatch(unpicklable),
+        "foreachBatch(f).foreach(f).start()": lambda: w().foreachBatch(f).foreach(f).start(),
+    }
+
+
+_STREAM_WRITE_OUTCOMES = {'start()': ['sent',
+             {'kind': 'write_stream_operation_start',
+              'input': True,
+              'format': '',
+              'options': [],
+              'partitioning': [],
+              'clustering': [],
+              'trigger': None,
+              'output_mode': '',
+              'query_name': '',
+              'sink': None,
+              'foreach_writer': None,
+              'foreach_batch': None},
+             ['StreamingQuery', 'q', 'r', 'n']],
+ 'start(p)': ['sent',
+              {'kind': 'write_stream_operation_start',
+               'input': True,
+               'format': '',
+               'options': [],
+               'partitioning': [],
+               'clustering': [],
+               'trigger': None,
+               'output_mode': '',
+               'query_name': '',
+               'sink': ['path', 'p'],
+               'foreach_writer': None,
+               'foreach_batch': None},
+              ['StreamingQuery', 'q', 'r', 'n']],
+ "start('')": ['sent',
+               {'kind': 'write_stream_operation_start',
+                'input': True,
+                'format': '',
+                'options': [],
+                'partitioning': [],
+                'clustering': [],
+                'trigger': None,
+                'output_mode': '',
+                'query_name': '',
+                'sink': None,
+                'foreach_writer': None,
+                'foreach_batch': None},
+               ['StreamingQuery', 'q', 'r', 'n']],
+ 'start(5)': ['call', 'TypeError', 'bad argument type for built-in operation'],
+ 'start(bad)': ['call',
+                'UnicodeEncodeError',
+                "'utf-8' codec can't encode character '\\udc80' in position 1: surrogates not "
+                'allowed'],
+ 'start(p, format=json, outputMode=append, partitionBy=a, queryName=q, k=1)': ['sent',
+                                                                               {'kind': 'write_stream_operation_start',
+                                                                                'input': True,
+                                                                                'format': 'json',
+                                                                                'options': [['k',
+                                                                                             '1']],
+                                                                                'partitioning': ['a'],
+                                                                                'clustering': [],
+                                                                                'trigger': None,
+                                                                                'output_mode': 'append',
+                                                                                'query_name': 'q',
+                                                                                'sink': ['path',
+                                                                                         'p'],
+                                                                                'foreach_writer': None,
+                                                                                'foreach_batch': None},
+                                                                               ['StreamingQuery',
+                                                                                'q',
+                                                                                'r',
+                                                                                'n']],
+ 'start(k=None)': ['sent',
+                   {'kind': 'write_stream_operation_start',
+                    'input': True,
+                    'format': '',
+                    'options': [],
+                    'partitioning': [],
+                    'clustering': [],
+                    'trigger': None,
+                    'output_mode': '',
+                    'query_name': '',
+                    'sink': None,
+                    'foreach_writer': None,
+                    'foreach_batch': None},
+                   ['StreamingQuery', 'q', 'r', 'n']],
+ 'start(k=True)': ['sent',
+                   {'kind': 'write_stream_operation_start',
+                    'input': True,
+                    'format': '',
+                    'options': [['k', 'true']],
+                    'partitioning': [],
+                    'clustering': [],
+                    'trigger': None,
+                    'output_mode': '',
+                    'query_name': '',
+                    'sink': None,
+                    'foreach_writer': None,
+                    'foreach_batch': None},
+                   ['StreamingQuery', 'q', 'r', 'n']],
+ 'start(k=bad)': ['call',
+                  'UnicodeEncodeError',
+                  "'utf-8' codec can't encode character '\\udc80' in position 1: surrogates not "
+                  'allowed'],
+ 'start(**{1: v})': ['call', 'TypeError', 'keywords must be strings'],
+ "start(queryName='')": ['call',
+                         'PySparkValueError',
+                         '[VALUE_NOT_NON_EMPTY_STR] Value for `queryName` must be a non-empty '
+                         "string, got ''."],
+ 'start(partitionBy=[a, b])': ['sent',
+                               {'kind': 'write_stream_operation_start',
+                                'input': True,
+                                'format': '',
+                                'options': [],
+                                'partitioning': ['a', 'b'],
+                                'clustering': [],
+                                'trigger': None,
+                                'output_mode': '',
+                                'query_name': '',
+                                'sink': None,
+                                'foreach_writer': None,
+                                'foreach_batch': None},
+                               ['StreamingQuery', 'q', 'r', 'n']],
+ 'toTable(t)': ['sent',
+                {'kind': 'write_stream_operation_start',
+                 'input': True,
+                 'format': '',
+                 'options': [],
+                 'partitioning': [],
+                 'clustering': [],
+                 'trigger': None,
+                 'output_mode': '',
+                 'query_name': '',
+                 'sink': ['table_name', 't'],
+                 'foreach_writer': None,
+                 'foreach_batch': None},
+                ['StreamingQuery', 'q', 'r', 'n']],
+ "toTable('')": ['sent',
+                 {'kind': 'write_stream_operation_start',
+                  'input': True,
+                  'format': '',
+                  'options': [],
+                  'partitioning': [],
+                  'clustering': [],
+                  'trigger': None,
+                  'output_mode': '',
+                  'query_name': '',
+                  'sink': None,
+                  'foreach_writer': None,
+                  'foreach_batch': None},
+                 ['StreamingQuery', 'q', 'r', 'n']],
+ 'toTable(5)': ['call', 'TypeError', 'bad argument type for built-in operation'],
+ 'toTable(bad)': ['call',
+                  'UnicodeEncodeError',
+                  "'utf-8' codec can't encode character '\\udc80' in position 1: surrogates not "
+                  'allowed'],
+ 'toTable(t, format=delta, outputMode=complete, partitionBy=[a, b], queryName=q, k=v)': ['sent',
+                                                                                         {'kind': 'write_stream_operation_start',
+                                                                                          'input': True,
+                                                                                          'format': 'delta',
+                                                                                          'options': [['k',
+                                                                                                       'v']],
+                                                                                          'partitioning': ['a',
+                                                                                                           'b'],
+                                                                                          'clustering': [],
+                                                                                          'trigger': None,
+                                                                                          'output_mode': 'complete',
+                                                                                          'query_name': 'q',
+                                                                                          'sink': ['table_name',
+                                                                                                   't'],
+                                                                                          'foreach_writer': None,
+                                                                                          'foreach_batch': None},
+                                                                                         ['StreamingQuery',
+                                                                                          'q',
+                                                                                          'r',
+                                                                                          'n']],
+ 'outputMode(append).start()': ['sent',
+                                {'kind': 'write_stream_operation_start',
+                                 'input': True,
+                                 'format': '',
+                                 'options': [],
+                                 'partitioning': [],
+                                 'clustering': [],
+                                 'trigger': None,
+                                 'output_mode': 'append',
+                                 'query_name': '',
+                                 'sink': None,
+                                 'foreach_writer': None,
+                                 'foreach_batch': None},
+                                ['StreamingQuery', 'q', 'r', 'n']],
+ "outputMode(b'append').start()": ['sent',
+                                   {'kind': 'write_stream_operation_start',
+                                    'input': True,
+                                    'format': '',
+                                    'options': [],
+                                    'partitioning': [],
+                                    'clustering': [],
+                                    'trigger': None,
+                                    'output_mode': 'append',
+                                    'query_name': '',
+                                    'sink': None,
+                                    'foreach_writer': None,
+                                    'foreach_batch': None},
+                                   ['StreamingQuery', 'q', 'r', 'n']],
+ 'outputMode(5)': ['call', 'TypeError', 'bad argument type for built-in operation'],
+ 'outputMode(None)': ['call', 'TypeError', 'bad argument type for built-in operation'],
+ 'outputMode(bad)': ['call',
+                     'UnicodeEncodeError',
+                     "'utf-8' codec can't encode character '\\udc80' in position 1: surrogates not "
+                     'allowed'],
+ 'format(console).start()': ['sent',
+                             {'kind': 'write_stream_operation_start',
+                              'input': True,
+                              'format': 'console',
+                              'options': [],
+                              'partitioning': [],
+                              'clustering': [],
+                              'trigger': None,
+                              'output_mode': '',
+                              'query_name': '',
+                              'sink': None,
+                              'foreach_writer': None,
+                              'foreach_batch': None},
+                             ['StreamingQuery', 'q', 'r', 'n']],
+ 'format(5)': ['call', 'TypeError', 'bad argument type for built-in operation'],
+ 'format(None)': ['call', 'TypeError', 'bad argument type for built-in operation'],
+ 'format(bad)': ['call',
+                 'UnicodeEncodeError',
+                 "'utf-8' codec can't encode character '\\udc80' in position 1: surrogates not "
+                 'allowed'],
+ 'option(k, v).start()': ['sent',
+                          {'kind': 'write_stream_operation_start',
+                           'input': True,
+                           'format': '',
+                           'options': [['k', 'v']],
+                           'partitioning': [],
+                           'clustering': [],
+                           'trigger': None,
+                           'output_mode': '',
+                           'query_name': '',
+                           'sink': None,
+                           'foreach_writer': None,
+                           'foreach_batch': None},
+                          ['StreamingQuery', 'q', 'r', 'n']],
+ 'option(k, None).start()': ['sent',
+                             {'kind': 'write_stream_operation_start',
+                              'input': True,
+                              'format': '',
+                              'options': [],
+                              'partitioning': [],
+                              'clustering': [],
+                              'trigger': None,
+                              'output_mode': '',
+                              'query_name': '',
+                              'sink': None,
+                              'foreach_writer': None,
+                              'foreach_batch': None},
+                             ['StreamingQuery', 'q', 'r', 'n']],
+ 'option(k, True).start()': ['sent',
+                             {'kind': 'write_stream_operation_start',
+                              'input': True,
+                              'format': '',
+                              'options': [['k', 'true']],
+                              'partitioning': [],
+                              'clustering': [],
+                              'trigger': None,
+                              'output_mode': '',
+                              'query_name': '',
+                              'sink': None,
+                              'foreach_writer': None,
+                              'foreach_batch': None},
+                             ['StreamingQuery', 'q', 'r', 'n']],
+ 'option(k, 1.5).start()': ['sent',
+                            {'kind': 'write_stream_operation_start',
+                             'input': True,
+                             'format': '',
+                             'options': [['k', '1.5']],
+                             'partitioning': [],
+                             'clustering': [],
+                             'trigger': None,
+                             'output_mode': '',
+                             'query_name': '',
+                             'sink': None,
+                             'foreach_writer': None,
+                             'foreach_batch': None},
+                            ['StreamingQuery', 'q', 'r', 'n']],
+ 'option(5, v)': ['call', 'TypeError', 'bad argument type for built-in operation'],
+ "option(b'k', v).start()": ['sent',
+                             {'kind': 'write_stream_operation_start',
+                              'input': True,
+                              'format': '',
+                              'options': [['k', 'v']],
+                              'partitioning': [],
+                              'clustering': [],
+                              'trigger': None,
+                              'output_mode': '',
+                              'query_name': '',
+                              'sink': None,
+                              'foreach_writer': None,
+                              'foreach_batch': None},
+                             ['StreamingQuery', 'q', 'r', 'n']],
+ 'option(bad, v)': ['call',
+                    'UnicodeEncodeError',
+                    "'utf-8' codec can't encode character '\\udc80' in position 1: surrogates not "
+                    'allowed'],
+ 'option(k, bad)': ['call',
+                    'UnicodeEncodeError',
+                    "'utf-8' codec can't encode character '\\udc80' in position 1: surrogates not "
+                    'allowed'],
+ "option(k, b'v').start()": ['sent',
+                             {'kind': 'write_stream_operation_start',
+                              'input': True,
+                              'format': '',
+                              'options': [['k', "b'v'"]],
+                              'partitioning': [],
+                              'clustering': [],
+                              'trigger': None,
+                              'output_mode': '',
+                              'query_name': '',
+                              'sink': None,
+                              'foreach_writer': None,
+                              'foreach_batch': None},
+                             ['StreamingQuery', 'q', 'r', 'n']],
+ 'options(a=1, b=None).start()': ['sent',
+                                  {'kind': 'write_stream_operation_start',
+                                   'input': True,
+                                   'format': '',
+                                   'options': [['a', '1']],
+                                   'partitioning': [],
+                                   'clustering': [],
+                                   'trigger': None,
+                                   'output_mode': '',
+                                   'query_name': '',
+                                   'sink': None,
+                                   'foreach_writer': None,
+                                   'foreach_batch': None},
+                                  ['StreamingQuery', 'q', 'r', 'n']],
+ 'options(**{1: v})': ['call', 'TypeError', 'keywords must be strings'],
+ 'partitionBy(a, b).start()': ['sent',
+                               {'kind': 'write_stream_operation_start',
+                                'input': True,
+                                'format': '',
+                                'options': [],
+                                'partitioning': ['a', 'b'],
+                                'clustering': [],
+                                'trigger': None,
+                                'output_mode': '',
+                                'query_name': '',
+                                'sink': None,
+                                'foreach_writer': None,
+                                'foreach_batch': None},
+                               ['StreamingQuery', 'q', 'r', 'n']],
+ 'partitionBy([a, b]).start()': ['sent',
+                                 {'kind': 'write_stream_operation_start',
+                                  'input': True,
+                                  'format': '',
+                                  'options': [],
+                                  'partitioning': ['a', 'b'],
+                                  'clustering': [],
+                                  'trigger': None,
+                                  'output_mode': '',
+                                  'query_name': '',
+                                  'sink': None,
+                                  'foreach_writer': None,
+                                  'foreach_batch': None},
+                                 ['StreamingQuery', 'q', 'r', 'n']],
+ 'partitionBy((a,)).start()': ['sent',
+                               {'kind': 'write_stream_operation_start',
+                                'input': True,
+                                'format': '',
+                                'options': [],
+                                'partitioning': ['a'],
+                                'clustering': [],
+                                'trigger': None,
+                                'output_mode': '',
+                                'query_name': '',
+                                'sink': None,
+                                'foreach_writer': None,
+                                'foreach_batch': None},
+                               ['StreamingQuery', 'q', 'r', 'n']],
+ 'partitionBy(a).partitionBy(b).start()': ['sent',
+                                           {'kind': 'write_stream_operation_start',
+                                            'input': True,
+                                            'format': '',
+                                            'options': [],
+                                            'partitioning': ['b'],
+                                            'clustering': [],
+                                            'trigger': None,
+                                            'output_mode': '',
+                                            'query_name': '',
+                                            'sink': None,
+                                            'foreach_writer': None,
+                                            'foreach_batch': None},
+                                           ['StreamingQuery', 'q', 'r', 'n']],
+ 'partitionBy().start()': ['sent',
+                           {'kind': 'write_stream_operation_start',
+                            'input': True,
+                            'format': '',
+                            'options': [],
+                            'partitioning': [],
+                            'clustering': [],
+                            'trigger': None,
+                            'output_mode': '',
+                            'query_name': '',
+                            'sink': None,
+                            'foreach_writer': None,
+                            'foreach_batch': None},
+                           ['StreamingQuery', 'q', 'r', 'n']],
+ 'partitionBy(5)': ['call', 'TypeError', 'bad argument type for built-in operation'],
+ 'partitionBy(a, 5)': ['call', 'TypeError', 'bad argument type for built-in operation'],
+ 'partitionBy(bad)': ['call',
+                      'UnicodeEncodeError',
+                      "'utf-8' codec can't encode character '\\udc80' in position 1: surrogates "
+                      'not allowed'],
+ 'partitionBy([a], b)': ['call', 'TypeError', 'bad argument type for built-in operation'],
+ 'clusterBy(a).start()': ['sent',
+                          {'kind': 'write_stream_operation_start',
+                           'input': True,
+                           'format': '',
+                           'options': [],
+                           'partitioning': [],
+                           'clustering': ['a'],
+                           'trigger': None,
+                           'output_mode': '',
+                           'query_name': '',
+                           'sink': None,
+                           'foreach_writer': None,
+                           'foreach_batch': None},
+                          ['StreamingQuery', 'q', 'r', 'n']],
+ 'clusterBy([a, b]).start()': ['sent',
+                               {'kind': 'write_stream_operation_start',
+                                'input': True,
+                                'format': '',
+                                'options': [],
+                                'partitioning': [],
+                                'clustering': ['a', 'b'],
+                                'trigger': None,
+                                'output_mode': '',
+                                'query_name': '',
+                                'sink': None,
+                                'foreach_writer': None,
+                                'foreach_batch': None},
+                               ['StreamingQuery', 'q', 'r', 'n']],
+ 'clusterBy(5)': ['call', 'TypeError', 'bad argument type for built-in operation'],
+ 'queryName(q).start()': ['sent',
+                          {'kind': 'write_stream_operation_start',
+                           'input': True,
+                           'format': '',
+                           'options': [],
+                           'partitioning': [],
+                           'clustering': [],
+                           'trigger': None,
+                           'output_mode': '',
+                           'query_name': 'q',
+                           'sink': None,
+                           'foreach_writer': None,
+                           'foreach_batch': None},
+                          ['StreamingQuery', 'q', 'r', 'n']],
+ "queryName('')": ['call',
+                   'PySparkValueError',
+                   '[VALUE_NOT_NON_EMPTY_STR] Value for `queryName` must be a non-empty string, '
+                   "got ''."],
+ "queryName('  ')": ['call',
+                     'PySparkValueError',
+                     '[VALUE_NOT_NON_EMPTY_STR] Value for `queryName` must be a non-empty string, '
+                     "got '  '."],
+ 'queryName(5)': ['call',
+                  'PySparkValueError',
+                  '[VALUE_NOT_NON_EMPTY_STR] Value for `queryName` must be a non-empty string, got '
+                  "'5'."],
+ 'queryName(None)': ['call',
+                     'PySparkValueError',
+                     '[VALUE_NOT_NON_EMPTY_STR] Value for `queryName` must be a non-empty string, '
+                     "got 'None'."],
+ 'queryName(bad)': ['call',
+                    'UnicodeEncodeError',
+                    "'utf-8' codec can't encode character '\\udc80' in position 1: surrogates not "
+                    'allowed'],
+ 'trigger()': ['call',
+               'PySparkValueError',
+               '[ONLY_ALLOW_SINGLE_TRIGGER] Only a single trigger is allowed.'],
+ 'trigger(5)': ['call',
+                'TypeError',
+                'DataStreamWriter.trigger() takes 1 positional argument but 2 were given'],
+ 'trigger(processingTime=1 second).start()': ['sent',
+                                              {'kind': 'write_stream_operation_start',
+                                               'input': True,
+                                               'format': '',
+                                               'options': [],
+                                               'partitioning': [],
+                                               'clustering': [],
+                                               'trigger': ['processing_time_interval', '1 second'],
+                                               'output_mode': '',
+                                               'query_name': '',
+                                               'sink': None,
+                                               'foreach_writer': None,
+                                               'foreach_batch': None},
+                                              ['StreamingQuery', 'q', 'r', 'n']],
+ "trigger(processingTime=' 1 second ').start()": ['sent',
+                                                  {'kind': 'write_stream_operation_start',
+                                                   'input': True,
+                                                   'format': '',
+                                                   'options': [],
+                                                   'partitioning': [],
+                                                   'clustering': [],
+                                                   'trigger': ['processing_time_interval',
+                                                               '1 second'],
+                                                   'output_mode': '',
+                                                   'query_name': '',
+                                                   'sink': None,
+                                                   'foreach_writer': None,
+                                                   'foreach_batch': None},
+                                                  ['StreamingQuery', 'q', 'r', 'n']],
+ "trigger(processingTime='')": ['call',
+                                'PySparkValueError',
+                                '[VALUE_NOT_NON_EMPTY_STR] Value for `processingTime` must be a '
+                                "non-empty string, got ''."],
+ 'trigger(processingTime=5)': ['call',
+                               'PySparkValueError',
+                               '[VALUE_NOT_NON_EMPTY_STR] Value for `processingTime` must be a '
+                               "non-empty string, got '5'."],
+ 'trigger(processingTime=bad)': ['call',
+                                 'UnicodeEncodeError',
+                                 "'utf-8' codec can't encode character '\\udc80' in position 1: "
+                                 'surrogates not allowed'],
+ 'trigger(once=True).start()': ['sent',
+                                {'kind': 'write_stream_operation_start',
+                                 'input': True,
+                                 'format': '',
+                                 'options': [],
+                                 'partitioning': [],
+                                 'clustering': [],
+                                 'trigger': ['once', True],
+                                 'output_mode': '',
+                                 'query_name': '',
+                                 'sink': None,
+                                 'foreach_writer': None,
+                                 'foreach_batch': None},
+                                ['StreamingQuery', 'q', 'r', 'n']],
+ 'trigger(once=False)': ['call',
+                         'PySparkValueError',
+                         '[VALUE_NOT_ALLOWED] Value for `once` has to be amongst the following '
+                         'values: [True].'],
+ 'trigger(once=1)': ['call',
+                     'PySparkValueError',
+                     '[VALUE_NOT_ALLOWED] Value for `once` has to be amongst the following values: '
+                     '[True].'],
+ 'trigger(availableNow=True).start()': ['sent',
+                                        {'kind': 'write_stream_operation_start',
+                                         'input': True,
+                                         'format': '',
+                                         'options': [],
+                                         'partitioning': [],
+                                         'clustering': [],
+                                         'trigger': ['available_now', True],
+                                         'output_mode': '',
+                                         'query_name': '',
+                                         'sink': None,
+                                         'foreach_writer': None,
+                                         'foreach_batch': None},
+                                        ['StreamingQuery', 'q', 'r', 'n']],
+ 'trigger(availableNow=False)': ['call',
+                                 'PySparkValueError',
+                                 '[VALUE_NOT_ALLOWED] Value for `availableNow` has to be amongst '
+                                 'the following values: [True].'],
+ 'trigger(continuous=1 second).start()': ['sent',
+                                          {'kind': 'write_stream_operation_start',
+                                           'input': True,
+                                           'format': '',
+                                           'options': [],
+                                           'partitioning': [],
+                                           'clustering': [],
+                                           'trigger': ['continuous_checkpoint_interval',
+                                                       '1 second'],
+                                           'output_mode': '',
+                                           'query_name': '',
+                                           'sink': None,
+                                           'foreach_writer': None,
+                                           'foreach_batch': None},
+                                          ['StreamingQuery', 'q', 'r', 'n']],
+ "trigger(continuous='')": ['call',
+                            'PySparkValueError',
+                            '[VALUE_NOT_NON_EMPTY_STR] Value for `continuous` must be a non-empty '
+                            "string, got ''."],
+ 'trigger(realTime=5 seconds).start()': ['sent',
+                                         {'kind': 'write_stream_operation_start',
+                                          'input': True,
+                                          'format': '',
+                                          'options': [],
+                                          'partitioning': [],
+                                          'clustering': [],
+                                          'trigger': ['real_time_batch_duration', '5 seconds'],
+                                          'output_mode': '',
+                                          'query_name': '',
+                                          'sink': None,
+                                          'foreach_writer': None,
+                                          'foreach_batch': None},
+                                         ['StreamingQuery', 'q', 'r', 'n']],
+ 'trigger(realTime=5)': ['call',
+                         'PySparkValueError',
+                         '[VALUE_NOT_NON_EMPTY_STR] Value for `realTime` must be a non-empty '
+                         "string, got '5'."],
+ 'trigger(processingTime=1 s, once=True)': ['call',
+                                            'PySparkValueError',
+                                            '[ONLY_ALLOW_SINGLE_TRIGGER] Only a single trigger is '
+                                            'allowed.'],
+ 'trigger(once=True).trigger(availableNow=True).start()': ['sent',
+                                                           {'kind': 'write_stream_operation_start',
+                                                            'input': True,
+                                                            'format': '',
+                                                            'options': [],
+                                                            'partitioning': [],
+                                                            'clustering': [],
+                                                            'trigger': ['available_now', True],
+                                                            'output_mode': '',
+                                                            'query_name': '',
+                                                            'sink': None,
+                                                            'foreach_writer': None,
+                                                            'foreach_batch': None},
+                                                           ['StreamingQuery', 'q', 'r', 'n']],
+ 'foreach(f).start()': ['sent',
+                        {'kind': 'write_stream_operation_start',
+                         'input': True,
+                         'format': '',
+                         'options': [],
+                         'partitioning': [],
+                         'clustering': [],
+                         'trigger': None,
+                         'output_mode': '',
+                         'query_name': '',
+                         'sink': None,
+                         'foreach_writer': ['python_function', True, True],
+                         'foreach_batch': None},
+                        ['StreamingQuery', 'q', 'r', 'n']],
+ 'foreach(process).start()': ['sent',
+                              {'kind': 'write_stream_operation_start',
+                               'input': True,
+                               'format': '',
+                               'options': [],
+                               'partitioning': [],
+                               'clustering': [],
+                               'trigger': None,
+                               'output_mode': '',
+                               'query_name': '',
+                               'sink': None,
+                               'foreach_writer': ['python_function', True, True],
+                               'foreach_batch': None},
+                              ['StreamingQuery', 'q', 'r', 'n']],
+ 'foreach(open, process, close).start()': ['sent',
+                                           {'kind': 'write_stream_operation_start',
+                                            'input': True,
+                                            'format': '',
+                                            'options': [],
+                                            'partitioning': [],
+                                            'clustering': [],
+                                            'trigger': None,
+                                            'output_mode': '',
+                                            'query_name': '',
+                                            'sink': None,
+                                            'foreach_writer': ['python_function', True, True],
+                                            'foreach_batch': None},
+                                           ['StreamingQuery', 'q', 'r', 'n']],
+ 'foreach(no process)': ['call',
+                         'PySparkAttributeError',
+                         '[ATTRIBUTE_NOT_CALLABLE] Attribute `process` in provided object `f` is '
+                         'not callable.'],
+ 'foreach(process not callable)': ['call',
+                                   'PySparkAttributeError',
+                                   '[ATTRIBUTE_NOT_CALLABLE] Attribute `process` in provided '
+                                   'object `f` is not callable.'],
+ 'foreach(5)': ['call',
+                'PySparkAttributeError',
+                '[ATTRIBUTE_NOT_CALLABLE] Attribute `process` in provided object `f` is not '
+                'callable.'],
+ 'foreach(unpicklable)': ['call',
+                          'PySparkPicklingError',
+                          '[STREAMING_CONNECT_SERIALIZATION_ERROR] Cannot serialize the function '
+                          '`foreach`. If you accessed the Spark session, or a'],
+ 'foreachBatch(f).start()': ['sent',
+                             {'kind': 'write_stream_operation_start',
+                              'input': True,
+                              'format': '',
+                              'options': [],
+                              'partitioning': [],
+                              'clustering': [],
+                              'trigger': None,
+                              'output_mode': '',
+                              'query_name': '',
+                              'sink': None,
+                              'foreach_writer': None,
+                              'foreach_batch': ['python_function', True, True]},
+                             ['StreamingQuery', 'q', 'r', 'n']],
+ 'foreachBatch(5).start()': ['sent',
+                             {'kind': 'write_stream_operation_start',
+                              'input': True,
+                              'format': '',
+                              'options': [],
+                              'partitioning': [],
+                              'clustering': [],
+                              'trigger': None,
+                              'output_mode': '',
+                              'query_name': '',
+                              'sink': None,
+                              'foreach_writer': None,
+                              'foreach_batch': ['python_function', True, True]},
+                             ['StreamingQuery', 'q', 'r', 'n']],
+ 'foreachBatch(unpicklable)': ['call',
+                               'PySparkPicklingError',
+                               '[STREAMING_CONNECT_SERIALIZATION_ERROR] Cannot serialize the '
+                               'function `foreachBatch`. If you accessed the Spark session,'],
+ 'foreachBatch(f).foreach(f).start()': ['sent',
+                                        {'kind': 'write_stream_operation_start',
+                                         'input': True,
+                                         'format': '',
+                                         'options': [],
+                                         'partitioning': [],
+                                         'clustering': [],
+                                         'trigger': None,
+                                         'output_mode': '',
+                                         'query_name': '',
+                                         'sink': None,
+                                         'foreach_writer': ['python_function', True, True],
+                                         'foreach_batch': ['python_function', True, True]},
+                                        ['StreamingQuery', 'q', 'r', 'n']]}
+
+
+def _stream_write_outcome(service, call):
+    import contextlib
+    import io
+
+    before = len(service.execute_requests)
+    try:
+        # CloudPickleSerializer prints the traceback of a function that does not pickle.
+        with contextlib.redirect_stderr(io.StringIO()):
+            value = call()
+    except BaseException as error:  # noqa: BLE001
+        return ["call", type(error).__name__, str(error)[:120]]
+    if len(service.execute_requests) == before:
+        return ["value", type(value).__name__]
+    query = [type(value).__name__, value.id, value.runId, value.name]
+    return ["sent", _sent_stream_write(service), query]
+
+
+@pytest.mark.parametrize("case", list(_STREAM_WRITE_OUTCOMES))
+def test_the_stream_writes_send_what_pysparks_writer_sends(objects, case):
+    # As PySpark's DataStreamWriter, of whose source the drop-in's is adapted: the errors of its
+    # setters and of the command of its start, in the same order, the start commands that it sends,
+    # of its format, options, partitioning, clustering, trigger, output mode, query name, path or
+    # table and the functions of foreach and foreachBatch, and the query of the start result.
+    objects.service.execute_payload = _start_result()
+    call = _stream_write_cases(objects.sdf)[case]
+    assert _stream_write_outcome(objects.service, call) == _STREAM_WRITE_OUTCOMES[case]
