@@ -9,6 +9,7 @@ that require a live server live in test_dropin_e2e.py and are gated on SPARK_REM
 import array
 import collections
 import contextlib
+import copyreg
 import datetime
 import decimal
 import importlib.util
@@ -6992,10 +6993,16 @@ def test_types_give_back_and_pickle_their_user_defined_types_as_pyspark():
             assert type(copied) is type(t) and copied == t and repr(copied) == repr(t)
     field = pickle.loads(pickle.dumps(T.StructField("p", udt, True, {"k": 1})))
     assert type(field.dataType) is ExamplePointUDT and field.metadata == {"k": 1}
-    # A type with a user-defined type pickles of the class of pyspark.sql.types and the type
-    # objects, which the Python workers of the server rebuild; one without, by its JSON.
-    assert T.ArrayType(udt).__reduce__() == (T.ArrayType, (udt, True))
-    assert T.ArrayType(T.IntegerType()).__reduce__()[0] is T._parse_datatype_json_string
+    # A type pickles of the class of pyspark.sql.types and its `__dict__`, as PySpark's, which the
+    # Python workers of the server rebuild; a struct with a user-defined type, of its class and the
+    # type objects, and one without, by its JSON.
+    assert T.ArrayType(udt).__reduce_ex__(2)[:3] == (
+        copyreg.__newobj__, (T.ArrayType,), {"elementType": udt, "containsNull": True}
+    )
+    assert T.StructType([T.StructField("p", udt)]).__reduce__()[0] is T.StructType
+    assert T.StructType([T.StructField("i", T.IntegerType())]).__reduce__()[0] is (
+        T._parse_datatype_json_string
+    )
 
 
 
@@ -19135,20 +19142,31 @@ def test_struct_field_metadata_any_values():
 
 
 def test_struct_fields_of_strs_that_utf8_cannot_encode_raise_their_encoding_error():
-    # The names and the metadata of the drop-in's types are of UTF-8, so a StructField of a str of
-    # a lone surrogate, as its name or anywhere in its metadata, raises the UnicodeEncodeError of
-    # that str, where PySpark's builds the field, whose DataFrames fail later (see
-    # dev/parity/known-differences.md).
+    # A StructField of a str of a lone surrogate, as its name or anywhere in its metadata, is made,
+    # as PySpark's, whose `json()` escapes it and whose tree string writes it. The names and the
+    # metadata of the plans of the drop-in's types are of UTF-8, so a plan of such metadata raises
+    # the UnicodeEncodeError of the str, where PySpark's sends the JSON that `json.dumps` escapes,
+    # and the simple string of such a name raises it, where PySpark's makes it (see
+    # dev/parity/known-differences.md). A plan of such a name raises it, as PySpark's.
     message = "'utf-8' codec can't encode character '\\ud800' in position 1: surrogates not allowed"
-    for make in (
-        lambda: _SF("a\ud800", _IT()),
-        lambda: _SF("a", _IT(), True, {"k": "a\ud800"}),
-        lambda: _SF("a", _IT(), True, {"a\ud800": 1}),
-        lambda: _SF("a", _IT(), True, {"k": ["x", {"n": "a\ud800"}]}),
+    for make, json_text in (
+        (lambda: _SF("a\ud800", _IT()), '{"metadata":{},"name":"a\\ud800","nullable":true,'),
+        (lambda: _SF("a", _IT(), True, {"k": "a\ud800"}), '{"metadata":{"k":"a\\ud800"},'),
+        (lambda: _SF("a", _IT(), True, {"a\ud800": 1}), '{"metadata":{"a\\ud800":1},'),
+        (
+            lambda: _SF("a", _IT(), True, {"k": ["x", {"n": "a\ud800"}]}),
+            '{"metadata":{"k":["x",{"n":"a\\ud800"}]},',
+        ),
     ):
+        field = make()
+        assert field.json().startswith(json_text)
+        assert _StT([field]).treeString().endswith(": integer (nullable = true)\n")
         with pytest.raises(UnicodeEncodeError) as error:
-            make()
+            pyspark.sql.functions.lit(None).cast(_StT([field]))._expr.to_plan(None)
         assert str(error.value) == message
+    with pytest.raises(UnicodeEncodeError) as error:
+        _SF("a\ud800", _IT()).simpleString()
+    assert str(error.value) == message
 
 
 def test_drop_metadata_and_create_row():
@@ -23628,7 +23646,8 @@ def test_create_dataframe_of_a_pandas_frame_sends_the_json_of_its_struct_as_pysp
     # PySpark's are of the fields of its setter. Local rows convert with PySpark's conversion too
     # (see `test_create_dataframe_of_local_data_under_a_subclass_converts_it_as_pyspark`); the
     # relation of the rows that the native types convert, of a frame without PyArrow, is of those
-    # types, as the rows are (see the known differences).
+    # types, as the rows are, which read the attributes of the field as Python reads them, as
+    # PySpark's (SPARK-62251).
     pd = pytest.importorskip("pandas")
     pa = pytest.importorskip("pyarrow")
     spark, service = mock_connect
@@ -23677,9 +23696,16 @@ def test_create_dataframe_of_a_pandas_frame_sends_the_json_of_its_struct_as_pysp
     assert sent(spark.createDataFrame(pd.DataFrame({"a": pd.Series([], dtype="int64")}), flds)) == (
         None, field("long"))
     assert sent(spark.createDataFrame([(1,)], strs)) == ([{"a": "1"}], field("string"))
+    # The row path of a frame without PyArrow converts a column of ints under the string field as
+    # under a field of `StringType()` itself, of its error.
+    from pyspark.errors import PySparkRuntimeError
+
     with _pandas_row_path():
-        assert sent(spark.createDataFrame(pd.DataFrame({"a": [1]}), strs)) == (
-            [{"a": 1}], field("long"))
+        for schema in (strs, T.StructType([T.StructField("a", T.StringType())])):
+            with pytest.raises(PySparkRuntimeError, match="Type mismatch in row data"):
+                spark.createDataFrame(pd.DataFrame({"a": [1]}), schema)
+        assert sent(spark.createDataFrame(pd.DataFrame({"a": ["x"]}), strs)) == (
+            [{"a": "x"}], field("string"))
 
 
 def test_create_dataframe_of_local_data_under_a_subclass_converts_it_as_pyspark(mock_connect):
@@ -23691,11 +23717,15 @@ def test_create_dataframe_of_local_data_under_a_subclass_converts_it_as_pyspark(
     # lower-cased str), of their errors (a None under a field that reads as not nullable, an int
     # past an int field), and the relation's schema is the `json()` of the struct, which reads
     # them too. So are the rows of dicts, Rows, values that are no rows and iterators, and a
-    # NumPy array, whose table is of its columns, of the `json()` of the struct. A struct whose
-    # `fields` property reads none, as the native `__init__` does not assign through its setter
-    # (SPARK-62231), and a struct of the native classes, convert by the native types, of the
-    # fields that they were given, as PySpark's are of them; and so does local data without
-    # PyArrow, which PySpark's conversion needs.
+    # NumPy array, whose table is of its columns, of the `json()` of the struct. A field reads its
+    # attributes as PySpark's (SPARK-62251): the names of a struct are those that the `name` of
+    # each field reads, by which a dict is taken, a property whose getter reads the state that its
+    # setter wrote reads what `__init__` gave it, and the field's own attributes shadow a class
+    # attribute over one. A struct whose `fields` property reads none, as the native `__init__`
+    # does not assign through its setter (SPARK-62231), and a struct of the native classes,
+    # convert by the native types, of the fields that they were given, as PySpark's are of them;
+    # and so does local data without PyArrow, which PySpark's conversion needs, whose native types
+    # read the attributes of the fields as Python reads them.
     np = pytest.importorskip("numpy")
     pa = pytest.importorskip("pyarrow")
     from pyspark.errors import PySparkValueError
@@ -23789,8 +23819,37 @@ def test_create_dataframe_of_local_data_under_a_subclass_converts_it_as_pyspark(
         assert sent(spark.createDataFrame([(1,)], schema)) == (
             [{"a": 1}], ["int64"], struct_of(("a", "long")))
     with _pandas_row_path():
-        assert sent(spark.createDataFrame([(1,)], strs)) == (
-            [{"a": 1}], ["int64"], struct_of(("a", "long")))
+        assert sent(spark.createDataFrame([(1,)], strs)) == ([{"a": "1"}], ["string"], of_strs)
+
+    class FieldName(T.StructField):
+        @property
+        def name(self):
+            return "renamed"
+
+        @name.setter
+        def name(self, value):
+            self.__dict__["given"] = value
+
+    class FieldKept(T.StructField):
+        @property
+        def dataType(self):
+            return self._dt
+
+        @dataType.setter
+        def dataType(self, value):
+            self._dt = value
+
+    class FieldClassAttr(T.StructField):
+        nullable = False
+
+    renamed = T.StructType([FieldName("a", long_type)])
+    assert renamed.names == ["renamed"]
+    assert sent(spark.createDataFrame([{"a": 1, "renamed": 2}], renamed)) == (
+        [{"renamed": 2}], ["int64"], struct_of(("renamed", "long")))
+    assert sent(spark.createDataFrame([(1,)], T.StructType([FieldKept("a", T.StringType())]))) == (
+        [{"a": "1"}], ["string"], of_strs)
+    assert sent(spark.createDataFrame([(None,)], T.StructType([FieldClassAttr("a", long_type)]))) == (
+        [{"a": None}], ["int64"], struct_of(("a", "long")))
 
 
 def test_customized_pandas_normalization_methods_do_not_run_as_pyspark(mock_connect):

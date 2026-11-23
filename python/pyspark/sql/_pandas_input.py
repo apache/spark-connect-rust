@@ -623,9 +623,15 @@ def prepare_int64_table(frame, schema):
     for cls, names, descriptor_type in (
         (StructType, ("fields", "names"), GetSetDescriptorType),
         (StructType, ("__iter__",), WrapperDescriptorType),
-        (StructField, ("name", "dataType", "nullable", "metadata"), GetSetDescriptorType),
+        (StructField, ("name", "dataType", "nullable", "metadata"), None),
     ):
         for name in names:
+            # A parameter of a field is an entry of the `__dict__` of the field, as PySpark's
+            # (SPARK-62251), of no attribute of the class, which a patch of it would set.
+            if descriptor_type is None:
+                if name in vars(cls):
+                    return None
+                continue
             descriptor = vars(cls).get(name)
             if (type(descriptor) is not descriptor_type
                     or descriptor.__objclass__ is not cls or descriptor.__name__ != name):
@@ -734,9 +740,15 @@ def timestamp_columns(frame, schema):
     for cls, names, descriptor_type in (
         (NativeStructType, ("fields", "names"), GetSetDescriptorType),
         (NativeStructType, ("__iter__",), WrapperDescriptorType),
-        (StructField, ("name", "dataType", "nullable", "metadata"), GetSetDescriptorType),
+        (StructField, ("name", "dataType", "nullable", "metadata"), None),
     ):
         for name in names:
+            # A parameter of a field is an entry of the `__dict__` of the field, as PySpark's
+            # (SPARK-62251), of no attribute of the class, which a patch of it would set.
+            if descriptor_type is None:
+                if name in vars(cls):
+                    return None
+                continue
             descriptor = vars(cls).get(name)
             if (type(descriptor) is not descriptor_type
                     or descriptor.__objclass__ is not cls or descriptor.__name__ != name):
@@ -893,9 +905,15 @@ def prepare_float64_table(frame, schema):
     for cls, names, descriptor_type in (
         (native.StructType, ("fields", "names"), GetSetDescriptorType),
         (native.StructType, ("__iter__",), WrapperDescriptorType),
-        (native.StructField, ("name", "dataType", "nullable", "metadata"), GetSetDescriptorType),
+        (native.StructField, ("name", "dataType", "nullable", "metadata"), None),
     ):
         for name in names:
+            # A parameter of a field is an entry of the `__dict__` of the field, as PySpark's
+            # (SPARK-62251), of no attribute of the class, which a patch of it would set.
+            if descriptor_type is None:
+                if name in vars(cls):
+                    return None
+                continue
             descriptor = vars(cls).get(name)
             if (type(descriptor) is not descriptor_type
                     or descriptor.__objclass__ is not cls or descriptor.__name__ != name):
@@ -994,10 +1012,16 @@ def prepare_string_input(frame, schema):
     for cls, names, descriptor_type in (
         (NativeStructType, ("fields", "names"), GetSetDescriptorType),
         (NativeStructType, ("__iter__",), WrapperDescriptorType),
-        (StructField, ("name", "dataType", "nullable", "metadata"), GetSetDescriptorType),
+        (StructField, ("name", "dataType", "nullable", "metadata"), None),
         (StringType, ("isUTF8BinaryCollation",), MethodDescriptorType),
     ):
         for name in names:
+            # A parameter of a field is an entry of the `__dict__` of the field, as PySpark's
+            # (SPARK-62251), of no attribute of the class, which a patch of it would set.
+            if descriptor_type is None:
+                if name in vars(cls):
+                    return None
+                continue
             descriptor = vars(cls).get(name)
             if (type(descriptor) is not descriptor_type
                     or descriptor.__objclass__ is not cls or descriptor.__name__ != name):
@@ -1183,9 +1207,15 @@ def prepare_date_table(frame, schema):
     for cls, names, descriptor_type in (
         (NativeStructType, ("fields", "names"), GetSetDescriptorType),
         (NativeStructType, ("__iter__",), WrapperDescriptorType),
-        (StructField, ("name", "dataType", "nullable", "metadata"), GetSetDescriptorType),
+        (StructField, ("name", "dataType", "nullable", "metadata"), None),
     ):
         for name in names:
+            # A parameter of a field is an entry of the `__dict__` of the field, as PySpark's
+            # (SPARK-62251), of no attribute of the class, which a patch of it would set.
+            if descriptor_type is None:
+                if name in vars(cls):
+                    return None
+                continue
             descriptor = vars(cls).get(name)
             if (type(descriptor) is not descriptor_type
                     or descriptor.__objclass__ is not cls or descriptor.__name__ != name):
@@ -1384,8 +1414,9 @@ def _reads_as(cls, base, names):
 
 def _native_struct_classes_intact():
     """Whether the native `StructType` and `StructField` keep their own reads: no class of them, or
-    a base, defines `__getattribute__` or `__class__`, and their `fields`, `names`, `__iter__`,
-    `name`, `dataType`, `nullable` and `metadata` are their own descriptors."""
+    a base, defines `__getattribute__` or `__class__`, their `fields`, `names` and `__iter__` are
+    their own descriptors, and `StructField` has no attribute `name`, `dataType`, `nullable` or
+    `metadata` of the class, which are entries of the `__dict__` of a field."""
     from types import GetSetDescriptorType, WrapperDescriptorType
 
     from pyspark._pyspark import StructField, StructType
@@ -1397,9 +1428,15 @@ def _native_struct_classes_intact():
     for cls, names, descriptor_type in (
         (StructType, ("fields", "names"), GetSetDescriptorType),
         (StructType, ("__iter__",), WrapperDescriptorType),
-        (StructField, ("name", "dataType", "nullable", "metadata"), GetSetDescriptorType),
+        (StructField, ("name", "dataType", "nullable", "metadata"), None),
     ):
         for name in names:
+            # A parameter of a field is an entry of the `__dict__` of the field, as PySpark's
+            # (SPARK-62251), of no attribute of the class, which a patch of it would set.
+            if descriptor_type is None:
+                if name in vars(cls):
+                    return False
+                continue
             descriptor = vars(cls).get(name)
             if (type(descriptor) is not descriptor_type
                     or descriptor.__objclass__ is not cls or descriptor.__name__ != name):

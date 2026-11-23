@@ -2259,7 +2259,10 @@ def test_struct_subclasses_that_override_the_reads_of_the_conversion_keep_the_ro
                       "__getattribute__": object.__getattribute__,
                       "field_getattribute": object.__getattribute__}[name]
             return {"__getattribute__" if name == "field_getattribute" else name: method}
-        return {name: property(lambda self: None)}
+        # Of a setter too, which the `__init__` of PySpark's field and the drop-in's assign
+        # through, and of a value that the struct's `__init__` reads (`needConversion()`).
+        value = {"name": "i", "dataType": T.LongType(), "nullable": True, "metadata": {}}.get(name)
+        return {name: property(lambda self: value, lambda self, value: None)}
 
     struct_reads = ("fields", "names", "__iter__", "__getattribute__")
     struct_class = type("Struct", (T.StructType,), override(read) if read in struct_reads else {})
@@ -2866,22 +2869,14 @@ _INTEGER_DESCRIPTORS = {
     ("StructType", "alias"): _integer_converts(
         error=["_to_table", "builtins.AssertionError", ""]),
 }
-# The known differences: the native `__init__` does not assign through a property patched over
-# its attributes (SPARK-62231, SPARK-62251), so the conversion goes on and reads the patch where
+# The known differences: the native `__init__` of a struct does not assign through a property
+# patched over its attributes (SPARK-62231), so the conversion goes on and reads the patch where
 # PySpark's reads the attribute, and so does the relation's schema, PySpark's `json()` of it; and
-# the drop-in's client is native.
+# the drop-in's client is native. A field assigns its attributes as PySpark's does, of the
+# `AttributeError` of a property of no setter (SPARK-62251).
 _INTEGER_DESCRIPTORS_OF_THE_DROP_IN = {
     ("StructType", "fields"): _guard_converts([], {"fields": [], "type": "struct"}),
     ("StructType", "names"): _integer_converts(name="changed"),
-    ("StructField", "name"): _guard_raises(*_rename_mismatch("renamed")),
-    ("StructField", "dataType"): _integer_converts(
-        [value != 0 for value in _INTEGER_VALUES], "bool",
-        relation=_relation_of("renamed", "boolean", False, {"source": "native"})),
-    ("StructField", "nullable"): _integer_converts(
-        nullable=True, relation=_relation_of("renamed", "long", True, {"source": "native"})),
-    ("StructField", "metadata"): _integer_converts(
-        metadata={"SPARK::metadata::json": '{"changed": true}'},
-        relation=_relation_of("renamed", "long", False, {"changed": True})),
     ("StructType", "alias"): _integer_converts(),
 }
 
@@ -3607,15 +3602,6 @@ _TIMESTAMP_DESCRIPTORS = {
 _TIMESTAMP_DESCRIPTORS_OF_THE_DROP_IN = {
     ("StructType", "fields"): _guard_converts([], {"fields": [], "type": "struct"}),
     ("StructType", "names"): _timestamp_converts(name="changed"),
-    ("StructField", "name"): _guard_raises(*_rename_mismatch("renamed")),
-    ("StructField", "dataType"): _guard_raises(
-        "pyarrow.lib.ArrowNotImplementedError",
-        "Unsupported cast from timestamp[ns] to bool using function cast_boolean"),
-    ("StructField", "nullable"): _guard_raises(
-        "builtins.ValueError", "Casting field 'renamed' with null values to non-nullable"),
-    ("StructField", "metadata"): _timestamp_converts(
-        metadata={"SPARK::metadata::json": '{"changed": true}'},
-        relation=_relation_of("renamed", "timestamp", True, {"changed": True})),
     ("StructType", "alias"): _timestamp_converts(),
 }
 
@@ -4277,13 +4263,6 @@ _FLOAT64_DESCRIPTORS_OF_THE_DROP_IN = {
     ("StructType", "fields"): _guard_converts([], {"fields": [], "type": "struct"}),
     ("StructType", "names"): _float64_converts(name="changed",
                                                relation_metadata={"source": "native"}),
-    ("StructField", "name"): _guard_raises(*_rename_mismatch("x")),
-    ("StructField", "dataType"): _float64_converts(relation_metadata={"source": "native"}),
-    ("StructField", "nullable"): _guard_raises(
-        "builtins.ValueError", "Casting field 'x' with null values to non-nullable"),
-    ("StructField", "metadata"): _float64_converts(
-        metadata={"SPARK::metadata::json": '{"changed": true}'},
-        relation_metadata={"changed": True}),
     ("StructType", "alias"): _float64_converts(relation_metadata={"source": "native"}),
 }
 
@@ -6671,13 +6650,6 @@ _STRING_DESCRIPTORS = {
 _STRING_DESCRIPTORS_OF_THE_DROP_IN = {
     ("StructType", "fields"): _guard_converts([], {"fields": [], "type": "struct"}),
     ("StructType", "names"): _string_converts(name="changed"),
-    ("StructField", "name"): _guard_raises(*_rename_mismatch("text")),
-    ("StructField", "dataType"): _string_converts(),
-    ("StructField", "nullable"): _string_converts(
-        nullable=False, relation=_relation_of("text", "string", False, {"source": "native"})),
-    ("StructField", "metadata"): _string_converts(
-        metadata={"SPARK::metadata::json": '{"changed": true}'},
-        relation=_relation_of("text", "string", True, {"changed": True})),
     ("StructType", "alias"): _string_converts(),
 }
 
@@ -7494,13 +7466,6 @@ _DATE_DESCRIPTORS = {
 _DATE_DESCRIPTORS_OF_THE_DROP_IN = {
     ("StructType", "fields"): _guard_converts([], {"fields": [], "type": "struct"}),
     ("StructType", "names"): _date_converts(name="changed"),
-    ("StructField", "name"): _guard_raises(*_rename_mismatch("day")),
-    ("StructField", "dataType"): _date_converts(),
-    ("StructField", "nullable"): _date_converts(
-        nullable=False, relation=_relation_of("day", "date", False, {"source": "native"})),
-    ("StructField", "metadata"): _date_converts(
-        metadata={"SPARK::metadata::json": '{"changed": true}'},
-        relation=_relation_of("day", "date", True, {"changed": True})),
 }
 
 
@@ -7523,11 +7488,20 @@ from datetime import date
 import pandas as pd
 from pyspark.sql import types as T
 
+# The capture module is loaded before the patch, as its types are made of the classes as they are.
+import importlib.util
+spec = importlib.util.spec_from_file_location("date_schema_capture", sys.argv[-1])
+capture = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = capture
+spec.loader.exec_module(capture)
 frame = pd.DataFrame({"day": [date(2020, 1, 1)] * 10000}, dtype=object)
 schema = T.StructType([T.StructField("day", T.DateType(), True, {"source": "native"})])
 class_name, attribute, before_import = sys.argv[1:4]
-if before_import == "False":
-    import pyspark.sql._pandas_input
+if before_import == "True":
+    # The capture module imports prepare_int64_table; force the public call to import a new helper
+    # after the class has been customized.
+    sys.modules.pop("pyspark.sql._pandas_input", None)
+assert ("pyspark.sql._pandas_input" in sys.modules) == (before_import == "False")
 cls = getattr(T, class_name)
 if attribute == "__getattribute__":
     replacement = lambda self, name: object.__getattribute__(self, name)
@@ -7542,11 +7516,6 @@ else:
              "dataType": T.DateType(), "nullable": False, "metadata": {"changed": True}}[attribute]
     replacement = property(lambda self: value)
 setattr(cls, attribute, replacement)
-import importlib.util
-spec = importlib.util.spec_from_file_location("date_schema_capture", sys.argv[-1])
-capture = importlib.util.module_from_spec(spec)
-sys.modules[spec.name] = capture
-spec.loader.exec_module(capture)
 '''
     outcome = _guard_outcome(script, class_name, attribute, str(before_import))
     _assert_guard(outcome, _DATE_DESCRIPTORS.get((class_name, attribute), _date_converts()),
