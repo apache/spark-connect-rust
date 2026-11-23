@@ -760,14 +760,8 @@ requests of the unpickled object pickle as it is then. This case still differs:
   different: the channels of a target that share the connection of the process resolve its name
   again once between them as that connection fails, where each channel of grpcio resolves it again
   of its own; a new channel takes the connection of the process whatever addresses its own
-  resolution gives, where grpcio's connects to those addresses (both until SPARK-62257); the search
-  domains and the options of a lookup through a DNS server are those of `/etc/resolv.conf`,
-  `LOCALDOMAIN` and `RES_OPTIONS` on any system, where c-ares reads them on macOS of the system's
-  configuration of DNS, of each of its resolvers of no domain (their search lists joined), and not
-  of `/etc/resolv.conf` (`ares_sysconfig_mac.c` of c-ares 1.34.5), and on Windows of the registry
-  (the `SearchList`, `Domain`, `DhcpDomain` and `PrimaryDnsSuffix` of TCP/IP, of its policies and of
-  each interface; `ares_sysconfig_win.c`), which the transport does not read (until SPARK-62254);
-  the `:authority` of the calls of a target whose authority HTTP's URIs cannot hold, of a `%` but in
+  resolution gives, where grpcio's connects to those addresses (both until SPARK-62257); the
+  `:authority` of the calls of a target whose authority HTTP's URIs cannot hold, of a `%` but in
   brackets or of more than one `:`, as of a Unix socket (`tmp%2Fa.sock`) or of a list of addresses,
   is the host and the port of the connection string (`localhost:443`, the first address), as hyper
   and h2, the HTTP/2 of the transport, take the authority of a URI only, where gRPC sends its own,

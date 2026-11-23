@@ -1,6 +1,6 @@
 {
   "inputs": {
-    "Cargo.lock": "6cd2446dca805a8f9c3cf8fdf78eb3ae32442c3a82dda24207e3ebd6296f0523",
+    "Cargo.lock": "89d9a52075cdd3a98dec6e9852888f1b5baad36f58f399c2cbd8942828d4e382",
     "Cargo.toml": "c6633f9ffab4f49000d4e4ca9b7496b6b3025ca711170970c7c74df16980a996",
     "LICENSE": "0d1dda3ddbb607c0ce754eddb23aa9b25b96f4f937b79b32605614c9ff1bfb96",
     "NOTICE": "f34ebcb547d17c3d7aab2d024c4685d4b17d49182480727b70cad2eccfc35274",

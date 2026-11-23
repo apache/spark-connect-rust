@@ -54,6 +54,10 @@ libc = "0.2"
 # that a failure as it starts is told from one later, as gRPC's core tells them.
 socket2 = "0.6"
 
+[target.'cfg(windows)'.dependencies]
+# The search list of DNS of the registry, as c-ares reads it for a `dns://<server>/` target.
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Registry"] }
+
 [target.'cfg(all(target_arch = "aarch64", not(target_os = "windows")))'.dependencies]
 # sha2 0.10 requires this feature for ARM hardware acceleration; sha2-asm excludes Windows.
 sha2 = { version = "0.10", features = ["asm"] }

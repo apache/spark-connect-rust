@@ -17,9 +17,10 @@
 
 //! The configuration of the resolver, as c-ares reads that of the system for each channel of
 //! gRPC's resolver: the search domains, `ndots`, the timeout and the attempts of
-//! `/etc/resolv.conf` and of the environment (`LOCALDOMAIN`, `RES_OPTIONS`), the order of the hosts
-//! file and of DNS (`/etc/nsswitch.conf`), the hosts file (`/etc/hosts`), and the aliases of
-//! `HOSTALIASES`.
+//! `/etc/resolv.conf`, of the resolvers of macOS's configuration of DNS in its place there, and of
+//! the search list of Windows's registry (see `super::system`), and of the environment
+//! (`LOCALDOMAIN`, `RES_OPTIONS`), the order of the hosts file and of DNS (`/etc/nsswitch.conf`),
+//! the hosts file (`/etc/hosts`), and the aliases of `HOSTALIASES`.
 
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -82,6 +83,25 @@ impl Default for Config {
     }
 }
 
+/// The text of the `resolv.conf` of the system, as c-ares reads its configuration: on macOS, of the
+/// resolvers of its configuration of DNS (see `super::macos`), and of `/etc/resolv.conf` only of no
+/// configuration to read; on Windows, of the search list of its registry (see `super::windows`);
+/// else of `/etc/resolv.conf`.
+fn system_resolv_conf() -> Option<String> {
+    #[cfg(windows)]
+    {
+        super::windows::search_list().map(|line| super::system::resolv_conf_of_search_list(&line))
+    }
+    #[cfg(not(windows))]
+    {
+        #[cfg(target_os = "macos")]
+        if let Some(resolvers) = super::macos::resolvers() {
+            return Some(super::system::resolv_conf_of_resolvers(&resolvers));
+        }
+        std::fs::read_to_string("/etc/resolv.conf").ok()
+    }
+}
+
 impl Config {
     /// The configuration of the system now, as c-ares reads it for a lookup.
     pub(crate) fn system() -> Self {
@@ -92,7 +112,7 @@ impl Config {
         Self::of(
             &|path| match path {
                 "hosts" => hosts_path.as_deref().and_then(read),
-                "resolv.conf" => read("/etc/resolv.conf"),
+                "resolv.conf" => system_resolv_conf(),
                 "nsswitch.conf" => read("/etc/nsswitch.conf"),
                 _ => None,
             },
