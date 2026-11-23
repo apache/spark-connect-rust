@@ -173,17 +173,74 @@ pub(crate) enum ObjectKind {
     Other,
 }
 
-/// The key of an option: a str, or another object, which PySpark keeps in its dict as it is.
-#[derive(Clone)]
+/// The Python object of an option, a key that is not a str or a value that is an object, which the
+/// copies of the options of a state share: of one reference to the object, which the options of a
+/// state report to Python's garbage collector while they alone hold it (see
+/// [`UnencodableOptions::visit_objects`]). It is cloned only with the GIL ([`OptionObject::clone_ref`];
+/// it has no `Clone`), so that the count of the options that hold it changes only while no
+/// collection runs, which must get the same objects of a state in each of its passes (see
+/// `crate::gc`): a drop without the GIL only makes it reported, which is safe.
+pub(crate) struct OptionObject(std::sync::Arc<Py<PyAny>>);
+
+impl OptionObject {
+    fn new(object: Py<PyAny>) -> Self {
+        OptionObject(std::sync::Arc::new(object))
+    }
+
+    /// Another holder of the object, with the GIL (`_py`).
+    pub(crate) fn clone_ref(&self, _py: Python<'_>) -> Self {
+        OptionObject(std::sync::Arc::clone(&self.0))
+    }
+
+    /// The object.
+    pub(crate) fn bind<'py>(&self, py: Python<'py>) -> &Bound<'py, PyAny> {
+        self.0.bind(py)
+    }
+
+    /// Whether `other` is of the same object, as a copy of it is. Of the address of the object,
+    /// which the holders keep alive, so another object cannot take it meanwhile.
+    fn is(&self, other: &OptionObject) -> bool {
+        self.0.as_ptr() == other.0.as_ptr()
+    }
+
+    /// Whether no other holder holds the object, which these options then report.
+    fn held_alone(&self) -> bool {
+        std::sync::Arc::strong_count(&self.0) == 1
+    }
+}
+
+/// The key of an option: a str, or another object, which PySpark keeps in its dict as it is. It is
+/// cloned with the GIL ([`OptionKey::clone_ref`]), as its object is.
 pub(crate) enum OptionKey {
     Text(OptionText),
     Object {
-        object: std::sync::Arc<Py<PyAny>>,
+        object: OptionObject,
         kind: ObjectKind,
     },
 }
 
 impl OptionKey {
+    /// Another holder of the key, with the GIL.
+    pub(crate) fn clone_ref(&self, py: Python<'_>) -> Self {
+        match self {
+            OptionKey::Text(text) => OptionKey::Text(text.clone()),
+            OptionKey::Object { object, kind } => OptionKey::Object {
+                object: object.clone_ref(py),
+                kind: kind.clone(),
+            },
+        }
+    }
+
+    /// Whether `other` is this key, as a copy of the options that hold it has it: the same str,
+    /// or the same object.
+    fn is(&self, other: &OptionKey) -> bool {
+        match (self, other) {
+            (OptionKey::Text(a), OptionKey::Text(b)) => a.utf32le == b.utf32le,
+            (OptionKey::Object { object: a, .. }, OptionKey::Object { object: b, .. }) => a.is(b),
+            _ => false,
+        }
+    }
+
     /// The text of the key that the core takes, for a str that encodes, and for bytes that are
     /// UTF-8; None for any other key.
     pub(crate) fn core_text(&self) -> Option<&OptionText> {
@@ -198,14 +255,14 @@ impl OptionKey {
     }
 
     /// Whether `other` is the same key, as PySpark's dict takes it: the same str, or an object
-    /// that is equal to it.
-    fn same_as(&self, other: &OptionKey) -> bool {
+    /// that is equal to it, of its `==`, which is Python code, so no lock of a state of options is
+    /// held meanwhile (see [`change_options`]).
+    fn same_as(&self, py: Python<'_>, other: &OptionKey) -> bool {
         match (self, other) {
             (OptionKey::Text(a), OptionKey::Text(b)) => a.utf32le == b.utf32le,
             (OptionKey::Object { object: a, .. }, OptionKey::Object { object: b, .. }) => {
-                Python::attach(|py| {
-                    pyo3::types::PyAnyMethods::eq(a.bind(py), b.bind(py)).unwrap_or(false)
-                })
+                crate::gc::check_no_lock_held("the `==` of the keys of options");
+                pyo3::types::PyAnyMethods::eq(a.bind(py), b.bind(py)).unwrap_or(false)
             }
             _ => false,
         }
@@ -217,6 +274,16 @@ impl OptionKey {
             OptionKey::Text(text) => text.to_object(py),
             OptionKey::Object { object, .. } => Ok(object.bind(py).clone()),
         }
+    }
+}
+
+/// Whether `a` and `b` are the same value of an entry, as a copy of the options that hold it has
+/// it.
+fn same_value(a: Option<&OptionKey>, b: Option<&OptionKey>) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) => a.is(b),
+        (None, None) => true,
+        _ => false,
     }
 }
 
@@ -242,7 +309,7 @@ pub(crate) fn option_object(object: &Bound<'_, PyAny>) -> PyResult<OptionKey> {
         ObjectKind::Other
     };
     Ok(OptionKey::Object {
-        object: std::sync::Arc::new(object.clone().unbind()),
+        object: OptionObject::new(object.clone().unbind()),
         kind,
     })
 }
@@ -304,11 +371,40 @@ fn entry_error(key: &OptionKey, value: Option<&OptionKey>) -> Option<SparkError>
 /// The entries of the options of a reader, writer, builder or table properties that the core
 /// cannot take, in the order of PySpark's dict: a key that is not a str that encodes, or a value
 /// that the core does not take, which is a str that does not encode, or an object that is not
-/// a str or bytes that are UTF-8. The plan fails with the error of the first entry.
-#[derive(Clone, Default)]
+/// a str or bytes that are UTF-8. The plan fails with the error of the first entry. Copied with
+/// the GIL ([`UnencodableOptions::clone_ref`]), as their objects are.
+#[derive(Default)]
 pub(crate) struct UnencodableOptions(Vec<(OptionKey, Option<OptionKey>)>);
 
 impl UnencodableOptions {
+    /// A copy of the entries, which holds their objects too, with the GIL.
+    pub(crate) fn clone_ref(&self, py: Python<'_>) -> Self {
+        UnencodableOptions(
+            self.0
+                .iter()
+                .map(|(key, value)| {
+                    (
+                        key.clone_ref(py),
+                        value.as_ref().map(|value| value.clone_ref(py)),
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    /// Whether these are the entries of `other`, a copy of them, as they are until either one
+    /// changes: the same keys and values, of the same objects.
+    fn same_entries(&self, other: &UnencodableOptions) -> bool {
+        self.0.len() == other.0.len()
+            && self
+                .0
+                .iter()
+                .zip(&other.0)
+                .all(|((key, value), (other_key, other_value))| {
+                    key.is(other_key) && same_value(value.as_ref(), other_value.as_ref())
+                })
+    }
+
     /// Whether an entry of `key` and `value` is kept: a key that is not a str, or a str that does
     /// not encode, or a value that the core does not take.
     fn kept(key: &OptionKey, value: Option<&OptionKey>) -> bool {
@@ -320,27 +416,29 @@ impl UnencodableOptions {
         }
     }
 
-    fn position(&self, key: &OptionKey) -> Option<usize> {
-        self.0.iter().position(|(entry, _)| entry.same_as(key))
+    /// The entry of `key`, of the `==` of the keys, which is Python code (see
+    /// [`OptionKey::same_as`]).
+    fn position(&self, py: Python<'_>, key: &OptionKey) -> Option<usize> {
+        self.0.iter().position(|(entry, _)| entry.same_as(py, key))
     }
 
     /// Remove the entry of `key`, which is set to a value that the core takes, or unset.
-    pub(crate) fn remove(&mut self, key: &OptionKey) {
-        if let Some(position) = self.position(key) {
+    pub(crate) fn remove(&mut self, py: Python<'_>, key: &OptionKey) {
+        if let Some(position) = self.position(py, key) {
             self.0.remove(position);
         }
     }
 
     /// Set the entry of `key` to `value`, as PySpark's dict is set: an entry keeps its place, and
     /// is removed when neither its key nor its value needs it.
-    pub(crate) fn set(&mut self, key: &OptionKey, value: Option<OptionKey>) {
+    pub(crate) fn set(&mut self, py: Python<'_>, key: &OptionKey, value: Option<OptionKey>) {
         if !Self::kept(key, value.as_ref()) {
-            self.remove(key);
+            self.remove(py, key);
             return;
         }
-        match self.position(key) {
-            Some(position) => self.0[position] = (key.clone(), value),
-            None => self.0.push((key.clone(), value)),
+        match self.position(py, key) {
+            Some(position) => self.0[position] = (key.clone_ref(py), value),
+            None => self.0.push((key.clone_ref(py), value)),
         }
     }
 
@@ -388,7 +486,9 @@ impl UnencodableOptions {
     /// Report the Python objects of the entries, the keys that are not strs and the values that
     /// are objects, to Python's garbage collector, as PySpark's dict of its options holds them:
     /// those that only these options hold, so that a copy of them, which a request makes of the
-    /// state, does not count one reference twice (see [`SharedObjects`]).
+    /// state, does not count one reference twice (see [`SharedObjects`]). A copy is made and
+    /// dropped only with the GIL, or dropped without it, which only makes an object reported, so
+    /// the objects reported are the same in each pass of a collection.
     pub(crate) fn visit_objects(
         &self,
         visit: &pyo3::PyVisit<'_>,
@@ -396,8 +496,8 @@ impl UnencodableOptions {
         for (key, value) in &self.0 {
             for entry in std::iter::once(key).chain(value.as_ref()) {
                 if let OptionKey::Object { object, .. } = entry {
-                    if std::sync::Arc::strong_count(object) == 1 {
-                        visit.call(&**object)?;
+                    if object.held_alone() {
+                        visit.call(&*object.0)?;
                     }
                 }
             }
@@ -406,10 +506,12 @@ impl UnencodableOptions {
     }
 
     /// The entries as Python objects, which a reduce gives back: the key, and the value, if any.
+    /// Of a copy of the options, as Python objects are made, which may run Python code.
     pub(crate) fn to_objects<'py>(
         &self,
         py: Python<'py>,
     ) -> PyResult<Vec<(Bound<'py, PyAny>, Bound<'py, PyAny>)>> {
+        crate::gc::check_no_lock_held("the Python objects of options made");
         self.0
             .iter()
             .map(|(key, value)| {
@@ -429,30 +531,170 @@ impl UnencodableOptions {
 /// one holder among them that could report its objects to Python's garbage collector once, so the
 /// state is held by a Python object too, a [`PySharedObjects`], which each copy holds and reports,
 /// and which reports the objects: so each is reported once, and freed with the last copy that
-/// holds the state, as in PySpark.
+/// holds the state, as in PySpark. The state of options is of a lock that is taken only with the
+/// GIL ([`crate::gc::GilMutex`]), so a collection finds it as it is in each of its passes.
 pub(crate) trait SharedObjects: Send + Sync {
-    /// Report the Python objects that the state holds, unless another thread holds its lock.
+    /// Report the Python objects that the state holds, unless its lock is held.
     fn visit(&self, visit: &pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError>;
 
     /// Drop the Python objects of the state, which the garbage collector found unreachable with
     /// every holder of the state. They are dropped once the lock is left, as their drop may run
     /// Python code.
-    fn clear(&self);
+    fn clear(&self, py: Python<'_>);
 }
 
-impl SharedObjects for WriterState<UnencodableOptions> {
+impl SharedObjects for crate::gc::GilMutex<UnencodableOptions> {
     fn visit(&self, visit: &pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
-        match self.try_lock() {
+        match self.try_lock_in_traverse(visit) {
             Some(options) => options.visit_objects(visit),
             None => Ok(()),
         }
     }
 
-    fn clear(&self) {
+    fn clear(&self, py: Python<'_>) {
         let cleared = self
-            .try_lock()
+            .try_lock(py)
             .map(|mut options| std::mem::take(&mut *options));
         drop(cleared);
+    }
+}
+
+/// Change the options of `state`, those that `options_of` gives of it, by `change`, which sets the
+/// entry of a key of them, as PySpark's dict sets a key, and `commit` the change to `state` with
+/// them. The keys are compared with their `==`, which is Python code: it may release the GIL, as
+/// any Python function may, or set an option of the same state again, as a key that PySpark's dict
+/// compares may. So `change` runs on a copy of the options, with no lock held, and the copy
+/// replaces them unless they changed meanwhile; then it runs again, of the options as they are, as
+/// a dict looks a key up again when its comparison changed the dict. The lock of the options is
+/// held only to copy and to replace them, and `commit` runs under it, of no Python code; the
+/// options that are replaced are dropped once it is released, as the drop of their objects may
+/// run Python code. A call of `change` of a key that is a str runs once, as such keys are
+/// compared with no Python code.
+pub(crate) fn change_options<T, R>(
+    py: Python<'_>,
+    state: &crate::gc::GilMutex<T>,
+    options_of: impl Fn(&mut T) -> &mut UnencodableOptions,
+    mut change: impl FnMut(&mut UnencodableOptions) -> R,
+    commit: impl FnOnce(&mut T, &R),
+) -> R {
+    let mut commit = Some(commit);
+    loop {
+        let base = options_of(&mut state.lock(py)).clone_ref(py);
+        let mut changed = Some(base.clone_ref(py));
+        let result = change(changed.as_mut().expect("the copy of the options"));
+        let replaced = {
+            let mut locked = state.lock(py);
+            if options_of(&mut locked).same_entries(&base) {
+                let replaced = std::mem::replace(
+                    options_of(&mut locked),
+                    changed.take().expect("the copy of the options"),
+                );
+                if let Some(commit) = commit.take() {
+                    commit(&mut locked, &result);
+                }
+                Some(replaced)
+            } else {
+                None
+            }
+        };
+        let committed = replaced.is_some();
+        drop((replaced, changed, base));
+        if committed {
+            return result;
+        }
+    }
+}
+
+/// The entry of the option `key` of a reader, set to `value`, or unset when it is None, as a
+/// reader's `option` sets it: `unencodable` keeps the entries that the core reader does not take,
+/// and the change of the options of the core reader is returned, which takes only a str key that
+/// encodes: its value, None for a value that is None or does not encode, which unsets it; and None
+/// of another key.
+fn reader_entry(
+    py: Python<'_>,
+    unencodable: &mut UnencodableOptions,
+    key: &OptionKey,
+    value: Option<&OptionText>,
+) -> Option<(String, Option<String>)> {
+    match value {
+        Some(value) => unencodable.set(py, key, Some(OptionKey::Text(value.clone()))),
+        None => unencodable.remove(py, key),
+    }
+    match key {
+        OptionKey::Text(OptionText {
+            text: Some(name), ..
+        }) => Some((name.clone(), value.and_then(|value| value.text.clone()))),
+        _ => None,
+    }
+}
+
+/// `builder` with the change of its options that [`reader_entry`] gives.
+fn with_reader_change<B: ReaderOptionBuilder>(
+    builder: B,
+    change: Option<(String, Option<String>)>,
+) -> B {
+    match change {
+        Some((name, Some(value))) => builder.with_option(&name, &value),
+        Some((name, None)) => builder.without_option(&name),
+        None => builder,
+    }
+}
+
+/// The entry of the option `key` of a writer, set to `value`, as a writer's `option` sets it:
+/// `unencodable` keeps the entries that the core writer does not take, and the option that the
+/// core writer takes is returned, of a key that is a str, or bytes that are UTF-8, with a value
+/// that encodes.
+pub(crate) fn writer_entry(
+    py: Python<'_>,
+    unencodable: &mut UnencodableOptions,
+    key: &OptionKey,
+    value: &OptionText,
+) -> Option<(String, String)> {
+    match (
+        key.core_text().and_then(|name| name.text.clone()),
+        value.text.clone(),
+    ) {
+        (Some(name), Some(value)) => {
+            unencodable.remove(py, key);
+            Some((name, value))
+        }
+        _ => {
+            unencodable.set(py, key, Some(OptionKey::Text(value.clone())));
+            None
+        }
+    }
+}
+
+/// The entry of the table property `key` of a V2 writer, set to `value`, or unset when it is
+/// None, as its `tableProperty` sets it: `unencodable` keeps the entries that the core writer does
+/// not take, and the change of its table properties is returned, of a key that is a str, or bytes
+/// that are UTF-8: its value, None for a value that is None or does not encode, which unsets it;
+/// and None of another key.
+pub(crate) fn property_entry(
+    py: Python<'_>,
+    unencodable: &mut UnencodableOptions,
+    key: &OptionKey,
+    value: Option<&OptionKey>,
+) -> Option<(String, Option<String>)> {
+    let Some(name) = key.core_text().and_then(|name| name.text.clone()) else {
+        unencodable.set(py, key, value.map(|value| value.clone_ref(py)));
+        return None;
+    };
+    match value {
+        Some(value) => match value.core_text().and_then(|text| text.text.clone()) {
+            Some(text) => {
+                unencodable.remove(py, key);
+                Some((name, Some(text)))
+            }
+            None => {
+                unencodable.set(py, key, Some(value.clone_ref(py)));
+                Some((name, None))
+            }
+        },
+        None => {
+            unencodable.remove(py, key);
+            Some((name, None))
+        }
     }
 }
 
@@ -487,7 +729,7 @@ impl PySharedObjects {
     /// Break a reference cycle that the garbage collector found unreachable: as every holder of
     /// the state is unreachable then, the objects of the state are dropped.
     fn __clear__(&mut self) {
-        self.0.clear();
+        Python::attach(|py| self.0.clear(py));
     }
 }
 
@@ -508,75 +750,70 @@ impl ReaderOptionBuilder for DataStreamReader {
     }
 }
 
-/// `builder` with the option `key` set to `value`, or unset when `value` is None, as a reader's
-/// `option` sets it. The core reader takes only a str key whose value encodes, and the other
-/// entries are kept in `unencodable`.
-pub(crate) fn put_reader_option<B: ReaderOptionBuilder>(
-    builder: B,
-    unencodable: &mut UnencodableOptions,
-    key: &OptionKey,
-    value: Option<&OptionText>,
-) -> B {
-    match value {
-        Some(value) => unencodable.set(key, Some(OptionKey::Text(value.clone()))),
-        None => unencodable.remove(key),
-    }
-    match key {
-        OptionKey::Text(OptionText {
-            text: Some(name), ..
-        }) => match value {
-            Some(OptionText {
-                text: Some(value), ..
-            }) => builder.with_option(name, value),
-            _ => builder.without_option(name),
-        },
-        _ => builder,
-    }
-}
-
-/// `builder` with the option `key` set to `value`, as a writer's `option` sets it: the core writer
-/// takes a key that is a str, or bytes that are UTF-8, with a value that encodes, and the other
-/// entries are kept in `unencodable`.
-pub(crate) fn put_writer_option<B: OptionBuilder>(
-    builder: B,
-    unencodable: &mut UnencodableOptions,
-    key: &OptionKey,
-    value: &OptionText,
-) -> B {
-    match (
-        key.core_text().and_then(|name| name.text.as_deref()),
-        value.text.as_deref(),
-    ) {
-        (Some(name), Some(value)) => {
-            unencodable.remove(key);
-            builder.with_option(name, value)
-        }
-        _ => {
-            unencodable.set(key, Some(OptionKey::Text(value.clone())));
-            builder
-        }
-    }
-}
-
 /// `builder` with the option `key` set to `value`, or unset when `value` is None, on a reader whose
-/// state is shared by its copies, as [`put_reader_option`] does.
+/// entries that the core reader does not take its copies share, `shared`, as a reader's `option`
+/// sets it ([`reader_entry`]): the keys are compared with no lock held ([`change_options`]).
 pub(crate) fn put_shared_option<B: ReaderOptionBuilder>(
+    py: Python<'_>,
     builder: B,
-    shared: &WriterState<UnencodableOptions>,
+    shared: &crate::gc::GilMutex<UnencodableOptions>,
     key: &OptionKey,
     value: Option<&OptionText>,
 ) -> B {
-    let mut unencodable = shared.get();
-    let builder = put_reader_option(builder, &mut unencodable, key, value);
-    shared.set(unencodable);
-    builder
+    let change = change_options(
+        py,
+        shared,
+        |options| options,
+        |options| reader_entry(py, options, key, value),
+        |_, _| {},
+    );
+    with_reader_change(builder, change)
+}
+
+/// Set the option `key` to `value`, or unset it when it is None, on the options that a reader and
+/// its shallow copies share, as PySpark's `option` sets the dict of its options: `options`, the
+/// options of the core reader, takes the option of a str key whose value encodes, and `shared`
+/// keeps the other entries ([`reader_entry`]). The keys are compared with no lock held
+/// ([`change_options`]), and the caller holds no borrow of the reader meanwhile, so that a key
+/// whose `__eq__` releases the GIL, or sets an option of the reader again, stops no call of the
+/// reader, as PySpark's dict stops none.
+pub(crate) fn put_reader_option_of_copies(
+    py: Python<'_>,
+    options: &WriterState<HashMap<String, String>>,
+    shared: &crate::gc::GilMutex<UnencodableOptions>,
+    key: &OptionKey,
+    value: Option<&OptionText>,
+) {
+    let change = change_options(
+        py,
+        shared,
+        |options| options,
+        |options| reader_entry(py, options, key, value),
+        |_, _| {},
+    );
+    if let Some((name, value)) = change {
+        // As the core reader's `option` and `unset_option`, of the map that its copies share.
+        options.update(|mut options| {
+            match value {
+                Some(value) => {
+                    options.insert(name, value);
+                }
+                None => {
+                    options.remove(&name);
+                }
+            }
+            options
+        });
+    }
 }
 
 /// `builder` with the option `key` set to `value`, converted by `to_text`, **skipping** a `value`
-/// that is absent or None, as [`set_option_skip_none`] does.
+/// that is absent or None, as [`set_option_skip_none`] does, on a reader whose entries that the
+/// core reader does not take its copies share, as [`put_shared_option`] sets them.
 pub(crate) fn put_option_skip_none<B: ReaderOptionBuilder>(
+    py: Python<'_>,
     builder: B,
-    unencodable: &mut UnencodableOptions,
+    shared: &crate::gc::GilMutex<UnencodableOptions>,
     key: &OptionKey,
     value: Option<&Bound<'_, PyAny>>,
     to_text: fn(&Bound<'_, PyAny>) -> PyResult<Option<OptionText>>,
@@ -585,26 +822,46 @@ pub(crate) fn put_option_skip_none<B: ReaderOptionBuilder>(
         return Ok(builder);
     };
     match to_text(value)? {
-        Some(text) => Ok(put_reader_option(builder, unencodable, key, Some(&text))),
+        Some(text) => Ok(put_shared_option(py, builder, shared, key, Some(&text))),
         None => Ok(builder),
     }
 }
 
 /// `builder` with each of `options` set, **skipping** those that are None, as
-/// [`put_option_skip_none`] does for each one, on a reader whose state is shared by its copies.
+/// [`put_option_skip_none`] does for each one, on a reader whose entries that the core reader does
+/// not take its copies share: the values are converted first, in order, as Python code, so the
+/// first one that fails raises before any of them is set; their keys are strs.
 pub(crate) fn skip_none_shared<B: ReaderOptionBuilder>(
-    mut builder: B,
-    shared: &WriterState<UnencodableOptions>,
+    py: Python<'_>,
+    builder: B,
+    shared: &crate::gc::GilMutex<UnencodableOptions>,
     options: &[(&str, Option<&Bound<'_, PyAny>>)],
     to_text: fn(&Bound<'_, PyAny>) -> PyResult<Option<OptionText>>,
 ) -> PyResult<B> {
-    let mut unencodable = shared.get();
+    let mut entries = Vec::new();
     for (name, value) in options {
-        let key = OptionKey::Text(OptionText::literal(name));
-        builder = put_option_skip_none(builder, &mut unencodable, &key, *value, to_text)?;
+        if let Some(value) = value {
+            if let Some(text) = to_text(value)? {
+                entries.push((OptionKey::Text(OptionText::literal(name)), text));
+            }
+        }
     }
-    shared.set(unencodable);
-    Ok(builder)
+    if entries.is_empty() {
+        return Ok(builder);
+    }
+    let changes = change_options(
+        py,
+        shared,
+        |options| options,
+        |options| {
+            entries
+                .iter()
+                .map(|(key, value)| reader_entry(py, options, key, Some(value)))
+                .collect::<Vec<_>>()
+        },
+        |_, _| {},
+    );
+    Ok(changes.into_iter().fold(builder, with_reader_change))
 }
 
 /// The text of the value of a `DataFrameReader` option, as its `option` takes it: None for None,
@@ -767,5 +1024,177 @@ impl DefaultedOption {
             DefaultedOption::Omitted => PyBool::new(py, default).to_owned().into_any(),
             DefaultedOption::Given(value) => value.bind(py).clone(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    use crate::gc::GilMutex;
+
+    /// Whether `gc.get_referents` of `shared` gives `object`, as a collection gets it.
+    fn reports(py: Python<'_>, shared: &Py<PySharedObjects>, object: &Bound<'_, PyAny>) -> bool {
+        let referents = py
+            .import("gc")
+            .unwrap()
+            .call_method1("get_referents", (shared,))
+            .unwrap();
+        referents
+            .cast::<PyList>()
+            .unwrap()
+            .iter()
+            .any(|referent| referent.is(object))
+    }
+
+    /// Set the entry of `key` to the text `value` in the options of `state`, as an option of a
+    /// reader is set.
+    fn put(py: Python<'_>, state: &GilMutex<UnencodableOptions>, key: &OptionKey, value: &str) {
+        let value = OptionText::literal(value);
+        change_options(
+            py,
+            state,
+            |options| options,
+            |options| reader_entry(py, options, key, Some(&value)),
+            |_, _| {},
+        );
+    }
+
+    #[test]
+    fn the_objects_of_options_are_reported_while_the_options_of_a_state_alone_hold_them() {
+        Python::initialize();
+        Python::attach(|py| {
+            let object = py.eval(c"object()", None, None).unwrap();
+            let state = Arc::new(GilMutex::new(UnencodableOptions::default()));
+            let shared = Py::new(py, PySharedObjects::new(state.clone())).unwrap();
+            let key = option_key(&object).unwrap();
+            put(py, &state, &key, "v");
+            // The key of the caller holds the object too, as the copy of a request does: the
+            // options do not report it while it lives, which keeps it alive.
+            assert!(!reports(py, &shared, &object));
+            drop(key);
+            assert!(reports(py, &shared, &object));
+            let copy = state.lock(py).clone_ref(py);
+            assert!(!reports(py, &shared, &object));
+            drop(copy);
+            assert!(reports(py, &shared, &object));
+            // A state whose lock is held is not read, in any pass of a collection alike.
+            {
+                let _held = state.lock(py);
+                assert!(!reports(py, &shared, &object));
+            }
+            assert!(reports(py, &shared, &object));
+            // The clear of an unreachable state drops its objects.
+            state.clear(py);
+            assert!(!reports(py, &shared, &object));
+            assert_eq!(state.lock(py).0.len(), 0);
+        });
+    }
+
+    /// The flags of the comparisons of [`keys_are_compared_with_no_lock_held_and_again_once_the_options_changed`].
+    static COMPARED_WITH_A_LOCK: AtomicBool = AtomicBool::new(false);
+    static REENTERED: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn keys_are_compared_with_no_lock_held_and_again_once_the_options_changed() {
+        Python::initialize();
+        Python::attach(|py| {
+            let namespace = pyo3::types::PyDict::new(py);
+            py.run(
+                c"class Key:\n    def __init__(self, tag, on_eq=None):\n        self.tag = tag\n        self.on_eq = on_eq\n    def __hash__(self):\n        return 1\n    def __eq__(self, other):\n        on_eq, self.on_eq = self.on_eq, None\n        if on_eq is not None:\n            on_eq()\n        return self is other\n",
+                Some(&namespace),
+                None,
+            )
+            .unwrap();
+            let class = namespace.get_item("Key").unwrap().unwrap();
+            let state = Arc::new(GilMutex::new(UnencodableOptions::default()));
+            let first = class.call1(("first",)).unwrap();
+            put(py, &state, &option_key(&first).unwrap(), "1");
+            // The comparison of a key with `first` sets another key of the same options, as the
+            // `__eq__` of a key of PySpark's dict may: the options are not locked meanwhile, and
+            // the change is made again of the options as they are then, which keep both keys,
+            // in the order of a dict that looks its key up again.
+            let inner = class.call1(("inner",)).unwrap();
+            let inner_key = option_key(&inner).unwrap();
+            let of_inner = state.clone();
+            let on_eq = pyo3::types::PyCFunction::new_closure(py, None, None, move |args, _| {
+                let py = args.py();
+                if of_inner.try_lock(py).is_none() {
+                    COMPARED_WITH_A_LOCK.store(true, Ordering::SeqCst);
+                }
+                REENTERED.fetch_add(1, Ordering::SeqCst);
+                put(py, &of_inner, &inner_key, "2");
+            })
+            .unwrap();
+            first.setattr("on_eq", on_eq).unwrap();
+            let outer = class.call1(("outer",)).unwrap();
+            put(py, &state, &option_key(&outer).unwrap(), "3");
+            assert!(!COMPARED_WITH_A_LOCK.load(Ordering::SeqCst));
+            assert_eq!(REENTERED.load(Ordering::SeqCst), 1);
+            // Of a copy, as Python objects are made apart from the lock.
+            let options = state.lock(py).clone_ref(py);
+            let tags: Vec<String> = options
+                .to_objects(py)
+                .unwrap()
+                .into_iter()
+                .map(|(key, value)| {
+                    let tag: String = key.getattr("tag").unwrap().extract().unwrap();
+                    let value: String = value.extract().unwrap();
+                    format!("{tag}={value}")
+                })
+                .collect();
+            assert_eq!(tags, ["first=1", "inner=2", "outer=3"]);
+        });
+    }
+
+    #[test]
+    fn a_key_that_is_a_str_is_set_with_no_comparison_of_python_code() {
+        Python::initialize();
+        Python::attach(|py| {
+            let namespace = pyo3::types::PyDict::new(py);
+            py.run(
+                c"class Key:\n    compared = 0\n    def __hash__(self):\n        return 1\n    def __eq__(self, other):\n        Key.compared += 1\n        return self is other\n",
+                Some(&namespace),
+                None,
+            )
+            .unwrap();
+            let class = namespace.get_item("Key").unwrap().unwrap();
+            let state = GilMutex::new(UnencodableOptions::default());
+            // A str key of a value that UTF-8 cannot encode is kept, next to an object key; the
+            // core reader unsets it.
+            let key = option_key(&PyString::new(py, "a")).unwrap();
+            let unencodable = OptionText::of(&py.eval(c"'\\udcff'", None, None).unwrap()).unwrap();
+            let change = change_options(
+                py,
+                &state,
+                |options| options,
+                |options| reader_entry(py, options, &key, Some(&unencodable)),
+                |_, _| {},
+            );
+            assert_eq!(change, Some(("a".to_string(), None)));
+            put(
+                py,
+                &state,
+                &option_key(&class.call0().unwrap()).unwrap(),
+                "2",
+            );
+            assert_eq!(state.lock(py).0.len(), 2);
+            // Set to a value that encodes, the str key leaves the kept options, which compare it
+            // with the object key of no Python code, and the core reader takes it.
+            let encodable = OptionText::literal("x");
+            let change = change_options(
+                py,
+                &state,
+                |options| options,
+                |options| reader_entry(py, options, &key, Some(&encodable)),
+                |_, _| {},
+            );
+            assert_eq!(change, Some(("a".to_string(), Some("x".to_string()))));
+            assert_eq!(state.lock(py).0.len(), 1);
+            let compared: usize = class.getattr("compared").unwrap().extract().unwrap();
+            assert_eq!(compared, 0);
+        });
     }
 }

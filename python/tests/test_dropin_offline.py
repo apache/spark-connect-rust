@@ -16512,6 +16512,385 @@ def test_cycles_through_the_option_keys_and_kept_arguments_are_collected_as_pysp
         assert freed() is None
 
 
+def test_option_keys_compared_as_python_code_stop_no_call_and_lose_no_option_as_pyspark(
+        mock_connect):
+    # As PySpark's readers, writers and session builder, whose options are dicts: a dict compares
+    # a key with the keys that it holds by their `__eq__`, Python code, which may release the GIL,
+    # as any Python function may, or set an option of the same object again. Neither stops a call
+    # of another thread, nor fails its own, nor loses an option. The drop-in compared the kept
+    # keys of a writer while it held the locks of the writer's state, so another thread's call of
+    # the writer waited for them with the GIL held, which the first thread needed back: the two
+    # deadlocked, and so did a comparison that set an option of the writer again. It compared
+    # those of a reader while it held a borrow of the reader, so another thread's call raised
+    # "Already borrowed", and an option that the comparison set was lost. In a process of its own,
+    # which a deadlock would hang, with the check of the clones on (see `crate::gc::GilMutex`).
+    import subprocess
+    import sys
+    import textwrap
+
+    _, service = mock_connect
+    code = textwrap.dedent("""
+        import os
+        import sys
+        import threading
+
+        from pyspark.sql.connect.session import SparkSession
+
+        try:
+            from pyspark._pyspark import _check_part_clones, _take_part_clone_violations
+
+            if not _check_part_clones():  # on Windows, where a thread cannot tell that it holds the GIL
+                _take_part_clone_violations = None
+        except ImportError:  # PySpark, which has no extension
+            _take_part_clone_violations = None
+
+        spark = SparkSession.builder.remote(sys.argv[1]).getOrCreate()
+        df = spark.range(1)
+        compared = threading.Event()
+        returned = threading.Event()
+
+
+        class Key:
+            # A key of an option, whose comparison with another key runs `on_eq` once: a dict compares a
+            # key with the keys that it holds by their `__eq__`, of the key that it holds.
+            def __init__(self, on_eq=None):
+                self.on_eq = on_eq
+
+            def __hash__(self):
+                return 1
+
+            def __eq__(self, other):
+                on_eq, self.on_eq = self.on_eq, None
+                if on_eq is not None:
+                    on_eq()
+                return self is other
+
+
+        def until_the_other_call_returns():
+            # Releases the GIL until the call of the other thread returns.
+            compared.set()
+            assert returned.wait(60), "the other call did not return"
+
+
+        def kept_objects_fail(holder, kind):
+            # The keys that are objects fail the plan of a read or a write, before any request, as
+            # PySpark's `DataSource` asserts its keys, and protobuf rejects them in a write.
+            error_of = {"reader": AssertionError, "stream reader": AssertionError}.get(kind, TypeError)
+            try:
+                {"reader": lambda: holder.load("p"), "stream reader": lambda: holder.load("p"),
+                 "writer": lambda: holder.save("p"), "writer v2": lambda: holder.create()}[kind]()
+            except (AssertionError, TypeError) as error:
+                return type(error) is error_of
+            return False
+
+
+        cases = {
+            # kind: (make, the setters of a key, the other calls, and the check of each other call)
+            "reader": (
+                lambda: spark.read,
+                [lambda h, k: h.option(k, "v")],
+                [(lambda h: h.option("k", "v"), lambda h: h._options.get("k") == "v"),
+                 (lambda h: h.options(k="v"), lambda h: h._options.get("k") == "v"),
+                 (lambda h: h.format("csv"), lambda h: h._format == "csv")],
+            ),
+            "stream reader": (
+                lambda: spark.readStream,
+                [lambda h, k: h.option(k, "v")],
+                [(lambda h: h.option("k", "v"), lambda h: h._options.get("k") == "v"),
+                 (lambda h: h.options(k="v"), lambda h: h._options.get("k") == "v"),
+                 (lambda h: h.format("csv"), lambda h: h._format == "csv")],
+            ),
+            "writer": (
+                lambda: df.write,
+                [lambda h, k: h.option(k, "v")],
+                [(lambda h: h.option("k", "v"), None), (lambda h: h.format("parquet"), None),
+                 (lambda h: h.mode("overwrite"), None), (lambda h: h.partitionBy("id"), None)],
+            ),
+            "writer v2": (
+                lambda: df.writeTo("t"),
+                [lambda h, k: h.option(k, "v"), lambda h, k: h.tableProperty(k, "v")],
+                [(lambda h: h.option("k", "v"), None), (lambda h: h.using("parquet"), None),
+                 (lambda h: h.tableProperty("p", "q"), None)],
+            ),
+        }
+        outcomes = []
+        only = sys.argv[2:]  # the kinds to run, all of them by default
+
+
+        def record(*outcome):
+            outcomes.append(outcome)
+            print(*outcome[:5], *outcome[5], flush=True)
+
+
+        for kind, (make, setters, others) in cases.items():
+            if only and kind not in only:
+                continue
+            for set_key in setters:
+                for other, check in others:
+                    # Another thread's call while a key is compared, of Python code that releases the GIL.
+                    holder = make()
+                    kept = Key()
+                    set_key(holder, kept)
+                    kept.on_eq = until_the_other_call_returns
+                    compared.clear()
+                    returned.clear()
+                    errors = []
+
+                    def setter(holder=holder, set_key=set_key, errors=errors):
+                        try:
+                            set_key(holder, Key())
+                        except BaseException as error:  # noqa: BLE001
+                            errors.append(repr(error))
+
+                    thread = threading.Thread(target=setter)
+                    thread.start()
+                    assert compared.wait(60)
+                    try:
+                        other(holder)
+                    except BaseException as error:  # noqa: BLE001
+                        errors.append(repr(error))
+                    returned.set()
+                    thread.join()
+                    state = check is None or check(holder)
+                    record(kind, "other thread", not errors, state, kept_objects_fail(holder, kind), errors)
+                # A comparison that sets an option of the same object again, of an object key and of a
+                # str key, which the reader keeps.
+                readers = kind in ("reader", "stream reader")
+                for inner, check in (
+                    (lambda h, set_key=set_key: set_key(h, Key()), None),
+                    (lambda h: h.option("inner", "w"),
+                     (lambda h: h._options.get("inner") == "w") if readers else None),
+                ):
+                    holder = make()
+                    kept = Key()
+                    set_key(holder, kept)
+                    kept.on_eq = lambda holder=holder, inner=inner: inner(holder)
+                    errors = []
+                    try:
+                        set_key(holder, Key())
+                    except BaseException as error:  # noqa: BLE001
+                        errors.append(repr(error))
+                    state = check is None or check(holder)
+                    record(kind, "reentered", not errors, state, kept_objects_fail(holder, kind), errors)
+        # The session builder, whose comparison sets a config of the same builder again (PySpark's
+        # builder holds its lock, an RLock, while it sets one).
+        if not only or "builder" in only:
+            builder = SparkSession.builder
+            kept = Key()
+            builder.config(kept, "v")
+            kept.on_eq = lambda: builder.config("inner", "w")
+            errors = []
+            try:
+                builder.config(Key(), "w")
+            except BaseException as error:  # noqa: BLE001
+                errors.append(repr(error))
+            record("builder", "reentered", not errors, True, True, errors)
+        violations = _take_part_clone_violations()[2:] if _take_part_clone_violations else (0, [])
+        print("violations", violations[0], *violations[1])
+        assert all(all(outcome[2:5]) for outcome in outcomes), outcomes
+        assert violations[0] == 0, violations
+        print("done")
+        sys.stdout.flush()
+        os._exit(0)
+    """)
+    done = subprocess.run([sys.executable, "-c", code, service.remote], capture_output=True,
+                          text=True, timeout=300)
+    assert done.returncode == 0, (done.stdout[-3000:], done.stderr[-3000:])
+    assert done.stdout.strip().endswith("done"), done.stdout[-3000:]
+
+
+def test_collections_while_option_keys_are_compared_free_and_clear_nothing_kept_as_pyspark(
+        mock_connect):
+    # As PySpark's dicts, which hold their keys and values while they compare a key with them: a
+    # collection that the comparison runs, as Python code may, frees and clears none of the keys
+    # of the options, which are in reference cycles through their holder, and through a shallow
+    # copy of it that shares them; once the holders are gone, the cycles are collected.
+    import copy
+    import gc
+    import weakref
+
+    from pyspark.sql.connect.session import SparkSession as ConnectSession
+
+    spark, _ = mock_connect
+    df = spark.range(1)
+
+    class Key:
+        # A key of an option, whose comparison with another key runs `on_eq` once.
+        on_eq = None
+
+        def __hash__(self):
+            return 1
+
+        def __eq__(self, other):
+            on_eq, self.on_eq = self.on_eq, None
+            if on_eq is not None:
+                on_eq()
+            return self is other
+
+    makers = [
+        (lambda: spark.read, lambda holder, key: holder.option(key, "v")),
+        (lambda: spark.readStream, lambda holder, key: holder.option(key, "v")),
+        (lambda: df.write, lambda holder, key: holder.option(key, "v")),
+        (lambda: df.writeTo("t"), lambda holder, key: holder.option(key, "v")),
+        (lambda: df.writeTo("t"), lambda holder, key: holder.tableProperty(key, "v")),
+        (lambda: ConnectSession.builder, lambda holder, key: holder.config(key, "v")),
+    ]
+    for make, put in makers:
+        for copied in (False, True):
+            holder = make()
+            holders = [holder, copy.copy(holder)] if copied else [holder]
+            keys = [Key() for _ in range(3)]
+            for key in keys:
+                put(holders[-1], key)
+                key.held = holders
+            freed = [weakref.ref(key) for key in keys]
+            seen = []
+
+            def collect(holders=holders, freed=freed, seen=seen):
+                gc.collect()
+                seen.append([ref() is not None and vars(ref()).get("held") is holders
+                             for ref in freed])
+
+            # The comparison of a new key with the first one collects.
+            keys[0].on_eq = collect
+            last = Key()
+            last.held = holders
+            put(holder, last)
+            assert seen == [[True, True, True]], (make, copied, seen)
+            freed.append(weakref.ref(last))
+            del holder, holders, keys, key, last, collect
+            gc.collect()
+            assert [ref() for ref in freed] == [None] * 4, (make, copied)
+
+
+def test_holders_of_option_objects_are_used_on_threads_as_the_collector_runs(mock_connect):
+    # Threads that set options of keys and values that are objects, in reference cycles through
+    # the readers, writers and session builders that keep them, copy those, set their options from
+    # other threads, reduce them and fail their reads and writes, while another thread runs
+    # requests without the GIL and another one the collector: no object that a live holder keeps
+    # is freed or cleared, and every cycle is collected at the end, as PySpark's.
+    import copy
+    import gc
+    import random
+    import threading
+    import time
+    import weakref
+
+    from pyspark.sql.connect.readwriter import DataFrameReader, DataFrameWriter, DataFrameWriterV2
+    from pyspark.sql.connect.session import SparkSession as ConnectSession
+    from pyspark.sql.connect.streaming.readwriter import DataStreamReader
+
+    spark, service = mock_connect
+    # The server answers these requests without keeping them.
+    service.forget_session(spark.session_id)
+    df = spark.range(1)
+
+    class Key:
+        # A key or a value of an option, which keeps its holder.
+        def __init__(self):
+            self.alive = True
+
+        def __hash__(self):
+            return 1
+
+        def __eq__(self, other):
+            return self is other
+
+    makers = [
+        lambda key: spark.read.option(key, "v"),
+        lambda key: spark.readStream.option(key, "v"),
+        lambda key: df.write.option(key, "v"),
+        lambda key: df.writeTo("t").option(key, "v"),
+        lambda key: df.writeTo("t").tableProperty(key, "v"),
+        lambda key: df.writeTo("t").tableProperty("p", key),
+        lambda key: ConnectSession.builder.config(key, "v"),
+    ]
+
+    def set_option(holder, key, value):
+        if isinstance(holder, ConnectSession.Builder):
+            holder.config(key, value)
+        else:
+            holder.option(key, value)
+
+    def fail(holder):
+        # The read or the write fails of the kept keys, before any request.
+        if isinstance(holder, (DataFrameReader, DataStreamReader)):
+            holder.load("p")
+        elif isinstance(holder, DataFrameWriter):
+            holder.save("p")
+        elif isinstance(holder, DataFrameWriterV2):
+            holder.create()
+
+    uses = [
+        copy.copy,
+        lambda holder: set_option(holder, "k", "v"),
+        lambda holder: set_option(holder, Key(), "w"),
+        lambda holder: holder.__reduce__(),
+        fail,
+    ]
+    stop = time.monotonic() + 3
+    lock = threading.Lock()
+    shared = []
+    problems = []
+    keys = []
+
+    def alive(holder, freed):
+        key = freed()
+        if key is None or not vars(key).get("alive"):
+            problems.append(type(holder).__name__)
+
+    def worker(index):
+        rng = random.Random(index)
+        kept = []
+        while time.monotonic() < stop:
+            key = Key()
+            holder = rng.choice(makers)(key)
+            key.held = [holder, copy.copy(holder)] if rng.random() < 0.5 else [holder]
+            with lock:
+                shared.append((holder, weakref.ref(key)))
+                others = rng.sample(shared, min(3, len(shared)))
+                gone = shared.pop(0) if len(shared) > 30 else None
+            for other, _ in others:
+                try:
+                    rng.choice(uses)(other)
+                except Exception:
+                    pass
+            if gone is not None:
+                alive(*gone)
+            kept.append((holder, weakref.ref(key)))
+            if len(kept) > 6:
+                alive(*kept.pop(0))
+            keys.append(weakref.ref(key))
+            del key, holder, others, gone
+
+    def requests():
+        while time.monotonic() < stop:
+            for action in (lambda: df.collect(), lambda: df.schema):
+                try:
+                    action()
+                except Exception:
+                    pass
+
+    def collector():
+        while time.monotonic() < stop:
+            gc.collect()
+            time.sleep(random.random() * 0.002)
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(3)]
+    threads += [threading.Thread(target=requests), threading.Thread(target=collector)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    for holder, freed in shared:
+        alive(holder, freed)
+    assert not problems, problems
+    del holder, freed
+    shared.clear()
+    gc.collect()
+    assert len(keys) > len(makers) and all(key() is None for key in keys)
+
+
 def test_stream_writers_keep_the_pickles_of_their_functions_as_pyspark(mock_connect):
     # As PySpark's DataStreamWriter, whose WriteStreamOperationStart keeps the pickle of the
     # function of foreachBatch and foreach and not the function: an object that keeps the writer

@@ -32,8 +32,9 @@ use crate::streaming::{PyDataStreamReader, PyStreamingQueryManager};
 pub struct PySparkSessionBuilder {
     /// The options of `remote`, `config` and `appName`, which the shallow copies of this builder
     /// share, as PySpark's builder shares its `_options` dict with them: an option that one of
-    /// them sets is the option of each.
-    options: std::sync::Arc<std::sync::Mutex<BuilderOptions>>,
+    /// them sets is the option of each. Of a lock that is taken only with the GIL, as Python's
+    /// garbage collector reads them (see [`crate::options::SharedObjects`]).
+    options: std::sync::Arc<crate::gc::GilMutex<BuilderOptions>>,
     /// The hook factories of `_registerHook`, which a new session calls with itself, as
     /// PySpark's builder does: a list, which the shallow copies of this builder share, as they
     /// share PySpark's `_hook_factories` list. None once the garbage collector cleared it.
@@ -50,17 +51,17 @@ pub struct PySparkSessionBuilder {
     shared: Option<Py<crate::options::PySharedObjects>>,
 }
 
-impl crate::options::SharedObjects for std::sync::Mutex<BuilderOptions> {
+impl crate::options::SharedObjects for crate::gc::GilMutex<BuilderOptions> {
     fn visit(&self, visit: &pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
-        match self.try_lock() {
-            Ok(options) => options.unencodable.visit_objects(visit),
-            Err(_) => Ok(()),
+        match self.try_lock_in_traverse(visit) {
+            Some(options) => options.unencodable.visit_objects(visit),
+            None => Ok(()),
         }
     }
 
-    fn clear(&self) {
+    fn clear(&self, py: Python<'_>) {
         let unencodable = self
-            .try_lock()
+            .try_lock(py)
             .map(|mut options| std::mem::take(&mut options.unencodable));
         drop(unencodable);
     }
@@ -68,7 +69,8 @@ impl crate::options::SharedObjects for std::sync::Mutex<BuilderOptions> {
 
 /// The options of a session builder, which its shallow copies share (see
 /// [`PySparkSessionBuilder::options`]). The lock of them is held only to read or replace them,
-/// while no Python code runs, as the threads of the copies may wait for it.
+/// while no Python code runs, as the threads of the copies may wait for it (see
+/// [`crate::gc::GilMutex`]).
 #[derive(Default)]
 struct BuilderOptions {
     /// The URL of `remote()` or of `config("spark.remote")`: None when it is not set, and
@@ -116,7 +118,7 @@ fn session_url(py: Python<'_>, remote_url: Option<Option<String>>) -> PyResult<S
 
 impl PySparkSessionBuilder {
     pub fn new(py: Python<'_>) -> Self {
-        let options: std::sync::Arc<std::sync::Mutex<BuilderOptions>> = Default::default();
+        let options = std::sync::Arc::new(crate::gc::GilMutex::new(BuilderOptions::default()));
         PySparkSessionBuilder {
             shared: Py::new(py, crate::options::PySharedObjects::new(options.clone())).ok(),
             options,
@@ -125,11 +127,9 @@ impl PySparkSessionBuilder {
         }
     }
 
-    /// The options of this builder and of its copies, locked.
-    fn options(&self) -> std::sync::MutexGuard<'_, BuilderOptions> {
-        self.options
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    /// The options of this builder and of its copies, locked, with the GIL.
+    fn options(&self, py: Python<'_>) -> crate::gc::GilGuard<'_, BuilderOptions> {
+        self.options.lock(py)
     }
 
     /// The hook factories, in the order that `_registerHook` registered them.
@@ -202,7 +202,7 @@ impl PySparkSessionBuilder {
         let py = slf.py();
         let this = slf.borrow();
         let options = {
-            let options = this.options();
+            let options = this.options(py);
             let mut pairs = Vec::with_capacity(options.configs.len() + 1);
             if let Some(url) = &options.remote_url {
                 pairs.push(("spark.remote".to_string(), url.clone()));
@@ -326,7 +326,7 @@ impl PySparkSessionBuilder {
                 Some(location) => crate::options::reader_option_text(location)?,
                 None => Some(crate::options::OptionText::literal("sc://localhost")),
             };
-            slf.borrow().put_config(key, value);
+            slf.borrow().put_config(slf.py(), key, value);
             Ok(slf.clone())
         })
     }
@@ -356,7 +356,7 @@ impl PySparkSessionBuilder {
                     Some(v) => crate::options::reader_option_text(v)?,
                     None => None,
                 };
-                this.put_config(k, v);
+                this.put_config(slf.py(), k, v);
             }
             if let Some(m) = map {
                 for (k, v) in m.iter() {
@@ -366,7 +366,7 @@ impl PySparkSessionBuilder {
                         crate::options::option_key(&k)?
                     };
                     let vs = crate::options::reader_option_text(&v)?;
-                    this.put_config(ks, vs);
+                    this.put_config(slf.py(), ks, vs);
                 }
             }
             if let Some(c) = conf {
@@ -375,7 +375,7 @@ impl PySparkSessionBuilder {
                     let pair = pair?;
                     let k: String = crate::str_text(&pair.get_item(0)?)?;
                     let v: String = crate::str_text(&pair.get_item(1)?)?;
-                    this.options().set_value(&k, Some(v));
+                    this.options(slf.py()).set_value(&k, Some(v));
                 }
             }
             Ok(slf.clone())
@@ -395,7 +395,7 @@ impl PySparkSessionBuilder {
                 "spark.app.name",
             ));
             let value = crate::options::reader_option_text(name)?;
-            slf.borrow().put_config(key, value);
+            slf.borrow().put_config(slf.py(), key, value);
             Ok(slf.clone())
         })
     }
@@ -535,7 +535,7 @@ impl PySparkSessionBuilder {
     /// of `channelBuilder`, or else of `remote()`. As PySpark Connect's `create`, it is an error
     /// to give both a channel builder and a URL, or neither.
     fn connection_url(&self, py: Python<'_>) -> PyResult<(String, OfChannelBuilder)> {
-        let remote_url = self.options().remote_url.clone();
+        let remote_url = self.options(py).remote_url.clone();
         match &self.channel_builder {
             Some(_) if remote_url.is_some() => Err(crate::column::raise_pyspark(
                 py,
@@ -552,9 +552,11 @@ impl PySparkSessionBuilder {
     /// a key and a value that the session takes are set, and the others are kept until
     /// `getOrCreate` fails with them ([`BuilderOptions::unencodable`]). The entries that are kept
     /// are compared with the `==` of their keys, which is Python code, so they are changed apart
-    /// from the lock of the options.
+    /// from the lock of the options ([`crate::options::change_options`]), which sets the config
+    /// with them.
     fn put_config(
         &self,
+        py: Python<'_>,
         key: crate::options::OptionKey,
         value: Option<crate::options::OptionText>,
     ) {
@@ -563,27 +565,27 @@ impl PySparkSessionBuilder {
             None => Some(None),
             Some(value) => value.text.clone().map(Some),
         };
-        let mut unencodable = self.options().unencodable.clone();
-        let name = match (name, text) {
-            (Some(name), Some(text)) => {
-                unencodable.remove(&key);
-                Some((name, text))
-            }
-            _ => {
-                unencodable.set(&key, value.map(crate::options::OptionKey::Text));
-                None
-            }
-        };
-        // The entries that are replaced are dropped once the lock is left, as the drop of their
-        // objects may run Python code.
-        let replaced = {
-            let mut options = self.options();
-            if let Some((name, text)) = name {
-                options.set_value(&name, text);
-            }
-            std::mem::replace(&mut options.unencodable, unencodable)
-        };
-        drop(replaced);
+        crate::options::change_options(
+            py,
+            &self.options,
+            |options| &mut options.unencodable,
+            |unencodable| match (name.clone(), text.clone()) {
+                (Some(name), Some(text)) => {
+                    unencodable.remove(py, &key);
+                    Some((name, text))
+                }
+                _ => {
+                    let value = value.clone().map(crate::options::OptionKey::Text);
+                    unencodable.set(py, &key, value);
+                    None
+                }
+            },
+            |options, config| {
+                if let Some((name, text)) = config {
+                    options.set_value(name, text.clone());
+                }
+            },
+        );
     }
 
     /// Set the options of the builder on `session`, as PySpark's `_apply_options`: in one
@@ -600,7 +602,7 @@ impl PySparkSessionBuilder {
     fn send_options(&self, py: Python<'_>, session: &SparkSession) -> PyResult<()> {
         let mut options: Vec<(String, Option<String>)> = Vec::new();
         let error = {
-            let builder_options = self.options();
+            let builder_options = self.options(py);
             // A later value of a key replaces an earlier one, as the options of PySpark's builder
             // do.
             for (key, value) in builder_options
