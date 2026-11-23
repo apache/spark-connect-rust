@@ -10,8 +10,9 @@ use std::sync::Mutex;
 
 use pyo3::prelude::*;
 
-use super::containers::{MapValue, RepeatedComposite, RepeatedScalar};
-use super::message::{new_instance, MessageClass, PyMessage, Slot};
+use super::containers::{Entries, MapValue, RepeatedComposite, RepeatedScalar};
+use super::message::{new_instance, EntryRef, Fields, MessageClass, PyMessage, Slot};
+use super::native::Value;
 use super::pool::{FieldDesc, Kind, MapDesc, MessageDesc};
 use super::scalar::Scalar;
 use super::text::upb_wire_key_order;
@@ -90,8 +91,9 @@ fn value_len(kind: Kind, value: &Scalar) -> usize {
 
 /// The bytes of `message`, as upb writes a message once into one buffer: the sizes of the
 /// message and of the messages that it holds first ([`measure`]), then the bytes, each message
-/// after its tag and size.
-pub(crate) fn encode(py: Python<'_>, message: &PyMessage) -> PyResult<Vec<u8>> {
+/// after its tag and size. The values that the message holds natively are written as their
+/// objects would be.
+pub(crate) fn encode(py: Python<'_>, message: &Fields) -> PyResult<Vec<u8>> {
     let mut sizes = Vec::new();
     let len = measure(py, message, &mut sizes)?;
     let mut out = Vec::with_capacity(len);
@@ -100,21 +102,67 @@ pub(crate) fn encode(py: Python<'_>, message: &PyMessage) -> PyResult<Vec<u8>> {
 }
 
 /// The length of the bytes of `message`, as [`encode`] writes them.
-pub(crate) fn encoded_len(py: Python<'_>, message: &PyMessage) -> PyResult<usize> {
+pub(crate) fn encoded_len(py: Python<'_>, message: &Fields) -> PyResult<usize> {
     measure(py, message, &mut Vec::new())
 }
 
-/// The entries of `map`, in upb's order of the keys of its deterministic serialization.
-fn sorted_entries(map: &super::containers::MapContainer) -> Vec<&(Scalar, MapValue)> {
-    let mut entries: Vec<_> = map.entries.iter().collect();
+/// The entries of `entries`, in upb's order of the keys of its deterministic serialization.
+fn sorted_entries<V>(entries: &Entries<V>) -> Vec<&(Scalar, V)> {
+    let mut entries: Vec<_> = entries.iter().collect();
     entries.sort_by(|a, b| upb_wire_key_order(&a.0, &b.0));
     entries
+}
+
+/// The length of the values `items` of the repeated scalar field `field`, with the length of their
+/// payload pushed onto `sizes` if they are packed.
+fn measure_scalars(field: &FieldDesc, items: &[Scalar], sizes: &mut Vec<usize>) -> usize {
+    if items.is_empty() {
+        return 0;
+    }
+    let values: usize = items.iter().map(|value| value_len(field.kind, value)).sum();
+    if field.packed {
+        sizes.push(values);
+        tag_len(field.number, 2) + varint_len(values as u64) + values
+    } else {
+        items.len() * tag_len(field.number, field.kind.wire_type()) + values
+    }
+}
+
+/// The length of the entries `entries` of the map field `field` of `map`, with the length of each
+/// entry, and of the messages that it holds, pushed onto `sizes`.
+fn measure_map<V>(
+    py: Python<'_>,
+    field: &FieldDesc,
+    map: &MapDesc,
+    entries: &Entries<V>,
+    sizes: &mut Vec<usize>,
+) -> PyResult<usize>
+where
+    for<'a> EntryRef<'a>: From<&'a V>,
+{
+    let mut total = 0;
+    for (key, value) in sorted_entries(entries) {
+        let at = sizes.len();
+        sizes.push(0);
+        let mut entry = tag_len(1, map.key.wire_type()) + value_len(map.key, key);
+        entry += match EntryRef::from(value) {
+            EntryRef::Scalar(value) => {
+                tag_len(2, map.value.wire_type()) + value_len(map.value, value)
+            }
+            EntryRef::Message(child) => {
+                child.read(py, |child| measure_field(py, 2, child, sizes))?
+            }
+        };
+        sizes[at] = entry;
+        total += tag_len(field.number, 2) + varint_len(entry as u64) + entry;
+    }
+    Ok(total)
 }
 
 /// The length of the bytes of `message`, with the lengths of the messages and the packed fields
 /// that it holds (and of the entries of its maps), each pushed onto `sizes` in the order in which
 /// [`write`] writes them.
-fn measure(py: Python<'_>, message: &PyMessage, sizes: &mut Vec<usize>) -> PyResult<usize> {
+fn measure(py: Python<'_>, message: &Fields, sizes: &mut Vec<usize>) -> PyResult<usize> {
     grow(|| {
         let mut total = 0;
         for (index, slot) in message.slots.iter() {
@@ -129,48 +177,31 @@ fn measure(py: Python<'_>, message: &PyMessage, sizes: &mut Vec<usize>) -> PyRes
                 Slot::Message(child) => {
                     total += measure_child(py, field, &child.bind(py).borrow(), sizes)?;
                 }
+                Slot::Native(Value::Message(child)) => {
+                    total += measure_child(py, field, &child.fields, sizes)?;
+                }
                 Slot::Repeated(container) => {
-                    let container = container.bind(py).borrow();
-                    if container.items.is_empty() {
-                        continue;
-                    }
-                    let values: usize = container
-                        .items
-                        .iter()
-                        .map(|value| value_len(field.kind, value))
-                        .sum();
-                    if field.packed {
-                        sizes.push(values);
-                        total += tag_len(field.number, 2) + varint_len(values as u64) + values;
-                    } else {
-                        total += container.items.len()
-                            * tag_len(field.number, field.kind.wire_type())
-                            + values;
-                    }
+                    total += measure_scalars(field, &container.bind(py).borrow().items, sizes);
+                }
+                Slot::Native(Value::Scalars(items)) => {
+                    total += measure_scalars(field, items, sizes);
                 }
                 Slot::Composite(container) => {
                     for child in &container.bind(py).borrow().items {
                         total += measure_child(py, field, &child.bind(py).borrow(), sizes)?;
                     }
                 }
+                Slot::Native(Value::Messages(items)) => {
+                    for child in &items.items {
+                        total += measure_child(py, field, &child.fields, sizes)?;
+                    }
+                }
                 Slot::Map(map) => {
                     let map = map.bind(py).borrow();
-                    let desc = &map.map;
-                    for (key, value) in sorted_entries(&map) {
-                        let at = sizes.len();
-                        sizes.push(0);
-                        let mut entry = tag_len(1, desc.key.wire_type()) + value_len(desc.key, key);
-                        entry += match value {
-                            MapValue::Scalar(value) => {
-                                tag_len(2, desc.value.wire_type()) + value_len(desc.value, value)
-                            }
-                            MapValue::Message(child) => {
-                                measure_field(py, 2, &child.bind(py).borrow(), sizes)?
-                            }
-                        };
-                        sizes[at] = entry;
-                        total += tag_len(field.number, 2) + varint_len(entry as u64) + entry;
-                    }
+                    total += measure_map(py, field, &map.map, &map.entries, sizes)?;
+                }
+                Slot::Native(Value::Map(map)) => {
+                    total += measure_map(py, field, &map.map, &map.entries, sizes)?;
                 }
             }
         }
@@ -183,7 +214,7 @@ fn measure(py: Python<'_>, message: &PyMessage, sizes: &mut Vec<usize>) -> PyRes
 fn measure_child(
     py: Python<'_>,
     field: &FieldDesc,
-    child: &PyMessage,
+    child: &Fields,
     sizes: &mut Vec<usize>,
 ) -> PyResult<usize> {
     if field.delimited {
@@ -198,7 +229,7 @@ fn measure_child(
 fn measure_field(
     py: Python<'_>,
     number: u32,
-    child: &PyMessage,
+    child: &Fields,
     sizes: &mut Vec<usize>,
 ) -> PyResult<usize> {
     let at = sizes.len();
@@ -208,10 +239,67 @@ fn measure_field(
     Ok(tag_len(number, 2) + varint_len(len as u64) + len)
 }
 
+/// Write the values `items` of the repeated scalar field `field`, of their payload's size of
+/// `sizes` if they are packed.
+fn write_scalars(
+    field: &FieldDesc,
+    items: &[Scalar],
+    sizes: &[usize],
+    next: &mut usize,
+    out: &mut Vec<u8>,
+) {
+    if items.is_empty() {
+        return;
+    }
+    if field.packed {
+        write_tag(out, field.number, 2);
+        write_varint(out, take_size(sizes, next) as u64);
+        for value in items {
+            write_value(out, field.kind, value);
+        }
+    } else {
+        for value in items {
+            write_tag(out, field.number, field.kind.wire_type());
+            write_value(out, field.kind, value);
+        }
+    }
+}
+
+/// Write the entries `entries` of the map field `field` of `map`, of the sizes of `sizes`.
+fn write_map<V>(
+    py: Python<'_>,
+    field: &FieldDesc,
+    map: &MapDesc,
+    entries: &Entries<V>,
+    sizes: &[usize],
+    next: &mut usize,
+    out: &mut Vec<u8>,
+) -> PyResult<()>
+where
+    for<'a> EntryRef<'a>: From<&'a V>,
+{
+    for (key, value) in sorted_entries(entries) {
+        write_tag(out, field.number, 2);
+        write_varint(out, take_size(sizes, next) as u64);
+        write_tag(out, 1, map.key.wire_type());
+        write_value(out, map.key, key);
+        match EntryRef::from(value) {
+            EntryRef::Scalar(value) => {
+                write_tag(out, 2, map.value.wire_type());
+                write_value(out, map.value, value);
+            }
+            EntryRef::Message(child) => {
+                child.read(py, |child| write_field(py, 2, child, sizes, next, out))?
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Write the bytes of `message`, of the sizes that [`measure`] pushed, from `next`.
 fn write(
     py: Python<'_>,
-    message: &PyMessage,
+    message: &Fields,
     sizes: &[usize],
     next: &mut usize,
     out: &mut Vec<u8>,
@@ -229,47 +317,31 @@ fn write(
                 Slot::Message(child) => {
                     write_child(py, field, &child.bind(py).borrow(), sizes, next, out)?
                 }
+                Slot::Native(Value::Message(child)) => {
+                    write_child(py, field, &child.fields, sizes, next, out)?
+                }
                 Slot::Repeated(container) => {
-                    let container = container.bind(py).borrow();
-                    if container.items.is_empty() {
-                        continue;
-                    }
-                    if field.packed {
-                        write_tag(out, field.number, 2);
-                        write_varint(out, take_size(sizes, next) as u64);
-                        for value in &container.items {
-                            write_value(out, field.kind, value);
-                        }
-                    } else {
-                        for value in &container.items {
-                            write_tag(out, field.number, field.kind.wire_type());
-                            write_value(out, field.kind, value);
-                        }
-                    }
+                    write_scalars(field, &container.bind(py).borrow().items, sizes, next, out)
+                }
+                Slot::Native(Value::Scalars(items)) => {
+                    write_scalars(field, items, sizes, next, out)
                 }
                 Slot::Composite(container) => {
                     for child in &container.bind(py).borrow().items {
                         write_child(py, field, &child.bind(py).borrow(), sizes, next, out)?;
                     }
                 }
+                Slot::Native(Value::Messages(items)) => {
+                    for child in &items.items {
+                        write_child(py, field, &child.fields, sizes, next, out)?;
+                    }
+                }
                 Slot::Map(map) => {
                     let map = map.bind(py).borrow();
-                    let desc = &map.map;
-                    for (key, value) in sorted_entries(&map) {
-                        write_tag(out, field.number, 2);
-                        write_varint(out, take_size(sizes, next) as u64);
-                        write_tag(out, 1, desc.key.wire_type());
-                        write_value(out, desc.key, key);
-                        match value {
-                            MapValue::Scalar(value) => {
-                                write_tag(out, 2, desc.value.wire_type());
-                                write_value(out, desc.value, value);
-                            }
-                            MapValue::Message(child) => {
-                                write_field(py, 2, &child.bind(py).borrow(), sizes, next, out)?
-                            }
-                        }
-                    }
+                    write_map(py, field, &map.map, &map.entries, sizes, next, out)?;
+                }
+                Slot::Native(Value::Map(map)) => {
+                    write_map(py, field, &map.map, &map.entries, sizes, next, out)?;
                 }
             }
         }
@@ -289,7 +361,7 @@ fn take_size(sizes: &[usize], next: &mut usize) -> usize {
 fn write_child(
     py: Python<'_>,
     field: &FieldDesc,
-    child: &PyMessage,
+    child: &Fields,
     sizes: &[usize],
     next: &mut usize,
     out: &mut Vec<u8>,
@@ -307,7 +379,7 @@ fn write_child(
 fn write_field(
     py: Python<'_>,
     number: u32,
-    child: &PyMessage,
+    child: &Fields,
     sizes: &[usize],
     next: &mut usize,
     out: &mut Vec<u8>,

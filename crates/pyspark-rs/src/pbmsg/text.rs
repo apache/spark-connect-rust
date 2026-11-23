@@ -6,9 +6,10 @@
 use pyo3::prelude::*;
 use pyo3::types::PyFloat;
 
-use super::containers::{MapContainer, MapValue};
-use super::message::{new_instance, PyMessage, Slot};
-use super::pool::{pool, Kind};
+use super::containers::Entries;
+use super::message::{new_instance, EntryRef, Fields, PyMessage, Slot};
+use super::native::Value;
+use super::pool::{pool, FieldDesc, Kind, MapDesc};
 use super::scalar::{key_order, Scalar};
 use super::{codec, grow};
 
@@ -66,7 +67,7 @@ struct Writer<'py> {
 impl Writer<'_> {
     /// Write a `google.protobuf.Any` that holds a message of a known type as `text_format` does,
     /// as `[type_url] { ... }` of the message, and return whether it was one.
-    fn any(&self, message: &PyMessage, indent: usize, out: &mut String) -> PyResult<bool> {
+    fn any(&self, message: &Fields, indent: usize, out: &mut String) -> PyResult<bool> {
         if self.style != Style::TextFormat || message.desc.full_name != "google.protobuf.Any" {
             return Ok(false);
         }
@@ -109,7 +110,7 @@ impl Writer<'_> {
         Ok(true)
     }
 
-    fn message(&self, message: &PyMessage, indent: usize, out: &mut String) -> PyResult<()> {
+    fn message(&self, message: &Fields, indent: usize, out: &mut String) -> PyResult<()> {
         let py = self.py;
         grow(|| {
             if self.any(message, indent, out)? {
@@ -133,35 +134,74 @@ impl Writer<'_> {
                     Slot::Message(child) => {
                         self.message_field(&field.name, &child.bind(py).borrow(), indent, out)?
                     }
+                    Slot::Native(Value::Message(child)) => {
+                        self.message_field(&field.name, &child.fields, indent, out)?
+                    }
                     Slot::Repeated(container) => {
-                        for value in &container.bind(py).borrow().items {
-                            self.scalar(
-                                &field.name,
-                                field.kind,
-                                &field.type_name,
-                                value,
-                                indent,
-                                out,
-                            )?;
-                        }
+                        self.scalars(field, &container.bind(py).borrow().items, indent, out)?
+                    }
+                    Slot::Native(Value::Scalars(items)) => {
+                        self.scalars(field, items, indent, out)?
                     }
                     Slot::Composite(container) => {
                         for child in &container.bind(py).borrow().items {
                             self.message_field(&field.name, &child.bind(py).borrow(), indent, out)?;
                         }
                     }
-                    Slot::Map(map) => self.map(&field.name, &map.bind(py).borrow(), indent, out)?,
+                    Slot::Native(Value::Messages(items)) => {
+                        for child in &items.items {
+                            self.message_field(&field.name, &child.fields, indent, out)?;
+                        }
+                    }
+                    Slot::Map(map) => {
+                        let map = map.bind(py).borrow();
+                        self.map(&field.name, &map.map, &map.entries, indent, out)?
+                    }
+                    Slot::Native(Value::Map(map)) => {
+                        self.map(&field.name, &map.map, &map.entries, indent, out)?
+                    }
                 }
             }
             Ok(())
         })
     }
 
+    /// The values `items` of the repeated scalar field `field`, a line each.
+    fn scalars(
+        &self,
+        field: &FieldDesc,
+        items: &[Scalar],
+        indent: usize,
+        out: &mut String,
+    ) -> PyResult<()> {
+        for value in items {
+            self.scalar(
+                &field.name,
+                field.kind,
+                &field.type_name,
+                value,
+                indent,
+                out,
+            )?;
+        }
+        Ok(())
+    }
+
     /// The entries of a map, as entry messages: upb's writes the key and the value of each, in
     /// upb's order of the keys; `text_format` skips a key or a value of the default, in Python's
     /// order of the keys.
-    fn map(&self, name: &str, map: &MapContainer, indent: usize, out: &mut String) -> PyResult<()> {
-        let mut entries: Vec<&(Scalar, MapValue)> = map.entries.iter().collect();
+    fn map<V>(
+        &self,
+        name: &str,
+        map: &MapDesc,
+        entries: &Entries<V>,
+        indent: usize,
+        out: &mut String,
+    ) -> PyResult<()>
+    where
+        for<'a> EntryRef<'a>: From<&'a V>,
+    {
+        let mut entries: Vec<&(Scalar, V)> = entries.iter().collect();
         match self.style {
             Style::Upb => entries.sort_by(|a, b| upb_text_key_order(&a.0, &b.0)),
             Style::TextFormat => entries.sort_by(|a, b| key_order(&a.0, &b.0)),
@@ -173,24 +213,17 @@ impl Writer<'_> {
             out.push_str(" {");
             end_line(out, self.one_line);
             if all || !key.is_default() {
-                self.scalar("key", map.map.key, "", key, indent + 1, out)?;
+                self.scalar("key", map.key, "", key, indent + 1, out)?;
             }
-            match value {
-                MapValue::Scalar(value) => {
+            match EntryRef::from(value) {
+                EntryRef::Scalar(value) => {
                     if all || !value.is_default() {
-                        self.scalar(
-                            "value",
-                            map.map.value,
-                            &map.map.value_type,
-                            value,
-                            indent + 1,
-                            out,
-                        )?;
+                        self.scalar("value", map.value, &map.value_type, value, indent + 1, out)?;
                     }
                 }
-                MapValue::Message(child) => {
-                    self.message_field("value", &child.bind(self.py).borrow(), indent + 1, out)?;
-                }
+                EntryRef::Message(child) => child.read(self.py, |child| {
+                    self.message_field("value", child, indent + 1, out)
+                })?,
             }
             start_line(out, self.one_line, indent);
             out.push('}');
@@ -202,7 +235,7 @@ impl Writer<'_> {
     fn message_field(
         &self,
         name: &str,
-        message: &PyMessage,
+        message: &Fields,
         indent: usize,
         out: &mut String,
     ) -> PyResult<()> {

@@ -38,6 +38,7 @@ use super::message::{
     content_eq, duplicate_with, mark_present, new_instance, registered_class, MessageClass,
     PyMessage,
 };
+use super::native::{self, CopyError, Native, NativeMap, NativeValue};
 use super::pool::{Kind, MapDesc};
 use super::scalar::Scalar;
 use crate::interrupt::ConversionBudget;
@@ -1437,9 +1438,8 @@ fn key_hash(key: &Scalar) -> u64 {
 /// `update`, `MergeFrom`, `==`) take as long as the square of their number. A removed entry
 /// leaves a hole, which the iteration passes over, so that a removal moves no entry either, until
 /// the holes are more than the entries, when they are dropped at once.
-#[derive(Default)]
-pub(crate) struct Entries {
-    slots: Vec<Option<(Scalar, MapValue)>>,
+pub(crate) struct Entries<V = MapValue> {
+    slots: Vec<Option<(Scalar, V)>>,
     /// The hash of the key of each entry and its position in `slots`, by the hash: the table
     /// grows of the hashes that it holds, without reading the keys again.
     positions: HashTable<(u64, usize)>,
@@ -1447,9 +1447,19 @@ pub(crate) struct Entries {
     first: usize,
 }
 
-impl Entries {
+impl<V> Default for Entries<V> {
+    fn default() -> Self {
+        Entries {
+            slots: Vec::new(),
+            positions: HashTable::new(),
+            first: 0,
+        }
+    }
+}
+
+impl<V> Entries<V> {
     /// The entries `entries`, of distinct keys (those of a map), in their order.
-    fn of_distinct(entries: Vec<(Scalar, MapValue)>) -> Entries {
+    pub(crate) fn of_distinct(entries: Vec<(Scalar, V)>) -> Entries<V> {
         let mut positions = HashTable::with_capacity(entries.len());
         for (at, (key, _)) in entries.iter().enumerate() {
             let hash = key_hash(key);
@@ -1477,8 +1487,47 @@ impl Entries {
     }
 
     /// The entries, in the order of their insertion.
-    pub(crate) fn iter(&self) -> impl Iterator<Item = &(Scalar, MapValue)> {
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &(Scalar, V)> {
         self.slots[self.first..].iter().flatten()
+    }
+
+    /// The entries, in the order of their insertion, taken.
+    pub(crate) fn into_entries(self) -> impl Iterator<Item = (Scalar, V)> {
+        self.slots.into_iter().flatten()
+    }
+
+    /// The values of the entries, in the order of their insertion.
+    pub(crate) fn values_mut(&mut self) -> impl Iterator<Item = &mut V> {
+        self.slots.iter_mut().flatten().map(|(_, value)| value)
+    }
+
+    /// The entries of the values of `value` of each, in the same order, of the same positions.
+    pub(crate) fn map<W>(&self, mut value: impl FnMut(&V) -> W) -> Entries<W> {
+        let entries = self.try_map(|v| Ok::<W, std::convert::Infallible>(value(v)));
+        match entries {
+            Ok(entries) => entries,
+            Err(never) => match never {},
+        }
+    }
+
+    /// The entries of the values of `value` of each, in the same order, of the same positions,
+    /// or the first error of `value`.
+    pub(crate) fn try_map<W, E>(
+        &self,
+        mut value: impl FnMut(&V) -> Result<W, E>,
+    ) -> Result<Entries<W>, E> {
+        let mut slots = Vec::with_capacity(self.slots.len());
+        for slot in &self.slots {
+            slots.push(match slot {
+                Some((key, v)) => Some((key.clone(), value(v)?)),
+                None => None,
+            });
+        }
+        Ok(Entries {
+            slots,
+            positions: self.positions.clone(),
+            first: self.first,
+        })
     }
 
     /// The key of the first entry at the position `at` or after it, with its position: an
@@ -1494,12 +1543,12 @@ impl Entries {
     }
 
     /// Whether the entry at `at`, a position of `positions`, is of `key`.
-    fn is_at(slots: &[Option<(Scalar, MapValue)>], at: usize, key: &Scalar) -> bool {
+    fn is_at(slots: &[Option<(Scalar, V)>], at: usize, key: &Scalar) -> bool {
         matches!(&slots[at], Some((held, _)) if held == key)
     }
 
     /// The value of `key`, if the map has one.
-    pub(crate) fn get(&self, key: &Scalar) -> Option<&MapValue> {
+    pub(crate) fn get(&self, key: &Scalar) -> Option<&V> {
         let hash = key_hash(key);
         let slots = &self.slots;
         let &(_, at) = self
@@ -1510,7 +1559,7 @@ impl Entries {
 
     /// Set the value of `key`, after the other entries if the map has none of it, and give back
     /// the value that it replaces.
-    pub(crate) fn insert(&mut self, key: Scalar, value: MapValue) -> Option<MapValue> {
+    pub(crate) fn insert(&mut self, key: Scalar, value: V) -> Option<V> {
         let hash = key_hash(&key);
         let Entries {
             slots, positions, ..
@@ -1535,7 +1584,7 @@ impl Entries {
     }
 
     /// Remove the entry of `key`, and give it back (to drop once the map is no longer borrowed).
-    pub(crate) fn remove(&mut self, key: &Scalar) -> Option<(Scalar, MapValue)> {
+    pub(crate) fn remove(&mut self, key: &Scalar) -> Option<(Scalar, V)> {
         let hash = key_hash(key);
         let Entries {
             slots,
@@ -1582,16 +1631,42 @@ fn value_of(map: &MapDesc, value: &Bound<'_, PyAny>) -> PyResult<Scalar> {
     Scalar::from_py(map.value, &map.value_name, &map.value_type, value)
 }
 
-/// The entries of a map read for a copy, of the messages of the map, which the copy copies with
-/// no borrow of the map held.
+/// The value of an entry of a map read for a copy or a merge: a scalar, a message of a map of
+/// Python (an object), or a message of a native map (see [`NativeMap`]).
+pub(crate) enum EntryValue {
+    Scalar(Scalar),
+    Object(Py<PyMessage>),
+    Native(Arc<Native>),
+}
+
+/// The entries of a map read for a copy or a merge, of the messages of the map, which the copy
+/// copies with no borrow of the map held.
 pub(crate) struct MapEntries {
-    field_name: String,
     map: Arc<MapDesc>,
-    entries: Vec<(Scalar, MapValue)>,
+    entries: Vec<(Scalar, EntryValue)>,
 }
 
 impl MapEntries {
-    /// Copies of the entries, a step of `budget` for each entry and for each message copied.
+    /// The entries of the native map `map`, read for a merge.
+    pub(crate) fn of_native(map: &NativeMap) -> MapEntries {
+        MapEntries {
+            map: map.map.clone(),
+            entries: map
+                .entries
+                .iter()
+                .map(|(key, value)| {
+                    let value = match value {
+                        NativeValue::Scalar(v) => EntryValue::Scalar(v.clone()),
+                        NativeValue::Message(m) => EntryValue::Native(m.clone()),
+                    };
+                    (key.clone(), value)
+                })
+                .collect(),
+        }
+    }
+
+    /// Copies of the entries, of objects of their messages, a step of `budget` for each entry and
+    /// for each message copied.
     fn copy_entries(
         self,
         py: Python<'_>,
@@ -1601,9 +1676,12 @@ impl MapEntries {
         for (key, value) in self.entries {
             budget.step(py)?;
             let value = match value {
-                MapValue::Scalar(v) => MapValue::Scalar(v),
-                MapValue::Message(m) => {
+                EntryValue::Scalar(v) => MapValue::Scalar(v),
+                EntryValue::Object(m) => {
                     MapValue::Message(duplicate_with(py, m.bind(py), budget)?.unbind())
+                }
+                EntryValue::Native(m) => {
+                    MapValue::Message(native::duplicate_native(py, &m, None, budget)?.unbind())
                 }
             };
             copies.push((key, value));
@@ -1611,17 +1689,48 @@ impl MapEntries {
         Ok(copies)
     }
 
-    /// A map of copies of the entries, held by no message yet.
-    pub(crate) fn copy(self, py: Python<'_>, budget: &ConversionBudget) -> PyResult<MapContainer> {
-        let field_name = self.field_name.clone();
-        let map = self.map.clone();
-        Ok(MapContainer {
-            field_name,
-            map,
-            entries: Entries::of_distinct(self.copy_entries(py, budget)?),
-            owner: None,
-            version: 0,
-        })
+    /// A native copy of the entries, of the levels `levels` that may still be below the message
+    /// of the map (see [`native::copy_message`]): an entry is a level below it, and the message of
+    /// its value another. A step of `budget` for each entry and for each message copied.
+    pub(crate) fn native_copy(
+        self,
+        py: Python<'_>,
+        at: native::At,
+        generation: u64,
+        budget: &ConversionBudget,
+    ) -> Result<NativeMap, CopyError> {
+        let entry = if self.entries.is_empty() {
+            at
+        } else {
+            at.below()?
+        };
+        let entry_levels = entry.levels;
+        let mut copies = Vec::with_capacity(self.entries.len());
+        for (key, value) in self.entries {
+            budget.step(py)?;
+            let value = match value {
+                EntryValue::Scalar(v) => NativeValue::Scalar(v),
+                EntryValue::Object(m) => NativeValue::Message(Arc::new(native::copy_message(
+                    py,
+                    m.bind(py),
+                    entry.below()?,
+                    generation,
+                    budget,
+                )?)),
+                EntryValue::Native(m) => {
+                    if entry_levels.is_some_and(|levels| m.depth >= levels) {
+                        return Err(CopyError::TooDeep);
+                    }
+                    NativeValue::Message(m.at(py, generation))
+                }
+            };
+            copies.push((key, value));
+        }
+        Ok(NativeMap::new(
+            self.map,
+            Entries::of_distinct(copies),
+            generation,
+        ))
     }
 }
 
@@ -1653,6 +1762,18 @@ impl MapContainer {
             map,
             entries: Entries::default(),
             owner,
+            version: 0,
+        }
+    }
+
+    /// A map of the entries `entries`, held by no message, as a copy of a map is (see
+    /// [`native::made_of`]).
+    pub(crate) fn of_entries(field_name: String, map: Arc<MapDesc>, entries: Entries) -> Self {
+        MapContainer {
+            field_name,
+            map,
+            entries,
+            owner: None,
             version: 0,
         }
     }
@@ -1736,19 +1857,19 @@ impl MapContainer {
             .transpose()
     }
 
-    /// The entries of the map, read for a copy: their keys and scalars copied, and their messages,
-    /// which [`MapEntries::copy`] copies once the map is no longer borrowed.
+    /// The entries of the map, read for a copy or a merge: their keys and scalars copied, and their
+    /// messages, which [`MapEntries::native_copy`] (or the merge) copies once the map is no longer
+    /// borrowed.
     pub(crate) fn entries_for_copy(&self, py: Python<'_>) -> MapEntries {
         MapEntries {
-            field_name: self.field_name.clone(),
             map: self.map.clone(),
             entries: self
                 .entries
                 .iter()
                 .map(|(k, v)| {
                     let value = match v {
-                        MapValue::Scalar(v) => MapValue::Scalar(v.clone()),
-                        MapValue::Message(m) => MapValue::Message(m.clone_ref(py)),
+                        MapValue::Scalar(v) => EntryValue::Scalar(v.clone()),
+                        MapValue::Message(m) => EntryValue::Object(m.clone_ref(py)),
                     };
                     (k.clone(), value)
                 })

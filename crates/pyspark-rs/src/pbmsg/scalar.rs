@@ -228,6 +228,20 @@ fn int_of(field: &str, value: &Bound<'_, PyAny>) -> PyResult<i128> {
         )));
     }
     let index = index_of(value)?;
+    // An int of 64 bits at once, as most are, else of PyO3's conversion of 128 bits, which the
+    // stable ABI makes of shifts of the int.
+    let mut overflow = 0;
+    // SAFETY: `index` is a live int (of `__index__`), whose conversion sets no error but of an
+    // int past 64 bits, which `overflow` tells.
+    let v = unsafe { ffi::PyLong_AsLongLongAndOverflow(index.as_ptr(), &mut overflow) };
+    if overflow == 0 {
+        if v == -1 {
+            if let Some(err) = PyErr::take(value.py()) {
+                return Err(err);
+            }
+        }
+        return Ok(i128::from(v));
+    }
     index.extract::<i128>().map_err(|_| out_of_range_of(&index))
 }
 
