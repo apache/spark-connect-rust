@@ -4349,7 +4349,10 @@ server that accepts the connection and never answers, grpcio's `failed to connec
 last error: UNKNOWN: ipv4:127.0.0.1:15002: connection attempt timed out before receiving SETTINGS
 frame`. Once it failed, it fails the later calls at once, of that error, while it connects again in
 the background with gRPC's backoff, 1 s and then 1.6 times longer each time up to 120 s, with a
-jitter of 20 %, each attempt with the longer of its backoff and 20 s as its deadline, until a
+jitter of 20 %, each attempt with the longer of its backoff and 20 s as its deadline, of the
+addresses of the last resolution of its name for 30 s from the start of that resolution, as
+gRPC's resolver resolves a name again no sooner (`grpc.dns_min_time_between_resolutions_ms`), and
+of a resolution that failed, a backoff after its end, as gRPC's resolver tries it again, until a
 connection succeeds, which the next call takes; once no call came for 30 min, or once every session
 of the connection is stopped, it stops, and the next call connects, as grpcio's channel goes idle,
 or shuts down. A connection that ends is made again by the next call. The Python client logs the
