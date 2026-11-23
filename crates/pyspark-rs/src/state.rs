@@ -114,17 +114,24 @@ pub(crate) fn foreign_client_error(client: &Bound<'_, PyAny>) -> PyErr {
 
 /// The session of `value`, the object that a PySpark method reads where its class takes a session
 /// (the `_sparkSession` of a catalog, the `_sparkSession` of the table-valued functions), through
-/// which it makes its requests: a session of this client is its own; of another object, the client
-/// of its attribute `client_attr` (`client`, or `_client` where PySpark reads that), whose
-/// `AttributeError` is PySpark's, is of its session, as a proxy of a session gives it. A client of
-/// another class raises [`foreign_client_error`].
+/// which it makes its requests: the client of its attribute `client_attr` (`client`, or `_client`
+/// where PySpark reads that), whose `AttributeError` is PySpark's, is of its session, of a session
+/// of this client as of a proxy of one, and the own client of a session of this client is of its
+/// session at once (see `PySparkSession::of_client`). A client of another class raises
+/// [`foreign_client_error`].
 pub(crate) fn session_of_value(
     value: &Bound<'_, PyAny>,
     client_attr: &Bound<'_, PyString>,
 ) -> PyResult<SparkSession> {
-    if let Ok(session) = value.cast::<PySparkSession>() {
-        return Ok(session.borrow().session.clone());
-    }
     let client = attr(value, client_attr)?;
+    if let Ok(session) = value.cast::<PySparkSession>() {
+        if let Some(own) = session
+            .try_borrow()
+            .ok()
+            .and_then(|session| session.session_of_own_client(&client))
+        {
+            return Ok(own);
+        }
+    }
     client_session(&client).ok_or_else(|| foreign_client_error(&client))
 }

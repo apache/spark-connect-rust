@@ -87,23 +87,26 @@ impl PyDataSourceRegistration {
     fn register(slf: &Bound<'_, Self>, dataSource: &Bound<'_, PyAny>) -> PyResult<()> {
         let py = slf.py();
         // As PySpark's `self.sparkSession._client.register_data_source(dataSource)`, which reads
-        // the session and its `_client` first: the session of this client is its own; the client
-        // of another object is of its session, or else of the `register_data_source` of its own
-        // class, which PySpark calls, also of a subclass of this client's that overrides it.
+        // the session and its `_client` first: the own client of a session of this client is of
+        // its session at once; another client is of its session, or else of the
+        // `register_data_source` of its own class, which PySpark calls, also of a subclass of this
+        // client's that overrides it.
         let register = pyo3::intern!(py, "register_data_source");
         let session = crate::state::attr(slf.as_any(), pyo3::intern!(py, "sparkSession"))?;
-        let session = match session.cast::<PySparkSession>() {
-            Ok(session) => session.borrow().session.clone(),
-            Err(_) => {
-                let client = crate::state::attr(&session, pyo3::intern!(py, "_client"))?;
-                match crate::state::client_session(&client) {
-                    Some(session) if !crate::state::overrides(&client, register)? => session,
-                    _ => {
-                        client.call_method1(register, (dataSource,))?;
-                        return Ok(());
-                    }
+        let client = crate::state::attr(&session, pyo3::intern!(py, "_client"))?;
+        let own = session
+            .cast::<PySparkSession>()
+            .ok()
+            .and_then(|session| session.try_borrow().ok()?.session_of_own_client(&client));
+        let session = match own {
+            Some(session) => session,
+            None => match crate::state::client_session(&client) {
+                Some(session) if !crate::state::overrides(&client, register)? => session,
+                _ => {
+                    client.call_method1(register, (dataSource,))?;
+                    return Ok(());
                 }
-            }
+            },
         };
         // The name of the classmethod `name()`, as PySpark Connect's: the AttributeError of a
         // class without one. Its `CommonInlineUserDefinedDataSource` sets the name in the string

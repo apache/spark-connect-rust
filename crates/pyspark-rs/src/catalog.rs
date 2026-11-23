@@ -214,14 +214,6 @@ fn named_tuples<T: NamedTuple>(py: Python<'_>, results: Vec<T>) -> PyResult<Vec<
 pub struct PyCatalog {}
 
 impl PyCatalog {
-    /// The catalog of `session`, as `spark.catalog` makes it: `Catalog(spark)`, of the session
-    /// object, which PySpark's `__init__` keeps as its `_sparkSession`.
-    pub(crate) fn of_session<'py>(session: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyCatalog>> {
-        let catalog = Bound::new(session.py(), PyCatalog {})?;
-        Self::__init__(&catalog, session)?;
-        Ok(catalog)
-    }
-
     /// The core catalog of the session of `_sparkSession`, which PySpark's methods read as they
     /// make their request, `DataFrame(plan, session=self._sparkSession)` of its `client`: of the
     /// AttributeError of a catalog whose `__init__` never ran, and of the object that it holds

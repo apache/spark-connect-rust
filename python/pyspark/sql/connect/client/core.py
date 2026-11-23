@@ -65,7 +65,6 @@ from pyspark.errors import (
     PySparkNotImplementedError,
     PySparkValueError,
 )
-from pyspark.errors.exceptions.connect import SparkConnectException
 from pyspark.sql.connect.logging import logger
 
 # As PySpark's core, which has the metrics classes of the execution info of its results.
@@ -102,11 +101,17 @@ _RETRIES_NAMES = (
 
 def __getattr__(name: str) -> Any:
     # Of the retries module when they are first read: it imports grpc, which this client does
-    # not need otherwise.
+    # not need otherwise. So does `SparkConnectException`, of the module of the exceptions of
+    # Spark Connect, whose `StatusCode` is grpc's: a session, which makes its client at once as
+    # PySpark's `__init__` does, imports no grpc.
     if name in _RETRIES_NAMES:
         from pyspark.sql.connect.client import retries
 
         return getattr(retries, name)
+    if name == "SparkConnectException":
+        from pyspark.errors.exceptions.connect import SparkConnectException
+
+        return SparkConnectException
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
@@ -387,6 +392,8 @@ class ChannelBuilder:
         )
         ua_len = len(urllib.parse.quote(user_agent))
         if ua_len > 2048:
+            from pyspark.errors.exceptions.connect import SparkConnectException
+
             raise SparkConnectException(
                 f"'user_agent' parameter should not exceed 2048 characters after URL "
                 f"escaping, found {ua_len} characters."
@@ -689,6 +696,8 @@ class AnalyzeResult:
         elif pb.HasField("json_to_ddl"):
             ddl_string = pb.json_to_ddl.ddl_string
         else:
+            from pyspark.errors.exceptions.connect import SparkConnectException
+
             raise SparkConnectException("No analyze result found!")
 
         return AnalyzeResult(
@@ -3112,10 +3121,20 @@ def _init_client_state(
     builder = (
         connection if isinstance(connection, ChannelBuilder) else DefaultChannelBuilder(connection)
     )
+    _set_client_state(session, _new_client_state(session, builder, user_id, builder_user))
+
+
+def _set_client_state(session: Any, state: dict[str, Any]) -> None:
+    """Give the clients of ``session`` the attributes ``state``: those of the state that it keeps,
+    which is set to them, so that the client that its session object made of it as it was made,
+    its ``_client``, has them too, or else a new state of them (see ``_client_context``)."""
     with _CLIENT_STATES_LOCK:
-        session._set_user_context_refresh(
-            _RequestContext(_new_client_state(session, builder, user_id, builder_user))
-        )
+        context = session._user_context_refresh()
+        if context is None:
+            session._set_user_context_refresh(_RequestContext(state))
+        else:
+            context.state.clear()
+            context.state.update(state)
 
 
 def _new_session_of(
@@ -3170,10 +3189,7 @@ def _new_session_of(
         # As PySpark's client of the new session, which reads the `metadata()` of its builder as
         # it is made, and again for each call.
         new._set_metadata_source(new_builder, new_builder.metadata())
-    with _CLIENT_STATES_LOCK:
-        new._set_user_context_refresh(
-            _RequestContext(_new_client_state(new, new_builder, new_user))
-        )
+    _set_client_state(new, _new_client_state(new, new_builder, new_user))
     return new
 
 
@@ -3186,15 +3202,18 @@ _CLIENTS: "weakref.WeakValueDictionary[str, SparkConnectClient]" = weakref.WeakV
 _RETRY_POLICIES: "weakref.WeakKeyDictionary[Any, list[Any]]" = weakref.WeakKeyDictionary()
 
 
-def _client_of(session: Any) -> "SparkConnectClient":
+def _client_of(session: Any, session_id: Optional[str] = None) -> "SparkConnectClient":
     """The client of ``session``, the same object while it is in use, as ``SparkSession.client``
-    is one object per session."""
-    client = _CLIENTS.get(session.session_id)
+    is one object per session: of its ID ``session_id``, which a session object that is being made
+    gives, as it has no ``session_id`` yet, of the ``_session_id`` of its ``__dict__``."""
+    if session_id is None:
+        session_id = session.session_id
+    client = _CLIENTS.get(session_id)
     if client is None or (
         client._session_cache() is not session and not client._session_ref._is_of(session)
     ):
         client = SparkConnectClient._of_session(session)
-        _CLIENTS[session.session_id] = client
+        _CLIENTS[session_id] = client
     return client
 
 
