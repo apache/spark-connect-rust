@@ -3041,30 +3041,24 @@ impl DataFrame {
     /// name. Not a stable API.
     #[doc(hidden)]
     pub fn column_reference(&self, name: &str) -> Column {
-        let reference = crate::expression::ColumnReference::new(name).with_plan_id(self.plan_id());
-        Column::new(ExpressionNode::ColumnReference(reference).into())
+        Column::reference_of_plan(name, self.plan_id(), false)
     }
 
     /// The star of the columns of this DataFrame, as `df["*"]` of PySpark Connect.
     pub fn star(&self) -> Column {
-        Column::new(ExpressionNode::UnresolvedStar(None, Some(self.plan_id())).into())
+        Column::star_of_plan(self.plan_id())
     }
 
     /// The columns of this DataFrame whose names match the regex `col_name`, in backticks, as
     /// a Column. Mirrors `DataFrame.colRegex`.
     pub fn col_regex(&self, col_name: &str) -> Column {
-        Column::new(
-            ExpressionNode::UnresolvedRegex(col_name.to_string(), Some(self.plan_id())).into(),
-        )
+        Column::regex_of_plan(col_name, self.plan_id())
     }
 
     /// The metadata column `name` of this DataFrame, which refers to it by its plan ID.
     /// Mirrors `pyspark.sql.DataFrame.metadataColumn`.
     pub fn metadata_column(&self, name: &str) -> Column {
-        let reference = crate::expression::ColumnReference::new(name)
-            .with_plan_id(self.plan_id())
-            .metadata();
-        Column::new(ExpressionNode::ColumnReference(reference).into())
+        Column::reference_of_plan(name, self.plan_id(), true)
     }
 
     /// Group by with rollup.

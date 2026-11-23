@@ -270,25 +270,6 @@ pub(crate) fn column_reference(name: &Bound<'_, PyAny>) -> PyResult<Column> {
     Ok(Column::new(args.expression(Expression::column(text))))
 }
 
-/// The Column of `name` of `df`, as PySpark Connect's `df._col(name)`, which refers to `df` by its
-/// plan ID, and is a metadata column for `metadata`: a str, of which one that UTF-8 cannot encode
-/// fails the requests of its plans, as [`col`]. Its `ColumnReference` asserts a str, so another
-/// object is a bare `AssertionError`.
-pub(crate) fn df_col(df: &DataFrame, name: &Bound<'_, PyAny>, metadata: bool) -> PyResult<Column> {
-    if !name.is_instance_of::<PyString>() {
-        return Err(pyo3::exceptions::PyAssertionError::new_err(()));
-    }
-    let mut args = PlanArgs::new();
-    let text = args.str(name)?;
-    let column = if metadata {
-        df.metadata_column(&text)
-    } else {
-        // Of the name `*` too, which `_col` does not make a star.
-        df.column_reference(&text)
-    };
-    Ok(args.column(column))
-}
-
 /// The Column of the SQL expression `text`, as PySpark Connect's `F.expr`, whose `SQLExpression`
 /// asserts a str: another object is a bare `AssertionError`, and a str that UTF-8 cannot encode
 /// fails the requests of its plans, as [`col`].

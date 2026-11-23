@@ -17107,6 +17107,169 @@ def test_the_methods_of_a_dataframe_that_make_plans_resolve_no_session_as_pyspar
     assert df.join(other, "id").columns == ["id"]
 
 
+def test_the_dataframes_of_the_methods_keep_the_session_of_their_dataframe_as_pyspark(
+    mock_connect,
+):
+    # As PySpark's methods, which make `DataFrame(plan, session=self._session)`, of the `_session`
+    # of the DataFrame, or `self._df._session` of grouped data: of a proxy of a session too, which
+    # the DataFrames of the groupings, the maps, the statistics and the null functions keep.
+    from pyspark.sql import functions as F
+    from pyspark.sql.connect.dataframe import DataFrame
+
+    class Proxy:
+        def __init__(self, session):
+            self._s = session
+
+        @property
+        def client(self):
+            return self._s.client
+
+        def __getattr__(self, name):
+            return getattr(self._s, name)
+
+    spark, _ = mock_connect
+    proxy = Proxy(spark)
+    df = DataFrame(spark.range(4)._plan, proxy)
+    grouped = df.groupBy("id")
+    made = [
+        grouped.count(),
+        grouped.agg(F.sum("id")),
+        grouped.sum("id"),
+        grouped.pivot("id").count(),
+        grouped.applyInPandas(lambda pdf: pdf, "id long"),
+        grouped.cogroup(df.groupBy("id")).applyInPandas(lambda left, right: left, "id long"),
+        df.mapInPandas(lambda batches: batches, "id long"),
+        df.crosstab("id", "id"),
+        df.stat.crosstab("id", "id"),
+        df.freqItems(["id"]),
+        df.replace(1, 5),
+        df.na.fill(0),
+        df.na.drop(),
+        df.na.replace(1, 5),
+    ]
+    assert [type(result._session).__name__ for result in made] == ["Proxy"] * len(made)
+    assert all(result._session is proxy for result in made)
+
+
+def test_the_columns_of_a_dataframe_are_of_the_plan_id_of_its_plan_as_pyspark(mock_connect):
+    # As PySpark's `_col`, `colRegex`, `metadataColumn` and the star of `df["*"]`, of
+    # `self._plan._plan_id`, which build no plan and read no session: of a plan of the Python
+    # client, of its `_plan_id`, also of a deleted `_session`; of a `_plan` that is not a plan, the
+    # `AttributeError` of `_plan_id`, also of `columns`, whose property falls back to the
+    # `__getattr__` of the request that fails to build the plan.
+    from pyspark.sql.connect.dataframe import DataFrame
+    from pyspark.sql.connect.plan import SubqueryAlias
+
+    class Counting(SubqueryAlias):
+        builds = 0
+
+        def plan(self, session):
+            type(self).builds += 1
+            return super().plan(session)
+
+    spark, _ = mock_connect
+    plan = Counting(spark.range(3)._plan, "s")
+    df = DataFrame(plan, spark)
+    del df._session
+    columns = [df.id, df["id"], df._col("id"), df.metadataColumn("id")]
+    assert Counting.builds == 0
+    for column in columns:
+        assert column._expr.to_plan(spark.client).unresolved_attribute.plan_id == plan._plan_id
+    assert df["*"]._expr.to_plan(spark.client).unresolved_star.plan_id == plan._plan_id
+    regex = df.colRegex("`i.`")._expr.to_plan(spark.client)
+    assert regex.unresolved_regex.plan_id == plan._plan_id and Counting.builds == 0
+    for value in (None, "not a plan", object()):
+        other = spark.range(3)
+        other._plan = value
+        for lookup in (
+            lambda: other.id,
+            lambda: other["id"],
+            lambda: other["*"],
+            lambda: other._col("id"),
+            lambda: other.colRegex("id"),
+            lambda: other.columns,
+        ):
+            with pytest.raises(AttributeError, match="_plan_id"):
+                lookup()
+
+
+def test_to_local_iterator_reads_its_dataframe_at_its_first_row_as_pyspark(mock_connect):
+    # As PySpark's `toLocalIterator`, a generator, whose body reads `self._plan` and
+    # `self._session` at the first `next`: what they are then, of their errors then.
+    spark, _ = mock_connect
+    df = spark.range(3)
+    rows = df.toLocalIterator()
+    df._plan = None
+    with pytest.raises(AttributeError, match="to_proto"):
+        next(rows)
+    df = spark.range(3)
+    rows = df.toLocalIterator()
+    del df._session
+    with pytest.raises(TypeError):
+        next(rows)
+
+
+def test_a_dataframe_initialized_again_keeps_its_answers_as_pyspark(mock_connect):
+    # As PySpark's `__init__`, which sets the entries of the `__dict__` and leaves the answers of
+    # the class-level `functools.cache` of `isLocal` and `semanticHash`, also while a request of
+    # the DataFrame runs on another thread.
+    spark, service = mock_connect
+    df = spark.range(3)
+    df.isLocal()
+    df.semanticHash()
+    other = spark.range(5)
+    before = len(service.analyze_requests)
+    service.block_response = True
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        lookup = pool.submit(lambda: df.schema)
+        try:
+            for _ in range(500):
+                if len(service.analyze_requests) > before:
+                    break
+                time.sleep(0.01)
+            else:
+                raise AssertionError("the request never reached the server")
+            type(df).__init__(df, other._plan, spark)
+        finally:
+            service.release_response()
+        lookup.result(timeout=10)
+    assert df._plan is other._plan and df._session is spark
+    df.isLocal()
+    df.semanticHash()
+    assert len(service.analyze_requests) == before + 1
+
+
+def test_a_dataframe_frees_the_plan_that_it_built_of_a_replaced_plan_as_pyspark(mock_connect):
+    # As PySpark's DataFrame, which holds its `_plan` alone: once it is replaced, the drop-in's
+    # DataFrame drops the plan object that it built of a plan of the Python client, at its next
+    # read and at `__init__`, of that plan and of the plan object of its input.
+    import gc
+    import weakref
+
+    from pyspark.sql import functions as F
+    from pyspark.sql.connect.dataframe import DataFrame
+    from pyspark.sql.connect.plan import SubqueryAlias
+
+    def identity(value):
+        return value
+
+    spark, _ = mock_connect
+    own = spark.range(1)
+    for replace in (
+        lambda df: (setattr(df, "_plan", own._plan), df.select("id")),
+        lambda df: type(df).__init__(df, own._plan, spark),
+    ):
+        inner = spark.range(3).select(F.udf(identity, "long")("id").alias("v"))
+        plan = SubqueryAlias(inner._plan, "s")
+        df = DataFrame(plan, spark)
+        df.select("v")
+        freed = [weakref.ref(plan), weakref.ref(inner._plan)]
+        del plan, inner
+        replace(df)
+        gc.collect()
+        assert [ref() for ref in freed] == [None, None]
+
+
 def test_the_request_of_is_streaming_takes_the_call_site_of_functools_as_pyspark(
     mock_connect, monkeypatch
 ):

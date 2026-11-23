@@ -289,10 +289,13 @@ impl PyGroupedData {
         // of the server, such as the `TypeError` of a user-defined type whose `__init__` takes
         // arguments.
         let frame = frame_of(attr(slf.as_any(), pyo3::intern!(py, "_df"))?)?;
-        let dataframe = {
-            let frame = crate::dataframe::Frame::of(&frame)?;
+        let (dataframe, frame_session) = {
+            let frame = crate::dataframe::PlanFrame::of(&frame)?;
             let schema = frame.schema_read(py)?;
-            frame.dataframe.with_known_schema(Some(schema))
+            (
+                frame.plan().with_known_schema(Some(schema)),
+                frame.session_object().clone().unbind(),
+            )
         };
         let grouped = aggregation_of(slf.as_any(), dataframe)?;
         let session = grouped.spark_session();
@@ -343,7 +346,8 @@ impl PyGroupedData {
                 vec![column.expression().clone()],
             ));
         }
-        Ok(PyDataFrame::new(grouped.agg(expressions)))
+        // As PySpark's `DataFrame(plan.Aggregate(...), session=self._df._session)`.
+        Ok(PyDataFrame::new(grouped.agg(expressions)).with_session(frame_session))
     }
 }
 
@@ -556,9 +560,16 @@ impl PyGroupedData {
         }
         let py = slf.py();
         let frame = frame_of(attr(slf.as_any(), pyo3::intern!(py, "_df"))?)?;
-        let dataframe = crate::dataframe::PlanFrame::of(&frame)?.plan().clone();
+        let (dataframe, session) = {
+            let frame = crate::dataframe::PlanFrame::of(&frame)?;
+            (
+                frame.plan().clone(),
+                frame.session_object().clone().unbind(),
+            )
+        };
         let grouped = aggregation_of(slf.as_any(), dataframe)?;
-        Ok(PyDataFrame::new(grouped.agg(agg_exprs)))
+        // As PySpark's `DataFrame(plan.Aggregate(...), session=self._df._session)`.
+        Ok(PyDataFrame::new(grouped.agg(agg_exprs)).with_session(session))
     }
 
     // Count rows in each group, as PySpark's `self.agg(F._invoke_function("count", F.lit(1))
@@ -728,7 +739,7 @@ impl PyGroupedData {
         )?;
         let cols = crate::dataframe::column_names_of(&frame, py)?;
         let udf = map_udf_of(py, &func, &schema, return_type, eval_type_id, &cols)?;
-        map_result_of(&schema, grouped.apply_in_pandas(udf))
+        map_result_of(&schema, &session, grouped.apply_in_pandas(udf))
     }
 
     // Deprecated grouped-map apply: `apply(udf)` where `udf` is a
@@ -799,7 +810,7 @@ impl PyGroupedData {
         )?;
         let cols = crate::dataframe::column_names_of(&frame, py)?;
         let udf = map_udf_of(py, &func, &schema, return_type, eval_type_id, &cols)?;
-        map_result_of(&schema, grouped.apply_in_arrow(udf))
+        map_result_of(&schema, &session, grouped.apply_in_arrow(udf))
     }
 
     // `GroupedData.cogroup`, as PySpark's `PandasCogroupedOps(self, other)`, which checks
@@ -876,7 +887,9 @@ impl PyGroupedData {
             &output_mode,
             &timeout_conf,
         );
-        Ok(PyDataFrame::new(args.plan(df)))
+        // As PySpark's `DataFrame(plan, session=self._df._session)`.
+        let session = attr(frame.as_any(), pyo3::intern!(py, "_session"))?;
+        Ok(PyDataFrame::new(args.plan(df)).with_session(session.unbind()))
     }
 
     // `GroupedData.transformWithStateInPandas` — arbitrary stateful processing with a
@@ -1055,7 +1068,9 @@ fn transform_with_state_of(
             initial_state.as_ref(),
         ),
     };
-    Ok(PyDataFrame::new(df))
+    // As PySpark's `DataFrame(plan, session=self._df._session)`.
+    let session = attr(frame.as_any(), pyo3::intern!(py, "_session"))?;
+    Ok(PyDataFrame::new(df).with_session(session.unbind()))
 }
 
 /// `grouped`, whose plan raises the error of `args`, if any, once it builds the grouping
@@ -1179,7 +1194,7 @@ impl PyCoGroupedData {
             &attr(&right, pyo3::intern!(py, "_grouping_cols"))?,
             Some(&left.spark_session()),
         )?;
-        map_result_of(schema, apply(&left.cogroup(&right), udf))
+        map_result_of(schema, &session, apply(&left.cogroup(&right), udf))
     }
 }
 

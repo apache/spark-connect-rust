@@ -7,7 +7,6 @@ use spark_connect::dataframe::DataFrame;
 use spark_connect::group::StatFunctions;
 
 use crate::column::raise_pyspark;
-use crate::dataframe::PyDataFrame;
 use crate::plan_args::PlanArgs;
 // Re-exported for the modules that raise through `crate::stat_arguments::not_expected_type`.
 pub(crate) use crate::errors::not_expected_type;
@@ -77,7 +76,7 @@ pub(crate) fn dropna(
     how: Option<&Bound<'_, PyAny>>,
     thresh: Option<&Bound<'_, PyAny>>,
     subset: Option<&Bound<'_, PyAny>>,
-) -> PyResult<crate::dataframe::NewDataFrame> {
+) -> PyResult<DataFrame> {
     // PySpark compares `how` to "all" and "any" in Python: a str that UTF-8 cannot encode is
     // neither, as "" is not.
     let how = how
@@ -98,7 +97,7 @@ pub(crate) fn dropna(
     };
     let dataframe = df.dropna(how.as_deref(), thresh, columns).to_pyerr()?;
     parsed?;
-    Ok(PyDataFrame::new(args.plan(dataframe)))
+    Ok(args.plan(dataframe))
 }
 
 /// The `thresh` and the `subset` of `dropna`, checked as PySpark's. Its `NADrop` plan sets the
@@ -156,7 +155,7 @@ pub(crate) fn fillna(
     df: &DataFrame,
     value: &Bound<'_, PyAny>,
     subset: Option<&Bound<'_, PyAny>>,
-) -> PyResult<crate::dataframe::NewDataFrame> {
+) -> PyResult<DataFrame> {
     let dict = value.cast::<PyDict>().ok();
     if dict.is_none() && !is_primitive(value) {
         return Err(not_expected_type(
@@ -196,14 +195,10 @@ pub(crate) fn fillna(
         for (column, fill) in columns.into_iter().zip(dict.values()) {
             pairs.push((column, fill_value(&mut args, &fill)?));
         }
-        return Ok(PyDataFrame::new(
-            args.plan(df.fillna_map(pairs).to_pyerr()?),
-        ));
+        return Ok(args.plan(df.fillna_map(pairs).to_pyerr()?));
     }
     let fill = fill_value(&mut args, value)?;
-    Ok(PyDataFrame::new(args.plan(
-        df.fillna_value(fill, column_refs(&columns)).to_pyerr()?,
-    )))
+    Ok(args.plan(df.fillna_value(fill, column_refs(&columns)).to_pyerr()?))
 }
 
 /// The value of a fill, which PySpark sets in a proto literal when it builds the plan (`args`):
@@ -322,7 +317,7 @@ pub(crate) fn crosstab(
     stat: &StatFunctions,
     col1: &Bound<'_, PyAny>,
     col2: &Bound<'_, PyAny>,
-) -> PyResult<crate::dataframe::NewDataFrame> {
+) -> PyResult<DataFrame> {
     for (col, name) in [(col1, "col1"), (col2, "col2")] {
         if !col.is_instance_of::<PyString>() {
             return Err(not_expected_type(col, name, "str"));
@@ -330,7 +325,7 @@ pub(crate) fn crosstab(
     }
     let mut args = PlanArgs::new();
     let (col1, col2) = (args.str(col1)?, args.str(col2)?);
-    Ok(PyDataFrame::new(args.plan(stat.crosstab(&col1, &col2))))
+    Ok(args.plan(stat.crosstab(&col1, &col2)))
 }
 
 /// `df.freqItems(cols, support)`, as PySpark's: `cols` is a list or tuple, and `support` is
@@ -340,7 +335,7 @@ pub(crate) fn freq_items(
     stat: &StatFunctions,
     cols: &Bound<'_, PyAny>,
     support: Option<&Bound<'_, PyAny>>,
-) -> PyResult<crate::dataframe::NewDataFrame> {
+) -> PyResult<DataFrame> {
     if !is_sequence(cols) {
         return Err(not_expected_type(cols, "cols", "list or tuple"));
     }
@@ -351,7 +346,7 @@ pub(crate) fn freq_items(
         _ => 0.01,
     };
     let refs: Vec<&str> = cols.iter().map(String::as_str).collect();
-    Ok(PyDataFrame::new(args.plan(stat.freq_items(refs, support))))
+    Ok(args.plan(stat.freq_items(refs, support)))
 }
 
 /// `df.approxQuantile(col, probabilities, relativeError)`, as PySpark's: the quantiles of a

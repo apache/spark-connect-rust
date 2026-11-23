@@ -566,13 +566,14 @@ requests of the unpickled object pickle as it is then. This case still differs:
     reader, catalog and query of the session holds, with the threads of the core, so that no
     Python object can answer for all of their references to them.
   - A reference cycle of a Python subclass of a class of the binding and an object of it that the
-    subclass holds, such as `Sub.inst = Sub(e)` of a subclass of `Column`, `WindowSpec`,
-    `TableArg`, `GroupedData` or `Catalog`, is not collected (inherent to PyO3 0.29): CPython's
-    traversal of an object of a subclass, a heap type, leaves the visit of its class to the
-    traversal of its base class when that is a heap type too (`subtype_traverse`), as the classes
-    of PyO3 are, and PyO3's traversal of an object visits its `__dict__` and what its class reports,
-    but not its class, so the collector does not see that the object holds its class. PySpark's
-    objects, of plain Python classes, visit their class, and such a cycle is collected.
+    subclass holds, such as `Sub.inst = Sub(e)` of a subclass of `DataFrame`, `Column`,
+    `WindowSpec`, `TableArg`, `GroupedData` or `Catalog`, is not collected (inherent to PyO3
+    0.29): CPython's traversal of an object of a subclass, a heap type, leaves the visit of its
+    class to the traversal of its base class when that is a heap type too (`subtype_traverse`), as
+    the classes of PyO3 are, and PyO3's traversal of an object visits its `__dict__` and what its
+    class reports, but not its class, so the collector does not see that the object holds its
+    class. PySpark's objects, of plain Python classes, visit their class, and such a cycle is
+    collected.
 
 ## Session and client (Connect)
 
@@ -1249,8 +1250,9 @@ requests of the unpickled object pickle as it is then. This case still differs:
   `_execution_info`, which its `__init__` and its methods set and read where PySpark's do, and of
   `isStreaming`, PySpark's `functools.cached_property`, whose `_plan` is the plan object of the
   drop-in (see "Plans of a DataFrame's relation"), whose `_schema` requests the schema while
-  `_cached_schema` is None and keeps it with its pickle, which `schema` loads, and whose methods
-  that keep the schema of their input share its `_cached_schema`, as PySpark's (see
+  `_cached_schema` is None and keeps it with its pickle, which `schema` loads, of one request for
+  the first reads of several threads at once, where each of PySpark's threads sends its own, and
+  whose methods that keep the schema of their input share its `_cached_schema`, as PySpark's (see
   `docs/compatibility.md`); the `DataFrameReader` and the `DataStreamReader` of `spark.read` and
   `spark.readStream`, PySpark
   Connect's classes, of their `_client`, `_format`, `_schema` and `_options` (and `_source_name`),
@@ -1354,7 +1356,11 @@ requests of the unpickled object pickle as it is then. This case still differs:
   after it is set, also one that only makes a plan, and not again at each request, as the plans of
   the core are made of the plans of their inputs and the core keeps the relation of that build
   (see "What a plan build does for a pickle"): so a `_session` that is not a session raises at
-  that method, where PySpark's raises at the request.
+  that method, where PySpark's raises at the request. The plan object that a DataFrame made of a
+  `_plan` of the Python client or of the plan object of a DataFrame of another session, and that
+  `_plan`, live until the first read of the DataFrame of another `_plan` or its `__init__`, where
+  PySpark's DataFrame frees a replaced `_plan` at its replacement, as the assignment of an entry
+  of its `__dict__` runs no code of the drop-in.
   The plan of a read is the core's, which takes the options of the reader when it is made, where
   PySpark's `Read` plan of `table` keeps the dict of the reader's options, of which a later `option`
   changes its requests. A
