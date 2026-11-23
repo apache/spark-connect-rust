@@ -163,8 +163,8 @@ pub(crate) fn sample_by_arguments(
         // As PySpark's `F._to_col`, by `col`, of its origin.
         let _origin = crate::origin::with_origin("col")?;
         crate::plan_args::col(col)?
-    } else if let Ok(column) = col.extract::<PyRef<'_, PyColumn>>() {
-        column.column.clone()
+    } else if let Ok(column) = col.cast::<PyColumn>() {
+        crate::column::column_of(column)?
     } else {
         return Err(raise_pyspark(
             py,

@@ -60,59 +60,6 @@ except ImportError:
 # and "Subclasses" of dev/parity/known-differences.md say: each change removes its own, and a test
 # of one of them that passes fails the run (strict).
 _DIFFERS_BY_CHANGE = {
-    "the Column, the WindowSpec and the TableArg": {
-        "vars": [
-            "Column",
-            "Column of a DataFrame",
-            "WindowSpec",
-            "TableArg",
-            "TableArg of partitionBy",
-        ],
-        "attributes": [
-            "Column",
-            "Column of a DataFrame",
-            "WindowSpec",
-            "TableArg",
-            "TableArg of partitionBy",
-        ],
-        "copies": [
-            "Column: copy",
-            "Column: deepcopy",
-            "Column: pickle",
-            "Column: cloudpickle",
-            "Column of a DataFrame: copy",
-            "Column of a DataFrame: deepcopy",
-            "Column of a DataFrame: pickle",
-            "Column of a DataFrame: cloudpickle",
-            "WindowSpec: copy",
-            "WindowSpec: deepcopy",
-            "WindowSpec: pickle",
-            "WindowSpec: cloudpickle",
-            "TableArg: copy",
-            "TableArg: deepcopy",
-            "TableArg: pickle",
-            "TableArg: cloudpickle",
-            "TableArg of partitionBy: copy",
-            "TableArg of partitionBy: deepcopy",
-            "TableArg of partitionBy: pickle",
-            "TableArg of partitionBy: cloudpickle",
-        ],
-        "construct": [
-            "pyspark.sql.connect.column.Column",
-            "pyspark.sql.connect.window.WindowSpec",
-            "pyspark.sql.connect.table_arg.TableArg",
-        ],
-        "uninit": [
-            "pyspark.sql.connect.column.Column",
-            "pyspark.sql.connect.window.WindowSpec",
-            "pyspark.sql.connect.table_arg.TableArg",
-        ],
-        "foreign": [
-            "pyspark.sql.connect.column.Column",
-            "pyspark.sql.connect.window.WindowSpec",
-            "pyspark.sql.connect.table_arg.TableArg",
-        ],
-    },
     "the DataFrame": {
         "vars": [
             # The writers of `df.write` and `df.writeTo`, PySpark's classes, whose `_df` is the
@@ -3462,3 +3409,195 @@ def test_the_merges_send_what_pysparks_merge_writer_sends(objects, case):
     # the actions of the clauses, in their order, and the schema evolution.
     call = _merge_cases(objects.df.alias("s"))[case]
     assert _merge_outcome(objects.service, call) == _MERGE_OUTCOMES[case]
+
+
+class _Reference:
+    # The class of an expression of the user's, of PySpark's `Expression`, which a Column takes:
+    # a column reference of its `_name`, which its `to_plan` builds of its fields at each call.
+    @staticmethod
+    def of(name):
+        from pyspark.sql.connect.expressions import Expression
+
+        class Reference(Expression):
+            def __init__(self, name):
+                super().__init__()
+                self._name = name
+
+            def to_plan(self, session):
+                expr = self._create_proto_expression()
+                expr.unresolved_attribute.unparsed_identifier = self._name
+                return expr
+
+            def __repr__(self):
+                return self._name
+
+        return Reference(name)
+
+
+def test_a_column_keeps_the_expression_that_it_is_given_as_pysparks(objects):
+    # PySpark's Column keeps the Expression that it is given as its `_expr`, once it checked its
+    # class (`NOT_EXPECTED_TYPE`): the `_expr` of another Column, as `outer()` keeps it, or an
+    # `Expression` of `pyspark.sql.connect.expressions`, a `LiteralExpression` or one of a class of
+    # the user's, whose `repr` it shows and whose `to_plan` its requests send, of the fields of
+    # the expression then.
+    from pyspark.errors import PySparkTypeError
+    from pyspark.sql import functions as F
+    from pyspark.sql.connect.column import Column
+    from pyspark.sql.connect.expressions import LiteralExpression
+    from pyspark.sql.types import LongType
+
+    df = objects.df
+    col = F.col("id") + 1
+    same = Column(col._expr)
+    assert vars(same) == {"_expr": col._expr} and same._expr is col._expr
+    assert repr(same) == repr(col)
+    outer = col.outer()
+    assert type(outer) is Column and outer._expr is col._expr
+    sent = _sent_plan(objects, df.select(same, col)).root.project.expressions
+    assert sent[0] == sent[1]
+    literal = LiteralExpression(5, LongType())
+    five = Column(literal)
+    assert vars(five) == {"_expr": literal} and repr(five) == "Column<'5'>"
+    sent = _sent_plan(objects, df.select(five, (five + 1).alias("six"))).root.project.expressions
+    assert sent[0] == literal.to_plan(None)
+    assert sent[1].alias.name == ["six"]
+    function = sent[1].alias.expr.unresolved_function
+    assert function.function_name == "+" and function.arguments[0] == literal.to_plan(None)
+    assert function.arguments[1].literal.integer == 1
+    literal._value = 6
+    assert repr(five) == "Column<'6'>"
+    assert _sent_plan(objects, df.select(five)).root.project.expressions[0].literal.long == 6
+    reference = Column(_Reference.of("v"))
+    assert repr(reference) == "Column<'v'>" and repr(reference.alias("x")) == "Column<'v AS x'>"
+    sent = _sent_plan(objects, df.select(reference, reference.alias("x"))).root.project.expressions
+    assert sent[0].unresolved_attribute.unparsed_identifier == "v"
+    assert not sent[0].HasField("common") and sent[1].alias.expr == sent[0]
+    reference._expr._name = "w"
+    assert repr(reference) == "Column<'w'>"
+    sent = _sent_plan(objects, df.select(reference)).root.project.expressions
+    assert sent[0].unresolved_attribute.unparsed_identifier == "w"
+    for value in (1, "id", None, F.col("id")):
+        with pytest.raises(PySparkTypeError) as raised:
+            Column(value)
+        assert raised.value.getCondition() == "NOT_EXPECTED_TYPE"
+        assert raised.value.getMessageParameters() == {
+            "expected_type": "Expression",
+            "arg_name": "expr",
+            "arg_type": type(value).__name__,
+        }
+
+
+def test_a_column_reads_its_expression_of_its_dict_as_pysparks(objects):
+    # PySpark's methods read `self._expr` at the call: a Column whose `_expr` was assigned is of
+    # that expression, in its repr and its plans, a subclass whose property gives the expression
+    # is of it, and a Column whose `_expr` was deleted raises the RecursionError of its
+    # `__getattr__`, which reads `_expr` again.
+    from pyspark.sql import functions as F
+    from pyspark.sql.connect.column import Column
+
+    df = objects.df
+    col, other = F.col("id"), F.col("id") + 1
+    col._expr = other._expr
+    assert vars(col) == {"_expr": other._expr} and repr(col) == repr(other)
+    assert repr(col.isNull()) == repr(other.isNull())
+    sent = _sent_plan(objects, df.select(col.alias("x"), other.alias("x"))).root.project
+    assert sent.expressions[0].alias.expr == sent.expressions[1].alias.expr
+
+    class Sub(Column):
+        @property
+        def _expr(self):
+            return other._expr
+
+    sub = Sub.__new__(Sub)
+    assert vars(sub) == {} and repr(sub) == repr(other)
+    assert repr(sub.alias("y")) == repr(other.alias("y"))
+    sent = _sent_plan(objects, df.select(sub)).root.project
+    assert sent.expressions[0] == _sent_plan(objects, df.select(other)).root.project.expressions[0]
+    del col._expr
+    with pytest.raises(RecursionError):
+        repr(col)
+    with pytest.raises(RecursionError):
+        col.alias("x")
+
+
+def test_window_specs_assert_their_arguments_and_share_their_lists_as_pysparks(objects):
+    # PySpark's WindowSpec asserts the arguments of its __init__, of a bare AssertionError: a list
+    # of expressions, a list of sort orders and a WindowFrame or None, which it keeps as they are;
+    # its `__new__` takes the same three arguments, and gives an object of no state. Its methods
+    # make a window of the base class, of the lists and the frame of this one that they do not
+    # replace, and the window expression of `over` is of the lists as they are then, of the
+    # expressions of the user's that they hold too.
+    from pyspark.sql import functions as F
+    from pyspark.sql.connect.window import Window, WindowFrame, WindowSpec
+
+    col = F.col("a")
+    sort = col.asc()._expr
+    frame = WindowFrame(isRowFrame=True, start=-1, end=1)
+    for args in (
+        (1, [], None),
+        ((col._expr,), [], None),
+        ([col], [], None),
+        ([], [col._expr], None),
+        ([], (sort,), None),
+        ([], [], "rows"),
+    ):
+        with pytest.raises(AssertionError) as raised:
+            WindowSpec(*args)
+        assert str(raised.value) == ""
+    partition, order = [col._expr, _Reference.of("v")], [sort]
+    window = WindowSpec(partition, order, frame)
+    assert vars(window) == {"_partitionSpec": partition, "_orderSpec": order, "_frame": frame}
+    assert window._partitionSpec is partition and window._orderSpec is order
+    assert repr(window) == "WindowSpec(PartitionBy(a, v), OrderBy(a ASC NULLS FIRST), " + (
+        "WindowFrame(ROW_FRAME, -1, 1))"
+    )
+    with pytest.raises(TypeError):
+        WindowSpec.__new__(WindowSpec)
+    assert vars(WindowSpec.__new__(WindowSpec, 1, 2, 3)) == {}
+
+    class Sub(WindowSpec):
+        pass
+
+    sub = Sub(partition, order, frame)
+    for derived in (sub.partitionBy("b"), sub.orderBy("b"), sub.rowsBetween(0, 1)):
+        assert type(derived) is WindowSpec
+    assert sub.partitionBy("b")._orderSpec is order and sub.partitionBy("b")._frame is frame
+    assert sub.orderBy("b")._partitionSpec is partition and sub.orderBy("b")._frame is frame
+    ranged = sub.rangeBetween(0, 1)
+    assert ranged._partitionSpec is partition and ranged._orderSpec is order
+    window = Window.partitionBy("id").orderBy("id")
+    window._partitionSpec.append(_Reference.of("p"))
+    window._orderSpec.append(F.col("o").desc()._expr)
+    over = F.sum("id").over(window)
+    assert repr(over) == (
+        "Column<'WindowExpression(sum(id), (WindowSpec(PartitionBy(id, p), "
+        "OrderBy(id ASC NULLS FIRST, o DESC NULLS LAST))))'>"
+    )
+    spec = _sent_plan(objects, objects.df.select(over)).root.project.expressions[0].window
+    assert [p.unresolved_attribute.unparsed_identifier for p in spec.partition_spec] == ["id", "p"]
+    assert not spec.partition_spec[1].HasField("common")
+    assert [o.child.unresolved_attribute.unparsed_identifier for o in spec.order_spec] == [
+        "id",
+        "o",
+    ]
+    # SORT_DIRECTION_ASCENDING, SORT_DIRECTION_DESCENDING.
+    assert [o.direction for o in spec.order_spec] == [1, 2]
+
+
+def test_a_table_argument_reads_its_subquery_of_its_dict_as_pysparks(objects):
+    # PySpark's TableArg keeps the object that it is given as its `_subquery_expr`, which its
+    # methods read: a table argument of the subquery of another is that one, and of an object that
+    # is not a subquery, its methods raise the AttributeError of the first field of PySpark's
+    # `SubqueryExpression` that they read.
+    from pyspark.sql.connect.table_arg import TableArg
+
+    table = objects.df.asTable().partitionBy("id")
+    same = TableArg(table._subquery_expr)
+    assert vars(same) == {"_subquery_expr": table._subquery_expr}
+    assert same._is_partitioned() and repr(same._subquery_expr) == repr(table._subquery_expr)
+    assert repr(same.orderBy("id")._subquery_expr) == repr(table.orderBy("id")._subquery_expr)
+    other = TableArg(1)
+    assert vars(other) == {"_subquery_expr": 1}
+    for call in (other._is_partitioned, lambda: other.partitionBy("id"), other.withSinglePartition):
+        with pytest.raises(AttributeError, match="'int' object has no attribute '_partition_spec'"):
+            call()

@@ -485,8 +485,8 @@ impl PyDataFrame {
         use pyo3::types::{PyBool, PyString};
         cols.iter()
             .map(|c| {
-                if let Ok(column) = c.extract::<PyRef<'_, PyColumn>>() {
-                    return Ok(column.column.clone());
+                if let Ok(column) = c.cast::<PyColumn>() {
+                    return crate::column::column_of(column);
                 }
                 if c.is_instance_of::<PyString>() {
                     // As PySpark's `F._to_col`, by `col`, of its origin.
@@ -546,8 +546,8 @@ impl PyDataFrame {
                     ordinal if ordinal > 0 => self.column_at(py, ordinal - 1)?,
                     ordinal => self.column_at(py, -ordinal - 1)?.desc(),
                 }
-            } else if let Ok(column) = c.extract::<PyRef<'_, PyColumn>>() {
-                column.column.clone()
+            } else if let Ok(column) = c.cast::<PyColumn>() {
+                crate::column::column_of(column)?
             } else if c.is_instance_of::<PyString>() {
                 // As PySpark's `F._to_col`, by `col`, of its origin.
                 let _origin = crate::origin::with_origin("col")?;
@@ -687,7 +687,7 @@ pub(crate) fn to_columns_as_given(
     for arg in args {
         // Try as PyColumn first
         if let Ok(pycol) = arg.extract::<Bound<'_, PyColumn>>() {
-            cols.push(pycol.borrow().column.clone());
+            cols.push(crate::column::column_of(&pycol)?);
         } else if arg.is_instance_of::<pyo3::types::PyString>() {
             // A column name, as PySpark's `F._to_col`, by `col`, of its origin.
             let _origin = crate::origin::with_origin("col")?;
@@ -802,8 +802,8 @@ fn as_of_join_condition(
     args: &mut crate::plan_args::PlanArgs,
     on: &Bound<'_, PyAny>,
 ) -> PyResult<(Option<spark_connect::column::Column>, Vec<String>)> {
-    if let Ok(column) = on.extract::<PyRef<PyColumn>>() {
-        return Ok((Some(column.column.clone()), Vec::new()));
+    if let Ok(column) = on.cast::<PyColumn>() {
+        return Ok((Some(crate::column::column_of(column)?), Vec::new()));
     }
     if on.is_instance_of::<pyo3::types::PyString>() {
         return Ok((None, vec![args.str(on)?]));
@@ -841,15 +841,15 @@ fn list_conjunction(
     let Some(mut reduced) = items.next() else {
         return Ok(None);
     };
-    let mut column = reduced
-        .extract::<PyRef<PyColumn>>()
-        .ok()
-        .map(|column| column.column.clone());
+    let mut column = match reduced.cast::<PyColumn>() {
+        Ok(column) => Some(crate::column::column_of(column)?),
+        Err(_) => None,
+    };
     for item in items {
         match column.take() {
             Some(left) => {
-                let right = match item.extract::<PyRef<PyColumn>>() {
-                    Ok(right) => right.column.clone(),
+                let right = match item.cast::<PyColumn>() {
+                    Ok(right) => crate::column::column_of(right)?,
                     Err(_) => match crate::column::operand_column(&item) {
                         Ok(right) => right,
                         Err(err) => {
@@ -862,10 +862,10 @@ fn list_conjunction(
             }
             None => match reduced.bitand(&item) {
                 Ok(result) => {
-                    column = result
-                        .extract::<PyRef<PyColumn>>()
-                        .ok()
-                        .map(|column| column.column.clone());
+                    column = match result.cast::<PyColumn>() {
+                        Ok(column) => Some(crate::column::column_of(column)?),
+                        Err(_) => None,
+                    };
                     reduced = result;
                 }
                 Err(err) => {
@@ -901,8 +901,8 @@ fn as_of_column(
     df: &DataFrame,
     column: &Bound<'_, PyAny>,
 ) -> PyResult<spark_connect::column::Column> {
-    if let Ok(column) = column.extract::<PyRef<PyColumn>>() {
-        return Ok(column.column.clone());
+    if let Ok(column) = column.cast::<PyColumn>() {
+        return crate::column::column_of(column);
     }
     crate::plan_args::df_col(df, column, false)
 }
@@ -911,8 +911,8 @@ fn as_of_column(
 /// `filter`, whose `Filter` plan collects the subqueries of anything else by its `foreach`: an
 /// object without one raises the `AttributeError` of it.
 fn cond_column(condition: &Bound<'_, PyAny>) -> PyResult<spark_connect::column::Column> {
-    if let Ok(c) = condition.extract::<PyRef<PyColumn>>() {
-        return Ok(c.column.clone());
+    if let Ok(c) = condition.cast::<PyColumn>() {
+        return crate::column::column_of(c);
     }
     if condition.is_instance_of::<pyo3::types::PyString>() {
         return crate::plan_args::expr(condition);
@@ -1476,7 +1476,7 @@ impl PyDataFrame {
         colName: &Bound<'_, PyAny>,
         col: &Bound<'_, PyAny>,
     ) -> PyResult<PyDataFrame> {
-        let Ok(column) = col.extract::<PyRef<'_, PyColumn>>() else {
+        let Ok(column) = col.cast::<PyColumn>() else {
             return Err(not_expected_type(col, "col", "Column"));
         };
         if !colName.is_instance_of::<pyo3::types::PyString>() {
@@ -1484,9 +1484,12 @@ impl PyDataFrame {
         }
         let mut args = crate::plan_args::PlanArgs::new();
         let name = args.str(colName)?;
-        Ok(PyDataFrame::new(args.plan(
-            self.dataframe.with_column(&name, column.column.clone()),
-        )))
+        Ok(PyDataFrame::new(
+            args.plan(
+                self.dataframe
+                    .with_column(&name, crate::column::column_of(column)?),
+            ),
+        ))
     }
 
     // Rename a column, as PySpark's, which renames of the dict `{existing: new}`, so an
@@ -1527,8 +1530,8 @@ impl PyDataFrame {
         let mut args = crate::plan_args::PlanArgs::new();
         let mut pairs = Vec::with_capacity(cols_map.len());
         for (name, column) in cols_map.iter() {
-            let column = column.extract::<PyRef<'_, PyColumn>>()?;
-            pairs.push((args.str(&name)?, column.column.clone()));
+            let column = column.cast::<PyColumn>()?;
+            pairs.push((args.str(&name)?, crate::column::column_of(column)?));
         }
         Ok(PyDataFrame::new(
             args.plan(self.dataframe.with_columns(pairs)),
@@ -1594,7 +1597,7 @@ impl PyDataFrame {
                         .unwrap_or_default();
                     return Err(invalid(&format!("list[{first}]")));
                 }
-            } else if !(primitive(p) || p.extract::<PyRef<'_, PyColumn>>().is_ok()) {
+            } else if !(primitive(p) || p.cast::<PyColumn>().is_ok()) {
                 return Err(invalid(&type_name(p)?));
             }
             expressions.push(crate::functions::to_column(p)?.expression().clone());
@@ -1616,8 +1619,8 @@ impl PyDataFrame {
         let mut args = crate::plan_args::PlanArgs::new();
         let (mut columns, mut names) = (Vec::new(), Vec::new());
         for column in &cols {
-            if let Ok(column) = column.extract::<PyRef<'_, PyColumn>>() {
-                columns.push(column.column.clone());
+            if let Ok(column) = column.cast::<PyColumn>() {
+                columns.push(crate::column::column_of(column)?);
             } else if column.is_instance_of::<pyo3::types::PyString>() {
                 names.push(args.str(column)?);
             } else {
@@ -1740,10 +1743,10 @@ impl PyDataFrame {
                 join_type,
             )));
         };
-        if let Ok(col) = on.extract::<PyRef<PyColumn>>() {
+        if let Ok(col) = on.cast::<PyColumn>() {
             return Ok(PyDataFrame::new(self.dataframe.join(
                 &other.dataframe,
-                Some(col.column.clone()),
+                Some(crate::column::column_of(col)?),
                 join_type,
             )));
         }
@@ -1843,10 +1846,10 @@ impl PyDataFrame {
         let tolerance = match tolerance.filter(|tolerance| !tolerance.is_none()) {
             None => None,
             Some(tolerance) => {
-                let column = tolerance.extract::<PyRef<PyColumn>>().map_err(|_| {
+                let column = tolerance.cast::<PyColumn>().map_err(|_| {
                     pyo3::exceptions::PyAssertionError::new_err("tolerance should be Column")
                 })?;
-                Some(column.column.clone())
+                Some(crate::column::column_of(column)?)
             }
         };
         // The as-of columns before `on`, as PySpark converts them before its `AsOfJoin` plan
@@ -1921,8 +1924,8 @@ impl PyDataFrame {
         let other = self.same_session(other)?;
         let on_col = match on {
             None => None,
-            Some(on) => match on.extract::<PyRef<PyColumn>>() {
-                Ok(column) => Some(column.column.clone()),
+            Some(on) => match on.cast::<PyColumn>() {
+                Ok(column) => Some(crate::column::column_of(column)?),
                 Err(_) => {
                     on.getattr("foreach")?;
                     return Err(no_to_plan(&on));
@@ -1946,8 +1949,8 @@ impl PyDataFrame {
         // As PySpark's `F._to_col`: a Column or a column name, else NOT_EXPECTED_TYPE of `col`.
         let index = match indexColumn {
             None => None,
-            Some(c) => Some(if let Ok(column) = c.extract::<PyRef<'_, PyColumn>>() {
-                column.column.clone()
+            Some(c) => Some(if let Ok(column) = c.cast::<PyColumn>() {
+                crate::column::column_of(column)?
             } else if c.is_instance_of::<pyo3::types::PyString>() {
                 let _origin = crate::origin::with_origin("col")?;
                 crate::plan_args::col(c)?
@@ -1988,7 +1991,7 @@ impl PyDataFrame {
             }
             (Some(numPartitions), cols)
         } else if numPartitions.is_instance_of::<pyo3::types::PyString>()
-            || numPartitions.extract::<PyRef<'_, PyColumn>>().is_ok()
+            || numPartitions.cast::<PyColumn>().is_ok()
         {
             // No partition count is sent, so the server picks it, as PySpark's.
             let mut all = vec![numPartitions];
@@ -2058,7 +2061,7 @@ impl PyDataFrame {
         // A `ColumnOrName`, as PySpark's `F._to_col`: a string is a column name, by `col`, of its
         // origin, not a literal, and another value is NOT_EXPECTED_TYPE of `col`.
         let col = if let Ok(c) = partitionIdCol.extract::<Bound<'_, PyColumn>>() {
-            c.borrow().column.clone()
+            crate::column::column_of(&c)?
         } else if partitionIdCol.is_instance_of::<pyo3::types::PyString>() {
             let _origin = crate::origin::with_origin("col")?;
             crate::plan_args::col(partitionIdCol)?
@@ -2104,12 +2107,18 @@ impl PyDataFrame {
             DefaultedOption::Omitted => pyo3::types::PyString::new(py, "index").into_any(),
             DefaultedOption::Given(name) => name.bind(py).clone(),
         };
-        let index = PyColumn::new(spark_connect::column::Column::new(
-            spark_connect::expression::Expression::function("distributed_sequence_id", vec![]),
-        ))
-        .alias(py, &PyTuple::new(py, [name])?, None)?;
+        let index = crate::column::column_object(
+            py,
+            spark_connect::column::Column::new(spark_connect::expression::Expression::function(
+                "distributed_sequence_id",
+                vec![],
+            )),
+        )?;
+        let index =
+            PyColumn::alias(&index, py, &PyTuple::new(py, [name])?, None)?.into_pyobject(py)?;
         Ok(PyDataFrame::new(
-            self.dataframe.select(vec![star, index.column]),
+            self.dataframe
+                .select(vec![star, crate::column::column_of(&index)?]),
         ))
     }
 
@@ -2228,7 +2237,7 @@ impl PyDataFrame {
             return Ok(self.of_same_schema(PyDataFrame::new(df)));
         }
         if !(numPartitions.is_instance_of::<pyo3::types::PyString>()
-            || numPartitions.extract::<PyRef<'_, PyColumn>>().is_ok())
+            || numPartitions.cast::<PyColumn>().is_ok())
         {
             return Err(not_expected_type(
                 &numPartitions,
@@ -2482,7 +2491,7 @@ impl PyDataFrame {
     // `DataFrame.colRegex`.
     #[pyo3(name = "colRegex")]
     #[doc = connect_doc!(DataFrame.colRegex)]
-    fn col_regex(&self, colName: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
+    fn col_regex(&self, colName: &Bound<'_, PyAny>) -> PyResult<crate::column::ColumnOut> {
         // As PySpark's: a str, else NOT_EXPECTED_TYPE.
         if !colName.is_instance_of::<pyo3::types::PyString>() {
             return Err(not_expected_type(colName, "colName", "str"));
@@ -2490,7 +2499,9 @@ impl PyDataFrame {
         // Its `UnresolvedRegex` sets the name when it builds the plan.
         let mut args = crate::plan_args::PlanArgs::new();
         let name = args.str(colName)?;
-        Ok(PyColumn::new(args.column(self.dataframe.col_regex(&name))))
+        Ok(crate::column::ColumnOut::new(
+            args.column(self.dataframe.col_regex(&name)),
+        ))
     }
 
     // Basic statistics for the given columns (count/mean/stddev/min/max), of column names or
@@ -2725,8 +2736,8 @@ impl PyDataFrame {
         }
         let mut columns = Vec::with_capacity(exprs.len());
         for expr in &exprs {
-            match expr.extract::<PyRef<'_, PyColumn>>() {
-                Ok(column) => columns.push(column.column.expression().clone()),
+            match expr.cast::<PyColumn>() {
+                Ok(column) => columns.push(crate::column::column_of(column)?.expression().clone()),
                 Err(_) => {
                     return Err(crate::column::raise_pyspark(
                         py,
@@ -3194,24 +3205,25 @@ impl PyDataFrame {
 
     // The EXISTS subquery of this DataFrame, as a Column. Mirrors `DataFrame.exists()`.
     #[doc = connect_doc!(DataFrame.exists)]
-    fn exists(&self) -> PyColumn {
-        PyColumn::new(self.dataframe.exists())
+    fn exists(&self) -> PyResult<crate::column::ColumnOut> {
+        Ok(crate::column::ColumnOut::new(self.dataframe.exists()))
     }
 
     // The scalar subquery of this DataFrame, as a Column. Mirrors `DataFrame.scalar()`.
     #[doc = connect_doc!(DataFrame.scalar)]
-    fn scalar(&self) -> PyColumn {
-        PyColumn::new(self.dataframe.scalar())
+    fn scalar(&self) -> PyResult<crate::column::ColumnOut> {
+        Ok(crate::column::ColumnOut::new(self.dataframe.scalar()))
     }
 
     // Return a `TableArg` wrapping this DataFrame, for use as a table-valued function
     // argument. Mirrors `DataFrame.asTable()`.
     #[pyo3(name = "asTable")]
     #[doc = connect_doc!(DataFrame.asTable)]
-    fn as_table(&self) -> crate::tablearg::PyTableArg {
-        crate::tablearg::PyTableArg::new(
+    fn as_table<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, crate::tablearg::PyTableArg>> {
+        crate::tablearg::table_arg_object(
+            py,
             spark_connect::table_arg::TableArg::new(self.dataframe.clone()),
-            self.dataframe.spark_session().session_id().to_string(),
+            Some(self.dataframe.spark_session().session_id().to_string()),
         )
     }
 
@@ -3330,7 +3342,7 @@ impl PyDataFrame {
         &self,
         py: Python<'_>,
         name: &Bound<'_, pyo3::types::PyString>,
-    ) -> PyResult<PyColumn> {
+    ) -> PyResult<crate::column::ColumnOut> {
         // A name that UTF-8 cannot encode is none of those below, nor a column of the server,
         // which the validation reads: it is the column of the name, which fails its requests, as
         // PySpark's `_col`, unless it is validated.
@@ -3345,7 +3357,7 @@ impl PyDataFrame {
                     &[("attr_name", name.as_any())],
                 ));
             }
-            return Ok(PyColumn::new(crate::plan_args::df_col(
+            return Ok(crate::column::ColumnOut::new(crate::plan_args::df_col(
                 &self.dataframe,
                 name.as_any(),
                 false,
@@ -3373,7 +3385,9 @@ impl PyDataFrame {
             ));
         }
         // As PySpark's `self._col(name)`, of the name `*` too.
-        Ok(PyColumn::new(self.dataframe.column_reference(name)))
+        Ok(crate::column::ColumnOut::new(
+            self.dataframe.column_reference(name),
+        ))
     }
 
     /// Private bridge used by pyspark.sql.dataframe.DataFrame.__getattr__ for
@@ -3383,7 +3397,7 @@ impl PyDataFrame {
         &self,
         py: Python<'_>,
         name: &Bound<'_, pyo3::types::PyString>,
-    ) -> PyResult<PyColumn> {
+    ) -> PyResult<crate::column::ColumnOut> {
         self.__getattr__(py, name)
     }
 
@@ -3438,12 +3452,12 @@ impl PyDataFrame {
         }
         let mut expressions = Vec::with_capacity(exprs.len());
         for expr in &exprs {
-            let Ok(column) = expr.extract::<PyRef<'_, PyColumn>>() else {
+            let Ok(column) = expr.cast::<PyColumn>() else {
                 return Err(pyo3::exceptions::PyAssertionError::new_err(
                     "all exprs should be Expression",
                 ));
             };
-            expressions.push(column.column.expression().clone());
+            expressions.push(crate::column::column_of(column)?.expression().clone());
         }
         Ok(PyDataFrame::new(self.dataframe.agg(expressions)))
     }
@@ -4149,7 +4163,7 @@ impl PyDataFrame {
                 }
                 crate::plan_args::df_col(&self.dataframe, item, false)?
             };
-            return PyColumn::new(column).into_py_any(py);
+            return crate::column::ColumnOut::new(column).into_py_any(py);
         } else if item.is_instance_of::<PyColumn>() {
             return self.filter(item)?.into_py_any(py);
         } else if item.is_instance_of::<PyList>() || item.is_instance_of::<PyTuple>() {
@@ -4178,14 +4192,14 @@ impl PyDataFrame {
         };
         // As PySpark's `F.col(self.columns[item])`, of the origin of `col`.
         let _origin = crate::origin::with_origin("col")?;
-        PyColumn::new(spark_connect::functions::col(&name)).into_py_any(py)
+        crate::column::ColumnOut::new(spark_connect::functions::col(&name)).into_py_any(py)
     }
 
     /// Private column accessor used by pandas-on-Spark (`sdf._col(name)`); mirrors the
     /// connect DataFrame's `_col`, the column of this DataFrame by its plan ID. Backtick-quoted
     /// names arrive from `scol_for`.
-    fn _col(&self, item: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
-        Ok(PyColumn::new(crate::plan_args::df_col(
+    fn _col(&self, item: &Bound<'_, PyAny>) -> PyResult<crate::column::ColumnOut> {
+        Ok(crate::column::ColumnOut::new(crate::plan_args::df_col(
             &self.dataframe,
             item,
             false,
@@ -4361,7 +4375,7 @@ impl PyDataFrame {
         &self,
         py: Python<'_>,
         other: &Bound<'_, PyAny>,
-        rankingExpression: &PyColumn,
+        rankingExpression: &Bound<'_, PyColumn>,
         numResults: &Bound<'_, PyAny>,
         mode: &Bound<'_, PyAny>,
         direction: &Bound<'_, PyAny>,
@@ -4433,7 +4447,7 @@ impl PyDataFrame {
         }
         Ok(PyDataFrame::new(self.dataframe.nearest_by_join(
             &other.dataframe,
-            rankingExpression.column.clone(),
+            crate::column::column_of(rankingExpression)?,
             num_results.extract::<i32>()?,
             &mode.extract::<String>()?,
             &direction.extract::<String>()?,
@@ -4444,12 +4458,12 @@ impl PyDataFrame {
     // `DataFrame.metadataColumn`.
     #[pyo3(name = "metadataColumn")]
     #[doc = connect_doc!(DataFrame.metadataColumn)]
-    fn metadata_column(&self, colName: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
+    fn metadata_column(&self, colName: &Bound<'_, PyAny>) -> PyResult<crate::column::ColumnOut> {
         // As PySpark's: a str, else NOT_EXPECTED_TYPE.
         if !colName.is_instance_of::<pyo3::types::PyString>() {
             return Err(not_expected_type(colName, "colName", "str"));
         }
-        Ok(PyColumn::new(crate::plan_args::df_col(
+        Ok(crate::column::ColumnOut::new(crate::plan_args::df_col(
             &self.dataframe,
             colName,
             true,
@@ -4801,8 +4815,8 @@ fn unpivot_columns(cols: &Bound<'_, PyAny>) -> PyResult<Vec<spark_connect::colum
 
 /// A column, or a column by its name, as PySpark's `_to_col`.
 pub(crate) fn column_or_name(col: &Bound<'_, PyAny>) -> PyResult<spark_connect::column::Column> {
-    if let Ok(column) = col.extract::<PyRef<'_, PyColumn>>() {
-        return Ok(column.column.clone());
+    if let Ok(column) = col.cast::<PyColumn>() {
+        return crate::column::column_of(column);
     }
     if col.is_instance_of::<pyo3::types::PyString>() {
         // As PySpark's `F._to_col`, by `col`, of its origin.

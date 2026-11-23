@@ -204,32 +204,32 @@ pub fn pipeline_define_auto_cdc_flow(
     flow_name: &str,
     target: &str,
     source: String,
-    keys: Vec<PyRef<'_, PyColumn>>,
-    sequence_by: PyRef<'_, PyColumn>,
-    apply_as_deletes: Option<PyRef<'_, PyColumn>>,
-    column_list: Option<Vec<PyRef<'_, PyColumn>>>,
-    except_column_list: Option<Vec<PyRef<'_, PyColumn>>>,
+    keys: Vec<Bound<'_, PyColumn>>,
+    sequence_by: Bound<'_, PyColumn>,
+    apply_as_deletes: Option<Bound<'_, PyColumn>>,
+    column_list: Option<Vec<Bound<'_, PyColumn>>>,
+    except_column_list: Option<Vec<Bound<'_, PyColumn>>>,
     stored_as_scd_type: i32,
     scl_file: Option<String>,
     scl_line: Option<i32>,
-    track_history_column_list: Option<Vec<PyRef<'_, PyColumn>>>,
-    track_history_except_column_list: Option<Vec<PyRef<'_, PyColumn>>>,
+    track_history_column_list: Option<Vec<Bound<'_, PyColumn>>>,
+    track_history_except_column_list: Option<Vec<Bound<'_, PyColumn>>>,
     sql_conf: Option<HashMap<String, String>>,
 ) -> PyResult<()> {
     // As a request serializes its expressions: one too deep to be sent is the RecursionError of
     // PySpark's serializer, before any request.
-    let to_expr = |c: &PyColumn| c.column.try_to_proto().to_pyerr();
-    let to_exprs = |cs: Option<Vec<PyRef<'_, PyColumn>>>| {
+    let to_expr = |c: &Bound<'_, PyColumn>| crate::column::column_of(c)?.try_to_proto().to_pyerr();
+    let to_exprs = |cs: Option<Vec<Bound<'_, PyColumn>>>| {
         cs.unwrap_or_default()
             .iter()
-            .map(|c| to_expr(c))
+            .map(&to_expr)
             .collect::<PyResult<Vec<_>>>()
     };
     let details = proto::pipeline_command::define_flow::AutoCdcFlowDetails {
         source: Some(source),
-        keys: keys.iter().map(|c| to_expr(c)).collect::<PyResult<_>>()?,
+        keys: keys.iter().map(&to_expr).collect::<PyResult<_>>()?,
         sequence_by: Some(to_expr(&sequence_by)?),
-        apply_as_deletes: apply_as_deletes.as_ref().map(|c| to_expr(c)).transpose()?,
+        apply_as_deletes: apply_as_deletes.as_ref().map(to_expr).transpose()?,
         apply_as_truncates: None,
         column_list: to_exprs(column_list)?,
         except_column_list: to_exprs(except_column_list)?,

@@ -75,7 +75,7 @@ fn columns_of(value: &Bound<'_, PyAny>, list: bool) -> PyResult<Vec<Column>> {
     value
         .try_iter()?
         .map(|item| match item?.cast::<PyColumn>() {
-            Ok(column) => Ok(column.borrow().column.clone()),
+            Ok(column) => Ok(crate::column::column_of(column)?),
             Err(_) => Err(assertion()),
         })
         .collect()
@@ -141,7 +141,7 @@ fn aggregation_of(
                 true => Vec::new(),
                 false => columns_of(&pivot_values, true)?,
             };
-            let pivot_col = pivot_col.borrow().column.clone();
+            let pivot_col = crate::column::column_of(pivot_col)?;
             (Some(pivot_col), pivot_values, Vec::new())
         }
         AggregateGroupType::GroupingSets => {
@@ -198,17 +198,6 @@ fn check_same_session(this: &Bound<'_, PyAny>, other: &Bound<'_, PyAny>) -> PyRe
     Ok(())
 }
 
-/// The shallow copy of the user-set attributes of `source`, its `__dict__`, onto `copy`, as
-/// `copy.copy` of a plain Python object carries them: the same values, not copies of them.
-pub(crate) fn copy_instance_state(
-    copy: &Bound<'_, PyAny>,
-    source: &Bound<'_, PyAny>,
-) -> PyResult<()> {
-    copy.getattr("__dict__")?
-        .call_method1("update", (source.getattr("__dict__")?,))?;
-    Ok(())
-}
-
 /// The state of `owner` in its reduce, as a plain Python object pickles it: its `__dict__`, the
 /// user-set attributes, or None if it has none.
 pub(crate) fn instance_state<'py>(owner: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
@@ -217,22 +206,6 @@ pub(crate) fn instance_state<'py>(owner: &Bound<'py, PyAny>) -> PyResult<Bound<'
         return Ok(owner.py().None().into_bound(owner.py()));
     }
     Ok(dict)
-}
-
-/// The reduce `reduce` of `owner` with its state as its third element, which `copy` and `pickle`
-/// restore into the `__dict__` of the object they rebuild, as they do for a plain object. A
-/// reduce of no state is left as it is.
-pub(crate) fn reduce_with_state<'py>(
-    reduce: &Bound<'py, PyAny>,
-    owner: &Bound<'py, PyAny>,
-) -> PyResult<Bound<'py, PyAny>> {
-    let state = instance_state(owner)?;
-    if state.is_none() {
-        return Ok(reduce.clone());
-    }
-    let mut items: Vec<Bound<'py, PyAny>> = reduce.cast::<PyTuple>()?.iter().collect();
-    items.push(state);
-    Ok(PyTuple::new(owner.py(), items)?.into_any())
 }
 
 // Python wrapper for Spark GroupedData. As PySpark's plain class, it keeps its state in its
@@ -562,12 +535,12 @@ impl PyGroupedData {
             // As PySpark's, which asserts that the expressions are Columns.
             _ => {
                 for col in &exprs {
-                    let Ok(col) = col.extract::<PyRef<'_, PyColumn>>() else {
+                    let Ok(col) = col.cast::<PyColumn>() else {
                         return Err(pyo3::exceptions::PyAssertionError::new_err(
                             "all exprs should be Column",
                         ));
                     };
-                    agg_exprs.push(col.column.expression().clone());
+                    agg_exprs.push(crate::column::column_of(col)?.expression().clone());
                 }
             }
         }
@@ -592,7 +565,7 @@ impl PyGroupedData {
             let _origin = crate::origin::with_origin("alias")?;
             count.alias("count")
         };
-        let counted = Bound::new(py, PyColumn::new(counted))?;
+        let counted = crate::column::column_object(py, counted)?;
         slf.call_method1(pyo3::intern!(py, "agg"), (counted,))
     }
 
