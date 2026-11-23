@@ -1348,19 +1348,31 @@ requests of the unpickled object pickle as it is then. This case still differs:
   A Python subclass of a data type (`StringType`, `DecimalType`, `ArrayType`, `StructField`,
   `StructType` and the others) is of the core type of its class, and runs its own methods where
   PySpark's methods of the class call them, also in the types that hold it and on the Python
-  workers of the server, to which it pickles of its class and its `__dict__`, as PySpark's. What
-  stays different (see `docs/compatibility.md`):
-  - the parameters are not entries of its `__dict__`, and a subclass whose `__init__` does not
-    call that of its class has the defaults of the class, where PySpark's has no parameters;
-  - the `__init__` of a subclass of a singleton type runs at each call of the class, as the
-    native classes are not of the `DataTypeSingleton` metaclass (which `pyspark.sql.types` has, of
-    PySpark's, for the classes made of it, such as PySpark's cloudpickle of such a subclass of
-    `__main__`), and copies and pickles of its one instance are that instance; a subclass of
-    another metaclass is made, where PySpark's raises a metaclass conflict;
-  - a class of types of two branches of their hierarchy (`class X(StringType, IntegerType)`)
-    raises CPython's `multiple bases have instance lay-out conflict`;
-  - a subclass of `__slots__` pickles at the protocols 0 and 1 too, where PySpark's raises the
-    `TypeError` of `__slots__` without `__getstate__`;
+  workers of the server, to which it pickles of its class and its `__dict__`, as PySpark's. A
+  type of parameters, a decimal, a string, a char, a varchar, a time, an interval of fields or a
+  spatial type, keeps them in its `__dict__`, as PySpark's, of any value, which its methods read
+  as PySpark's, and a subclass of `__slots__` raises PySpark's `TypeError` of `__slots__` without
+  `__getstate__` at the protocols 0 and 1. What stays different (see `docs/compatibility.md`):
+  - the parameters of an array, a map, a field and a struct are not entries of its `__dict__`, and
+    a subclass of them whose `__init__` does not call that of its class has the defaults of the
+    class, where PySpark's has no parameters (tracked: SPARK-62251);
+  - inherent, of the metaclass of a native class: the `__init__` of a subclass of a singleton type
+    runs at each call of the class (of `class Counted(IntegerType)` whose `__init__` counts,
+    `Counted() is Counted()`, and the count is 2, where PySpark's is 1), and copies and pickles of
+    its one instance are that instance, where PySpark's `copyreg.__newobj__` makes another object;
+    a subclass of another metaclass is made, where PySpark's raises `TypeError: metaclass
+    conflict`. PySpark's `DataTypeSingleton.__call__` returns the one instance without calling
+    `__init__`; a native class is of the metaclass `type`, whose `__call__` calls the `__init__`
+    each time the `__new__` gives an instance of the class, as the extension makes its classes
+    with `PyType_FromSpec` of the stable ABI of Python 3.9, which has no `PyType_FromMetaclass`
+    to make a class of another metaclass (`pyspark.sql.types` has PySpark's `DataTypeSingleton`,
+    for the classes made of it, such as PySpark's cloudpickle of such a subclass of `__main__`);
+  - inherent, of the layouts of the native classes: a class of types of two branches of their
+    hierarchy (`class X(StringType, IntegerType)`, `class Y(ArrayType, MapType)`) raises
+    `TypeError: multiple bases have instance lay-out conflict` when it is made, where PySpark makes
+    the class (`X()` is `StringType()`): an object of such a class would be of the native layout
+    of one branch, which the native methods of the other read as theirs, as CPython raises of
+    bases of conflicting layouts;
   - the repr of an array, a map, a field or a struct that holds a type whose repr has a lone
     surrogate raises its `UnicodeEncodeError`;
   - `createDataFrame` of data under types that override none of the reads of `json()` sends the

@@ -107,10 +107,21 @@ def _pysparks_pickle(key, protocol):
 
 def _attributes(t, case):
     """The repr of each attribute of PySpark's type of `case`, of its `__dict__`, and the repr of
-    the attribute of the drop-in's type `t`. The `_crs` and `_alg` that PySpark's spatial types
-    keep of their SRID are not attributes of the drop-in's."""
-    expected = {k: v for k, v in case["attributes"].items() if k not in ("_crs", "_alg")}
+    the attribute of the drop-in's type `t`."""
+    expected = case["attributes"]
     return {k: repr(getattr(t, k)) for k in expected}, expected
+
+
+# The types of parameters, which keep them in their `__dict__`, as PySpark's (SPARK-62251).
+PARAMETER_TYPES = (
+    T.DecimalType, T.StringType, T.CharType, T.VarcharType, T.TimeType, T.DayTimeIntervalType,
+    T.YearMonthIntervalType, T.GeometryType, T.GeographyType,
+)
+
+
+def _dict_of(t):
+    """The repr of each entry of the `__dict__` of `t`, in its order."""
+    return [(k, repr(v)) for k, v in vars(t).items()]
 
 
 @pytest.mark.parametrize("protocol", [2, 3, 4, 5])
@@ -118,9 +129,10 @@ def test_types_that_pyspark_pickled_load_as_its_types(protocol):
     # PySpark's types are plain classes, which pickle as `copyreg.__newobj__(cls)` and their
     # `__dict__`: the drop-in's class makes a type of `cls.__new__(cls)`, without arguments, and
     # sets the attributes of the `__dict__`, of which the type then is, also in a struct, an
-    # array or a map. They are its parameters, not entries of its own `__dict__`. A type of
-    # PySpark's `DataTypeSingleton` is the one instance, which `cls.__new__(cls)` gives, where
-    # PySpark's own unpickling gives another object.
+    # array or a map. A type of parameters keeps them in its `__dict__`, as PySpark's; an array,
+    # a map, a field and a struct keep theirs as their parameters. A type of PySpark's
+    # `DataTypeSingleton` is the one instance, which `cls.__new__(cls)` gives, where PySpark's own
+    # unpickling gives another object.
     from pyspark.ml.linalg import VectorUDT
 
     names = dict(vars(T), VectorUDT=VectorUDT)
@@ -141,7 +153,10 @@ def test_types_that_pyspark_pickled_load_as_its_types(protocol):
         )
         got, expected = _attributes(t, case)
         assert got == expected, case["type"]
-        assert vars(t) == {}, case["type"]
+        if isinstance(t, PARAMETER_TYPES):
+            assert _dict_of(t) == list(case["attributes"].items()), case["type"]
+        else:
+            assert vars(t) == {}, case["type"]
 
 
 @pytest.mark.parametrize("protocol", [0, 1])
@@ -166,18 +181,18 @@ def test_types_that_pyspark_pickled_after_an_edit_load_as_they_were(protocol):
         assert (repr(t), t.simpleString()) == (case["repr"], case["simpleString"]), name
         got, expected = _attributes(t, case)
         assert got == expected, name
-        if name != "set_srid":
-            assert t.json() == case["json"], name
+        assert t.json() == case["json"], name
+        if isinstance(t, PARAMETER_TYPES):
+            assert _dict_of(t) == list(case["attributes"].items()), name
     decimal = loaded["decimal_attributes"]
-    assert vars(decimal) == {"tag": "x"}
+    assert vars(decimal) == {"precision": 10, "scale": 2, "hasPrecisionInfo": False, "tag": "x"}
     assert decimal != T.DecimalType(10, 2) and hash(decimal) == hash(T.DecimalType(10, 2))
     assert loaded["set_scale"] == T.DecimalType(10, 3)
     assert loaded["retyped_field"]._needSerializeAnyField is True
     # PySpark's JSON of a GeometryType of a set SRID is that of the CRS of its constructor, which
-    # it keeps as `_crs`; the drop-in's type is of the SRID, so it is GeometryType(0), of its JSON.
-    assert PYSPARK_PICKLES["edited"]["set_srid"]["json"] == '"geometry(OGC:CRS84)"'
-    assert loaded["set_srid"] == T.GeometryType(0)
-    assert loaded["set_srid"].json() == '"geometry(SRID:0)"'
+    # it keeps as `_crs`, so the type is equal to no GeometryType(0), whose `_crs` is another.
+    assert loaded["set_srid"].json() == '"geometry(OGC:CRS84)"'
+    assert loaded["set_srid"] != T.GeometryType(0)
 
 
 # The abstract classes of PySpark's type hierarchy, with the name of each without `Type` in lower
@@ -410,16 +425,18 @@ def test_type_parameters_set_in_a_nested_type_are_of_the_containing_type_as_pysp
 def test_set_spatial_srids_and_precision_info_as_pysparks():
     # A set `srid` shows in the repr and simpleString of the type, as PySpark's; PySpark's JSON
     # stays that of the CRS of its constructor, which it keeps as `_crs` (`geometry(OGC:CRS84)`),
-    # so that its type is equal to no GeometryType(0), where the drop-in's type is of the SRID,
-    # also of its JSON. The mixed SRID -1, of which `GeographyType("ANY")` is, is an SRID too.
+    # so that its type is equal to no GeometryType(0), as the drop-in's, of the same `__dict__`
+    # (SPARK-62251). The mixed SRID -1, of which `GeographyType("ANY")` is, is an SRID too.
     geometry = T.GeometryType(4326)
     geometry.srid = 0
     assert (repr(geometry), geometry.simpleString()) == ("GeometryType(0)", "geometry(0)")
-    assert geometry == T.GeometryType(0) and geometry.json() == '"geometry(SRID:0)"'
+    assert geometry != T.GeometryType(0) and geometry.json() == '"geometry(OGC:CRS84)"'
+    assert vars(geometry) == {"srid": 0, "_crs": "OGC:CRS84"}
     geography = T.GeographyType(4326)
     geography.srid = -1
     assert (repr(geography), geography.simpleString()) == ("GeographyType(ANY)", "geography(any)")
-    assert geography == T.GeographyType("ANY")
+    assert geography != T.GeographyType("ANY")
+    assert geography.json() == '"geography(OGC:CRS84, SPHERICAL)"'
     # `hasPrecisionInfo`, which PySpark's `__init__` sets true, is a plain attribute too, which
     # `==` compares, as PySpark's `__dict__`, and the repr and hash do not show.
     decimal = T.DecimalType(10, 2)
@@ -428,36 +445,43 @@ def test_set_spatial_srids_and_precision_info_as_pysparks():
     assert decimal != T.DecimalType(10, 2) and hash(decimal) == hash(T.DecimalType(10, 2))
 
 
-def test_type_parameters_take_the_values_of_their_constructors():
-    # PySpark's attributes take any value, of which its repr, JSON or simpleString may fail later
-    # (the TypeError of `%d` of a str, the KeyError of a field that the type does not have). The
-    # drop-in's core type holds the values that the constructor takes, so another raises the
-    # constructor's error at the assignment, and the type stays as it was.
-    from pyspark.errors import IllegalArgumentException, PySparkRuntimeError
-
+def test_type_parameters_take_any_value_as_pysparks():
+    # SPARK-62251: PySpark's attributes are entries of the `__dict__`, of any value, of which the
+    # repr, JSON or simpleString fails later, as PySpark's: the TypeError of `%d` of a str, the
+    # KeyError of a field that the type does not have. A plan of the type sets them in its proto,
+    # which refuses a bool and an int out of the range of its field, as protobuf does. The texts
+    # are official PySpark 4.3.0's.
     decimal, interval, geometry = T.DecimalType(10, 2), T.DayTimeIntervalType(), T.GeometryType(0)
-    with pytest.raises(TypeError):
-        decimal.scale = "3"
-    with pytest.raises(TypeError):
-        T.StringType().collation = 5
-    for name, value, parameters in [
-        ("startField", 7, {"start_field": "7", "end_field": "3"}),
-        ("endField", None, {"start_field": "0", "end_field": "None"}),
-    ]:
-        with pytest.raises(PySparkRuntimeError) as e:
-            setattr(interval, name, value)
-        assert e.value.getCondition() == "INVALID_INTERVAL_CASTING"
-        assert e.value.getMessageParameters() == parameters
-    for t, srid in [(geometry, 1234), (T.GeographyType(4326), 0)]:
-        with pytest.raises(IllegalArgumentException) as e:
-            t.srid = srid
-        assert e.value.getCondition() == "ST_INVALID_SRID_VALUE"
-    assert (decimal, interval, geometry) == (
-        T.DecimalType(10, 2), T.DayTimeIntervalType(), T.GeometryType(0)
-    )
-    # The `"ANY"` of the constructor is the mixed SRID, which PySpark's attribute keeps as a str.
+    decimal.scale = "3"
+    assert vars(decimal) == {"precision": 10, "scale": "3", "hasPrecisionInfo": True}
+    for use in (repr, lambda t: t.simpleString(), lambda t: t.json()):
+        with pytest.raises(TypeError, match="^%d format: a real number is required, not str$"):
+            use(decimal)
+    decimal.scale = 3.7
+    assert (repr(decimal), decimal.json()) == ("DecimalType(10,3)", '"decimal(10,3)"')
+    with pytest.raises(TypeError, match="^'float' object cannot be interpreted as an integer$"):
+        F.col("v").cast(decimal)._expr.to_plan(None)
+    decimal.scale = True
+    with pytest.raises(TypeError) as e:
+        F.col("v").cast(decimal)._expr.to_plan(None)
+    assert str(e.value) == "Field spark.connect.DataType.Decimal.scale: Expected an int, got a boolean."
+    string = T.StringType()
+    string.collation = 5
+    assert (repr(string), string.simpleString()) == ("StringType('5')", "string collate 5")
+    with pytest.raises(AttributeError, match="^'int' object has no attribute 'startswith'$"):
+        T.StructType([T.StructField("s", string)]).json()
+    interval.startField = 7
+    assert repr(interval) == "DayTimeIntervalType(7, 3)"
+    with pytest.raises(KeyError, match="^7$"):
+        interval.simpleString()
+    interval.endField = None
+    with pytest.raises(TypeError, match="^%d format: a real number is required, not NoneType$"):
+        repr(interval)
+    geometry.srid = 1234
+    assert (repr(geometry), geometry.json()) == ("GeometryType(1234)", '"geometry(SRID:0)"')
+    # The `"ANY"` of the constructor is the mixed SRID; a set "ANY" is the str itself.
     geometry.srid = "ANY"
-    assert geometry.srid == -1 and geometry == T.GeometryType("ANY")
+    assert geometry.srid == "ANY" and geometry.simpleString() == "geometry(ANY)"
 
 
 @pytest.mark.parametrize("name, stem", ABSTRACT_TYPES, ids=[name for name, _ in ABSTRACT_TYPES])
@@ -1653,8 +1677,8 @@ def test_python_subclasses_of_the_types_initialize_and_pickle_as_pysparks():
     assert _Money(currency="USD", scale=4) == _Money("USD", 12, 4) != _Money("USD")
     assert money == _Money("EUR") and money != _Money("USD") and money != T.DecimalType(12, 2)
     assert hash(money) == hash(T.DecimalType(12, 2))
-    # The parameters are of the class, as for its own types, not of the `__dict__`.
-    assert vars(money) == {"currency": "EUR"}
+    # The parameters are entries of the `__dict__`, as PySpark's (SPARK-62251).
+    assert vars(money) == {"precision": 12, "scale": 2, "hasPrecisionInfo": True, "currency": "EUR"}
     state = {"precision": 12, "scale": 2, "hasPrecisionInfo": True, "currency": "EUR"}
     assert money.__reduce_ex__(2) == (copyreg.__newobj__, (_Money,), state, None, None)
     slotted = _Slotted("UTF8_LCASE")
@@ -1686,11 +1710,114 @@ def test_python_subclasses_of_the_types_initialize_and_pickle_as_pysparks():
     assert pickle.loads(pickle.dumps(_Tag())) is _Tag() and copy.deepcopy(_Tag()) is _Tag()
 
 
-def test_python_subclasses_that_do_not_initialize_their_class_have_its_defaults():
+class _SlottedArray(T.ArrayType):
+    __slots__ = ("tag",)
+
+
+class _SlottedInteger(T.IntegerType):
+    __slots__ = ("tag",)
+
+
+class _SlottedStruct(T.StructType):
+    __slots__ = ("tag",)
+
+
+class _SlottedField(T.StructField):
+    __slots__ = ("tag",)
+
+
+class _SlottedDecimal(T.DecimalType):
+    __slots__ = ("tag",)
+
+
+class _SlottedGeography(T.GeographyType):
+    __slots__ = ("tag",)
+
+
+class _SlottedOwnState(T.DecimalType):
+    __slots__ = ("tag",)
+
+    def __getstate__(self):
+        return (vars(self), {"tag": "y"})
+
+
+class _EmptySlots(T.StringType):
+    __slots__ = ()
+
+
+class _SlottedOwnReduce(T.CharType):
+    __slots__ = ("tag",)
+
+    def __reduce__(self):
+        return (T.CharType, (3,))
+
+
+def test_python_subclasses_of_slots_pickle_at_the_protocols_of_pysparks():
+    # SPARK-62251: as copyreg's `_reduce_ex` of PySpark's plain classes, a subclass of `__slots__`
+    # of no `__getstate__` of its own raises at the protocols 0 and 1, of any type; one of its own
+    # `__getstate__` or `__reduce__`, or of empty slots, pickles at every protocol, and from the
+    # protocol 2 the slots are of the state. The text is official PySpark 4.3.0's.
+    message = "^a class that defines __slots__ without defining __getstate__ cannot be pickled$"
+    for make in (
+        lambda: _SlottedArray(T.LongType()),
+        lambda: _SlottedInteger(),
+        lambda: _SlottedStruct([T.StructField("a", T.LongType())]),
+        lambda: _SlottedField("a", T.LongType()),
+        lambda: _SlottedDecimal(10, 2),
+        lambda: _SlottedGeography(4326),
+    ):
+        for protocol in (0, 1):
+            with pytest.raises(TypeError, match=message):
+                pickle.dumps(make(), protocol)
+        t = make()
+        t.tag = "x"
+        for protocol in (2, 5):
+            loaded = pickle.loads(pickle.dumps(t, protocol))
+            assert (type(loaded), loaded.tag, loaded == t) == (type(t), "x", True)
+    own, empty, reduced = _SlottedOwnState(10, 2), _EmptySlots(), _SlottedOwnReduce(3)
+    for protocol in range(6):
+        assert pickle.loads(pickle.dumps(own, protocol)).tag == "y"
+        assert pickle.loads(pickle.dumps(empty, protocol)) == empty
+        assert type(pickle.loads(pickle.dumps(reduced, protocol))) is T.CharType
+
+
+def test_the_dicts_of_the_types_of_parameters_are_their_state_as_pysparks():
+    # SPARK-62251: the `__dict__` of a type of parameters is its state, as PySpark's: an entry
+    # written there is the parameter of its repr, JSON, plan and `==`, also in the struct that
+    # holds it, whose JSON writes the `jsonValue()` of a type of values that the core type does
+    # not hold, of its own errors, and a type of other entries than those of its constructor
+    # compares, copies and pickles of them. The texts are official PySpark 4.3.0's.
+    decimal = T.DecimalType(10, 2)
+    decimal.__dict__["scale"] = 4
+    assert (repr(decimal), decimal.json()) == ("DecimalType(10,4)", '"decimal(10,4)"')
+    assert decimal == T.DecimalType(10, 4)
+    assert F.col("v").cast(decimal)._expr.to_plan(None).cast.type.decimal.scale == 4
+    decimal.__dict__["precision"] = 7.9
+    struct = T.StructType([T.StructField("d", decimal)])
+    assert struct.json() == (
+        '{"fields":[{"metadata":{},"name":"d","nullable":true,"type":"decimal(7,4)"}],'
+        '"type":"struct"}'
+    )
+    assert struct.simpleString() == "struct<d:decimal(7,4)>"
+    del decimal.__dict__["precision"]
+    with pytest.raises(AttributeError, match="^'DecimalType' object has no attribute 'precision'$"):
+        struct.json()
+    geometry = T.GeometryType(0)
+    geometry.tag = "t"
+    assert vars(geometry) == {"srid": 0, "_crs": "SRID:0", "tag": "t"}
+    assert geometry != T.GeometryType(0) and T.ArrayType(geometry) != T.ArrayType(T.GeometryType(0))
+    for copied in (copy.copy(geometry), copy.deepcopy(geometry), pickle.loads(pickle.dumps(geometry))):
+        assert vars(copied) == vars(geometry) and copied == geometry
+    array = pickle.loads(pickle.dumps(T.ArrayType(geometry)))
+    assert vars(array.elementType) == vars(geometry)
+
+
+def test_python_subclasses_that_do_not_initialize_their_class_raise_pysparks_errors():
     # PySpark's subclass whose `__init__` does not call the `__init__` of its class has none of
-    # its parameters, and raises the AttributeError of each where it reads it. The drop-in's
-    # type is of the parameters of the native state, of the class's `cls.__new__(cls)`, which
-    # pickle makes too, until they are set. Singletons have no parameters.
+    # its parameters, and raises the AttributeError of each where it reads it; so does the
+    # drop-in's type of parameters, which keeps them in its `__dict__` (SPARK-62251). An array,
+    # whose parameters are of its native state, has those of the class's `cls.__new__(cls)`.
+    # Singletons have no parameters.
     class Unset(T.StringType):
         def __init__(self, x):
             self.x = x
@@ -1699,8 +1826,10 @@ def test_python_subclasses_that_do_not_initialize_their_class_have_its_defaults(
         def __init__(self):
             self.elementType = T.LongType()
 
-    assert (repr(Unset(1)), Unset(1).collation, vars(Unset(1))) == ("StringType()",
-                                                                     "UTF8_BINARY", {"x": 1})
+    assert vars(Unset(1)) == {"x": 1}
+    for use in (repr, lambda t: t.collation, lambda t: t.simpleString(), lambda t: t.json()):
+        with pytest.raises(AttributeError, match="^'Unset' object has no attribute 'collation'$"):
+            use(Unset(1))
     assert Unset(1) == Unset(1) and Unset(1) != Unset(2)
     assert Array() == Array() and repr(Array()) == "ArrayType(LongType(), True)"
 
