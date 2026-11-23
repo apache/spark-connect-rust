@@ -1323,27 +1323,6 @@ fn field_object(py: Python<'_>, field: PyStructField) -> PyResult<Py<PyStructFie
     Py::new(py, field_base(field))
 }
 
-/// The `simpleString()` of the type object `obj`, of the core type `data_type`, where the core's
-/// simple string may not be PySpark's, which is of the object: of a user-defined type, whose
-/// `simpleString()` its class may have of its own, or that of its parameters, and of a type of a
-/// Python subclass, of its own methods, also held by an array, a map, a field or a struct, as
-/// PySpark's `CastExpression.__repr__` shows it. None for another type, and when the method
-/// raises, which a repr of the core's type then shows.
-pub(crate) fn shown_simple_string(
-    obj: &Bound<'_, PyAny>,
-    data_type: &DataType,
-) -> PyResult<Option<String>> {
-    let py = obj.py();
-    if !has_udt(data_type) && !is_subclass_object(obj) && !keeps_subclass_objects(py, obj)? {
-        return Ok(None);
-    }
-    match obj.call_method0(pyo3::intern!(py, "simpleString")) {
-        Ok(text) => Ok(text.extract().ok()),
-        Err(error) if is_exception(py, &error) => Ok(None),
-        Err(error) => Err(error),
-    }
-}
-
 /// The core type of `obj` for a proto that the client sends, as PySpark's
 /// `pyspark_types_to_proto_types`, which has no proto of a `StructField` as a type, nor of a
 /// type of its class only, such as `AtomicType()`: it is the `UNSUPPORTED_OPERATION` of the
@@ -1357,13 +1336,9 @@ pub(crate) fn py_to_proto_data_type(obj: &Bound<'_, PyAny>) -> PyResult<DataType
         }
     }
     let data_type = lowered?;
-    if let Some(field) = unsendable_field_repr(obj, &data_type)? {
-        return Err(crate::column::raise_pyspark(
-            obj.py(),
-            "PySparkValueError",
-            "UNSUPPORTED_OPERATION",
-            &[("operation", &format!("data type {field}"))],
-        ));
+    // Of the str of the type, as PySpark's `f"data type {data_type}"`, a lone surrogate too.
+    if let Some(unsendable) = unsendable_type(obj, &data_type)? {
+        return Err(not_a_type_error(&unsendable));
     }
     Ok(data_type)
 }
@@ -1391,20 +1366,40 @@ fn foreign_proto_type_level(
     if !obj.is_instance_of::<PyDataType>() {
         return Err(not_a_type_error(obj));
     }
+    // A user-defined type, of its JSON and of the proto of its `sqlType()`, as PySpark's
+    // conversion writes it, of no look into its `sqlType()` first, which would call it once more.
+    // An atomic type, which no user-defined type is, is not looked up as one.
+    if !obj.is_instance_of::<PyAtomicType>() && is_udt(obj)? {
+        return udt_of(obj, |sql_type| foreign_proto_type(sql_type, foreign));
+    }
     if !foreign.holds(obj)? {
         return py_to_proto_data_type(obj);
     }
     if obj.is_instance_of::<PyStructType>() {
         let mut fields = Vec::new();
+        let native = &py.get_type::<PyStructField>();
         for element in obj.getattr(pyo3::intern!(py, "fields"))?.try_iter()? {
             let element = element?;
             if let Ok(field) = element.cast::<PyStructField>() {
+                // A field of the native class, whose name, flag and metadata are its own: of the
+                // type that its `dataType` converts to, as PySpark's conversion reads it, of no
+                // look into it first, which may call the code of a user once more.
+                if element.get_type().is(native) {
+                    let data_type = foreign_proto_type(
+                        &element.getattr(pyo3::intern!(py, "dataType"))?,
+                        foreign,
+                    )?;
+                    fields.push(field.borrow().field_of_type(py, data_type, false)?);
+                    continue;
+                }
                 if !foreign.holds(&element)? {
                     // A field of a type that PySpark's conversion has no proto of, such as
                     // `AtomicType()` or a `StructField` as a type, raises its
-                    // `UNSUPPORTED_OPERATION`, as of a field of a struct of no foreign element.
-                    py_to_proto_data_type(&element.getattr(pyo3::intern!(py, "dataType"))?)?;
-                    fields.push(field.borrow().current_field(py)?);
+                    // `UNSUPPORTED_OPERATION`, as of a field of a struct of no foreign element;
+                    // the field is of the type that the check converted, of no second lowering.
+                    let data_type =
+                        py_to_proto_data_type(&element.getattr(pyo3::intern!(py, "dataType"))?)?;
+                    fields.push(field.borrow().field_of_type(py, data_type, false)?);
                     continue;
                 }
             }
@@ -1455,11 +1450,6 @@ fn foreign_proto_type_level(
             value_contains_null,
         });
     }
-    // A user-defined type, of its JSON and of the proto of its `sqlType()`, as PySpark's
-    // conversion writes it.
-    if is_udt(obj)? {
-        return udt_of(obj, |sql_type| foreign_proto_type(sql_type, foreign));
-    }
     // A `StructField` as a type, which PySpark's conversion does not take.
     Err(not_a_type_error(obj))
 }
@@ -1502,21 +1492,17 @@ pub(crate) fn not_a_type_error(value: &Bound<'_, PyAny>) -> PyErr {
     )
 }
 
-/// The repr of the first type of the type object `obj` of `data_type`, `obj` itself or one
-/// nested in it, which PySpark's conversion of a plan's type (`pyspark_types_to_proto_types`)
-/// does not take: a `StructField` as a type, or a type of its class only; None if there is none.
-pub(crate) fn unsendable_field_repr(
-    obj: &Bound<'_, PyAny>,
+/// The first type of the type object `obj` of `data_type`, `obj` itself or one nested in it,
+/// which PySpark's conversion of a plan's type (`pyspark_types_to_proto_types`) does not take: a
+/// `StructField` as a type, or a type of its class only; None if there is none.
+fn unsendable_type<'py>(
+    obj: &Bound<'py, PyAny>,
     data_type: &DataType,
-) -> PyResult<Option<String>> {
-    let nested = if obj.is_instance_of::<PyStructField>() || is_class_type(obj)? {
-        Some(obj.clone())
-    } else {
-        nested_python_type_in(obj.py(), data_type)?
-    };
-    nested
-        .map(|field| field.repr().and_then(|text| text.extract::<String>()))
-        .transpose()
+) -> PyResult<Option<Bound<'py, PyAny>>> {
+    if obj.is_instance_of::<PyStructField>() || is_class_type(obj)? {
+        return Ok(Some(obj.clone()));
+    }
+    nested_python_type_in(obj.py(), data_type)
 }
 
 /// The first `StructField` that is a type of `data_type`, in the depth-first order of its fields,
@@ -2136,6 +2122,12 @@ impl ForeignFields {
     fn holds_level(&mut self, obj: &Bound<'_, PyAny>) -> PyResult<bool> {
         let py = obj.py();
         if let Ok(st) = obj.cast::<PyStructType>() {
+            // Of an element of its own fields that is not a `StructField`, before the looks into
+            // the types of the others, which may call the code of a user, such as the `sqlType()`
+            // of a user-defined type.
+            if holds_foreign_element(obj)? {
+                return Ok(true);
+            }
             let kept = st.borrow().fields.clone_ref(py);
             if self.holds_element(kept.bind(py).try_iter()?)? {
                 return Ok(true);
@@ -2165,7 +2157,8 @@ impl ForeignFields {
             // which no user-defined type is, is not looked up as one.
             match obj.call_method0(pyo3::intern!(py, "sqlType")) {
                 Ok(sql_type) => self.holds(&sql_type),
-                Err(_) => Ok(false),
+                Err(error) if is_exception(py, &error) => Ok(false),
+                Err(error) => Err(error),
             }
         } else {
             Ok(false)
@@ -9089,6 +9082,22 @@ pub(crate) fn lower_noting_subclasses(
     obj: &Bound<'_, PyAny>,
     metadata: MetadataOf,
 ) -> (PyResult<DataType>, bool) {
+    // A struct whose own fields hold such an element is not lowered, whose uses read its elements
+    // (see `ForeignFields`): the lowering would read the types of the fields before the element,
+    // whose reads may call the code of a user, such as the `sqlType()` of a user-defined type,
+    // which the uses then read once more.
+    match holds_foreign_element(obj) {
+        Ok(true) => {
+            return (
+                Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                    "StructType fields must be StructField objects",
+                )),
+                true,
+            )
+        }
+        Ok(false) => {}
+        Err(error) => return (Err(error), false),
+    }
     let before = LOWERED_SUBCLASS.with(|lowered| lowered.replace(false));
     let lowered = lower_type(obj, metadata);
     let subclass = LOWERED_SUBCLASS.with(|lowered| lowered.replace(before || lowered.get()));

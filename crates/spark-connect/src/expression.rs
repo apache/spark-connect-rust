@@ -220,7 +220,15 @@ impl ExpressionNode {
                 pending.extend(function.args.iter().map(Of));
             }
             ExpressionNode::Alias(alias) => pending.push(Of(&alias.child)),
-            ExpressionNode::Cast(cast) => pending.push(Of(&cast.child)),
+            // The readers of the type object of a cast after its child, as PySpark's deep copy
+            // of a `CastExpression` copies its expression before its type.
+            ExpressionNode::Cast(cast) => {
+                pending.push(Of(&cast.child));
+                if let CastTarget::Read(read) = &cast.target {
+                    pending.extend(read.type_reader.iter().map(Pickler));
+                    pending.extend(read.shown_reader.iter().map(Pickler));
+                }
+            }
             ExpressionNode::DirectShufflePartitionId(child) => pending.push(Of(child)),
             ExpressionNode::SortOrder(sort) => pending.push(Of(&sort.child)),
             ExpressionNode::CaseWhen(case_when) => {
@@ -282,7 +290,18 @@ impl ExpressionNode {
                 function.args.iter_mut().map(Of).collect()
             }
             ExpressionNode::Alias(alias) => vec![Of(&mut alias.child)],
-            ExpressionNode::Cast(cast) => vec![Of(&mut cast.child)],
+            ExpressionNode::Cast(cast) => {
+                let cast = &mut **cast;
+                let mut parts = vec![Of(&mut cast.child)];
+                if let CastTarget::Read(read) = &mut cast.target {
+                    let read = &mut **read;
+                    parts.extend([
+                        Pickler(&mut read.type_reader),
+                        Pickler(&mut read.shown_reader),
+                    ]);
+                }
+                parts
+            }
             ExpressionNode::DirectShufflePartitionId(child) => vec![Of(child)],
             ExpressionNode::SortOrder(sort) => vec![Of(&mut sort.child)],
             ExpressionNode::CaseWhen(case_when) => {
@@ -1145,6 +1164,7 @@ impl Expression {
                 let type_str = match &cast.target {
                     CastTarget::Type(dt) => dt.simple_string(),
                     CastTarget::TypeStr(s) | CastTarget::Shown(_, s) => s.clone(),
+                    CastTarget::Read(read) => read.shown(),
                 }
                 .to_uppercase();
                 let name = if cast.eval_mode == Some(CastEvalMode::Try) {
@@ -2070,6 +2090,65 @@ pub enum CastTarget {
     /// type, such as a user-defined type of its own `simpleString()`. Not a stable API.
     #[doc(hidden)]
     Shown(DataType, String),
+    /// A type object of a binding, which the cast reads when it renders and when a request
+    /// builds it, as PySpark's `CastExpression` reads its type object (see [`CastRead`]). Not a
+    /// stable API.
+    #[doc(hidden)]
+    Read(Box<CastRead>),
+}
+
+/// The readers of the type object of a [`CastTarget::Read`], as PySpark's `CastExpression` reads
+/// the type object that it keeps: its `__repr__` shows `simpleString().upper()` of it, and its
+/// `to_plan` sends `pyspark_types_to_proto_types` of it, of the object as it is then, of the
+/// errors of each then. Not a stable API.
+#[doc(hidden)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct CastRead {
+    /// The type that stands for the object of a reader that gives none: that the Rust API's
+    /// `to_proto` sends outside a request of a `type_reader` that fails, which a request raises
+    /// the error of, and that a render shows of a `shown_reader` that fails, of which
+    /// [`Expression::try_render`] raises the error.
+    pub stand_in: DataType,
+    /// The reader of the `spark.connect.DataType` of the object, which a request calls when it
+    /// builds the plan, in the order of the build, as the reader of the schema of `DataFrame.to`
+    /// (see [`pickled_command`]).
+    pub type_reader: Option<crate::udf::CommandPickler>,
+    /// The reader of the text of the type that the render shows, the UTF-8 of the
+    /// `simpleString()` of the object in upper case, which each render calls.
+    pub shown_reader: Option<crate::udf::CommandPickler>,
+}
+
+impl CastRead {
+    /// The text of the type that the render of the cast shows: of `shown_reader`, else, of one
+    /// that fails, whose error [`Expression::try_render`] raises, of `stand_in`.
+    fn shown(&self) -> String {
+        match self
+            .shown_reader
+            .as_ref()
+            .map(crate::udf::CommandPickler::pickle)
+        {
+            Some(Ok(text)) => String::from_utf8_lossy(&text).into_owned(),
+            Some(Err(error)) => {
+                record_unrenderable(&error);
+                self.stand_in.simple_string()
+            }
+            None => self.stand_in.simple_string(),
+        }
+    }
+
+    /// The `spark.connect.DataType` that the cast sends: of `type_reader` as the build gives it
+    /// (see [`pickled_command`]), else of `stand_in`, as before the reader gives one.
+    fn to_proto(&self) -> proto::DataType {
+        self.type_reader
+            .as_ref()
+            .map(pickled_command)
+            .filter(|read| !read.is_empty())
+            .and_then(|read| {
+                use prost::Message;
+                proto::DataType::decode(read.as_slice()).ok()
+            })
+            .unwrap_or_else(|| self.stand_in.to_proto())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2111,6 +2190,9 @@ impl Cast {
                 proto::expression::cast::CastToType::Type(dt.to_proto())
             }
             CastTarget::TypeStr(s) => proto::expression::cast::CastToType::TypeStr(s.clone()),
+            // Of the type object as the build reads it, once the expression is built, as
+            // PySpark's `CastExpression.to_plan` converts it after it builds its child.
+            CastTarget::Read(read) => proto::expression::cast::CastToType::Type(read.to_proto()),
         });
 
         if let Some(mode) = self.eval_mode {

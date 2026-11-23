@@ -2953,56 +2953,22 @@ impl PyDataFrame {
             // As PySpark's `assert schema is not None`.
             return Err(pyo3::exceptions::PyAssertionError::new_err(()));
         }
-        // The type that PySpark's conversion of the plan fails at, at each action: the schema
-        // when it is not a DataType, such as a str, or the first StructField that is a type in
-        // it, which that conversion (`pyspark_types_to_proto_types`) does not take either.
-        let mut unsendable = None;
-        if !schema.is_instance_of::<pyo3::types::PyString>() {
-            // A struct whose fields hold an element that is not a `StructField`, at any level,
-            // whose `schema` is the object, as PySpark's: the type that PySpark's
-            // `pyspark_types_to_proto_types` reads of its elements, which this call reads, and
-            // each request raises the error of that (see `crate::types::py_to_proto_data_type`),
-            // where PySpark's `ToSchema` reads it when it builds (see the known differences,
-            // SPARK-62228).
-            let (lowered, maybe_foreign) =
-                crate::types::lower_noting_subclasses(schema, crate::types::MetadataOf::Strict);
-            let lowered = match crate::types::foreign_of_lowering(schema, maybe_foreign)? {
-                true => crate::types::py_to_proto_data_type(schema),
-                false => lowered,
-            };
-            match lowered {
-                Ok(dt) => match crate::types::unsendable_field_repr(schema, &dt)? {
-                    None => {
-                        let reader = crate::udf_command::data_type_pickler(schema.clone().unbind());
-                        let mut result =
-                            PyDataFrame::new(self.dataframe.to_read_at_build(dt, reader));
-                        result.schema_object = Some(schema.clone().unbind());
-                        return Ok(result);
-                    }
-                    Some(field) => unsendable = Some(field),
-                },
-                // A type that does not lower now, such as a struct of a `UserDefinedType` whose
-                // `module()` is not implemented, which a type keeps as it is: PySpark's conversion
-                // of the plan raises its error at each request (see `crate::types::lenient_type`),
-                // as `PlanArgs::raised` takes it.
-                Err(err) if schema.is_instance_of::<crate::types::PyDataType>() => {
-                    let mut args = crate::plan_args::PlanArgs::new();
-                    if args.raised(schema.py(), err).is_ok() {
-                        if let Some(error) = args.error() {
-                            let error = error.clone();
-                            let mut result = PyDataFrame::new(self.dataframe.unbuildable(error));
-                            result.schema_object = Some(schema.clone().unbind());
-                            return Ok(result);
-                        }
-                    }
-                }
-                Err(_) => {}
-            }
+        // As PySpark's `ToSchema`, which converts the schema object when it builds the plan: each
+        // request reads the object as it is then (see `crate::udf_command::data_type_pickler`),
+        // of the errors of PySpark's `pyspark_types_to_proto_types`, its `UNSUPPORTED_OPERATION`
+        // and those of the reads of the elements of a struct whose fields hold one that is not a
+        // `StructField`. The DataFrame caches the type that stands for the object at the call
+        // (see `crate::types::lenient_type`), and its `schema` is the object.
+        if schema.is_instance_of::<crate::types::PyDataType>() {
+            let stand_in = crate::types::lenient_type(schema)?;
+            let reader = crate::udf_command::data_type_pickler(schema.clone().unbind());
+            let mut result = PyDataFrame::new(self.dataframe.to_read_at_build(stand_in, reader));
+            result.schema_object = Some(schema.clone().unbind());
+            return Ok(result);
         }
-        let operation = match unsendable {
-            Some(field) => format!("data type {field}"),
-            None => crate::plan_args::data_type_operation(schema)?,
-        };
+        // Of a value that is not a data type, such as a str, PySpark's conversion of the plan
+        // raises its `UNSUPPORTED_OPERATION` at each request.
+        let operation = crate::plan_args::data_type_operation(schema)?;
         let error = spark_connect_core::error::SparkError::classed(
             spark_connect_core::error::SparkErrorKind::ValueError,
             "UNSUPPORTED_OPERATION",
