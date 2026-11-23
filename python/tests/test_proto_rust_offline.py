@@ -8742,3 +8742,91 @@ def test_copies_of_many_levels_of_maps_grow_the_stack_at_their_entries():
     )
     assert result.returncode == 0, result.stderr[-2000:]
     assert json.loads(result.stdout.strip().splitlines()[-1]) == {"deepcopy": True, "CopyFrom": True}
+
+
+def _first_reads_of_containers():
+    """The first reads of a container of a message (a repeated message field, a map, a repeated
+    scalar field), each of the message and of the read."""
+    return {
+        "repeated": (lambda m: m.project, lambda t: t.expressions),
+        "map": (lambda m: m.read.data_source, lambda t: t.options),
+        "repeated scalar": (lambda m: m.read.data_source, lambda t: t.paths),
+    }
+
+
+def test_a_collection_during_the_first_read_of_a_container_finds_the_message():
+    # The first read of a container of a message makes the container, and the weak reference of
+    # its owner, with no borrow of the message held: a collection that their allocation starts,
+    # whose callback reads the message, finds it free, where it raised the runtime's
+    # PanicException ("Already mutably borrowed").
+    out = {}
+    for case, (target_of, read) in _first_reads_of_containers().items():
+        target = target_of(proto.Relation())
+        state = {"ran": False, "error": None}
+
+        def callback(phase, info, target=target, state=state):
+            if phase == "start" and not state["ran"]:
+                state["ran"] = True
+                try:
+                    target.ListFields()
+                except BaseException as e:  # noqa: BLE001 (a PanicException too)
+                    state["error"] = f"{type(e).__name__}: {e}"
+
+        gc.collect()
+        gc.callbacks.append(callback)
+        threshold = gc.get_threshold()
+        gc.set_threshold(1)
+        try:
+            container = read(target)
+        finally:
+            gc.set_threshold(*threshold)
+            gc.callbacks.remove(callback)
+        out[case] = [state["ran"], state["error"], container is read(target)]
+    assert out == {case: [True, None, True] for case in _first_reads_of_containers()}, out
+
+
+def test_another_thread_during_the_first_read_of_a_container_finds_the_message():
+    # The cross-thread form: a callback of the collections of the first read gives the GIL to
+    # another thread, which reads the message meanwhile, whole.
+    out = {}
+    for case, (target_of, read) in _first_reads_of_containers().items():
+        targets = [target_of(proto.Relation()) for _ in range(40)]
+        state = {"current": None, "done": False}
+        seen = {"ok": 0, "errors": {}}
+
+        def reader(targets=targets, state=state, seen=seen):
+            last = None
+            while not state["done"]:
+                i = state["current"]
+                if i is None or i == last:
+                    time.sleep(0)
+                    continue
+                last = i
+                try:
+                    targets[i].ListFields()
+                    seen["ok"] += 1
+                except BaseException as e:  # noqa: BLE001 (a PanicException too)
+                    key = f"{type(e).__name__}: {e}"
+                    seen["errors"][key] = seen["errors"].get(key, 0) + 1
+
+        def callback(phase, info):
+            if phase == "start":
+                time.sleep(0.0002)
+
+        thread = threading.Thread(target=reader)
+        thread.start()
+        gc.callbacks.append(callback)
+        threshold = gc.get_threshold()
+        gc.set_threshold(1)
+        try:
+            for i, target in enumerate(targets):
+                state["current"] = i
+                read(target)
+        finally:
+            gc.set_threshold(*threshold)
+            gc.callbacks.remove(callback)
+            state["done"] = True
+            thread.join()
+        out[case] = seen["errors"]
+        assert all(read(t) is read(t) for t in targets)
+    assert out == {case: {} for case in _first_reads_of_containers()}, out

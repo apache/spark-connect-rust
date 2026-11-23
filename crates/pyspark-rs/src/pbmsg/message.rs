@@ -223,6 +223,32 @@ pub(crate) fn weak(message: &Bound<'_, PyMessage>) -> PyResult<Py<PyWeakrefRefer
     Ok(PyWeakrefReference::new(message.as_any())?.unbind())
 }
 
+/// An empty container of the repeated or map field `field`, which holds its message `owner`
+/// weakly, if it is given: of the kind and class that the container of the field is made of.
+fn new_container(
+    py: Python<'_>,
+    field: &FieldDesc,
+    owner: Option<Py<PyWeakrefReference>>,
+) -> PyResult<Slot> {
+    if let Some(map) = &field.map {
+        let container = MapContainer::new(field.name.clone(), map.clone(), owner);
+        return Ok(Slot::Map(container.into_object(py)?));
+    }
+    if field.kind == Kind::Message {
+        let class = MessageClass::of(py, &field.type_name)?;
+        let container = RepeatedComposite::new(class, Vec::new(), owner);
+        return Ok(Slot::Composite(Py::new(py, container)?));
+    }
+    let container = RepeatedScalar::new(
+        field.kind,
+        field.full_name.clone(),
+        field.type_name.clone(),
+        Vec::new(),
+        owner,
+    );
+    Ok(Slot::Repeated(Py::new(py, container)?))
+}
+
 #[pyclass(
     subclass,
     weakref,
@@ -1653,80 +1679,53 @@ impl PyMessage {
         Ok(child)
     }
 
-    /// The container of the repeated scalar field `index`, made if absent.
-    pub(crate) fn repeated_scalar(
-        &mut self,
-        py: Python<'_>,
-        index: usize,
-        owner: Option<Py<PyWeakrefReference>>,
-    ) -> PyResult<Py<RepeatedScalar>> {
-        self.materialize_in_place(py, index)?;
-        if let Some(Slot::Repeated(c)) = self.slots.get(index) {
-            return Ok(c.clone_ref(py));
-        }
-        let field = &self.desc.fields[index];
-        let container = Py::new(
-            py,
-            RepeatedScalar::new(
-                field.kind,
-                field.full_name.clone(),
-                field.type_name.clone(),
-                Vec::new(),
-                owner,
-            ),
-        )?;
-        self.set_slot(index, Slot::Repeated(container.clone_ref(py)));
-        Ok(container)
-    }
-
-    /// The container of the repeated message field `index`, made if absent.
-    pub(crate) fn composite(
-        &mut self,
-        py: Python<'_>,
-        index: usize,
-        owner: Option<Py<PyWeakrefReference>>,
-    ) -> PyResult<Py<RepeatedComposite>> {
-        self.materialize_in_place(py, index)?;
-        if let Some(Slot::Composite(c)) = self.slots.get(index) {
-            return Ok(c.clone_ref(py));
-        }
-        let field = &self.desc.fields[index];
-        let class = MessageClass::of(py, &field.type_name)?;
-        let container = Py::new(py, RepeatedComposite::new(class, Vec::new(), owner))?;
-        self.set_slot(index, Slot::Composite(container.clone_ref(py)));
-        Ok(container)
-    }
-
-    /// The map of the map field `index`, made if absent.
-    pub(crate) fn map(
-        &mut self,
-        py: Python<'_>,
-        index: usize,
-        owner: Option<Py<PyWeakrefReference>>,
-    ) -> PyResult<Py<MapContainer>> {
-        self.materialize_in_place(py, index)?;
-        if let Some(Slot::Map(c)) = self.slots.get(index) {
-            return Ok(c.clone_ref(py));
-        }
-        let field = &self.desc.fields[index];
-        let map = field
-            .map
-            .as_ref()
-            .ok_or_else(|| PyTypeError::new_err(format!("{} is not a map", field.full_name)))?;
-        let container =
-            MapContainer::new(field.name.clone(), map.clone(), owner).into_object(py)?;
-        self.set_slot(index, Slot::Map(container.clone_ref(py)));
-        Ok(container)
-    }
-
     /// The child of the singular message field `index` of `message` to merge into (see
     /// [`PyMessage::child_for_merge`]), of the object of its native value, if it holds one.
+    /// A new child is made with no borrow of the message held, as [`PyMessage::container_of`]
+    /// makes a container, and set only if the field has no child by then.
     pub(crate) fn child_for_merge_of<'py>(
         message: &Bound<'py, PyMessage>,
         index: usize,
     ) -> PyResult<Bound<'py, PyMessage>> {
-        Self::materialize(message, index)?;
-        message.borrow_mut().child_for_merge(message.py(), index)
+        let py = message.py();
+        loop {
+            Self::materialize(message, index)?;
+            let type_name = {
+                let m = message.try_borrow()?;
+                match m.slots.get(index) {
+                    Some(Slot::Message(c)) => return Ok(c.bind(py).clone()),
+                    _ if m.lazy_child(index).is_some() => None,
+                    _ => Some(m.desc.fields[index].type_name.clone()),
+                }
+            };
+            let made = type_name
+                .map(|type_name| new_instance(py, &type_name))
+                .transpose()?;
+            let mut m = message.try_borrow_mut()?;
+            if matches!(m.slots.get(index), Some(Slot::Native(_) | Slot::Message(_))) {
+                // Set meanwhile: read again; the child made is dropped once the message is no
+                // longer borrowed.
+                drop(m);
+                continue;
+            }
+            // As upb's: an unset child that the message gave out becomes the child that the merge
+            // sets, so that the object it gave out holds the merged fields.
+            let child = match (m.take_lazy_child(index), made) {
+                (Some(stub), _) => {
+                    let stub = stub.into_bound(py);
+                    stub.try_borrow_mut()?.parent = None;
+                    stub
+                }
+                (None, Some(made)) => made,
+                (None, None) => {
+                    drop(m);
+                    continue;
+                }
+            };
+            m.clear_oneof_siblings(py, index);
+            m.set_slot(index, Slot::Message(child.clone().unbind()));
+            return Ok(child);
+        }
     }
 
     /// Make the object of the native value of the field `index` of `message`, if it holds one,
@@ -1807,47 +1806,83 @@ impl PyMessage {
         Ok(())
     }
 
+    /// The container of the repeated or map field `index` of `message` (its slot), made if
+    /// absent, which holds `message` weakly when `owned`: of the object of the native value of the
+    /// field, if it holds one (see [`PyMessage::materialize`]). The container, and the weak
+    /// reference of its owner, are made with no borrow of the message held, as their allocations
+    /// may run the Python code of a collection of the garbage collector, which may read the
+    /// message or give the GIL to a thread that does; the field takes the container only if it
+    /// holds none by then. A message that Rust code borrows meanwhile is Python's
+    /// `RuntimeError`, never a panic.
+    fn container_of(message: &Bound<'_, PyMessage>, index: usize, owned: bool) -> PyResult<Slot> {
+        let py = message.py();
+        let held = |slot: Option<&Slot>| match slot {
+            Some(slot @ (Slot::Repeated(_) | Slot::Composite(_) | Slot::Map(_))) => {
+                Some(slot.clone_slot(py))
+            }
+            _ => None,
+        };
+        loop {
+            Self::materialize(message, index)?;
+            let desc = {
+                let m = message.try_borrow()?;
+                if let Some(slot) = held(m.slots.get(index)) {
+                    return Ok(slot);
+                }
+                m.desc.clone()
+            };
+            let owner = if owned { Some(weak(message)?) } else { None };
+            let made = new_container(py, &desc.fields[index], owner)?;
+            let mut m = message.try_borrow_mut()?;
+            if let Some(slot) = held(m.slots.get(index)) {
+                // Made meanwhile; this one is dropped once the message is no longer borrowed.
+                drop(m);
+                drop(made);
+                return Ok(slot);
+            }
+            if matches!(m.slots.get(index), Some(Slot::Native(_))) {
+                // A native value set meanwhile, whose object the field gives.
+                continue;
+            }
+            m.set_slot(index, made.clone_slot(py));
+            return Ok(made);
+        }
+    }
+
     /// The container of the repeated scalar field `index` of `message`, made if absent, which
-    /// holds `message` weakly.
+    /// holds `message` weakly (see [`PyMessage::container_of`]).
     pub(crate) fn repeated_scalar_of(
         message: &Bound<'_, PyMessage>,
         index: usize,
     ) -> PyResult<Py<RepeatedScalar>> {
-        let py = message.py();
-        Self::materialize(message, index)?;
-        if let Some(Slot::Repeated(c)) = message.borrow().slots.get(index) {
-            return Ok(c.clone_ref(py));
+        match Self::container_of(message, index, true)? {
+            Slot::Repeated(c) => Ok(c),
+            _ => Err(PyTypeError::new_err("not a repeated scalar field")),
         }
-        let owner = weak(message)?;
-        message.borrow_mut().repeated_scalar(py, index, Some(owner))
     }
 
-    /// The container of the repeated message field `index` of `message`, made if absent.
+    /// The container of the repeated message field `index` of `message`, made if absent (see
+    /// [`PyMessage::container_of`]).
     pub(crate) fn composite_of(
         message: &Bound<'_, PyMessage>,
         index: usize,
     ) -> PyResult<Py<RepeatedComposite>> {
-        let py = message.py();
-        Self::materialize(message, index)?;
-        if let Some(Slot::Composite(c)) = message.borrow().slots.get(index) {
-            return Ok(c.clone_ref(py));
+        match Self::container_of(message, index, true)? {
+            Slot::Composite(c) => Ok(c),
+            _ => Err(PyTypeError::new_err("not a repeated message field")),
         }
-        let owner = weak(message)?;
-        message.borrow_mut().composite(py, index, Some(owner))
     }
 
-    /// The map of the map field `index` of `message`, made if absent.
+    /// The map of the map field `index` of `message`, made if absent (see
+    /// [`PyMessage::container_of`]).
     pub(crate) fn map_of_field(
         message: &Bound<'_, PyMessage>,
         index: usize,
     ) -> PyResult<Py<MapContainer>> {
-        let py = message.py();
-        Self::materialize(message, index)?;
-        if let Some(Slot::Map(c)) = message.borrow().slots.get(index) {
-            return Ok(c.clone_ref(py));
+        match Self::container_of(message, index, true)? {
+            Slot::Map(c) => Ok(c),
+            _ => Err(PyTypeError::new_err("not a map field")),
         }
-        let owner = weak(message)?;
-        message.borrow_mut().map(py, index, Some(owner))
     }
 
     /// Set the fields of the items of `mapping` in `message`, in their order, as upb's
@@ -1896,14 +1931,18 @@ impl PyMessage {
                 }
                 let field = &desc.fields[index];
                 if field.map.is_some() {
-                    Self::materialize(message, index)?;
-                    let container = message.borrow_mut().map(py, index, None)?.into_bound(py);
+                    let Slot::Map(container) = Self::container_of(message, index, false)? else {
+                        unreachable!("the container of a map field")
+                    };
+                    let container = container.into_bound(py);
                     MapContainer::update_from(py, &container, &value, &field.full_name, budget)?;
                 } else if field.repeated && field.kind == Kind::Message {
                     Self::init_messages(message, index, field, &value, budget)?;
                 } else if field.repeated {
-                    Self::materialize(message, index)?;
-                    let container = message.borrow_mut().repeated_scalar(py, index, None)?;
+                    let Slot::Repeated(container) = Self::container_of(message, index, false)?
+                    else {
+                        unreachable!("the container of a repeated scalar field")
+                    };
                     RepeatedScalar::extend_with(container.bind(py), &value, Some(budget))?;
                 } else if field.kind == Kind::Message {
                     Self::init_message(message, index, field, &value, budget)?;
@@ -2052,8 +2091,9 @@ impl PyMessage {
         for copy in &copies {
             objects.push(native::message_object(py, copy)?.unbind());
         }
-        Self::materialize(message, index)?;
-        let container = message.borrow_mut().composite(py, index, None)?;
+        let Slot::Composite(container) = Self::container_of(message, index, false)? else {
+            unreachable!("the container of a repeated message field")
+        };
         container.bind(py).borrow_mut().items.extend(objects);
         Ok(())
     }
@@ -2071,11 +2111,10 @@ impl PyMessage {
         budget: &ConversionBudget,
     ) -> PyResult<()> {
         let py = message.py();
-        Self::materialize(message, index)?;
-        let container = message
-            .borrow_mut()
-            .composite(py, index, None)?
-            .into_bound(py);
+        let Slot::Composite(container) = Self::container_of(message, index, false)? else {
+            unreachable!("the container of a repeated message field")
+        };
+        let container = container.into_bound(py);
         let class = container.borrow().class.clone_ref(py);
         let item = class.new_message(py)?;
         container.borrow_mut().items.push(item.clone().unbind());
@@ -2201,38 +2240,43 @@ impl PyMessage {
         }
         // The native value of the field, if it holds one, becomes an object, which it gives.
         Self::materialize(slf, index)?;
-        let desc = slf.borrow().desc.clone();
+        let desc = slf.try_borrow()?.desc.clone();
         let field = &desc.fields[index];
-        if field.map.is_some() {
-            let map = slf.borrow_mut().map(py, index, Some(weak(slf)?))?;
-            return Ok(map.into_any());
+        if field.map.is_some() || field.repeated {
+            return Ok(match Self::container_of(slf, index, true)? {
+                Slot::Repeated(c) => c.into_any(),
+                Slot::Composite(c) => c.into_any(),
+                Slot::Map(c) => c.into_any(),
+                _ => unreachable!("the container of a repeated or map field"),
+            });
         }
-        if field.repeated && field.kind == Kind::Message {
-            let container = slf.borrow_mut().composite(py, index, Some(weak(slf)?))?;
-            return Ok(container.into_any());
+        // A message field: its message, or an unset child of it.
+        let given = |me: &PyMessage| match me.slots.get(index) {
+            Some(Slot::Message(c)) => Some(c.clone_ref(py).into_any()),
+            _ => me.lazy_child(index).map(|c| c.clone_ref(py).into_any()),
+        };
+        let found = given(&*slf.try_borrow()?);
+        if let Some(child) = found {
+            return Ok(child);
         }
-        if field.repeated {
-            let container = slf
-                .borrow_mut()
-                .repeated_scalar(py, index, Some(weak(slf)?))?;
-            return Ok(container.into_any());
-        }
-        // A message field.
-        {
-            let me = slf.borrow();
-            if let Some(Slot::Message(c)) = me.slots.get(index) {
-                return Ok(c.clone_ref(py).into_any());
-            }
-            if let Some(c) = me.lazy_child(index) {
-                return Ok(c.clone_ref(py).into_any());
-            }
-        }
+        // Made with no borrow of the message held (see `container_of`), and given out only if the
+        // field has none by then.
+        let parent = weak(slf)?;
         let child = new_instance(py, &field.type_name)?;
-        child.borrow_mut().parent = Some(Parent {
-            message: weak(slf)?,
+        child.try_borrow_mut()?.parent = Some(Parent {
+            message: parent,
             field: index,
         });
-        slf.borrow_mut().lazy.push((index, child.clone().unbind()));
+        let mut me = slf.try_borrow_mut()?;
+        if let Some(given) = given(&me) {
+            drop(me);
+            return Ok(given);
+        }
+        if matches!(me.slots.get(index), Some(Slot::Native(_))) {
+            drop(me);
+            return Self::field_value(slf, index);
+        }
+        me.lazy.push((index, child.clone().unbind()));
         Ok(child.into_any().unbind())
     }
 
