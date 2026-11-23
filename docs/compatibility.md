@@ -2307,10 +2307,12 @@ errors are the runtime's `DecodeError` and `EncodeError`. The differences:
   copy, upb's 0.08 s), and a read of every message of a copy takes as long as the copy of each
   message as an object took before. The parse, the constructor (of lists and mappings too),
   the copies (`CopyFrom`, and `copy.deepcopy` of a message or of a repeated field of messages), the
-  merges (`MergeFrom`), the `extend` of a repeated field of messages and the `update` and
-  `MergeFrom` of a map let another thread take the GIL, and a signal interrupt them with the
-  exception of its handler, every 1,024 steps of the operation (a message that it reads, makes or
-  copies, an entry of a map, or a value of a repeated field that the constructor takes), where upb
+  merges (`MergeFrom`), the `extend` of a repeated field of messages, the `update` and `MergeFrom`
+  of a map, and the first read of a repeated message field or a map of messages of a copy, which
+  makes the objects of its messages (of 1,024 messages or more), let another thread take the GIL,
+  and a signal interrupt them with the exception of its handler, every 1,024 steps of the operation
+  (a message that it reads, makes or copies, an entry of a map, or a value of a repeated field that
+  the constructor takes; the read, interrupted, leaves the field as it was), where upb
   holds the GIL until they end (but in the `update` and `MergeFrom` of a map and the constructor of
   a map of scalars, which run `MutableMapping.update` in Python, as the runtime's constructor runs
   it of a value that is not a dict), so another thread can use a message that one of them reads
