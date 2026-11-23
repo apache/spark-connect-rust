@@ -2670,6 +2670,12 @@ def _guard_outcome(script, *args, timeout=60):
     return json.loads(result.stdout.strip().splitlines()[-1])
 
 
+def _relation_of(name, data_type, nullable, metadata):
+    """The JSON of the relation's schema of a struct of one field, as `json()` writes it."""
+    return {"fields": [{"metadata": metadata, "name": name, "nullable": nullable,
+                        "type": data_type}], "type": "struct"}
+
+
 def _guard_raises(error, message, *, configs=True, stage="createDataFrame"):
     """The outcome of a guard script whose `stage` raises `error` (of its module) of `message`:
     after the settings that createDataFrame reads in one request, as PySpark's reads them before
@@ -2839,9 +2845,8 @@ _INTEGER_RELATION = {"fields": [{"metadata": {"source": "native"}, "name": "rena
 
 
 def _integer_converts(values=_INTEGER_VALUES, arrow_type="int64", name="renamed", nullable=False,
-                      metadata=None, error=None):
-    return _guard_converts([(name, arrow_type, nullable, values, metadata)], _INTEGER_RELATION,
-                           error)
+                      metadata=None, error=None, relation=_INTEGER_RELATION):
+    return _guard_converts([(name, arrow_type, nullable, values, metadata)], relation, error)
 
 
 # The outcomes of PySpark's createDataFrame of the patches of `_integer_guard_process`, as the
@@ -2863,16 +2868,20 @@ _INTEGER_DESCRIPTORS = {
 }
 # The known differences: the native `__init__` does not assign through a property patched over
 # its attributes (SPARK-62231, SPARK-62251), so the conversion goes on and reads the patch where
-# PySpark's reads the attribute, and the drop-in's client is native.
+# PySpark's reads the attribute, and so does the relation's schema, PySpark's `json()` of it; and
+# the drop-in's client is native.
 _INTEGER_DESCRIPTORS_OF_THE_DROP_IN = {
-    ("StructType", "fields"): _guard_converts([], _INTEGER_RELATION),
+    ("StructType", "fields"): _guard_converts([], {"fields": [], "type": "struct"}),
     ("StructType", "names"): _integer_converts(name="changed"),
     ("StructField", "name"): _guard_raises(*_rename_mismatch("renamed")),
     ("StructField", "dataType"): _integer_converts(
-        [value != 0 for value in _INTEGER_VALUES], "bool"),
-    ("StructField", "nullable"): _integer_converts(nullable=True),
+        [value != 0 for value in _INTEGER_VALUES], "bool",
+        relation=_relation_of("renamed", "boolean", False, {"source": "native"})),
+    ("StructField", "nullable"): _integer_converts(
+        nullable=True, relation=_relation_of("renamed", "long", True, {"source": "native"})),
     ("StructField", "metadata"): _integer_converts(
-        metadata={"SPARK::metadata::json": '{"changed": true}'}),
+        metadata={"SPARK::metadata::json": '{"changed": true}'},
+        relation=_relation_of("renamed", "long", False, {"changed": True})),
     ("StructType", "alias"): _integer_converts(),
 }
 
@@ -3578,10 +3587,9 @@ _TIMESTAMP_RELATION = {"fields": [{"metadata": {"source": "native"}, "name": "re
 
 
 def _timestamp_converts(values=(0, 1000, None, -1000), arrow_type="timestamp[us, tz=UTC]",
-                        name="renamed", metadata=None, error=None):
+                        name="renamed", metadata=None, error=None, relation=_TIMESTAMP_RELATION):
     """Of the microseconds `values` of the timestamps, or the values of another type."""
-    return _guard_converts([(name, arrow_type, True, list(values), metadata)],
-                           _TIMESTAMP_RELATION, error)
+    return _guard_converts([(name, arrow_type, True, list(values), metadata)], relation, error)
 
 
 # PySpark's outcomes (see `_INTEGER_DESCRIPTORS`), and the drop-in's where they differ.
@@ -3597,7 +3605,7 @@ _TIMESTAMP_DESCRIPTORS = {
         error=["_to_table", "builtins.AssertionError", ""]),
 }
 _TIMESTAMP_DESCRIPTORS_OF_THE_DROP_IN = {
-    ("StructType", "fields"): _guard_converts([], _TIMESTAMP_RELATION),
+    ("StructType", "fields"): _guard_converts([], {"fields": [], "type": "struct"}),
     ("StructType", "names"): _timestamp_converts(name="changed"),
     ("StructField", "name"): _guard_raises(*_rename_mismatch("renamed")),
     ("StructField", "dataType"): _guard_raises(
@@ -3606,7 +3614,8 @@ _TIMESTAMP_DESCRIPTORS_OF_THE_DROP_IN = {
     ("StructField", "nullable"): _guard_raises(
         "builtins.ValueError", "Casting field 'renamed' with null values to non-nullable"),
     ("StructField", "metadata"): _timestamp_converts(
-        metadata={"SPARK::metadata::json": '{"changed": true}'}),
+        metadata={"SPARK::metadata::json": '{"changed": true}'},
+        relation=_relation_of("renamed", "timestamp", True, {"changed": True})),
     ("StructType", "alias"): _timestamp_converts(),
 }
 
@@ -4265,7 +4274,7 @@ _FLOAT64_DESCRIPTORS = {
         error=["_to_table", "builtins.AssertionError", ""]),
 }
 _FLOAT64_DESCRIPTORS_OF_THE_DROP_IN = {
-    ("StructType", "fields"): _guard_converts([], _float64_relation({"source": "native"})),
+    ("StructType", "fields"): _guard_converts([], {"fields": [], "type": "struct"}),
     ("StructType", "names"): _float64_converts(name="changed",
                                                relation_metadata={"source": "native"}),
     ("StructField", "name"): _guard_raises(*_rename_mismatch("x")),
@@ -4274,7 +4283,7 @@ _FLOAT64_DESCRIPTORS_OF_THE_DROP_IN = {
         "builtins.ValueError", "Casting field 'x' with null values to non-nullable"),
     ("StructField", "metadata"): _float64_converts(
         metadata={"SPARK::metadata::json": '{"changed": true}'},
-        relation_metadata={"source": "native"}),
+        relation_metadata={"changed": True}),
     ("StructType", "alias"): _float64_converts(relation_metadata={"source": "native"}),
 }
 
@@ -6640,9 +6649,9 @@ def _string_converts(name="text", nullable=True, metadata=None, relation=_STRING
                            error)
 
 
-# PySpark's outcomes (see `_INTEGER_DESCRIPTORS`), and the drop-in's where they differ: PySpark's
-# `json()` of the schema reads a patched `isUTF8BinaryCollation` too, of which it writes the
-# collation of the string, where the native `json()` writes the native type.
+# PySpark's outcomes (see `_INTEGER_DESCRIPTORS`), and the drop-in's where they differ: as
+# PySpark's `json()` of the schema, which reads a patched `isUTF8BinaryCollation` too, the relation's
+# schema holds the collation of the string.
 _STRING_DESCRIPTORS = {
     ("StructType", "fields"): _guard_raises(*_no_setter("StructType")),
     ("StructType", "names"): _guard_raises(*_no_setter("StructType")),
@@ -6660,15 +6669,16 @@ _STRING_DESCRIPTORS = {
         "type": "struct"}),
 }
 _STRING_DESCRIPTORS_OF_THE_DROP_IN = {
-    ("StructType", "fields"): _guard_converts([], _STRING_RELATION),
+    ("StructType", "fields"): _guard_converts([], {"fields": [], "type": "struct"}),
     ("StructType", "names"): _string_converts(name="changed"),
     ("StructField", "name"): _guard_raises(*_rename_mismatch("text")),
     ("StructField", "dataType"): _string_converts(),
-    ("StructField", "nullable"): _string_converts(nullable=False),
+    ("StructField", "nullable"): _string_converts(
+        nullable=False, relation=_relation_of("text", "string", False, {"source": "native"})),
     ("StructField", "metadata"): _string_converts(
-        metadata={"SPARK::metadata::json": '{"changed": true}'}),
+        metadata={"SPARK::metadata::json": '{"changed": true}'},
+        relation=_relation_of("text", "string", True, {"changed": True})),
     ("StructType", "alias"): _string_converts(),
-    ("StringType", "isUTF8BinaryCollation"): _string_converts(),
 }
 
 
@@ -7464,11 +7474,11 @@ _DATE_RELATION = {"fields": [{"metadata": {"source": "native"}, "name": "day", "
                               "type": "date"}], "type": "struct"}
 
 
-def _date_converts(name="day", nullable=True, metadata=None):
+def _date_converts(name="day", nullable=True, metadata=None, relation=_DATE_RELATION):
     from datetime import date
 
     return _guard_converts([(name, "date32[day]", nullable, [date(2020, 1, 1)] * 10000,
-                             metadata)], _DATE_RELATION)
+                             metadata)], relation)
 
 
 # PySpark's outcomes (see `_INTEGER_DESCRIPTORS`), and the drop-in's where they differ.
@@ -7482,13 +7492,15 @@ _DATE_DESCRIPTORS = {
     ("StructField", "metadata"): _guard_raises(*_no_setter("StructField")),
 }
 _DATE_DESCRIPTORS_OF_THE_DROP_IN = {
-    ("StructType", "fields"): _guard_converts([], _DATE_RELATION),
+    ("StructType", "fields"): _guard_converts([], {"fields": [], "type": "struct"}),
     ("StructType", "names"): _date_converts(name="changed"),
     ("StructField", "name"): _guard_raises(*_rename_mismatch("day")),
     ("StructField", "dataType"): _date_converts(),
-    ("StructField", "nullable"): _date_converts(nullable=False),
+    ("StructField", "nullable"): _date_converts(
+        nullable=False, relation=_relation_of("day", "date", False, {"source": "native"})),
     ("StructField", "metadata"): _date_converts(
-        metadata={"SPARK::metadata::json": '{"changed": true}'}),
+        metadata={"SPARK::metadata::json": '{"changed": true}'},
+        relation=_relation_of("day", "date", True, {"changed": True})),
 }
 
 

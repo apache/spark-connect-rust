@@ -23589,6 +23589,70 @@ def test_create_dataframe_of_a_pandas_frame_of_another_width_zips_it_as_pyspark(
         assert error.value.getCondition() == "AXIS_LENGTH_MISMATCH"
 
 
+def test_create_dataframe_of_a_pandas_frame_sends_the_json_of_its_struct_as_pyspark(mock_connect):
+    # As PySpark's createDataFrame of a pandas DataFrame, which sends the `json()` of the struct as
+    # the schema of the relation, of the attributes that a Python subclass overrides as Python
+    # reads them, as its conversion of the table reads them: of a field whose `dataType` reads
+    # `StringType()`, a table of strings under a string field, also of no rows, of the schema
+    # alone, and of a pyarrow Table, which is cast to the struct. A struct whose `fields` property
+    # reads none, as the native `__init__` does not assign through its setter (SPARK-62231),
+    # takes the row path, of the relation of the fields that it was given, as its rows are, as
+    # PySpark's are of the fields of its setter. The relation of rows that the native types
+    # convert, of local rows and of a frame without PyArrow, is of those types, as the rows are
+    # (see the known differences).
+    pd = pytest.importorskip("pandas")
+    pa = pytest.importorskip("pyarrow")
+    spark, service = mock_connect
+
+    class FieldStr(T.StructField):
+        @property
+        def dataType(self):
+            return T.StringType()
+
+        @dataType.setter
+        def dataType(self, value):
+            self.__dict__["given"] = value
+
+    class StructFlds(T.StructType):
+        @property
+        def fields(self):
+            return list(self.__dict__.get("_f", []))
+
+        @fields.setter
+        def fields(self, value):
+            self.__dict__["_f"] = value
+
+    def sent(df):
+        df.toArrow()
+        request = parse_message(service.execute_requests[-1])
+        relation = parse_message(parse_message(request[3][0])[1][0])
+        while 18 in relation:  # Relation.to_df -> ToDF.input.
+            relation = parse_message(parse_message(relation[18][0])[1][0])
+        local = parse_message(relation[11][0])
+        rows = pa.ipc.open_stream(local[1][0]).read_all().to_pylist() if 1 in local else None
+        return rows, json.loads(local[2][0])["fields"]
+
+    def field(type_name):
+        return [{"metadata": {}, "name": "a", "nullable": True, "type": type_name}]
+
+    strs = T.StructType([FieldStr("a", T.LongType())])
+    assert sent(spark.createDataFrame(pd.DataFrame({"a": ["x"]}), strs)) == (
+        [{"a": "x"}], field("string"))
+    assert sent(spark.createDataFrame(pd.DataFrame({"a": pd.Series([], dtype=object)}), strs)) == (
+        None, field("string"))
+    assert sent(spark.createDataFrame(pa.table({"a": ["x"]}), strs)) == (
+        [{"a": "x"}], field("string"))
+    assert sent(spark.createDataFrame([], strs)) == (None, field("string"))
+    flds = StructFlds([T.StructField("a", T.LongType())])
+    assert sent(spark.createDataFrame(pd.DataFrame({"a": [1]}), flds)) == ([{"a": 1}], field("long"))
+    assert sent(spark.createDataFrame(pd.DataFrame({"a": pd.Series([], dtype="int64")}), flds)) == (
+        None, field("long"))
+    assert sent(spark.createDataFrame([(1,)], strs)) == ([{"a": 1}], field("long"))
+    with _pandas_row_path():
+        assert sent(spark.createDataFrame(pd.DataFrame({"a": [1]}), strs)) == (
+            [{"a": 1}], field("long"))
+
+
 def test_customized_pandas_normalization_methods_do_not_run_as_pyspark(mock_connect):
     from pyspark.errors import PySparkValueError
 

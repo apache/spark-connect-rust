@@ -180,9 +180,12 @@ each column to Arrow, in the session time zone (`prepare_pandas_table` and
 `prepare_inferred_pandas_table` of `pyspark/sql/_pandas_input.py`, of the vendored
 `create_arrow_table_from_pandas`, as `pyspark.sql.connect.session` binds the conversions as
 PySpark Connect's module of the session binds them), whose table this importer sends, as PySpark's
-`createDataFrame` does. Fast paths take plain frames of some columns, of which they make the
-values of that conversion without its per-column work; the frames that they decline, such as a
-subclass or a frame of customized hooks, take PySpark's conversion. Without PyArrow, which that
+`createDataFrame` does, with the `json()` of the struct as the schema of the relation, which reads
+the attributes of the types as the conversion reads them, of a Python subclass or a patched class
+too (`pyspark_schema_json_text` of `src/types.rs`). Fast paths take plain frames of some columns,
+of which they make the values of that conversion without its per-column work; the frames that
+they decline, such as a subclass or a frame of customized hooks, take PySpark's conversion.
+Without PyArrow, which that
 conversion needs, the native row path of the session converts every frame from its rows of
 Python values, and no fast path is taken (see `dev/parity/known-differences.md`).
 `verifySchema` remains ignored for pandas input, matching Spark Connect. The fast paths:

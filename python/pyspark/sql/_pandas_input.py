@@ -1413,9 +1413,10 @@ def _canonical_struct(schema):
     The conversion reads the fields, names and data types through the classes, and the relation
     of the core the native types that they hold, so a frame under a class that overrides one of
     these reads takes the row path, which converts it with PySpark's conversion too, of the
-    relation of the native fields (`create_from_pandas_table` of the session). As PySpark's
-    createDataFrame, which converts a frame under any StructType of StructFields with its
-    conversion, a Python subclass that overrides none takes this route too.
+    relation of PySpark's `json()` of the struct, which reads them as the conversion does
+    (`create_from_pandas_table` of the session). As PySpark's createDataFrame, which converts a
+    frame under any StructType of StructFields with its conversion, a Python subclass that
+    overrides none takes this route too.
     """
     from pyspark._pyspark import StructField, StructType
 
@@ -1436,9 +1437,9 @@ def accepts_pandas_schema(schema=None):
     struct type, with PySpark's conversion (`prepare_pandas_table`), of the relation of the struct
     that the core lowers: of a struct whose classes, and its fields', keep their own reads
     (`_canonical_struct`). The row path converts a frame under another struct with PySpark's
-    conversion too, where PyArrow is, of the relation of its native fields, but of a struct whose
-    `names` and `fields`, as Python reads them of a class that defines either, are not as many,
-    whose rows it converts (SPARK-62231).
+    conversion too, where PyArrow is, of the relation of PySpark's `json()` of the struct, but of a
+    struct whose `names` and `fields`, as Python reads them of a class that defines either, are not
+    as many, whose rows it converts, of the relation of its native types (SPARK-62231).
     """
     return schema is None or type(schema) is str or _canonical_struct(schema)
 

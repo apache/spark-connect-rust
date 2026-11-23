@@ -2487,7 +2487,10 @@ impl PySparkSession {
         if actual != fields.len() {
             return Err(crate::infer::axis_length_mismatch(py, fields.len(), actual));
         }
-        let options = with_schema_json(options, crate::types::schema_json_text(Some(schema))?);
+        let options = with_schema_json(
+            options,
+            crate::types::pyspark_schema_json_text(Some(schema))?,
+        );
         let batches = crate::pyarrow_import::table_batches(&table)?;
         let df = crate::interrupt::interruptible_without_parts(py, &self.session, || {
             self.session
@@ -2696,7 +2699,8 @@ impl PySparkSession {
     /// `fields` of the schema object, which only the columns of such an index under a struct of no
     /// fields can fail, and the relation is of the table, with the names of the struct that the
     /// conversion read (`schema.fieldNames()`) applied with `toDF`. The schema of the relation is
-    /// of the core types of the fields.
+    /// PySpark's `json()` of the struct, which reads the attributes that the conversion read
+    /// (`types::pyspark_schema_json_text`), of a Python subclass of its own or a patched class too.
     fn create_from_pandas_table(
         &self,
         py: Python<'_>,
@@ -2734,9 +2738,12 @@ impl PySparkSession {
         if actual != expected {
             return Err(crate::infer::axis_length_mismatch(py, expected, actual));
         }
+        // Then, as PySpark's, the `json()` of the struct, which reads the attributes that the
+        // conversion read, of a Python subclass of its own or of a patched class too, as the table
+        // follows them (`types::pyspark_schema_json_text`).
         let options = with_schema_json(
             options.clone(),
-            crate::types::schema_json_text(struct_object)?,
+            crate::types::pyspark_schema_json_text(struct_object)?,
         );
         let batches = crate::pyarrow_import::table_batches(&table)?;
         let relation = DataType::Struct {
@@ -3057,7 +3064,15 @@ impl PySparkSession {
                 },
             )?;
         }
-        let schema_json = crate::types::schema_json_text(schema_object)?;
+        // The relation's schema is of the native types, as the rows are, but of no rows, of which
+        // PySpark's conversion converts none, PySpark's `json()` of the struct, which reads the
+        // attributes of a Python subclass or a patched class as the conversion of a frame of rows
+        // reads them (`create_from_pandas_table`).
+        let schema_json = if empty {
+            crate::types::pyspark_schema_json_text(schema_object)?
+        } else {
+            crate::types::schema_json_text(schema_object)?
+        };
         let schema = DataType::Struct { fields };
         let df = match (options, schema_json) {
             // Of no rows, as an empty frame, of no settings: the schema alone.
@@ -3803,7 +3818,7 @@ impl PySparkSession {
                         ));
                     }
                 };
-                let schema_json = crate::types::schema_json_text(schema)?;
+                let schema_json = crate::types::pyspark_schema_json_text(schema)?;
                 let options = options
                     .clone()
                     .map(|options| with_schema_json(options, schema_json));
@@ -3870,7 +3885,7 @@ impl PySparkSession {
                         ));
                     }
                 };
-                let schema_json = crate::types::schema_json_text(schema)?;
+                let schema_json = crate::types::pyspark_schema_json_text(schema)?;
                 let options = options
                     .clone()
                     .map(|options| with_schema_json(options, schema_json));

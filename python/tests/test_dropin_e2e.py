@@ -3053,7 +3053,9 @@ def test_create_dataframe_of_a_struct_of_another_width(session):
     # As PySpark's conversion of a struct whose `fields` or `names` list was changed in place, also
     # of a class of an iteration of its own: of a field removed or a name appended, the names of
     # `toDF` are not as many as the columns, which the server raises ASSIGNMENT_ARITY_MISMATCH of;
-    # of a field appended or a name removed, `_deduplicate_field_names` raises IndexError.
+    # of a field appended or a name removed, `_deduplicate_field_names` raises IndexError. The
+    # relation of a class of an iteration of its own is of its `json()`, as PySpark's, whose type
+    # is its `typeName()` (`iter`), which the server fails to parse first (PARSE_SYNTAX_ERROR).
     class Iterated(StructType):
         def __iter__(self):
             return iter(self.fields)
@@ -3075,7 +3077,9 @@ def test_create_dataframe_of_a_struct_of_another_width(session):
                 with pytest.raises(error) as raised:
                     session.createDataFrame(frame, schema).schema
                 if error is AnalysisException:
-                    assert raised.value.getCondition() == "ASSIGNMENT_ARITY_MISMATCH", change
+                    condition = ("PARSE_SYNTAX_ERROR" if cls is Iterated
+                                 else "ASSIGNMENT_ARITY_MISMATCH")
+                    assert raised.value.getCondition() == condition, change
                 else:
                     assert str(raised.value) == "list index out of range", change
 
@@ -3113,6 +3117,74 @@ print(df.schema.simpleString(), [row.renamed for row in df.collect()])
                             timeout=120)
     assert result.returncode == 0, result.stdout + result.stderr
     assert result.stdout.strip().splitlines()[-1] == "struct<renamed:bigint> [1, 0, 1]"
+
+
+def test_create_dataframe_of_a_pandas_frame_under_a_subclass_that_overrides_its_reads(session):
+    # As official PySpark 4.3.0's createDataFrame of a pandas DataFrame, whose conversion and the
+    # `json()` of the struct that the relation sends read the attributes of a Python subclass that
+    # overrides them, as Python reads them: of a field whose `dataType` reads `StringType()` or
+    # `IntegerType()`, the DataFrame is of that type, also of no rows; of a struct that iterates
+    # its fields in reverse, the schema is of the fields in reverse, which the table zipped with
+    # the fields is not of, and which the server raises INVALID_COLUMN_OR_FIELD_DATA_TYPE of. A
+    # struct whose `fields` property reads none, as the native `__init__` does not assign through
+    # its setter (SPARK-62231), is of the fields that it was given, as PySpark's is of its setter.
+    import json
+
+    pd = pytest.importorskip("pandas")
+
+    class FieldStr(StructField):
+        @property
+        def dataType(self):
+            return StringType()
+
+        @dataType.setter
+        def dataType(self, value):
+            self.__dict__["given"] = value
+
+    class FieldInt(StructField):
+        @property
+        def dataType(self):
+            return IntegerType()
+
+        @dataType.setter
+        def dataType(self, value):
+            self.__dict__["given"] = value
+
+    class StructRevr(StructType):
+        def __iter__(self):
+            return iter(list(self.fields)[::-1])
+
+    class StructFlds(StructType):
+        @property
+        def fields(self):
+            return list(self.__dict__.get("_f", []))
+
+        @fields.setter
+        def fields(self, value):
+            self.__dict__["_f"] = value
+
+    def field(name, type_name, metadata=None):
+        return {"metadata": metadata or {}, "name": name, "nullable": True, "type": type_name}
+
+    for frame, schema, fields, rows in [
+        (pd.DataFrame({"a": ["x", None]}), StructType([FieldStr("a", LongType())]),
+         [field("a", "string")], [Row(a="x"), Row(a=None)]),
+        (pd.DataFrame({"a": pd.Series([], dtype=object)}), StructType([FieldStr("a", LongType())]),
+         [field("a", "string")], []),
+        (pd.DataFrame({"a": [1, 2]}), StructType([FieldInt("a", LongType(), True, {"k": 1})]),
+         [field("a", "integer", {"k": 1})], [Row(a=1), Row(a=2)]),
+        (pd.DataFrame({"a": [1]}), StructFlds([StructField("a", LongType())]),
+         [field("a", "long")], [Row(a=1)]),
+        (pd.DataFrame({"a": pd.Series([], dtype="int64")}), StructFlds([StructField("a", LongType())]),
+         [field("a", "long")], []),
+    ]:
+        df = session.createDataFrame(frame, schema)
+        assert json.loads(df.schema.json()) == {"fields": fields, "type": "struct"}
+        assert df.collect() == rows
+    reversed_struct = StructRevr([StructField("a", LongType()), StructField("b", StringType())])
+    with pytest.raises(AnalysisException) as error:
+        session.createDataFrame(pd.DataFrame({"a": [1], "b": ["x"]}), reversed_struct).schema
+    assert error.value.getCondition() == "INVALID_COLUMN_OR_FIELD_DATA_TYPE"
 
 
 @pytest.mark.parametrize(

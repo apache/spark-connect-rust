@@ -61,9 +61,13 @@ difference is intentional or tracked for a fix.
   errors and its columns. What differs:
   - Of a struct of a class that defines `names` or `fields` itself, whose `names` and `fields`, as
     Python reads them, are not as many, the frame takes the native row path (see "pandas
-    DataFrames without PyArrow" above), of its rows (SPARK-62231): PySpark's `__init__` assigns
-    them through the class's setters, and the native `__init__` does not, so a `names` or `fields`
-    property of a setter reads none. Where PySpark's conversion takes such a struct, the row path
+    DataFrames without PyArrow" above), of its rows and of a relation of its native fields
+    (SPARK-62231): PySpark's `__init__` assigns them through the class's setters, and the native
+    `__init__` does not, so a `names` or `fields` property of a setter reads none. Of a `fields`
+    property, the struct's `json()` and the relation of a frame of no rows are of the fields that
+    the native `__init__` was given too, also of one whose read raises, as the `AttributeError` of
+    the attribute that its setter sets, as PySpark's are of the fields that its `__init__` assigned
+    (see below). Where PySpark's conversion takes such a struct, the row path
     names the columns by the native names (`a` where PySpark's are the `A` of a setter that
     upper-cases them), raises `AXIS_LENGTH_MISMATCH` of a frame of fewer columns, where PySpark
     raises the `ArrowInvalid` of its rename, and `PySparkRuntimeError: Type mismatch in row data`
@@ -77,30 +81,50 @@ difference is intentional or tracked for a fix.
     object has no setter` (of `'StructType'`, of a struct's), as the `__init__` of the field or the
     struct that it makes assigns through it. The native `__init__` does not (SPARK-62231), nor has
     a native type a `__dict__` that a setter could write (SPARK-62251), so the conversion goes on
-    and reads the patch where PySpark's would: a `dataType` of `BooleanType()` converts a column of
-    ints to bools, which the relation's schema of the native types holds as longs (the server's
-    `INVALID_COLUMN_OR_FIELD_DATA_TYPE`), a `name` raises the `ValueError` of the cast of the table
-    (`Target schema's field names are not matching the table's field names: ['renamed'],
+    and reads the patch where PySpark's would, and so does the relation's schema, the struct's
+    `json()` (see below): a `dataType` of `BooleanType()` converts a column of ints to bools of a
+    boolean field (`struct<renamed:boolean>`), a `name` raises the `ValueError` of the cast of the
+    table (`Target schema's field names are not matching the table's field names: ['renamed'],
     ['changed']`), a `nullable` of False raises `Casting field 'x' with null values to
-    non-nullable` of a column of nulls, a `metadata` is the Arrow metadata of the column, a
-    struct's `names` names the column of the table, of a relation of the native names, and its
-    `fields` of `[]` makes a table of no columns, which the server raises
-    `ASSIGNMENT_ARITY_MISMATCH` of.
-  - The relation's schema is of the native types of the fields, where PySpark's is the `json()` of
-    the struct, which reads the overrides and the patches too: of a field of a subclass whose
-    `dataType` reads `StringType()` over a column of strs under `a long`, PySpark's DataFrame is
-    `struct<a:string>`, and the drop-in's table follows the override and its schema does not, so
-    its `schema` raises the server's `INVALID_COLUMN_OR_FIELD_DATA_TYPE` (``Column or field
-    `col_0` is of type "STRING" while it's required to be "BIGINT"``); of
-    `StringType.isUTF8BinaryCollation` patched to return False, PySpark's schema holds the
-    collation of the field (`"string collate UTF8_BINARY"`, and its `__COLLATIONS` metadata). The
-    drop-in's own `json()` reads neither (SPARK-62236).
+    non-nullable` of a column of nulls, and makes the field of another column not nullable, a
+    `metadata` is the Arrow metadata of the column and the metadata of the field, a struct's
+    `names` names the column of the table, of a relation of the native names, and its `fields` of
+    `[]` makes a table and a relation of no columns, which the server raises
+    `ASSIGNMENT_ARITY_MISMATCH` of, of the names of `toDF`.
+  - The relation's schema is the `json()` of the struct, as PySpark's, which reads the attributes
+    of the types as Python reads them, the overrides and the patches too, as the conversion does:
+    of a field of a subclass whose `dataType` reads `StringType()` over a column of strs under
+    `a long`, the DataFrame is `struct<a:string>`, and of `StringType.isUTF8BinaryCollation`
+    patched to return False, the schema holds the collation of the field (`"string collate
+    UTF8_BINARY"`, and its `__COLLATIONS` metadata), as PySpark's, also of a frame of no rows and of
+    a pyarrow Table, which is cast to the struct. What stays different is what the attributes of the
+    drop-in's types read (until SPARK-62231 and SPARK-62251): a property of a field whose getter
+    reads the state that its setter writes, which the native `__init__` does not call, reads it
+    unwritten, so a `dataType` that returns the `self._dt` of its setter makes the conversion and
+    `json()` raise `AttributeError: 'Field' object has no attribute '_dt'`, where PySpark's read
+    the type that `__init__` gave it; and a class attribute over a field's `name`, `dataType`,
+    `nullable` or `metadata`, which PySpark's `__init__` shadows with the attribute of the instance
+    and the native one does not, is what they read: of `nullable = False` in the class, the field
+    of the relation and of `json()` is not nullable, where PySpark's is.
 
   A Python subclass of `StructType` or `StructField` that overrides none of these takes PySpark's
   conversion, as in PySpark, with the JSON of its core types, where PySpark sends its `json()`,
   which names a struct of a subclass by its `typeName()` and which the server then fails to parse
-  (see the types of `docs/compatibility.md`). So does a name that holds a NUL, at any depth, whose
-  table the importer reads of its IPC stream, as the C data interface holds names as C strings.
+  (see the types of `docs/compatibility.md`); so does one that overrides only a struct's `names`,
+  `__getattribute__` or `__class__`, which `json()` does not read. So does a name that holds a
+  NUL, at any depth, whose table the importer reads of its IPC stream, as the C data interface
+  holds names as C strings.
+- **Local data under types that override what PySpark's conversion reads** (tracked for a fix:
+  SPARK-62258). PySpark's conversion of local data (`LocalDataToArrowConversion`), of tuples,
+  lists, dicts, Rows and NumPy arrays, reads the fields of the struct and their attributes as
+  Python reads them, of a Python subclass of a property or an iteration of its own and of a patched
+  native class, and its relation sends the `json()` of the struct. The drop-in converts the rows by
+  the native types, of a relation of those types, as its rows are: under a field whose `dataType`
+  reads `StringType()` over `a long`, `createDataFrame([(1,)], schema)` is `struct<a:bigint>` of
+  `Row(a=1)`, where PySpark's is `struct<a:string>` of `Row(a='1')`, and `createDataFrame([("x",)],
+  schema)` raises `ArrowInvalid: Could not convert 'x' with type str: tried to convert to int64`,
+  where PySpark's is `Row(a='x')`. Data of no rows, a pandas DataFrame and a pyarrow Table are sent
+  with the `json()` of the struct, as PySpark's (see above).
 - **Type names that PySpark Connect's other modules and PySpark's types read** (intentional). The
   other modules of PySpark Connect that its session imports bind the type names of
   `pyspark.sql.types` too, and PySpark's types read them when they are called, so a rebound name
@@ -1297,8 +1321,17 @@ requests of the unpickled object pickle as it is then. This case still differs:
     `TypeError` of `__slots__` without `__getstate__`;
   - the repr of an array, a map, a field or a struct that holds a type whose repr has a lone
     surrogate raises its `UnicodeEncodeError`;
-  - `createDataFrame` of data sends the JSON of the core types of its schema, where PySpark sends
-    the `json()` of the object, which the server may fail to parse.
+  - `createDataFrame` of local rows sends the JSON of the core types of its schema, as its rows
+    are of them (until SPARK-62258), and so does one of a pandas DataFrame or a pyarrow Table of
+    types that override none of the reads of `json()`, where PySpark sends the `json()` of the
+    object, which the server may fail to parse; of a struct that holds a type that overrides one,
+    of a pandas DataFrame, a pyarrow Table or data of no rows, it sends the `json()`, as PySpark
+    (see `createDataFrame` above);
+  - `simpleString()`, `repr()` and `treeString()` read the native values of the attributes that a
+    subclass overrides with a property, where PySpark's read the property, as the drop-in's
+    `json()` and `jsonValue()` now do (`struct<a:bigint>` and `StructField('a', LongType(), True)`
+    of a field whose `dataType` reads `StringType()` over `LongType()`, where PySpark's are
+    `struct<a:string>` and `StructField('a', StringType(), True)`), until SPARK-62251.
 
   The class's own types compare without the attributes that a user set on them, where PySpark's
   comparison of the `__dict__`s holds them (see `docs/compatibility.md`); their copies and pickles

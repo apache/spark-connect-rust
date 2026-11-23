@@ -1827,6 +1827,121 @@ def test_python_subclasses_nested_in_types_run_their_methods_as_pysparks():
         "containsNull": True, "elementType": "string", "type": "array"}
 
 
+def test_python_subclasses_that_override_the_reads_of_json_write_it_as_pysparks():
+    # PySpark's `jsonValue` reads the attributes of a type as Python reads them: of a struct, the
+    # fields as it iterates itself (`for f in self`, which is `iter(self.fields)`), of a field its
+    # `name`, `dataType`, `nullable` and `metadata`, so a property of a subclass that overrides one,
+    # and an iteration of its own, are of its JSON, at any depth, as PySpark 4.3.0's.
+    class FieldStr(T.StructField):
+        @property
+        def dataType(self):
+            return T.StringType()
+
+        @dataType.setter
+        def dataType(self, value):
+            self.__dict__["given"] = value
+
+    class FieldNotNull(T.StructField):
+        @property
+        def nullable(self):
+            return False
+
+        @nullable.setter
+        def nullable(self, value):
+            self.__dict__["given"] = value
+
+    class FieldMeta(T.StructField):
+        @property
+        def metadata(self):
+            return {"own": 1}
+
+        @metadata.setter
+        def metadata(self, value):
+            self.__dict__["given"] = value
+
+    class StructRevr(T.StructType):
+        # Of the `typeName` of `struct`, the class name less its last four letters.
+        def __iter__(self):
+            return iter(list(self.fields)[::-1])
+
+    long_type = T.LongType()
+    struct = T.StructType([FieldStr("a", long_type, True, {"k": 1}), FieldNotNull("b", long_type),
+                           FieldMeta("c", long_type)])
+    assert json.loads(struct.json())["fields"] == [
+        {"metadata": {"k": 1}, "name": "a", "nullable": True, "type": "string"},
+        {"metadata": {}, "name": "b", "nullable": False, "type": "long"},
+        {"metadata": {"own": 1}, "name": "c", "nullable": True, "type": "long"},
+    ]
+    assert struct.jsonValue() == json.loads(struct.json())
+    assert FieldStr("a", long_type).json() == (
+        '{"metadata":{},"name":"a","nullable":true,"type":"string"}')
+    assert FieldStr("a", long_type).jsonValue() == {
+        "name": "a", "type": "string", "nullable": True, "metadata": {}}
+    nested = T.StructType([T.StructField("s", T.ArrayType(T.MapType(
+        T.StringType(), T.StructType([FieldStr("a", long_type)]))))])
+    assert json.loads(nested.json())["fields"][0]["type"] == {
+        "containsNull": True, "type": "array", "elementType": {
+            "keyType": "string", "type": "map", "valueContainsNull": True, "valueType": {
+                "fields": [{"metadata": {}, "name": "a", "nullable": True, "type": "string"}],
+                "type": "struct"}}}
+    reversed_struct = StructRevr([T.StructField("a", long_type), T.StructField("b", T.StringType())])
+    assert reversed_struct.json() == (
+        '{"fields":[{"metadata":{},"name":"b","nullable":true,"type":"string"},'
+        '{"metadata":{},"name":"a","nullable":true,"type":"long"}],"type":"struct"}')
+
+    # PySpark's `__init__` assigns the fields through a property of the class, which keeps them of
+    # its setter, and the native `__init__` does not (SPARK-62231), so the property reads none, or
+    # raises the AttributeError of the attribute that the setter sets. The JSON of such a struct,
+    # whose fields read otherwise than PySpark's `__init__` would have assigned them, is of the
+    # fields that the native `__init__` was given, as PySpark's is.
+    class StructFlds(T.StructType):
+        @property
+        def fields(self):
+            return list(self.__dict__.get("_f", []))
+
+        @fields.setter
+        def fields(self, value):
+            self.__dict__["_f"] = value
+
+    class StructPrivate(T.StructType):
+        @property
+        def fields(self):
+            return self._fields
+
+        @fields.setter
+        def fields(self, value):
+            self._fields = value
+
+    for cls, type_name in ((StructFlds, "struct"), (StructPrivate, "structpri")):
+        assert cls([FieldStr("a", long_type)]).json() == (
+            '{"fields":[{"metadata":{},"name":"a","nullable":true,"type":"string"}],'
+            f'"type":"{type_name}"}}')
+
+
+def test_patched_native_type_classes_are_of_their_json_as_pysparks(monkeypatch):
+    # As PySpark's `jsonValue`, `simpleString` and `__repr__`, which call the methods of the
+    # classes: of `StringType.isUTF8BinaryCollation` patched to return False, a string is written
+    # of its collation, which a field holds in its metadata, and of a patched `__iter__` of the
+    # struct, its fields are written in that order.
+    monkeypatch.setattr(T.StringType, "isUTF8BinaryCollation", lambda self: False)
+    assert T.StructType([T.StructField("a", T.StringType())]).json() == (
+        '{"fields":[{"metadata":{"__COLLATIONS":{"a":"spark.UTF8_BINARY"}},"name":"a",'
+        '"nullable":true,"type":"string collate UTF8_BINARY"}],"type":"struct"}')
+    string = T.StringType()
+    assert (repr(string), string.simpleString(), string.json()) == (
+        "StringType('UTF8_BINARY')", "string collate UTF8_BINARY", '"string collate UTF8_BINARY"')
+    assert T.ArrayType(T.StringType()).json() == (
+        '{"containsNull":true,"elementType":"string collate UTF8_BINARY","type":"array"}')
+    monkeypatch.undo()
+    assert T.StructType([T.StructField("a", T.StringType())]).json() == (
+        '{"fields":[{"metadata":{},"name":"a","nullable":true,"type":"string"}],"type":"struct"}')
+    monkeypatch.setattr(T.StructType, "__iter__", lambda self: iter(list(self.fields)[::-1]))
+    struct = T.StructType([T.StructField("a", T.LongType()), T.StructField("b", T.StringType())])
+    assert struct.json() == (
+        '{"fields":[{"metadata":{},"name":"b","nullable":true,"type":"string"},'
+        '{"metadata":{},"name":"a","nullable":true,"type":"long"}],"type":"struct"}')
+
+
 @pytest.mark.parametrize(
     "a, b, equal",
     [

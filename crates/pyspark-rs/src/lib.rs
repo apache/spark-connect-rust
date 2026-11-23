@@ -302,6 +302,9 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyYearMonthIntervalType>()?;
     m.add_class::<PyDayTimeIntervalType>()?;
     m.add_class::<PyVariantType>()?;
+    // The attributes that PySpark's `jsonValue` reads of the native classes, as they are made,
+    // before any patch of them.
+    types::keep_native_json_reads(_py)?;
     values::register(m)?;
 
     // Register Window classes

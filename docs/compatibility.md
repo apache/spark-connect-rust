@@ -3333,6 +3333,15 @@ read it by `isinstance`, and the methods of its class are PySpark's, of the meth
   simple string, repr, tree string and conversions, also on the Python workers of the server, to
   which a UDF pickles its return type: a UDF that is not Arrow-optimized converts its results with
   the `toInternal` of the subclass, as PySpark's;
+- `json()` and `jsonValue()` read the attributes that PySpark's `jsonValue` reads as Python reads
+  them: of a struct, its fields as it iterates itself (`iter(self.fields)`, or an `__iter__` of
+  its own), of a field its `name`, `dataType`, `nullable` and `metadata`, and of an array and a
+  map their types and flags, so a property of a subclass that overrides one is of the JSON, at any
+  depth, and so is a patch of a native class (of `StringType.isUTF8BinaryCollation` patched to
+  return False, a string is `"string collate UTF8_BINARY"`, of the `__COLLATIONS` metadata of its
+  field); `createDataFrame` of a pandas DataFrame, a pyarrow Table or data of no rows sends that
+  `json()` as the schema of its relation, as PySpark's, whose conversion reads the attributes
+  alike (see `dev/parity/known-differences.md`);
 - the conversion of the local rows of `createDataFrame` takes the type objects of the schema, as
   PySpark's converters hold them: its errors name the object (`input for SubBooleanType() must not
   be None`), of its repr, and a geometry or a geography converts with the `toInternal` of a
@@ -3366,7 +3375,16 @@ What differs:
   (`vars(t)` holds the attributes that a user set), and a subclass whose `__init__` does not call
   the `__init__` of its class has the parameters of `cls.__new__(cls)`, of the defaults of the
   class (`StringType()`, `DecimalType(10, 0)`, an array of `NullType()`), where PySpark's has none
-  of them and raises the `AttributeError` of each that a method reads.
+  of them and raises the `AttributeError` of each that a method reads. The native `__init__` sets
+  them, and not through the attributes of the class, as PySpark's assigns them (SPARK-62231), so a
+  property of a subclass whose getter reads the state that its setter writes reads it unwritten,
+  and a class attribute over a parameter (`nullable = False`) is what reads it, where PySpark's
+  `__init__` shadows it with the instance's own (SPARK-62251); `json()` and the conversions read
+  them so, as Python does. A struct whose `fields`, of a class that defines `names` or `fields`,
+  raise or are not as many as its `names`, as Python reads them, is of the fields that its
+  `__init__` was given, of its JSON and its relations. `simpleString()`, `repr()` and
+  `treeString()` read the native values of the attributes that a subclass overrides with a
+  property, where PySpark's read the property (until SPARK-62251).
 - Python calls the `__init__` of a subclass of a singleton type at each call of the class, which
   returns the one instance, where PySpark's metaclass calls it on the first call, as the
   drop-in's `DataTypeSingleton` does of a class of it, such as of PySpark's cloudpickle of such a
@@ -3386,8 +3404,11 @@ What differs:
   `json()` of the schema object, which names a type of a subclass by its `typeName()`
   (`"subinteger"`) and which the server then fails to parse (`PARSE_SYNTAX_ERROR`), so sending it
   would only bring back that failure; of data of no rows it sends the `json()` of the object, as
-  PySpark. The readers, `from_json`, `from_xml`, `applyInPandasWithState` and `toDDL` send the
-  `json()` of the object, as PySpark's.
+  PySpark, and so it does of a pandas DataFrame or a pyarrow Table under a struct that holds a type
+  that overrides a read of `jsonValue` (see above). Local rows under such a struct convert by the
+  native types, of their JSON, where PySpark's conversion reads the overrides (until SPARK-62258).
+  The readers, `from_json`, `from_xml`, `applyInPandasWithState` and `toDDL` send the `json()` of
+  the object, as PySpark's.
 
 The metadata of a field is the dict that it was given, which `==` compares as Python compares dicts,
 as PySpark compares the `__dict__`s of its fields, also in a struct and in the types that hold it:
