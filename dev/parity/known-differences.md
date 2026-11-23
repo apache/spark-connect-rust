@@ -193,14 +193,6 @@ difference is intentional or tracked for a fix.
 
 ## `DataFrame`
 
-- **The metadata of an element of the fields of a struct that is not a JSON object** (tracked:
-  SPARK-62230). PySpark's plans send `json.dumps` of the `metadata` of each element, and the server
-  raises `UnknownException: (java.lang.ClassCastException) class org.json4s.JArray cannot be cast
-  to class org.json4s.JObject` of a list such as `[1, 2]`; the drop-in's core metadata is a JSON
-  object, so its plans raise `ValueError: the metadata of a field is not a JSON object: [1, 2]` on
-  the client, and `toNullable()` raises the `TypeError` of the `StructField` that it makes of it.
-
-
 - **A session time zone that the server takes and Python's zone databases do not, and a timestamp
   out of Python's range in the session time zone** (intentional; the values are those of any other
   zone and timestamp). The zones are such as `Z`, `PST`, `GMT+08:00` or `UTC+01:00`. PySpark's

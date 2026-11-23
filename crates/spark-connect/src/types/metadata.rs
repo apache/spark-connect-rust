@@ -627,6 +627,9 @@ impl Parser<'_> {
 pub struct Metadata {
     /// The members of the object, in their order.
     entries: Vec<(String, Json)>,
+    /// The value of metadata that is not an object, such as a list, if it is (see
+    /// [`Metadata::from_json_value`]), of no members.
+    other: Option<Json>,
 }
 
 impl Metadata {
@@ -640,10 +643,35 @@ impl Metadata {
     /// reads it. Its values are kept as they are written, and its keys in their order.
     pub fn from_json(json: &str) -> Result<Metadata> {
         match Json::parse(json) {
-            Ok(Json::Object(entries)) => Ok(Metadata { entries }),
+            Ok(Json::Object(entries)) => Ok(Metadata {
+                entries,
+                other: None,
+            }),
             Ok(_) => Err(SparkError::value_msg(format!(
                 "the metadata of a field is not a JSON object: {json}"
             ))),
+            Err(error) => Err(SparkError::value_msg(format!(
+                "the metadata of a field is not JSON: {error}"
+            ))),
+        }
+    }
+
+    /// The metadata of the JSON text of any value, as [`Metadata::from_json`] of an object, and of
+    /// another value, such as a list, as PySpark's `StructField` keeps the metadata that it is
+    /// given, which its plans send as `json.dumps` of it ([`Metadata::json`]), and which the server
+    /// refuses: such metadata has no keys, and the JSON of a type writes it as it is. Not a stable
+    /// API.
+    #[doc(hidden)]
+    pub fn from_json_value(json: &str) -> Result<Metadata> {
+        match Json::parse(json) {
+            Ok(Json::Object(entries)) => Ok(Metadata {
+                entries,
+                other: None,
+            }),
+            Ok(other) => Ok(Metadata {
+                entries: Vec::new(),
+                other: Some(other),
+            }),
             Err(error) => Err(SparkError::value_msg(format!(
                 "the metadata of a field is not JSON: {error}"
             ))),
@@ -656,13 +684,16 @@ impl Metadata {
     /// or as `NaN`, `Infinity` and `-Infinity`.
     pub fn json(&self) -> String {
         let mut out = String::new();
-        Json::write_object(&mut out, &self.entries, false);
+        match &self.other {
+            Some(other) => other.write_python(&mut out),
+            None => Json::write_object(&mut out, &self.entries, false),
+        }
         out
     }
 
-    /// Whether the metadata has no keys.
+    /// Whether the metadata has no keys, and is an object (see [`Metadata::from_json_value`]).
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.entries.is_empty() && self.other.is_none()
     }
 
     /// The number of the keys of the metadata.
@@ -777,15 +808,22 @@ impl Metadata {
         old
     }
 
-    /// The metadata as the JSON object of its members.
+    /// The metadata as the JSON object of its members, or the value of metadata that is not an
+    /// object.
     pub(crate) fn as_object(&self) -> Json {
-        Json::Object(self.entries.clone())
+        match &self.other {
+            Some(other) => other.clone(),
+            None => Json::Object(self.entries.clone()),
+        }
     }
 
     /// The metadata of the members of a JSON object, or none of another value.
     pub(crate) fn of_json(value: Json) -> Option<Metadata> {
         match value {
-            Json::Object(entries) => Some(Metadata { entries }),
+            Json::Object(entries) => Some(Metadata {
+                entries,
+                other: None,
+            }),
             _ => None,
         }
     }
@@ -793,15 +831,24 @@ impl Metadata {
     /// Whether the metadata equal `other` as Python's `==` compares the dicts of `json.loads` of
     /// them (see [`DataType::eq_as_python`](super::DataType::eq_as_python)). Not a stable API.
     pub(crate) fn eq_as_python(&self, other: &Metadata) -> bool {
-        entries_match(&self.entries, &other.entries, Json::eq_as_python)
+        match (&self.other, &other.other) {
+            (None, None) => entries_match(&self.entries, &other.entries, Json::eq_as_python),
+            (Some(a), Some(b)) => a.eq_as_python(b),
+            _ => false,
+        }
     }
 }
 
 /// As the dicts of `json.loads` of them compare: of the same keys, in any order, of the same
-/// values, of which an int and a float are not, as `serde_json`'s numbers of their types are not.
+/// values, of which an int and a float are not, as `serde_json`'s numbers of their types are not;
+/// and metadata that is not an object, of its value.
 impl PartialEq for Metadata {
     fn eq(&self, other: &Metadata) -> bool {
-        entries_match(&self.entries, &other.entries, Json::same)
+        match (&self.other, &other.other) {
+            (None, None) => entries_match(&self.entries, &other.entries, Json::same),
+            (Some(a), Some(b)) => a.same(b),
+            _ => false,
+        }
     }
 }
 
@@ -818,7 +865,10 @@ impl From<BTreeMap<String, serde_json::Value>> for Metadata {
             .into_iter()
             .map(|(key, value)| (key, Json::from_serde(&value)))
             .collect();
-        Metadata { entries }
+        Metadata {
+            entries,
+            other: None,
+        }
     }
 }
 
@@ -829,7 +879,10 @@ impl From<serde_json::Map<String, serde_json::Value>> for Metadata {
             .into_iter()
             .map(|(key, value)| (key, Json::from_serde(&value)))
             .collect();
-        Metadata { entries }
+        Metadata {
+            entries,
+            other: None,
+        }
     }
 }
 
@@ -849,7 +902,10 @@ impl<K: Into<String>> FromIterator<(K, serde_json::Value)> for Metadata {
                 }
             }
         }
-        Metadata { entries }
+        Metadata {
+            entries,
+            other: None,
+        }
     }
 }
 
@@ -911,6 +967,61 @@ mod tests {
         assert_eq!(
             out,
             r#"{"a":{"c":[1.5,100000000000000000000],"d":2},"b":1,"\u00e9":"\u00e9"}"#
+        );
+    }
+
+    #[test]
+    fn from_json_value_keeps_metadata_that_is_not_an_object_as_pyspark_sends_it() {
+        // As PySpark's `StructField`, which keeps metadata of any value, whose plans send
+        // `json.dumps` of it, and whose `json()` writes it as it is.
+        for (text, sent, written) in [
+            ("[1,2]", "[1, 2]", "[1,2]"),
+            (r#""abc""#, r#""abc""#, r#""abc""#),
+            ("5", "5", "5"),
+            (
+                r#"[{"b": 1, "a": 2}]"#,
+                r#"[{"b": 1, "a": 2}]"#,
+                r#"[{"a":2,"b":1}]"#,
+            ),
+        ] {
+            let metadata = Metadata::from_json_value(text).unwrap();
+            assert!(
+                !metadata.is_empty() && metadata.keys().next().is_none(),
+                "{text}"
+            );
+            assert_eq!(metadata.json(), sent);
+            assert_eq!(metadata, Metadata::from_json_value(sent).unwrap());
+            assert!(metadata.eq_as_python(&Metadata::from_json_value(sent).unwrap()));
+            assert_ne!(metadata, Metadata::new());
+            let field = crate::types::StructField {
+                name: "a".to_string(),
+                data_type: crate::types::DataType::Long,
+                nullable: true,
+                metadata,
+            };
+            assert_eq!(
+                field.json(),
+                format!(r#"{{"metadata":{written},"name":"a","nullable":true,"type":"long"}}"#)
+            );
+            let proto = crate::types::DataType::Struct {
+                fields: vec![field],
+            }
+            .to_proto();
+            let Some(spark_connect_proto::data_type::Kind::Struct(proto)) = proto.kind else {
+                panic!("not a struct");
+            };
+            assert_eq!(proto.fields[0].metadata.as_deref(), Some(sent));
+        }
+        // Of an object, the metadata of `from_json`.
+        let object = r#"{"k": [1, 2]}"#;
+        assert_eq!(
+            Metadata::from_json_value(object).unwrap(),
+            Metadata::from_json(object).unwrap()
+        );
+        assert!(Metadata::from_json_value("[1,").is_err());
+        assert_ne!(
+            Metadata::from_json_value("[]").unwrap(),
+            Metadata::from_json("{}").unwrap()
         );
     }
 

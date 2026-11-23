@@ -796,7 +796,9 @@ as PySpark's `json.dumps(metadata)` writes it, where an int beyond 64 bits was s
 `serde_json::Map` of `serde_json` values, or `collect` of key and value pairs, makes metadata of
 them, so a struct expression of `metadata: BTreeMap::new()` takes `Metadata::new()`, and one of a
 map takes its `.into()`; `Metadata::from_json` reads the text of a JSON object, and `Metadata::json`
-writes it. `get` returns the value of a key as an owned `serde_json::Value`, where it returned a
+writes it. The hidden `Metadata::from_json_value`, which is not a stable API, reads the text of any
+JSON value, of which another value than an object, such as a list, has no keys and is not empty,
+and is written and sent as it is, as PySpark's field keeps and sends such metadata. `get` returns the value of a key as an owned `serde_json::Value`, where it returned a
 reference: an int beyond 64 bits as its nearest float and a float that is not finite as null, of
 which `get_json` gives the exact text. `insert` sets the value of a key at its place, or after the
 others, and returns the value it had, `remove`, `contains_key`, `len` and `is_empty` are as those
@@ -3225,8 +3227,8 @@ struct, array or map that holds it. A drop-in type holds only the values that it
 makes, so the assignment of another raises the constructor's error, where PySpark keeps it, of
 which its repr or JSON may fail later, as a field that an interval does not have
 (`DayTimeIntervalType().startField = 9`). So do the constructors: they refuse values that
-PySpark's keep, with a `TypeError`, such as `DecimalType(10.0)`, `TimeType(6.0)`, `StringType(None)`
-and the metadata `[1]` of a `StructField`, and hold the ints of those they take, so the `precision`
+PySpark's keep, with a `TypeError`, such as `DecimalType(10.0)`, `TimeType(6.0)` and
+`StringType(None)`, and hold the ints of those they take, so the `precision`
 of `DecimalType(np.int64(12))` is an `int`, where PySpark's is the NumPy int. The assertions of
 PySpark's constructors (`field name 1 should be a string`, `elementType string should be an
 instance of ...`) are made under `python -O` too, which skips PySpark's, whose types are then made.
@@ -3389,8 +3391,9 @@ What differs:
   PySpark. The readers, `from_json`, `from_xml`, `applyInPandasWithState` and `toDDL` send the
   `json()` of the object, as PySpark's.
 
-The metadata of a field is the dict that it was given, which `==` compares as Python compares dicts,
-as PySpark compares the `__dict__`s of its fields, also in a struct and in the types that hold it:
+The metadata of a field is the value that it was given, as PySpark's `metadata or {}` keeps it: a
+dict, or another value, such as a list or a str (see below). `==` compares it as Python compares
+dicts, as PySpark compares the `__dict__`s of its fields, also in a struct and in the types that hold it:
 `(1, 2)` is not `[1, 2]`, nor `{1: "a"}` `{"1": "a"}`, nor `10**30` `10**30 + 1`. Its `jsonValue()`
 holds that dict, which `json()` writes with `json.dumps`, as PySpark's: an int of more than 64 bits
 as it is, a float as Python's `repr` writes it, of the shortest digits that read back as it and of
@@ -3419,6 +3422,17 @@ holds the metadata (`keys must be str, int, float, bool or None, not tuple`). `m
 those of a cogroup raise PySpark's `NOT_IMPLEMENTED` of the return type of such a schema, of their
 UDF's check of its Arrow type. The JSON of a type writes each character of its names and strings
 that is not printable ASCII as the `\u` escape of `json.dumps`, as PySpark's `json()`.
+
+Metadata that is not a dict, such as `[1, 2]`, `"abc"` or `5`, is kept as it is given, as PySpark's
+field keeps it, by the constructor (of false metadata, such as `[]` or `0`, a new dict), the setter
+and `StructType.add`, and so do its `jsonValue()`, `json()`, `toNullable()`, copies, pickles and
+`fromJson`. A plan sends `json.dumps` of it when it has a length, as PySpark's
+`len(field.metadata) > 0`, which the server refuses (`ClassCastException`: a `JArray` cannot be cast
+to a `JObject`), and each request of a plan of metadata of no length, such as an int, raises the
+`TypeError` of the length (`object of type 'int' has no len()`); `createDataFrame` and `from_json`
+send it in the JSON of the schema, which the server fails to parse. Its `jsonValue()`
+of a field of collated strings raises the `TypeError` of PySpark's `{**self.metadata}`
+(`'list' object is not a mapping`).
 
 A `TableArg`, of `DataFrame.asTable()`, pickles at every protocol, plainly and by cloudpickle, as
 PySpark's, of its user-set attributes, and `copy.copy` and `copy.deepcopy` copy it as PySpark's. Its
