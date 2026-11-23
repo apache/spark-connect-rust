@@ -955,6 +955,35 @@ enum PlanCompression {
     Zstd { threshold: usize },
 }
 
+/// The settings of the plan compression of a client, as PySpark's client keeps them in its
+/// `_plan_compression_threshold` and `_plan_compression_algorithm`: the threshold of the conf of
+/// the server as an int (-1 of none), and its algorithm, which PySpark's plans compress with when it
+/// is `ZSTD`, above a threshold that is not negative. Binding hook; not a stable API.
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlanCompressionSettings {
+    pub threshold: i128,
+    pub algorithm: Option<String>,
+}
+
+impl PlanCompressionSettings {
+    /// The settings that a plan compression of no others stands for: of a failed lookup, of the
+    /// threshold -1 and the algorithm `NONE`, as PySpark's lookup and its `CANNOT_PARSE` set them.
+    fn of(compression: PlanCompression) -> Option<Self> {
+        match compression {
+            PlanCompression::Unknown => None,
+            PlanCompression::Disabled => Some(Self {
+                threshold: -1,
+                algorithm: Some("NONE".to_string()),
+            }),
+            PlanCompression::Zstd { threshold } => Some(Self {
+                threshold: i128::try_from(threshold).unwrap_or(i128::MAX),
+                algorithm: Some("ZSTD".to_string()),
+            }),
+        }
+    }
+}
+
 /// The threshold of the plan compression of the conf `threshold` of the server, as PySpark's
 /// `int(plan_compression_threshold_str) if plan_compression_threshold_str else -1` reads it, or
 /// None where `int()` raises.
@@ -1453,6 +1482,9 @@ pub struct SparkConnectClient {
     releases: std::sync::Arc<Releases>,
     /// The plan compression of the client, shared by its clones, looked up on its first plan.
     plan_compression: std::sync::Arc<std::sync::Mutex<PlanCompression>>,
+    /// The settings of the plan compression of the client as PySpark's client keeps them, of its
+    /// lookup or of a binding, shared by its clones (see [`PlanCompressionSettings`]).
+    plan_compression_settings: std::sync::Arc<std::sync::Mutex<Option<PlanCompressionSettings>>>,
 }
 
 /// Whether [`SparkConnectClient::close`] closed the channel of a client, which its clones share,
@@ -1745,6 +1777,11 @@ struct UserContextExtensions {
     /// What a binding keeps to bring the extensions up to date before the calls of a thread send
     /// requests (see [`SparkConnectClient::set_user_context_refresher`]).
     refresher: Option<UserContextRefresher>,
+    /// The deadlines and the result chunking that a binding gave a thread last (see
+    /// [`SparkConnectClient::set_thread_call_settings`]), which the calls of a thread that it gave
+    /// no request context take, as a thread of the transport that sends the requests of a call,
+    /// such as one of the fits of the classes of a OneVsRest.
+    latest_call_settings: Option<(Option<RpcDeadlines>, Option<ResultChunking>)>,
 }
 
 /// The session ID, the user and the global user context extensions of the requests of a thread,
@@ -1755,6 +1792,12 @@ struct ThreadRequestContext {
     session_id: String,
     user_id: Option<String>,
     global: Vec<(String, prost_types::Any)>,
+    /// The deadlines of the RPCs of the thread, in the place of the client's, of a binding (see
+    /// [`SparkConnectClient::set_thread_call_settings`]).
+    rpc_deadlines: Option<RpcDeadlines>,
+    /// The result chunking options of the executions of the thread, in the place of the
+    /// client's, of a binding (see [`SparkConnectClient::set_thread_call_settings`]).
+    result_chunking: Option<ResultChunking>,
 }
 
 /// The context of the requests of a thread as it was, of
@@ -1972,6 +2015,7 @@ impl SparkConnectClient {
             inflight_operations: Default::default(),
             releases: Default::default(),
             plan_compression: Default::default(),
+            plan_compression_settings: Default::default(),
         })
     }
 
@@ -2028,14 +2072,115 @@ impl SparkConnectClient {
         {
             forget_when_thread_ends(&self.user_context_extensions, forget_thread_extensions);
         }
+        // The settings of the calls of the thread stay those that the binding gave it (see
+        // `set_thread_call_settings`).
+        let (rpc_deadlines, result_chunking) = extensions
+            .request_by_thread
+            .get(&thread)
+            .map(|request| (request.rpc_deadlines.clone(), request.result_chunking))
+            .unwrap_or_default();
         extensions.request_by_thread.insert(
             thread,
             ThreadRequestContext {
                 session_id,
                 user_id,
                 global,
+                rpc_deadlines,
+                result_chunking,
             },
         );
+    }
+
+    /// Give the calls of the calling thread the deadlines `rpc_deadlines` of their RPCs, and their
+    /// executions the result chunking options `result_chunking`, in the place of those of the
+    /// client, or the client's again of None, until the thread is given others: as a binding
+    /// gives them of the client that the thread calls, which PySpark's requests read of its
+    /// `_rpc_deadlines`, `_allow_arrow_batch_chunking` and `_preferred_arrow_chunk_size` when they
+    /// are sent. An execution keeps those that it started with for its reattaches and its
+    /// release, as PySpark's iterator of the execution keeps those of its client then; the
+    /// requests of the artifacts keep the client's deadlines, as PySpark's `ArtifactManager` keeps
+    /// those that its client was made with. A thread of no request context of a binding (see
+    /// [`SparkConnectClient::set_thread_request_context`]) is given one of the session ID, the
+    /// user and the global user context extensions of the client. Binding hook; not a stable API.
+    #[doc(hidden)]
+    pub fn set_thread_call_settings(
+        &self,
+        rpc_deadlines: Option<RpcDeadlines>,
+        result_chunking: Option<ResultChunking>,
+    ) {
+        let mut extensions = self
+            .user_context_extensions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        extensions.latest_call_settings = Some((rpc_deadlines.clone(), result_chunking));
+        let thread = crate::runtime::calling_thread_id();
+        if let Some(request) = extensions.request_by_thread.get_mut(&thread) {
+            request.rpc_deadlines = rpc_deadlines;
+            request.result_chunking = result_chunking;
+            return;
+        }
+        if rpc_deadlines.is_none() && result_chunking.is_none() {
+            return;
+        }
+        if !extensions.by_thread.contains_key(&thread) {
+            forget_when_thread_ends(&self.user_context_extensions, forget_thread_extensions);
+        }
+        let global = extensions.global.clone();
+        extensions.request_by_thread.insert(
+            thread,
+            ThreadRequestContext {
+                session_id: self.client_session_id.get(),
+                user_id: self.request_user_id.get(),
+                global,
+                rpc_deadlines,
+                result_chunking,
+            },
+        );
+    }
+
+    /// The deadlines of the RPCs of the calling thread now: those that a binding gave it (see
+    /// [`SparkConnectClient::set_thread_call_settings`]), or, of a thread of no request context of
+    /// a binding, those that it gave a thread last; else the client's.
+    fn call_rpc_deadlines(&self) -> RpcDeadlines {
+        self.call_settings_of_thread(|(deadlines, _)| deadlines.clone())
+            .unwrap_or_else(|| self.rpc_deadlines.clone())
+    }
+
+    /// Of the settings of the calls of the calling thread (see
+    /// [`SparkConnectClient::call_rpc_deadlines`]), the one that `of` reads, if a binding gave it.
+    fn call_settings_of_thread<T>(
+        &self,
+        of: impl FnOnce(&(Option<RpcDeadlines>, Option<ResultChunking>)) -> Option<T>,
+    ) -> Option<T> {
+        let extensions = self
+            .user_context_extensions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        match extensions
+            .request_by_thread
+            .get(&crate::runtime::calling_thread_id())
+        {
+            Some(request) => of(&(request.rpc_deadlines.clone(), request.result_chunking)),
+            None => extensions.latest_call_settings.as_ref().and_then(of),
+        }
+    }
+
+    /// The result chunking options of the executions of the calling thread now: those that a
+    /// binding gave it (see [`SparkConnectClient::set_thread_call_settings`]), else the client's.
+    fn call_result_chunking(&self) -> ResultChunking {
+        self.call_settings_of_thread(|(_, chunking)| *chunking)
+            .unwrap_or(self.result_chunking)
+    }
+
+    /// A clone of this client of the settings of the calls of the calling thread now, its
+    /// deadlines and its result chunking (see [`SparkConnectClient::set_thread_call_settings`]),
+    /// for the requests that a call sends once it returned, as the reattaches and the release of
+    /// an execution, on threads that are not the caller's.
+    fn of_call_settings(&self) -> Self {
+        let mut client = self.clone();
+        client.rpc_deadlines = self.call_rpc_deadlines();
+        client.result_chunking = self.call_result_chunking();
+        client
     }
 
     /// What the requests of the calling thread carry of the context that a binding gave it, as of
@@ -2217,7 +2362,7 @@ impl SparkConnectClient {
             user_context_extensions: Default::default(),
             retry_policy: Default::default(),
             retry_decider: Default::default(),
-            rpc_deadlines: self.rpc_deadlines.clone(),
+            rpc_deadlines: self.call_rpc_deadlines(),
             token: self.token.clone(),
             result_chunking: ResultChunking::default(),
             reattachable: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
@@ -2231,6 +2376,7 @@ impl SparkConnectClient {
             inflight_operations: Default::default(),
             releases: Default::default(),
             plan_compression: Default::default(),
+            plan_compression_settings: Default::default(),
         }
     }
 
@@ -3014,6 +3160,9 @@ impl SparkConnectClient {
         // handler raises while the lookup waits, unless it is a `BaseException` only, such as the
         // KeyboardInterrupt of Ctrl-C: then the settings are those of a failed lookup, kept for the
         // later plans, and the call goes on (see `runtime::catching`).
+        // The settings as PySpark's lookup sets them, of the threshold as an int and the algorithm
+        // as it is, of a lookup whose threshold is one.
+        let mut read = None;
         let looked_up = match crate::runtime::catching(self.get_configs(&[
             PLAN_COMPRESSION_THRESHOLD_CONF,
             PLAN_COMPRESSION_ALGORITHM_CONF,
@@ -3023,6 +3172,12 @@ impl SparkConnectClient {
             None => PlanCompression::Disabled,
             Some(Ok(values)) => match values.as_slice() {
                 [threshold, algorithm] => {
+                    read = plan_compression_threshold(threshold.as_deref()).map(|threshold| {
+                        PlanCompressionSettings {
+                            threshold,
+                            algorithm: algorithm.clone(),
+                        }
+                    });
                     // As PySpark's lookup, which logs the settings that it read, or the error of a
                     // threshold that is not an integer, which disables the compression.
                     let (looked_up, logged) =
@@ -3052,7 +3207,7 @@ impl SparkConnectClient {
                             // catches the error of a handler of the log, as a failed lookup.
                             None => {
                                 return self
-                                    .plan_compression_after_error(error, Some(looked_up))
+                                    .plan_compression_after_error(error, Some((looked_up, read)))
                                     .await
                             }
                         },
@@ -3072,16 +3227,69 @@ impl SparkConnectClient {
                 return self.plan_compression_after_error(error, None).await;
             }
         };
-        self.keep_plan_compression(looked_up);
+        self.keep_plan_compression_of(looked_up, read);
         Ok(looked_up)
     }
 
-    /// Keep `looked_up` as the plan compression of this client, for its later plans.
+    /// Keep `looked_up` as the plan compression of this client, for its later plans, of the
+    /// settings that it stands for (see [`PlanCompressionSettings::of`]).
     fn keep_plan_compression(&self, looked_up: PlanCompression) {
+        self.keep_plan_compression_of(looked_up, None);
+    }
+
+    /// Keep `looked_up` as the plan compression of this client, of the settings `read` of its
+    /// lookup, else of those that it stands for.
+    fn keep_plan_compression_of(
+        &self,
+        looked_up: PlanCompression,
+        read: Option<PlanCompressionSettings>,
+    ) {
         *self
             .plan_compression
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = looked_up;
+        *self
+            .plan_compression_settings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) =
+            read.or_else(|| PlanCompressionSettings::of(looked_up));
+    }
+
+    /// The settings of the plan compression of this client, as PySpark's client keeps them (see
+    /// [`PlanCompressionSettings`]): of its lookup, of the first plan, or of
+    /// [`SparkConnectClient::set_plan_compression_settings`], and None before. Binding hook; not
+    /// a stable API.
+    #[doc(hidden)]
+    pub fn plan_compression_settings(&self) -> Option<PlanCompressionSettings> {
+        self.plan_compression_settings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Make `settings` the plan compression of this client and of its clones, as a binding sets
+    /// PySpark's `_plan_compression_threshold` and `_plan_compression_algorithm` of its client,
+    /// which its plans read: of a threshold that is not negative and the algorithm `ZSTD`, the
+    /// plans of more bytes than the threshold are compressed, and of other settings none is; of
+    /// None, or of no algorithm, the settings are looked up again with the next plan, as
+    /// PySpark's client looks them up while either is None. Binding hook; not a stable API.
+    #[doc(hidden)]
+    pub fn set_plan_compression_settings(&self, settings: Option<PlanCompressionSettings>) {
+        let compression = match &settings {
+            Some(PlanCompressionSettings {
+                threshold,
+                algorithm: Some(algorithm),
+            }) => plan_compression_above(*threshold, Some(algorithm.as_str())),
+            _ => PlanCompression::Unknown,
+        };
+        *self
+            .plan_compression
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = compression;
+        *self
+            .plan_compression_settings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = settings;
     }
 
     /// The plan compression after `error`, of the lookup of its settings or of the log of them, as
@@ -3096,7 +3304,7 @@ impl SparkConnectClient {
     async fn plan_compression_after_error(
         &self,
         error: SparkError,
-        read: Option<PlanCompression>,
+        read: Option<(PlanCompression, Option<PlanCompressionSettings>)>,
     ) -> Result<PlanCompression> {
         // Of the error as it is, before it is caught, of which the listener logs only one of an
         // `Exception`. The error of the log has the error that it logs as its context, as the log
@@ -3112,8 +3320,8 @@ impl SparkConnectClient {
             crate::retries::raised_in_handling(raised, crate::retries::Handled::Error(&error))
         });
         if let Some(error) = crate::retries::caught(error) {
-            if let Some(read) = read {
-                self.keep_plan_compression(read);
+            if let Some((read, settings)) = read {
+                self.keep_plan_compression_of(read, settings);
             }
             return Err(error);
         }
@@ -3240,7 +3448,7 @@ impl SparkConnectClient {
             Box::pin(log_execution_call(&request, log)).await?;
         }
         self.fill_client_type(&mut request.client_type)?;
-        add_result_chunking_option(&mut request, self.result_chunking);
+        add_result_chunking_option(&mut request, self.call_result_chunking());
         self.session_on(&mut request.session_id);
         // The caller has extended the user context with the extensions of its thread.
         self.fill_user_context(&mut request.user_context);
@@ -3419,7 +3627,7 @@ impl SparkConnectClient {
             .max_decoding_message_size(GRPC_MAX_MESSAGE_LENGTH_DEFAULT)
             .max_encoding_message_size(GRPC_MAX_MESSAGE_LENGTH_DEFAULT);
         wait_ready(&mut grpc).await?;
-        let deadline = self.rpc_deadlines.analyze_plan;
+        let deadline = self.call_rpc_deadlines().analyze_plan;
         let mut req = with_deadline(Request::new(request), deadline);
         self._attach_metadata(&mut req);
         let path = tonic::codegen::http::uri::PathAndQuery::from_static(
@@ -3488,7 +3696,7 @@ impl SparkConnectClient {
         self.fill_user_context(&mut request.user_context);
         let response = self
             .with_retry(|| {
-                let deadline = self.rpc_deadlines.analyze_plan;
+                let deadline = self.call_rpc_deadlines().analyze_plan;
                 let mut request = clone_on_grown_stack(&request);
                 self.observe_on(&mut request.client_observed_server_side_session_id);
                 let mut req = with_deadline(Request::new(request), deadline);
@@ -3827,7 +4035,7 @@ impl SparkConnectClient {
     pub fn spawn_execute_plan_reattachable(&self, mut request: ExecutePlanRequest) {
         self.extend_user_context(&mut request.user_context);
         self.add_call_stack(&mut request.user_context);
-        let client = self.clone();
+        let client = self.of_call_settings();
         drop(crate::runtime::get_runtime().spawn(async move {
             if let Ok(mut stream) = client
                 .execute_plan_reattachable_in_context(
@@ -3888,7 +4096,7 @@ impl SparkConnectClient {
         );
         // As PySpark's: an execution that is not reattachable has no deadline, which would end it.
         let deadline = if reattachable {
-            self.rpc_deadlines.reattachable_execute_plan
+            self.call_rpc_deadlines().reattachable_execute_plan
         } else {
             None
         };
@@ -3980,7 +4188,7 @@ impl SparkConnectClient {
             metadata: execution_metadata
                 .and_then(std::result::Result::ok)
                 .unwrap_or_else(|| self.execution_metadata()),
-            client: self.clone(),
+            client: self.of_call_settings(),
             log,
             reattachable,
             first_response_retries: Some(first_response_retries),
@@ -4011,7 +4219,7 @@ impl SparkConnectClient {
         self.extend_user_context(&mut request.user_context);
         self.fill_user_context(&mut request.user_context);
         self.observe_on(&mut request.client_observed_server_side_session_id);
-        let deadline = self.rpc_deadlines.fetch_error_details;
+        let deadline = self.call_rpc_deadlines().fetch_error_details;
         let mut req = with_deadline(Request::new(request), deadline);
         self._attach_metadata(&mut req);
         let resp = within_deadline(deadline, self.stub().fetch_error_details(req)).await;
@@ -4222,7 +4430,7 @@ impl SparkConnectClient {
         // As `_fetch_enriched_error`, whose request carries the user context extensions.
         self.extend_user_context(&mut request.user_context);
         self.observe_on(&mut request.client_observed_server_side_session_id);
-        let deadline = self.rpc_deadlines.fetch_error_details;
+        let deadline = self.call_rpc_deadlines().fetch_error_details;
         let mut req = with_deadline(Request::new(request), deadline);
         self._attach_metadata(&mut req);
         // Not sent once a signal interrupted the wait of the caller, which raises the exception of
@@ -4304,7 +4512,7 @@ impl SparkConnectClient {
         // that a signal handler raises while the config is read, unless it is a `BaseException`
         // only: the config is then not read (see `runtime::catching`).
         let Some(attempts) = crate::runtime::catching(self.retried(&mut retries, || {
-            let deadline = self.rpc_deadlines.config;
+            let deadline = self.call_rpc_deadlines().config;
             let mut req = with_deadline(Request::new(request.clone()), deadline);
             self._attach_metadata(&mut req);
             let mut stub = self.stub();
@@ -4363,7 +4571,7 @@ impl SparkConnectClient {
         self.fill_user_context(&mut request.user_context);
         let response = self
             .with_retry(|| {
-                let deadline = self.rpc_deadlines.config;
+                let deadline = self.call_rpc_deadlines().config;
                 let mut request = request.clone();
                 self.observe_on(&mut request.client_observed_server_side_session_id);
                 let mut req = with_deadline(Request::new(request), deadline);
@@ -4391,7 +4599,7 @@ impl SparkConnectClient {
         self.fill_user_context(&mut request.user_context);
         let response = self
             .with_retry(|| {
-                let deadline = self.rpc_deadlines.interrupt;
+                let deadline = self.call_rpc_deadlines().interrupt;
                 let mut request = request.clone();
                 self.observe_on(&mut request.client_observed_server_side_session_id);
                 let mut req = with_deadline(Request::new(request), deadline);
@@ -4738,7 +4946,7 @@ impl SparkConnectClient {
         // server for it, of the Rust client too.
         let response = self
             .with_retry_left_to_grpc(LeftToGrpc::AsItIs, || {
-                let deadline = self.rpc_deadlines.clone_session;
+                let deadline = self.call_rpc_deadlines().clone_session;
                 let mut req = with_deadline(Request::new(request.clone()), deadline);
                 self._attach_metadata(&mut req);
                 let mut stub = self.stub();
@@ -4790,7 +4998,7 @@ impl SparkConnectClient {
 
         let response = self
             .with_retry(|| {
-                let deadline = self.rpc_deadlines.release_session;
+                let deadline = self.call_rpc_deadlines().release_session;
                 let mut req = with_deadline(Request::new(request.clone()), deadline);
                 self._attach_metadata(&mut req);
                 let mut stub = self.stub();
@@ -4827,7 +5035,7 @@ impl SparkConnectClient {
         }
         let response = self
             .with_retry(|| {
-                let deadline = self.rpc_deadlines.get_status;
+                let deadline = self.call_rpc_deadlines().get_status;
                 let mut req = with_deadline(Request::new(request.clone()), deadline);
                 self._attach_metadata(&mut req);
                 let mut stub = self.stub();
@@ -5475,7 +5683,7 @@ impl SparkConnectClient {
         if self.is_closed() || self.channel_is_closed() {
             return;
         }
-        add_result_chunking_option(&mut request, self.result_chunking);
+        add_result_chunking_option(&mut request, self.call_result_chunking());
         self.extend_user_context(&mut request.user_context);
         self.add_call_stack(&mut request.user_context);
         self.fill_user_context(&mut request.user_context);
@@ -7692,6 +7900,116 @@ mod tests {
         assert!(client.is_closed() && client.ensure_channel_open().is_ok());
         client.reopen();
         assert!(client.ensure_open().is_ok());
+    }
+
+    #[test]
+    fn the_call_settings_of_a_thread_are_its_own_and_its_executions_keep_them() {
+        // As the `_rpc_deadlines`, `_allow_arrow_batch_chunking` and `_preferred_arrow_chunk_size`
+        // of the client that a thread of the binding calls: its calls read those that it was
+        // given, a request context given afterwards keeps them, a clone made for a call keeps them
+        // for the requests that it sends from other threads, a thread of no request context of
+        // the binding, as one of the transport that sends the requests of a call, takes those that
+        // a thread was given last, and None gives the thread the client's again.
+        let client = connect_blocking("sc://localhost/;user_id=alice");
+        let own = client.rpc_deadlines().clone();
+        let deadlines = RpcDeadlines {
+            analyze_plan: Some(Duration::from_secs(7)),
+            ..RpcDeadlines::disabled()
+        };
+        let chunking = ResultChunking {
+            allow_arrow_batch_chunking: false,
+            preferred_arrow_chunk_size: Some(4096),
+        };
+        // Of a thread of no request context: one of the client's session ID and user.
+        client.set_thread_call_settings(Some(deadlines.clone()), Some(chunking));
+        assert_eq!(client.call_rpc_deadlines(), deadlines);
+        assert_eq!(client.call_result_chunking(), chunking);
+        assert_eq!(client.client_session_id(), client.session_id());
+        assert_eq!(client.request_user_id().as_deref(), Some("alice"));
+        client.set_thread_request_context("thread-session".to_string(), None, vec![]);
+        assert_eq!(client.call_rpc_deadlines(), deadlines);
+        assert_eq!(client.client_session_id(), "thread-session");
+        let of_call = client.of_call_settings();
+        let other = client.clone();
+        let seen = std::thread::spawn(move || {
+            (
+                other.call_rpc_deadlines(),
+                other.call_result_chunking(),
+                of_call.call_rpc_deadlines(),
+                of_call.call_result_chunking(),
+            )
+        })
+        .join()
+        .unwrap();
+        assert_eq!(
+            seen,
+            (deadlines.clone(), chunking, deadlines.clone(), chunking)
+        );
+        // A call that ran during the call of the thread gives it its settings back.
+        let kept = client.thread_request_state();
+        client.set_thread_call_settings(None, None);
+        assert_eq!(client.call_rpc_deadlines(), own);
+        assert_eq!(client.call_result_chunking(), ResultChunking::default());
+        let other = client.clone();
+        let seen =
+            std::thread::spawn(move || (other.call_rpc_deadlines(), other.call_result_chunking()))
+                .join()
+                .unwrap();
+        assert_eq!(seen, (own.clone(), ResultChunking::default()));
+        client.restore_thread_request_state(kept);
+        assert_eq!(client.call_result_chunking(), chunking);
+        assert_eq!(client.call_rpc_deadlines(), deadlines);
+    }
+
+    #[test]
+    fn the_plan_compression_settings_are_those_of_pyspark_s_client() {
+        // As PySpark's `_plan_compression_threshold` and `_plan_compression_algorithm`: none
+        // before the lookup; those of a failed lookup and of `CANNOT_PARSE`, -1 and `NONE`; and
+        // those of a binding, of which the plans of more bytes than a threshold that is not
+        // negative are compressed of the algorithm `ZSTD`, none of another, and of no algorithm
+        // the settings are looked up again.
+        let client = connect_blocking("sc://localhost/");
+        assert_eq!(client.plan_compression_settings(), None);
+        assert_eq!(client.known_plan_compression(), None);
+        client.keep_plan_compression(PlanCompression::Disabled);
+        assert_eq!(
+            client.plan_compression_settings(),
+            Some(PlanCompressionSettings {
+                threshold: -1,
+                algorithm: Some("NONE".to_string()),
+            })
+        );
+        let settings = |threshold, algorithm: Option<&str>| PlanCompressionSettings {
+            threshold,
+            algorithm: algorithm.map(str::to_string),
+        };
+        for (threshold, algorithm, known) in [
+            (100, Some("ZSTD"), Some(Some(100))),
+            (0, Some("ZSTD"), Some(Some(0))),
+            (-1, Some("ZSTD"), Some(None)),
+            (100, Some("LZ4"), Some(None)),
+            (100, Some("NONE"), Some(None)),
+            (100, None, None),
+        ] {
+            client.set_plan_compression_settings(Some(settings(threshold, algorithm)));
+            assert_eq!(
+                client.known_plan_compression(),
+                known,
+                "{threshold} {algorithm:?}"
+            );
+            assert_eq!(
+                client.clone().plan_compression_settings(),
+                Some(settings(threshold, algorithm))
+            );
+        }
+        client.set_plan_compression_settings(None);
+        assert_eq!(client.known_plan_compression(), None);
+        assert_eq!(client.plan_compression_settings(), None);
+        client.keep_plan_compression(PlanCompression::Zstd { threshold: 9 });
+        assert_eq!(
+            client.plan_compression_settings(),
+            Some(settings(9, Some("ZSTD")))
+        );
     }
 
     #[test]

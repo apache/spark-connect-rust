@@ -1133,6 +1133,126 @@ pub(crate) fn rpc_deadlines(deadlines: &Bound<'_, PyDict>) -> PyResult<RpcDeadli
     })
 }
 
+/// The bool of `value` that a bool field of protobuf's default backend (upb) takes, as PySpark's
+/// request of an execution sets its `allow_arrow_batch_chunking`: a bool or an int as it is, and
+/// upb's `TypeError` of any other object.
+pub(crate) fn proto_bool(value: &Bound<'_, PyAny>) -> PyResult<bool> {
+    if let Ok(value) = value.extract::<bool>() {
+        return Ok(value);
+    }
+    if value.is_instance_of::<pyo3::types::PyInt>() {
+        return value.is_truthy();
+    }
+    Err(pyo3::exceptions::PyTypeError::new_err(format!(
+        "bad argument type for built-in operation: {}",
+        value.get_type().name()?
+    )))
+}
+
+/// Retry the RPCs of `session` that start from now on as PySpark's client of the retry policies
+/// of its `_retry_policies` and the `_max_retry_exception_elapsed_time` of its call settings
+/// (`_call_settings` of `pyspark.sql.connect.client.core`): of the parameters `native` that the
+/// transport retries with, of the policies of PySpark's own classes as they are now, else of
+/// PySpark's `Retrying` of `decider`, the policies of the client, which it asks of each failed
+/// RPC, as PySpark's `_retrying()` is of them, and of the bound `elapsed` of the retries of a
+/// `RetryException`, in seconds, or None without one.
+pub(crate) fn apply_retries(
+    py: Python<'_>,
+    session: &SparkSession,
+    native: Option<&Bound<'_, PyDict>>,
+    decider: Option<Bound<'_, PyAny>>,
+    elapsed: Option<f64>,
+) -> PyResult<()> {
+    let parameters = retry_policy(py, session)?;
+    parameters.set_item("max_retry_exception_elapsed_time", elapsed)?;
+    if let Some(native) = native {
+        parameters.update(native.as_mapping())?;
+    }
+    let of = |name: &str| -> PyResult<Bound<'_, PyAny>> {
+        parameters
+            .get_item(name)?
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(name.to_string()))
+    };
+    set_retry_policy(
+        session,
+        RetryParameters {
+            max_retries: of("max_retries")?.extract()?,
+            initial_backoff: of("initial_backoff")?.extract()?,
+            max_backoff: of("max_backoff")?.extract()?,
+            backoff_multiplier: of("backoff_multiplier")?.extract()?,
+            jitter: of("jitter")?.extract()?,
+            min_jitter_threshold: of("min_jitter_threshold")?.extract()?,
+            recognize_server_retry_delay: of("recognize_server_retry_delay")?.extract()?,
+            max_server_retry_delay: of("max_server_retry_delay")?.extract()?,
+            max_retry_exception_elapsed_time: of("max_retry_exception_elapsed_time")?.extract()?,
+            retries_failures: of("retries_failures")?.extract()?,
+        },
+    );
+    let decider = match decider {
+        Some(policies) => Some(match policies.cast_into::<PyList>() {
+            Ok(list) => list,
+            // As PySpark's `Retrying`, which iterates any iterable of policies.
+            Err(other) => PyList::new(
+                py,
+                other
+                    .into_inner()
+                    .try_iter()?
+                    .collect::<PyResult<Vec<_>>>()?,
+            )?,
+        }),
+        None => None,
+    };
+    set_retry_decider(session, decider);
+    Ok(())
+}
+
+/// The plan compression of the `_plan_compression_threshold` `threshold` and the
+/// `_plan_compression_algorithm` `algorithm` of a client, as PySpark's client compresses its plans
+/// of them: None while either is None, which the next plan looks up, as PySpark's does; else of
+/// the threshold, an int or a float, as PySpark compares it with the size of a plan, and the
+/// algorithm, of a str, which compresses of `ZSTD`, and of another object, which compresses of
+/// none, as PySpark compares it with "ZSTD". A threshold of another object compresses no plan.
+pub(crate) fn plan_compression_settings(
+    threshold: &Bound<'_, PyAny>,
+    algorithm: &Bound<'_, PyAny>,
+) -> PyResult<Option<spark_connect_core::client::PlanCompressionSettings>> {
+    if threshold.is_none() || algorithm.is_none() {
+        return Ok(None);
+    }
+    let threshold = match threshold.extract::<i64>() {
+        Ok(threshold) => i128::from(threshold),
+        // Of an int past 64 bits, as PySpark compares it with the size of the plan.
+        Err(_) if threshold.is_instance_of::<pyo3::types::PyInt>() => {
+            if threshold.lt(0)? {
+                i128::MIN
+            } else {
+                i128::MAX
+            }
+        }
+        // Of a float, the int of the same comparisons with the size of a plan, an int, of
+        // PySpark's `threshold >= 0` and `original_size > threshold`: none of a NaN or a
+        // negative one, and every size under an infinite one (`as` saturates).
+        Err(_) if threshold.is_instance_of::<pyo3::types::PyFloat>() => {
+            let threshold: f64 = threshold.extract()?;
+            if threshold >= 0.0 {
+                threshold.floor() as i128
+            } else {
+                -1
+            }
+        }
+        // Of another object, no compression (see "The attributes of `SparkConnectClient`" of
+        // dev/parity/known-differences.md).
+        Err(_) => -1,
+    };
+    // Of a value that is not a str, whose plans are sent as they are, as of one that is not
+    // "ZSTD".
+    let algorithm: String = algorithm.extract().unwrap_or_default();
+    Ok(Some(spark_connect_core::client::PlanCompressionSettings {
+        threshold,
+        algorithm: Some(algorithm),
+    }))
+}
+
 /// The result chunking of the executions of a client of `allow_arrow_batch_chunking` and
 /// `preferred_arrow_chunk_size`, as PySpark's `SparkConnectClient` takes them.
 pub(crate) fn result_chunking(

@@ -858,6 +858,68 @@ def test_server_session_id_is_observed_and_a_changed_one_closes_the_session_as_p
         session.stop()
 
 
+def test_the_attributes_of_a_client_are_its_dict_read_at_each_request_as_pyspark():
+    # As PySpark's SparkConnectClient, a plain object: its state is the dict of its attributes, of
+    # PySpark's names and order, but for the objects of grpcio and of its Python plan compression,
+    # which the native transport replaces; its requests read them when they are built, so a change
+    # of its session hooks, of whether its executions are reattachable, of its plan compression
+    # and of its progress handlers applies to the next request; and a copy of it has its own
+    # `_closed`, which its `close()` sets, of the channel that it shares with its client, which
+    # stays open, of the ValueError of a closed channel.
+    import copy
+
+    from pyspark.errors.exceptions.connect import SparkConnectException
+
+    remote = os.environ.get("SPARK_REMOTE")
+    if not remote:
+        pytest.skip("SPARK_REMOTE is required for live-server tests")
+    spark = SparkSession.builder.remote(remote).create()
+    try:
+        client = spark.client
+        assert spark.range(3).count() == 3
+        inherent = {"_channel", "_internal_stub", "_artifact_manager", "_release_futures",
+                    "_zstd_module"}
+        assert [name for name in vars(client) if name not in inherent] == [
+            "thread_local", "_builder", "_user_id", "_retry_policies",
+            "_max_retry_exception_elapsed_time", "_session_id", "_closed", "_rpc_deadlines",
+            "_use_reattachable_execute", "_allow_arrow_batch_chunking",
+            "_preferred_arrow_chunk_size", "_session_hooks", "_server_session_id",
+            "_profiler_collector", "_progress_handlers", "_plan_compression_threshold",
+            "_plan_compression_algorithm", "_release_session_on_exit",
+            "global_user_context_extensions", "global_user_context_extensions_lock",
+        ]
+        seen = []
+
+        class Hook:
+            def on_execute_plan(self, request):
+                seen.append(request.operation_id)
+                return request
+
+        client._session_hooks.append(Hook())
+        client._use_reattachable_execute = False
+        client._plan_compression_threshold, client._plan_compression_algorithm = 0, "ZSTD"
+        assert spark.range(3).collect() == [Row(id=0), Row(id=1), Row(id=2)]
+        assert len(seen) == 1
+        client._session_hooks = []
+        client._use_reattachable_execute = True
+        calls = []
+        client._progress_handlers.append(lambda **kwargs: calls.append(kwargs["done"]))
+        assert spark.range(0, 8, 1, 4).selectExpr("sum(id) AS s").collect() == [Row(s=28)]
+        assert calls and calls[-1] is True and len(seen) == 1
+
+        copied = copy.copy(client)
+        copied.close()
+        assert copied.is_closed and not client.is_closed and not spark.is_stopped
+        with pytest.raises(ValueError, match="^Cannot invoke RPC on closed channel!$"):
+            client.get_configs("spark.sql.shuffle.partitions")
+        with pytest.raises(SparkConnectException) as error:
+            copied.get_configs("spark.sql.shuffle.partitions")
+        assert error.value.getCondition() == "NO_ACTIVE_SESSION"
+    finally:
+        spark.release_session_on_close = False
+        spark.stop()
+
+
 def test_udtfs_and_udfs_of_a_dataframe_or_the_session_raise_no_active_session_as_pyspark(session):
     # As PySpark Connect's: a UDTF or a UDF that captures a DataFrame or the session pickles it
     # of its session, which raises NO_ACTIVE_SESSION on the Python worker of the server, where

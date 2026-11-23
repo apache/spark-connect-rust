@@ -593,6 +593,114 @@ pub(crate) struct Refreshed {
     /// reset once the call ended, so that the calls that the call makes meanwhile, as of a
     /// progress handler or a finalizer, are of the state of the session.
     copy_token: Option<Py<PyAny>>,
+    /// What the session had of the settings of the client as the call started, which the call
+    /// writes back into the attributes of the client when it changed them (see [`CallSnapshot`]).
+    snapshot: Option<CallSnapshot>,
+}
+
+/// The closed flag, the server-side session ID and the plan compression of a session as a call
+/// started, once the session was given the attributes of its client (see [`apply_call_settings`]):
+/// what PySpark's client changes of its own attributes as its requests go, its `_closed` when the
+/// server says that the session changed, its `_server_session_id` of its first response, and its
+/// `_plan_compression_threshold` and `_plan_compression_algorithm` of their lookup, which the
+/// call writes back into the attributes when it changed them (see [`after_call`]).
+#[derive(Clone, PartialEq)]
+pub(crate) struct CallSnapshot {
+    closed: bool,
+    server_session_id: Option<String>,
+    compression: Option<spark_connect_core::client::PlanCompressionSettings>,
+}
+
+impl CallSnapshot {
+    fn of(session: &SparkSession) -> Self {
+        CallSnapshot {
+            closed: session.is_stopped(),
+            server_session_id: session.server_session_id(),
+            compression: session.plan_compression_settings(),
+        }
+    }
+}
+
+/// The settings of a client of `_call_settings` of `pyspark.sql.connect.client.core`: of the
+/// closed flag, the server-side session ID, the retries and the plan compression, the value and
+/// whether the session has another, and the deadlines, the result chunking, the reattachability,
+/// the session hooks and the number of the progress handlers, which the call takes as they are.
+type CallSettings<'py> = (
+    (bool, bool),
+    (Option<String>, bool),
+    Bound<'py, PyDict>,
+    (Bound<'py, PyAny>, Bound<'py, PyAny>),
+    bool,
+    (
+        (
+            Option<Bound<'py, PyDict>>,
+            Option<Bound<'py, PyAny>>,
+            Option<f64>,
+        ),
+        bool,
+    ),
+    ((Bound<'py, PyAny>, Bound<'py, PyAny>), bool),
+    Bound<'py, PyAny>,
+    usize,
+);
+
+/// Give `session` the settings of its client of `settings` (see [`CallSettings`]), as PySpark's
+/// requests read the attributes of their client when they are sent: the closed flag, the
+/// server-side session ID, the retries and the plan compression where the session has others, the
+/// deadlines of the RPCs and the result chunking of the executions of the calling thread, the
+/// reattachability of the executions, the session hooks of the executions of the call and the
+/// number of the progress handlers. What the session then has of what its calls change is the
+/// snapshot that the call writes back from (see [`CallSnapshot`]).
+fn apply_call_settings(
+    py: Python<'_>,
+    session: &SparkSession,
+    settings: &Bound<'_, PyAny>,
+    of_the_session: bool,
+) -> PyResult<CallSnapshot> {
+    let (
+        (closed, closed_changed),
+        (server_session_id, server_session_id_changed),
+        deadlines,
+        (allow_chunking, preferred_chunk_size),
+        reattachable,
+        ((native, decider, elapsed), retry_changed),
+        ((threshold, algorithm), compression_changed),
+        hooks,
+        handlers,
+    ): CallSettings<'_> = settings.extract()?;
+    // As the fields of PySpark's `ResultChunkingOptions`, a bool and an optional int.
+    let chunking = crate::client::result_chunking(
+        crate::client::proto_bool(&allow_chunking)?,
+        if preferred_chunk_size.is_none() {
+            None
+        } else {
+            Some(preferred_chunk_size.extract::<i64>()?)
+        },
+    );
+    let deadlines = crate::client::rpc_deadlines(&deadlines)?;
+    if closed_changed {
+        if closed {
+            session.mark_closed();
+        } else {
+            session.reopen();
+        }
+    }
+    if server_session_id_changed {
+        session.set_server_session_id(server_session_id);
+    }
+    session.set_thread_call_settings(Some(deadlines), Some(chunking));
+    session.set_reattachable_execute(reattachable);
+    if retry_changed {
+        crate::client::apply_retries(py, session, native.as_ref(), decider, elapsed)?;
+    }
+    if compression_changed {
+        session.set_plan_compression_settings(crate::client::plan_compression_settings(
+            &threshold, &algorithm,
+        )?);
+    }
+    crate::session::set_call_hooks(session, &hooks, of_the_session);
+    crate::progress::set_handler_count(py, session, handlers);
+    Ok(CallSnapshot::of(session))
 }
 
 /// Bring the request context of `session` up to date before a call sends its requests, on the
@@ -617,7 +725,7 @@ pub(crate) fn refresh_request_context(
     let Some(refresher) = session.user_context_refresher() else {
         return Ok(Refreshed::default());
     };
-    let Some(refresh) = refresher.downcast_ref::<Py<PyAny>>() else {
+    let Some(refresh) = crate::state::refresh_of(refresher.as_ref()) else {
         return Ok(Refreshed::default());
     };
     let Some(mode) = context.mode() else {
@@ -627,11 +735,17 @@ pub(crate) fn refresh_request_context(
         return Ok(Refreshed {
             without_tags: false,
             copy_token: (!copy_token.is_none()).then(|| copy_token.unbind()),
+            snapshot: None,
         });
     };
     let refreshed = refresh.bind(py).call1((mode,))?;
-    let (session_id, user_id, global, own, tags, copy_token, of_the_session): RefreshedContext<'_> =
+    let (session_id, user_id, global, own, tags, copy_token, of_the_session, settings): RefreshedContext<'_> =
         refreshed.extract()?;
+    let snapshot = if settings.is_none() {
+        None
+    } else {
+        Some(apply_call_settings(py, session, &settings, of_the_session)?)
+    };
     let unchanged = |value: &Bound<'_, PyAny>| value.is(py.Ellipsis().bind(py));
     let session_id = if unchanged(&session_id) {
         session.client_session_id()
@@ -669,6 +783,7 @@ pub(crate) fn refresh_request_context(
         return Ok(Refreshed {
             without_tags: false,
             copy_token,
+            snapshot,
         });
     }
     let without_tags = tags.is_none();
@@ -683,6 +798,7 @@ pub(crate) fn refresh_request_context(
         without_tags: without_tags && context == RequestContext::Full
             || without_tags && context == RequestContext::Finalizer,
         copy_token,
+        snapshot,
     })
 }
 
@@ -700,6 +816,7 @@ type RefreshedContext<'py> = (
     Bound<'py, PyAny>,
     Bound<'py, PyAny>,
     bool,
+    Bound<'py, PyAny>,
 );
 
 /// What PySpark's client leaves in the `thread_local` of the calling thread once a call ended:
@@ -712,15 +829,53 @@ fn after_call(
     read_tags: bool,
     handled_error: bool,
     copy_token: Option<Py<PyAny>>,
+    snapshot: Option<CallSnapshot>,
 ) -> PyResult<()> {
-    if !read_tags && !handled_error && copy_token.is_none() {
+    // What the call changed of the settings of the client that the session keeps (see
+    // `CallSnapshot`), of each `...` when it changed none.
+    let written = snapshot
+        .map(|before| (CallSnapshot::of(session), before))
+        .filter(|(after, before)| after != before)
+        .map(|(after, before)| -> PyResult<Py<PyAny>> {
+            let ellipsis = || py.Ellipsis().into_bound(py);
+            let closed = if after.closed != before.closed {
+                pyo3::types::PyBool::new(py, after.closed)
+                    .to_owned()
+                    .into_any()
+            } else {
+                ellipsis()
+            };
+            let server_session_id = if after.server_session_id != before.server_session_id {
+                after.server_session_id.into_pyobject(py)?.into_any()
+            } else {
+                ellipsis()
+            };
+            let compression = if after.compression != before.compression {
+                match after.compression {
+                    Some(settings) => (settings.threshold, settings.algorithm)
+                        .into_pyobject(py)?
+                        .into_any(),
+                    None => py.None().into_bound(py),
+                }
+            } else {
+                ellipsis()
+            };
+            Ok(
+                pyo3::types::PyTuple::new(py, [closed, server_session_id, compression])?
+                    .into_any()
+                    .unbind(),
+            )
+        })
+        .transpose()?;
+    if !read_tags && !handled_error && copy_token.is_none() && written.is_none() {
         return Ok(());
     }
     if let Some(refresher) = session.user_context_refresher() {
-        if let Some(refresh) = refresher.downcast_ref::<Py<PyAny>>() {
-            refresh
-                .bind(py)
-                .call_method1("_after_call", (read_tags, handled_error, copy_token))?;
+        if let Some(refresh) = crate::state::refresh_of(refresher.as_ref()) {
+            refresh.bind(py).call_method1(
+                "_after_call",
+                (read_tags, handled_error, copy_token, written),
+            )?;
         }
     }
     Ok(())
@@ -790,6 +945,7 @@ fn read_for_finalizer_request(py: Python<'_>, session: &SparkSession) -> PyResul
         refreshed.without_tags,
         false,
         refreshed.copy_token,
+        refreshed.snapshot,
     ) {
         Err(error) if !error.is_instance_of::<pyo3::exceptions::PyException>(py) => Err(error),
         _ => started,
@@ -1078,6 +1234,33 @@ fn take_raised_of_waiting_call(session: &SparkSession) -> Option<PyErr> {
 }
 
 /// Whether `call` is a call of the session whose refresher is `refresher`.
+/// The attributes of the copy of a client whose method makes the nearest call of `session` that
+/// runs on the calling thread, the `__dict__` of the copy (see `_COPY_CALL` of
+/// `pyspark.sql.connect.client.core`), else None, of a call of the client of the session: as the
+/// execution of PySpark's copy reads the `_progress_handlers` and the `_profiler_collector` of the
+/// copy. The callbacks of an execution, its progress and its Python accumulators, run on the
+/// thread of its call.
+pub(crate) fn calling_copy_state<'py>(
+    py: Python<'py>,
+    session: &SparkSession,
+) -> Option<Bound<'py, PyDict>> {
+    let refresher = session.user_context_refresher()?;
+    let token = CALLS.with(|calls| {
+        let calls = calls.try_borrow().ok()?;
+        let call = calls.iter().rev().find(|call| is_of(call, &refresher))?;
+        call.copy_token.as_ref().map(|token| token.clone_ref(py))
+    })?;
+    // The value of the contextvar before the call held it: the refresher and the attributes of
+    // the copy.
+    let copy = token
+        .bind(py)
+        .getattr(pyo3::intern!(py, "old_value"))
+        .ok()?
+        .get_item(1)
+        .ok()?;
+    copy.cast_into::<PyDict>().ok()
+}
+
 fn is_of(call: &CallOfThread, refresher: &Arc<dyn std::any::Any + Send + Sync>) -> bool {
     call.refresher
         .as_ref()
@@ -1234,7 +1417,7 @@ fn reread_nearest_call(
         return Ok(());
     };
     let strict = read == ReadOf::Requests && context.handles_errors();
-    let Some(refresh) = refresher.downcast_ref::<Py<PyAny>>() else {
+    let Some(refresh) = crate::state::refresh_of(refresher.as_ref()) else {
         return Ok(());
     };
     let reread = || -> PyResult<()> {
@@ -1424,7 +1607,7 @@ pub(crate) fn interrupt_for_handler(
     let refresher = session.user_context_refresher();
     let refresh = refresher
         .as_ref()
-        .and_then(|refresher| refresher.downcast_ref::<Py<PyAny>>());
+        .and_then(|refresher| crate::state::refresh_of(refresher.as_ref()));
     let token = refresher.as_ref().and_then(|refresher| {
         CALLS.with(|calls| {
             let calls = calls.try_borrow().ok()?;
@@ -1515,7 +1698,14 @@ fn run_interruptible<T: Send, E: Send + Into<Box<SparkError>>>(
     let read_tags = refreshed.without_tags && session.has_thread_tags();
     let handled_error =
         context.handles_errors() && !inside_error_handling && matches!(outcome, Ok(Err(_)));
-    let after = after_call(py, session, read_tags, handled_error, refreshed.copy_token);
+    let after = after_call(
+        py,
+        session,
+        read_tags,
+        handled_error,
+        refreshed.copy_token,
+        refreshed.snapshot,
+    );
     let mut ended = call.end(py);
     ended.release_failure_errors(match &outcome {
         Ok(Err(failure)) => Some(failure),
