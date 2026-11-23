@@ -3491,10 +3491,10 @@ nothing for a closed client. The drop-in drops such a session, closes its client
 connection of the process to its server once no session uses it, which the sessions of
 `newSession()` and `cloneSession()` share, as PySpark's channels share their subchannels, but a
 session of a token, whose connection is its own. Once its `catalog` or its `streams` is read, the
-session object of either client is in a reference cycle with its catalog, which holds it as its
-`_sparkSession`, or with its `StreamingQueryManager`, which holds it as its `_session`, and which
-only the garbage collector frees, so that until a collection its exit still cleans its ML cache, as
-PySpark's.
+session object of either client is in a reference cycle with its catalog, the `catalog` of its
+`__dict__`, which holds it as its `_sparkSession`, or with its `StreamingQueryManager`, its `_sqm`,
+which holds it as its `_session`, and which only the garbage collector frees, so that until a
+collection its exit still cleans its ML cache, as PySpark's.
 A client that no session object owns, of `SparkConnectClient(...)` or of its `newSession()` or
 `clone()`, lives until the exit, as PySpark's `atexit` registration keeps it, so its ML cache
 is cleaned at exit unless it is closed, even when the program dropped it.
@@ -4009,6 +4009,31 @@ subclass of the class changes what `create` reads, a builder whose `__init__` ne
 builder are those of its `__dict__`: a shallow copy shares the dict of its options and the list of
 its hook factories, and a deep copy and a pickle copy them.
 
+The `SparkSession` of `pyspark.sql.connect.session` keeps its state in its `__dict__`, as PySpark's:
+its `__init__`, and the builder, `newSession()` and `cloneSession()` of the session that they make,
+set its `_client`, the `SparkConnectClient` of the session that `spark.client` gives, its
+`_session_id`, the `_session_id` of the client, and its `release_session_on_close`, True. `streams`
+keeps its `StreamingQueryManager` as its `_sqm`, unless the session has one, and `catalog` and
+`version` are `functools.cached_property`s of PySpark's functions, whose first access keeps the
+value in the `__dict__`, which the next ones read: `version` asks the server once. The methods of
+the session read its state at the call, as PySpark's: `client` is the `_client`, `session_id` the
+`_session_id`, of which the session pickles, `stop` releases the session unless
+`release_session_on_close` is false, `is_stopped` is the `is_closed` of its `client`, and the
+requests of the session, of its catalog, of its streams and of its `conf` are of its `_client`, or
+of its `client` where PySpark reads that: of the session itself while that is its own client, and of
+the session of another `SparkConnectClient` of the drop-in that is assigned to it, such as the
+client of another session. So `vars(spark)` is PySpark's, `_client`, `_session_id` and
+`release_session_on_close`, and then `_sqm`, `catalog` and `version` in the order that they are
+read; a session whose `__init__` never ran, as of a subclass whose `__init__` does not call it,
+raises the `AttributeError` of its `_client` at its first use, as PySpark's; and a session whose
+catalog or streams were read is in a reference cycle with them, as PySpark's, which a collection of
+the garbage collector frees (see `dev/parity/known-differences.md`). What differs is of the native
+transport: a client of another class raises a `TypeError` of the requests of the session, where
+PySpark's calls the methods of that client, though its `conf` calls the `config` of the client and
+`is_stopped` reads its `is_closed`; and the DataFrames of `range`, `sql` and `createDataFrame` are
+of the session of the client at the call, which they hold natively, where PySpark's DataFrame reads
+the client of its session at each request (until SPARK-62218).
+
 The catalog, the table-valued functions, the data source registration and the runtime
 configuration of a session keep their state in their `__dict__`, as PySpark's: their `__init__`
 sets the object that it is given, whatever it is, as their `_sparkSession` (`sparkSession` of a
@@ -4075,25 +4100,23 @@ of grouped data makes, a value of the core, of the state at the call: a later ch
 of the state, such as `gd._grouping_cols.clear()` after `agg = gd.count()`, is not of `agg`, where
 PySpark's plan holds the list and builds its message of it at each request.
 
-The `__init__` of a session or a reader gives it its session, as PySpark's `__init__` sets it: the
-session of a new client, of `SparkSession(connection, userId=None, hook_factories=None)`, and the
-session of its argument for a reader, which must be a session, where PySpark's keeps any object
-until it is used, which raises its `AttributeError` then. Until it runs, as for a subclass whose
-`__init__` does not call it, a session or a reader is of a session of no server, whose requests
-raise `NO_ACTIVE_SESSION`, where PySpark's raise the `AttributeError` of the first attribute that
-the method reads: `_client` of a session, and `_options`, `_schema` or `_format` of a reader (a
-reader is of the first session among the arguments of a subclass, if any, which then works). So a
-pickle of PySpark, which makes an object of its class without arguments and then sets its
-`__dict__`, loads in the drop-in: a reader, of the `_client`, `_format`, `_schema` and `_options`
-(and `_source_name`) of its state, which it sets as its setters do, a catalog of its `_sparkSession`
-and a registration of its `sparkSession`; and the drop-in's pickles of them load in PySpark, of
-their classes, as PySpark's own do: where the session of their ID is active. The other native
-classes, of which the Connect `Column`, `WindowSpec` and `TableArg` are, cannot be subclassed
-(`TypeError: type 'Column' is not an
-acceptable base type`), and do not construct (`TypeError: cannot create '...' instances`): their
-objects are made of the state of the Rust core, a plan, an expression or a query, which the
-arguments of PySpark's constructors, the Python objects of its client, do not give, as the drop-in
-does not have them, so a subclass would have no `__init__` to call:
+The `__init__` of a reader gives it its session, as PySpark's `__init__` sets it: the session of its
+argument, which must be a session, where PySpark's keeps any object until it is used, which raises
+its `AttributeError` then. Until it runs, as for a subclass whose `__init__` does not call it, a
+reader is of a session of no server, whose requests raise `NO_ACTIVE_SESSION`, where PySpark's raise
+the `AttributeError` of the first attribute that the method reads, `_options`, `_schema` or
+`_format` (a reader is of the first session among the arguments of a subclass, if any, which then
+works). So a pickle of PySpark, which makes an object of its class without arguments and then sets
+its `__dict__`, loads in the drop-in: a reader, of the `_client`, `_format`, `_schema` and
+`_options` (and `_source_name`) of its state, which it sets as its setters do, a catalog of its
+`_sparkSession` and a registration of its `sparkSession`; and the drop-in's pickles of them load in
+PySpark, of their classes, as PySpark's own do: where the session of their ID is active. The other
+native classes, of which the Connect `Column`, `WindowSpec` and `TableArg` are, cannot be subclassed
+(`TypeError: type 'Column' is not an acceptable base type`), and do not construct (`TypeError:
+cannot create '...' instances`): their objects are made of the state of the Rust core, a plan, an
+expression or a query, which the arguments of PySpark's constructors, the Python objects of its
+client, do not give, as the drop-in does not have them, so a subclass would have no `__init__` to
+call:
 - `Column` takes an `Expression` of `pyspark.sql.connect.expressions`; the drop-in's expressions
   are the Rust core's.
 - `DataFrameWriter`, `DataFrameWriterV2`, `DataStreamWriter` and `MergeIntoWriter` take the

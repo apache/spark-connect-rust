@@ -8260,3 +8260,32 @@ def test_a_builder_creates_its_session_of_its_dict_as_pysparks(session):
         assert created.range(3).count() == 3
     finally:
         created.stop()
+
+
+def test_a_session_keeps_its_state_in_its_dict_and_requests_of_its_client_as_pysparks(session):
+    # As official PySpark 4.3.0, whose SparkSession keeps its `_client`, its `_session_id` and its
+    # `release_session_on_close` in its __dict__, and then its catalog and its version, cached
+    # properties, and the `_sqm` of its streams, and makes its requests of its client at the call:
+    # of the client of another session that is assigned, its SQL, its catalog and its conf are of
+    # that session, and of its own client given back, of its own again.
+    other = session.newSession()
+    try:
+        assert list(vars(session))[:3] == ["_client", "_session_id", "release_session_on_close"]
+        assert session.client is session._client and session.session_id == session._session_id
+        assert session.version == vars(session)["version"]
+        catalog, streams = session.catalog, session.streams
+        assert vars(session)["catalog"] is catalog and vars(session)["_sqm"] is streams
+        other.range(3).createOrReplaceTempView("dictsub_session_view")
+        other.conf.set("spark.sql.shuffle.partitions", "7")
+        own = session._client
+        session._client = other.client
+        try:
+            assert session.sql("select count(*) from dictsub_session_view").collect()[0][0] == 3
+            assert session.catalog.tableExists("dictsub_session_view")
+            assert session.conf.get("spark.sql.shuffle.partitions") == "7"
+        finally:
+            session._client = own
+        assert not session.catalog.tableExists("dictsub_session_view")
+        assert session.conf.get("spark.sql.shuffle.partitions") != "7"
+    finally:
+        other.stop()

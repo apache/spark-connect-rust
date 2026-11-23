@@ -18,7 +18,8 @@
 #
 # As in PySpark, ``pyspark.sql.SparkSession`` is the classic class (``pyspark.sql.session``, of
 # Apache Spark), whose builder makes a session of this class, which it is not a subclass of.
-from typing import Callable
+import functools
+from typing import TYPE_CHECKING, Callable
 
 from pyspark._pyspark import SparkSession, _install_builder
 from pyspark.errors import PySparkTypeError as _PySparkTypeError
@@ -48,6 +49,9 @@ from pyspark.sql.types import (  # noqa: F401
     TimestampType,
 )
 
+if TYPE_CHECKING:
+    from pyspark.sql.connect.catalog import Catalog
+
 __all__ = ["SparkSession"]
 
 # As PySpark Connect's `SparkSession.builder`, of its class body: PySpark's classproperty, whose
@@ -58,6 +62,30 @@ _builder = _classproperty(lambda cls: cls.Builder())
 _builder.__doc__ = _PySparkSession.builder.__doc__
 _install_builder(_builder)
 del _builder
+
+
+# As PySpark Connect's `catalog` and `version`, `functools.cached_property`s of its class body,
+# with the docstrings of the classic session's: the first access keeps the value in the
+# `__dict__` of the session, which the next ones read, of PySpark's functions.
+def catalog(self: "SparkSession") -> "Catalog":
+    from pyspark.sql.connect.catalog import Catalog
+
+    return Catalog(self)
+
+
+def version(self: "SparkSession") -> str:
+    result = self._client._analyze(method="spark_version").spark_version
+    assert result is not None
+    return result
+
+
+for _function in (catalog, version):
+    _function.__qualname__ = f"SparkSession.{_function.__name__}"
+    _cached = functools.cached_property(_function)
+    _cached.__doc__ = getattr(_PySparkSession, _function.__name__).__doc__
+    _cached.__set_name__(SparkSession, _function.__name__)
+    setattr(SparkSession, _function.__name__, _cached)
+del catalog, version, _function, _cached
 
 
 def _check_schema(schema: object) -> None:

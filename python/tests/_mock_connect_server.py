@@ -567,6 +567,10 @@ def serve(connection):
             # a test sets.
             if 18 in parse_message(request):
                 return message_field(16, message_field(1, self.ddl_string.encode()))
+            # base.proto: AnalyzePlanRequest.spark_version=10; AnalyzePlanResponse.spark_version=8,
+            # SparkVersion.version=1: `spark_version`, which a test may set.
+            if 10 in parse_message(request):
+                return message_field(8, message_field(1, getattr(self, "spark_version", "4.3.0")))
             # base.proto: AnalyzePlanRequest.same_semantics=12 (SameSemantics.target_plan=1,
             # other_plan=2) and semantic_hash=13; AnalyzePlanResponse.same_semantics=10 and
             # semantic_hash=11, of result=1: whether the two plans are the same bytes, and

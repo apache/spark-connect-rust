@@ -20561,7 +20561,7 @@ def test_is_streaming_is_empty_and_input_files_are_asked_once_per_dataframe_as_p
 
 
 @pytest.mark.parametrize("cls,name,descriptor", [
-    (_SS, "version", "getset_descriptor"),
+    (_SS, "version", "cached_property"),
     (_ConnectDF, "dtypes", "getset_descriptor"),
     (_ConnectDF, "executionInfo", "getset_descriptor"),
     (_DF, "dtypes", "property"),
@@ -20569,7 +20569,8 @@ def test_is_streaming_is_empty_and_input_files_are_asked_once_per_dataframe_as_p
 ])
 def test_property_not_method(cls, name, descriptor):
     # PySpark accesses these without parentheses. Concrete Rust getters remain
-    # getset descriptors; the Python public base exposes ordinary properties.
+    # getset descriptors; the Python public base exposes ordinary properties, and the session's
+    # `version` is PySpark Connect's `functools.cached_property`.
     assert type(inspect.getattr_static(cls, name)).__name__ == descriptor
 
 
@@ -30592,8 +30593,9 @@ def test_the_responses_of_every_kind_of_call_nest_within_upbs_limit(mock_connect
 
 def test_responses_take_upbs_limit_of_set_allow_oversize_protos():
     # Once upb's SetAllowOversizeProtos(True) is called, upb's FromString reads messages of up to
-    # 65535 levels, and so does the Rust transport of the responses of each kind of call, also
-    # before pyspark.sql.connect.proto imports; a deeper response raises PySpark's error of it.
+    # 65535 levels, and so does the Rust transport of the responses of each kind of call, of the
+    # limit that pyspark.sql.connect.proto takes of upb as it imports (with the client of the
+    # session, as PySpark's core imports it); a deeper response raises PySpark's error of it.
     # Within that limit, a response whose messages of the fields of the protos (which the client
     # keeps) nest more than 1024 levels raises the client's RecursionError, which protects its
     # stack, as PySpark raises its own when it converts such a schema (from about 650 levels).
@@ -30621,11 +30623,9 @@ def test_responses_take_upbs_limit_of_set_allow_oversize_protos():
 
         out = {}
         with mock_connect_session() as (spark, service):
-            # Of no import of the runtime, the transport asks upb for its limit.
-            assert "pyspark.sql.connect.proto" not in sys.modules
-            service.config_extra = groups(65535)
-            out["conf of 65535 levels, of no runtime"] = outcome(
-                lambda: spark.conf.get("spark.sql.session.timeZone"))
+            # The session makes its client as it is made, as PySpark's `__init__` does, whose
+            # module imports the runtime, as PySpark's core does.
+            assert "pyspark.sql.connect.proto" in sys.modules
             for levels in (101, 65535, 65536):
                 service.config_extra = groups(levels)
                 out[f"conf {levels}"] = outcome(
@@ -30661,7 +30661,6 @@ def test_responses_take_upbs_limit_of_set_allow_oversize_protos():
         """
     )
     assert out == {
-        "conf of 65535 levels, of no runtime": "ok",
         "conf 101": "ok",
         "schema 101": "ok",
         "conf 65535": "ok",
@@ -44942,7 +44941,6 @@ def test_sessions_catalogs_and_registrations_subclass_as_pyspark(mock_connect):
 
     import cloudpickle
     import pyspark.sql.connect.proto as pb2
-    from pyspark.errors.exceptions.connect import SparkConnectException
     from pyspark.sql.connect.catalog import Catalog
     from pyspark.sql.connect.datasource import DataSourceRegistration
     from pyspark.sql.connect.session import SparkSession as ConnectSession
@@ -44982,17 +44980,26 @@ def test_sessions_catalogs_and_registrations_subclass_as_pyspark(mock_connect):
             session.release_session_on_close = False
             session.stop()
 
-    # A session whose __init__ never ran has no client: its requests raise NO_ACTIVE_SESSION, as
-    # those of a stopped session do, where PySpark's raise the AttributeError of its _client.
+    # A session whose __init__ never ran has no client: its `is_stopped`, its requests and its
+    # `stop` raise the AttributeError of its _client, as PySpark's.
     class Unconnected(ConnectSession):
         def __init__(self, tag):
             self.tag = tag
 
     unconnected = Unconnected("u")
-    assert unconnected.is_stopped and unconnected.tag == "u"
-    with pytest.raises(SparkConnectException) as raised:
-        unconnected.range(1).collect()
-    assert raised.value.getCondition() == "NO_ACTIVE_SESSION"
+    assert vars(unconnected) == {"tag": "u"}
+    for use in [
+        lambda: unconnected.is_stopped,
+        lambda: unconnected.range(1).collect(),
+        lambda: unconnected.sql("select 1"),
+        lambda: unconnected.version,
+        lambda: unconnected.catalog.currentDatabase(),
+        lambda: unconnected.newSession(),
+        unconnected.stop,
+    ]:
+        with pytest.raises(AttributeError) as raised:
+            use()
+        assert str(raised.value) == "'Unconnected' object has no attribute '_client'"
 
     class SubCatalog(Catalog):
         def __init__(self, x, session):
@@ -45058,6 +45065,51 @@ class _PathReader(_ConnectReader):
     def __init__(self, path, client):
         super().__init__(client)
         self.path = path
+
+
+def test_the_requests_of_a_session_of_a_client_of_another_class_raise_a_type_error(mock_connect):
+    # A session makes its requests of its `_client`, or of its `client`, at the call, as PySpark's:
+    # those of a client of this client are of its native transport, and a client of another class
+    # raises a TypeError of it, where PySpark's calls the methods of that client (see the row "The
+    # `__dict__` of the objects of a session" of dev/parity/known-differences.md). Its `conf` calls
+    # the `config` of such a client, and `is_stopped` reads its `is_closed`, as PySpark's do.
+    from types import SimpleNamespace
+
+    from pyspark.sql import SparkSession
+
+    _, service = mock_connect
+    session = SparkSession.builder.remote(service.remote).create()
+    own = session._client
+
+    class Client:
+        is_closed = "of the client"
+
+        def config(self, operation):
+            return SimpleNamespace(pairs=[("k", "v")], warnings=[])
+
+    try:
+        session._client = Client()
+        assert session.is_stopped == "of the client"
+        assert session.conf.get("k") == "v"
+        for call in [
+            lambda: session.sql("select 1"),
+            lambda: session.range(1),
+            lambda: session.createDataFrame([(1,)], "a int"),
+            session.interruptAll,
+            lambda: session.catalog.currentDatabase(),
+            session.newSession,
+            session.stop,
+        ]:
+            with pytest.raises(TypeError) as raised:
+                call()
+            assert str(raised.value) == (
+                "'Client' object is not a SparkConnectClient of pyspark.sql.connect.client.core, "
+                "whose native transport makes the requests of the objects of a session"
+            )
+    finally:
+        session._client = own
+        session.release_session_on_close = False
+        session.stop()
 
 
 @pytest.mark.parametrize("subclass", [_OptionsReader, _OptionsStreamReader])

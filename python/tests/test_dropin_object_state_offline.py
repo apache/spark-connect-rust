@@ -31,7 +31,7 @@ import gc
 import weakref
 
 import pytest
-from _mock_connect_server import mock_connect_session
+from _mock_connect_server import mock_connect_session, parse_message
 from _object_state_cases import (
     CLASSES,
     OBJECTS,
@@ -220,22 +220,6 @@ _DIFFERS_BY_CHANGE = {
             "pyspark.sql.connect.merge.MergeIntoWriter.WhenMatched",
             "pyspark.sql.connect.merge.MergeIntoWriter.WhenNotMatched",
             "pyspark.sql.connect.merge.MergeIntoWriter.WhenNotMatchedBySource",
-        ],
-    },
-    "the session and its builder": {
-        "vars": [
-            "SparkSession",
-            "SparkSession of streams and catalog",
-        ],
-        "attributes": [
-            "SparkSession",
-            "SparkSession of streams and catalog",
-        ],
-        "construct": [
-            "pyspark.sql.connect.session.SparkSession",
-        ],
-        "uninit": [
-            "pyspark.sql.connect.session.SparkSession",
         ],
     },
     "the Column, the WindowSpec and the TableArg": {
@@ -1031,3 +1015,199 @@ def test_the_options_of_a_builder_are_sent_as_pysparks_set_all_sends_them(object
             assert _config_sets(objects) == []
     finally:
         _stop_sessions(*made)
+
+
+def test_a_session_reads_its_client_and_its_session_id_of_its_dict_as_pysparks(objects):
+    # PySpark's session holds its `_client`, its `_session_id` and its `release_session_on_close`
+    # in its `__dict__`, which its methods read at the call: `client` is the `_client`,
+    # `session_id` the `_session_id`, of which the session pickles, and `stop` releases the session
+    # unless `release_session_on_close` is false.
+    from pyspark.sql.connect.session import SparkSession
+
+    spark, service = objects.spark, objects.service
+    assert list(vars(spark)) == ["_client", "_session_id", "release_session_on_close"]
+    assert spark.client is spark._client
+    assert spark.session_id == spark._session_id == spark._client._session_id
+    own = spark._session_id
+    try:
+        spark._session_id = "another id"
+        assert spark.session_id == "another id"
+        assert spark.__reduce__()[1] == ("another id",)
+    finally:
+        spark._session_id = own
+    made = [SparkSession.builder.remote(service.remote).create() for _ in range(2)]
+    made[0].release_session_on_close = False
+    for session, released in zip(made, (0, 1)):
+        service.reset()
+        session.stop()
+        assert session.is_stopped and service.release_session_calls == released
+
+
+def test_the_catalog_the_streams_and_the_version_of_a_session_are_in_its_dict_as_pysparks(
+    objects,
+):
+    # PySpark's `catalog` and `version` are `functools.cached_property`s, whose first access keeps
+    # the value in the `__dict__` of the session, which the next ones read, and which an
+    # assignment or a `del` changes; `streams` keeps its StreamingQueryManager as the `_sqm` of the
+    # `__dict__`, unless the session has one.
+    import functools
+
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.sql.connect.session import SparkSession
+
+    spark, service = objects.spark, objects.service
+    for name in ("catalog", "version"):
+        assert type(vars(SparkSession)[name]) is functools.cached_property
+    catalog = spark.catalog
+    assert vars(spark)["catalog"] is catalog and spark.catalog is catalog
+    assert vars(catalog)["_sparkSession"] is spark
+    service.reset()
+    assert spark.version == "4.3.0" and spark.version == "4.3.0"
+    assert vars(spark)["version"] == "4.3.0"
+    requests = [pb2.AnalyzePlanRequest.FromString(r) for r in service.analyze_requests]
+    assert [r.WhichOneof("analyze") for r in requests] == ["spark_version"]
+    streams = spark.streams
+    assert vars(spark)["_sqm"] is streams and spark.streams is streams
+    assert vars(streams)["_session"] is spark
+    try:
+        spark.catalog, spark.version, spark._sqm = "a catalog", "a version", "a manager"
+        assert spark.catalog == "a catalog" and spark.version == "a version"
+        assert spark.streams == "a manager"
+        del spark.catalog
+        assert spark.catalog is not catalog and type(spark.catalog) is type(catalog)
+    finally:
+        spark.catalog, spark._sqm = catalog, streams
+
+
+def test_a_session_makes_its_requests_of_its_client_at_the_call_as_pysparks(objects):
+    # PySpark's session makes its requests of its `_client`, or of its `client`, as it is at the
+    # call: of the client of another session that is assigned, the requests of `sql`, `range`,
+    # `createDataFrame`, `interruptAll`, `version`, of its catalog and of its `conf` are of that
+    # session, and `is_stopped` is of that client; of its own client given back, they are of the
+    # session again.
+    from pyspark.sql.connect.session import SparkSession
+
+    spark, service = objects.spark, objects.service
+    other = SparkSession.builder.remote(service.remote).create()
+    own = spark._client
+
+    def session_ids(call):
+        service.reset()
+        try:
+            call()
+        except Exception:
+            # The mock server answers no rows; the requests are what is checked.
+            pass
+        return {parse_message(request)[1][0].decode() for _, request in service.recorded_order}
+
+    calls = [
+        lambda: spark.sql("select 1").collect(),
+        lambda: spark.range(3).collect(),
+        lambda: spark.createDataFrame([(1,)], "a int").collect(),
+        lambda: spark.interruptAll(),
+        lambda: spark.version,
+        lambda: spark.catalog.currentDatabase(),
+        lambda: spark.conf.get("spark.sql.shuffle.partitions"),
+    ]
+    try:
+        spark._client = other.client
+        assert spark.client is other.client
+        for call in calls:
+            assert session_ids(call) == {other.session_id}
+        other.release_session_on_close = False
+        other.stop()
+        assert spark.is_stopped
+        spark._client = own
+        assert not spark.is_stopped
+        del spark.version
+        for call in calls:
+            assert session_ids(call) == {spark.session_id}
+    finally:
+        spark._client = own
+        if not other.is_stopped:
+            other.release_session_on_close = False
+            other.stop()
+
+
+def test_a_session_whose_catalog_or_streams_was_read_is_freed_at_a_collection_as_pysparks(
+    objects,
+):
+    # PySpark's session and its catalog, which holds the session as its `_sparkSession`, or its
+    # StreamingQueryManager, which holds it as its `_session`, are a reference cycle: a dropped
+    # session whose catalog or streams was read is freed at a collection, and one of neither is
+    # freed when it is dropped, also once its `client` or its `version` was read.
+    from pyspark.sql.connect.session import SparkSession
+
+    remote = objects.service.remote
+    for read, cycle in [
+        (None, False),
+        ("client", False),
+        ("version", False),
+        ("catalog", True),
+        ("streams", True),
+    ]:
+        session = SparkSession.builder.remote(remote).create()
+        if read is not None:
+            getattr(session, read)
+        freed = weakref.ref(session)
+        del session
+        assert (freed() is not None) == cycle, read
+        gc.collect()
+        assert freed() is None, read
+
+
+def test_the_methods_of_a_session_whose_init_never_ran_raise_pysparks_errors(objects):
+    # PySpark's methods of a session whose `__init__` never ran check their arguments first, as
+    # they do, and then raise the `AttributeError` of the first attribute that they read: its
+    # `_client` at their first request, and its `_session_id` of `session_id` and of a pickle.
+    import pickle
+
+    from pyspark.sql.connect.session import SparkSession
+
+    def outcome(call):
+        try:
+            call()
+        except Exception as error:
+            condition = getattr(error, "getCondition", lambda: None)()
+            return condition or f"{type(error).__name__}: {error}"
+        return "ok"
+
+    session = no_init(SparkSession)()
+    client = "AttributeError: 'NoInit' object has no attribute '_client'"
+    session_id = "AttributeError: 'NoInit' object has no attribute '_session_id'"
+    cases = [
+        (lambda: session.createDataFrame([(1,)], 5), "NOT_EXPECTED_TYPE"),
+        (lambda: session.createDataFrame([]), "CANNOT_INFER_EMPTY_SCHEMA"),
+        (lambda: session.createDataFrame([(1,)], "a int"), client),
+        (lambda: session.createDataFrame([(1,)], ["a"]), client),
+        (lambda: session.createDataFrame([(1,)]), client),
+        (lambda: session.range(1).collect(), client),
+        (lambda: session.sql("select 1", args=5), "INVALID_TYPE"),
+        (lambda: session.sql("select 1"), client),
+        (lambda: session.table(5), "NOT_EXPECTED_TYPE"),
+        (lambda: session.emptyDataFrame(None), "CANNOT_INFER_EMPTY_SCHEMA"),
+        (
+            lambda: session.addArtifacts("x", pyfile=True, archive=True),
+            "INVALID_MULTIPLE_ARGUMENT_CONDITIONS",
+        ),
+        (lambda: session.addArtifacts("/nonexistent.py", pyfile=True), client),
+        (lambda: session.client, client),
+        (lambda: session.session_id, session_id),
+        (lambda: pickle.dumps(session), session_id),
+        (lambda: session.is_stopped, client),
+        (lambda: session.version, client),
+        (lambda: session.conf, client),
+        (lambda: session.catalog.currentDatabase(), client),
+        (lambda: session.interruptAll(), client),
+        (lambda: session.interruptTag("t"), client),
+        (lambda: session.addTag("t"), client),
+        (lambda: session.getTags(), client),
+        (lambda: session.newSession(), client),
+        (lambda: session.cloneSession(), client),
+        (lambda: session.profile, client),
+        (lambda: session.registerProgressHandler(lambda **kwargs: None), client),
+        (lambda: session.stop(), client),
+        (lambda: session.__exit__(None, None, None), client),
+    ]
+    assert [outcome(call) for call, _ in cases] == [expected for _, expected in cases]
+    assert list(vars(session)) == ["catalog"]
