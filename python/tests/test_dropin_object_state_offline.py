@@ -60,72 +60,6 @@ except ImportError:
 # and "Subclasses" of dev/parity/known-differences.md say: each change removes its own, and a test
 # of one of them that passes fails the run (strict).
 _DIFFERS_BY_CHANGE = {
-    "the grouped data, the cogrouped data, na and stat": {
-        "vars": [
-            "GroupedData of groupBy",
-            "GroupedData of cube",
-            "GroupedData of rollup",
-            "GroupedData of pivot",
-            "GroupedData of groupingSets",
-            "PandasCogroupedOps",
-            "DataFrameNaFunctions",
-            "DataFrameStatFunctions",
-        ],
-        "attributes": [
-            "GroupedData of groupBy",
-            "GroupedData of cube",
-            "GroupedData of rollup",
-            "GroupedData of pivot",
-            "GroupedData of groupingSets",
-            "PandasCogroupedOps",
-            "DataFrameNaFunctions",
-            "DataFrameStatFunctions",
-        ],
-        "copies": [
-            "GroupedData of groupBy: copy",
-            "GroupedData of groupBy: deepcopy",
-            "GroupedData of groupBy: cloudpickle",
-            "GroupedData of cube: copy",
-            "GroupedData of cube: deepcopy",
-            "GroupedData of cube: cloudpickle",
-            "GroupedData of rollup: copy",
-            "GroupedData of rollup: deepcopy",
-            "GroupedData of rollup: cloudpickle",
-            "GroupedData of pivot: copy",
-            "GroupedData of pivot: deepcopy",
-            "GroupedData of pivot: cloudpickle",
-            "GroupedData of groupingSets: copy",
-            "GroupedData of groupingSets: deepcopy",
-            "GroupedData of groupingSets: cloudpickle",
-            "PandasCogroupedOps: copy",
-            "PandasCogroupedOps: deepcopy",
-            "PandasCogroupedOps: cloudpickle",
-            "DataFrameNaFunctions: copy",
-            "DataFrameNaFunctions: deepcopy",
-            "DataFrameNaFunctions: cloudpickle",
-            "DataFrameStatFunctions: copy",
-            "DataFrameStatFunctions: deepcopy",
-            "DataFrameStatFunctions: cloudpickle",
-        ],
-        "construct": [
-            "pyspark.sql.connect.group.GroupedData",
-            "pyspark.sql.connect.group.PandasCogroupedOps",
-            "pyspark.sql.connect.dataframe.DataFrameNaFunctions",
-            "pyspark.sql.connect.dataframe.DataFrameStatFunctions",
-        ],
-        "uninit": [
-            "pyspark.sql.connect.group.GroupedData",
-            "pyspark.sql.connect.group.PandasCogroupedOps",
-            "pyspark.sql.connect.dataframe.DataFrameNaFunctions",
-            "pyspark.sql.connect.dataframe.DataFrameStatFunctions",
-        ],
-        "foreign": [
-            "pyspark.sql.connect.group.GroupedData",
-            "pyspark.sql.connect.group.PandasCogroupedOps",
-            "pyspark.sql.connect.dataframe.DataFrameNaFunctions",
-            "pyspark.sql.connect.dataframe.DataFrameStatFunctions",
-        ],
-    },
     "the readers": {
         "vars": [
             "DataFrameReader",
@@ -667,6 +601,206 @@ def test_the_message_of_a_stream_writer_is_the_message_of_its_operation(objects)
     assert writer._write_proto is writer._write_stream.write_op
     assert writer._write_stream._child is objects.sdf._plan
     assert str(writer._write_proto) == 'format: "memory"\noptions {\n  key: "a"\n  value: "1"\n}\n'
+
+
+def _sent_plan(objects, df):
+    # The plan of the ExecutePlanRequest of a collect of `df`: the mock server answers what a
+    # client may not take, and the request is what is checked.
+    import pyspark.sql.connect.proto as pb2
+
+    objects.service.reset()
+    try:
+        df.collect()
+    except Exception:
+        pass
+    return pb2.ExecutePlanRequest.FromString(objects.service.execute_requests[-1]).plan
+
+
+class _Proxy:
+    # A proxy of an object, which gives each attribute of it, as a wrapper of a session or of a
+    # DataFrame does.
+    def __init__(self, target):
+        self._target = target
+
+    def __getattr__(self, name):
+        return getattr(self._target, name)
+
+
+def test_grouped_data_assert_their_arguments_as_pysparks(objects):
+    # PySpark's GroupedData asserts the arguments of its __init__, of a bare AssertionError: a
+    # DataFrame, a grouping of its names, a list of Columns, a Column to pivot and a list of the
+    # values of a pivot, and a list of grouping sets. The arguments of a pivot and the grouping
+    # sets are not read of another grouping, and the pivot values are the `F.lit` of each.
+    from pyspark.sql import functions as F
+    from pyspark.sql.connect.group import GroupedData
+
+    df, col = objects.df, F.col("id")
+    for args in (
+        (1, "groupby", []),
+        (df, "bogus", []),
+        (df, "groupby", (col,)),
+        (df, "groupby", ["id"]),
+        (df, "pivot", [col]),
+        (df, "pivot", [col], "id"),
+        (df, "pivot", [col], col, (1, 2)),
+        (df, "grouping_sets", [col], None, None, ([col],)),
+    ):
+        with pytest.raises(AssertionError) as raised:
+            GroupedData(*args)
+        assert str(raised.value) == ""
+    grouped = GroupedData(df, "groupby", [col], "x", "y", "z")
+    assert grouped._pivot_col is None and grouped._pivot_values is None
+    assert grouped._grouping_sets is None
+    pivoted = GroupedData(df, "pivot", [col], col, [1, "a", True, 1.5])
+    assert [repr(value) for value in pivoted._pivot_values] == [
+        "Column<'1'>",
+        "Column<'a'>",
+        "Column<'True'>",
+        "Column<'1.5'>",
+    ]
+
+
+def test_a_pivot_shares_the_dataframe_and_the_grouping_columns_as_pysparks(objects):
+    # PySpark's `pivot` makes grouped data of the base class, of the same DataFrame and the same
+    # list of grouping columns, and of the pivot column `self._df[pivot_col]`, once it read the
+    # type of the grouping, of which only that of `groupBy` pivots.
+    from pyspark.errors import PySparkNotImplementedError
+    from pyspark.sql.connect.group import GroupedData
+
+    class Sub(GroupedData):
+        pass
+
+    df = objects.df
+    grouped = Sub(df, "groupby", df.groupBy("id")._grouping_cols)
+    pivot = grouped.pivot("id", [1])
+    assert type(pivot) is GroupedData
+    assert pivot._df is df and pivot._grouping_cols is grouped._grouping_cols
+    assert pivot._group_type == "pivot" and repr(pivot._pivot_col) == "Column<'id'>"
+    for group_type, operation in [
+        ("rollup", "PIVOT after ROLLUP"),
+        ("grouping_sets", "PIVOT after GROUPING_SETS"),
+        ("pivot", "Repeated PIVOT operation"),
+        ("other", "PIVOT after OTHER"),
+    ]:
+        grouped._group_type = group_type
+        with pytest.raises(PySparkNotImplementedError) as raised:
+            grouped.pivot("id")
+        assert raised.value.getMessageParameters() == {"operation": operation}
+
+
+def test_the_methods_of_grouped_data_read_their_state_as_pysparks(objects):
+    # PySpark's GroupedData reads its state as its methods make their plans: an aggregation of
+    # grouped data whose state was assigned is of that state, with the assertions of its plan, a
+    # proxy of a DataFrame is grouped as the DataFrame, and `count` is a call of `agg`, of a
+    # subclass too.
+    from pyspark.sql import functions as F
+    from pyspark.sql.connect.group import GroupedData
+
+    df = objects.df
+    grouped = df.groupBy("id")
+    grouped._grouping_cols = [F.col("x"), F.col("y")]
+    grouped._group_type = "cube"
+    aggregate = _sent_plan(objects, grouped.count()).root.aggregate
+    # GROUP_TYPE_CUBE.
+    assert len(aggregate.grouping_expressions) == 2 and aggregate.group_type == 3
+    for name, value in [
+        ("_grouping_cols", ("x",)),
+        ("_group_type", "bogus"),
+        ("_pivot_col", F.col("x")),
+    ]:
+        original = getattr(grouped, name)
+        setattr(grouped, name, value)
+        with pytest.raises(AssertionError):
+            grouped.count()
+        setattr(grouped, name, original)
+    del grouped._pivot_col
+    with pytest.raises(AttributeError, match="'GroupedData' object has no attribute '_pivot_col'"):
+        grouped.count()
+    proxied = df.groupBy("id")
+    proxied._df = _Proxy(df)
+    assert _sent_plan(objects, proxied.count()).root.aggregate.input.HasField("range")
+    assert repr(proxied) == (
+        "GroupedData[grouping expressions: [id], value: [id: bigint], type: GroupBy]"
+    )
+
+    class Sub(GroupedData):
+        def agg(self, *exprs):
+            return [repr(expr) for expr in exprs]
+
+    assert Sub(df, "groupby", [F.col("id")]).count() == ["Column<'count(1) AS count'>"]
+
+
+def test_cogrouped_data_are_of_any_grouped_data_of_the_same_session_as_pysparks(objects):
+    # PySpark's PandasCogroupedOps checks `gd1._df._check_same_session(gd2._df)` and keeps its
+    # grouped data as they are, any objects of a `_df` and `_grouping_cols`, of which its methods
+    # make their plans.
+    from pyspark.errors import SessionNotSameException
+    from pyspark.sql import functions as F
+
+    df = objects.df
+    grouped = df.groupBy("id")
+
+    class Grouped:
+        pass
+
+    duck = Grouped()
+    duck._df, duck._grouping_cols = df, [F.col("id"), F.col("id")]
+    cogrouped = grouped.cogroup(duck)
+    assert vars(cogrouped) == {"_gd1": grouped, "_gd2": duck}
+    mapped = cogrouped.applyInPandas(lambda left, right: left, "id long")
+    assert len(_sent_plan(objects, mapped).root.co_group_map.other_grouping_expressions) == 2
+    with pytest.raises(SessionNotSameException):
+        grouped.cogroup(df)
+    with pytest.raises(AttributeError, match="'int' object has no attribute '_df'"):
+        grouped.cogroup(1)
+
+
+def test_the_null_and_statistics_functions_call_the_methods_of_their_df_as_pysparks(objects):
+    # PySpark's DataFrameNaFunctions and DataFrameStatFunctions call the methods of their `df`, of
+    # any object, as PySpark's call them, so a proxy of a DataFrame works; an omitted value of
+    # `replace` is PySpark's `_NoValue`, which a DataFrame takes for an omitted value.
+    from pyspark._globals import _NoValue
+    from pyspark.sql.connect.dataframe import DataFrameNaFunctions, DataFrameStatFunctions
+
+    calls = []
+
+    class Recorder:
+        def __getattr__(self, name):
+            def method(*args, **kwargs):
+                calls.append((name, args, kwargs))
+                return name
+
+            return method
+
+    na, stat = DataFrameNaFunctions(Recorder()), DataFrameStatFunctions(Recorder())
+    assert na.drop() == "dropna"
+    na.drop(how=None, thresh=1, subset=["a"])
+    na.fill(1)
+    na.replace([1], [2])
+    na.replace({1: 2})
+    stat.corr("a", "b")
+    stat.cov("a", "b")
+    stat.crosstab("a", "b")
+    stat.freqItems(["a"])
+    stat.sampleBy("a", {1: 0.5})
+    stat.approxQuantile("a", [0.5], 0.1)
+    assert calls == [
+        ("dropna", (), {"how": "any", "thresh": None, "subset": None}),
+        ("dropna", (), {"how": None, "thresh": 1, "subset": ["a"]}),
+        ("fillna", (), {"value": 1, "subset": None}),
+        ("replace", ([1], [2], None), {}),
+        ("replace", ({1: 2}, _NoValue, None), {}),
+        ("corr", ("a", "b", None), {}),
+        ("cov", ("a", "b"), {}),
+        ("crosstab", ("a", "b"), {}),
+        ("freqItems", (["a"], None), {}),
+        ("sampleBy", ("a", {1: 0.5}, None), {}),
+        ("approxQuantile", ("a", [0.5], 0.1), {}),
+    ]
+    df = objects.df
+    assert type(df.na.replace({1: 2})) is type(df)
+    assert type(DataFrameNaFunctions(_Proxy(df)).drop()) is type(df)
+    assert type(DataFrameStatFunctions(_Proxy(df)).crosstab("id", "id")) is type(df)
 
 
 class _ConfigResult:

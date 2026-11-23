@@ -2281,66 +2281,59 @@ impl PyDataFrame {
         Ok(self.of_same_schema(PyDataFrame::new(args.plan(self.dataframe.alias(&alias)))))
     }
 
-    // Group by columns for aggregation.
+    // Group by columns for aggregation, as PySpark's `GroupedData(df=self, group_type="groupby",
+    // grouping_cols=self._to_cols(*cols, allow_ordinal=True))`, of this DataFrame object.
     #[pyo3(signature = (*cols))]
     #[doc = connect_doc!(DataFrame.groupBy)]
-    fn groupBy(
-        slf: &Bound<'_, Self>,
-        py: Python<'_>,
-        cols: Vec<Bound<'_, PyAny>>,
-    ) -> PyResult<PyGroupedData> {
-        let this = slf.borrow();
-        let columns = this.grouping_columns(py, cols, "cols")?;
-        Ok(PyGroupedData::new(
-            this.dataframe.group_by(columns),
-            slf.clone().unbind(),
-        ))
+    fn groupBy<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+        cols: Vec<Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyGroupedData>> {
+        let columns = slf.borrow().grouping_columns(py, cols, "cols")?;
+        PyGroupedData::of_grouping(slf.as_any(), "groupby", &columns, None)
     }
 
-    // Rollup multi-dimensional aggregation.
+    // Rollup multi-dimensional aggregation, as PySpark's `GroupedData(df=self,
+    // group_type="rollup", ...)`.
     #[pyo3(signature = (*cols))]
     #[doc = connect_doc!(DataFrame.rollup)]
-    fn rollup(
-        slf: &Bound<'_, Self>,
-        py: Python<'_>,
-        cols: Vec<Bound<'_, PyAny>>,
-    ) -> PyResult<PyGroupedData> {
-        let this = slf.borrow();
-        Ok(PyGroupedData::new(
-            this.dataframe
-                .rollup(this.grouping_columns(py, cols, "cols")?),
-            slf.clone().unbind(),
-        ))
+    fn rollup<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+        cols: Vec<Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyGroupedData>> {
+        let columns = slf.borrow().grouping_columns(py, cols, "cols")?;
+        PyGroupedData::of_grouping(slf.as_any(), "rollup", &columns, None)
     }
 
-    // Cube multi-dimensional aggregation.
+    // Cube multi-dimensional aggregation, as PySpark's `GroupedData(df=self, group_type="cube",
+    // ...)`.
     #[pyo3(signature = (*cols))]
     #[doc = connect_doc!(DataFrame.cube)]
-    fn cube(
-        slf: &Bound<'_, Self>,
-        py: Python<'_>,
-        cols: Vec<Bound<'_, PyAny>>,
-    ) -> PyResult<PyGroupedData> {
-        let this = slf.borrow();
-        Ok(PyGroupedData::new(
-            this.dataframe
-                .cube(this.grouping_columns(py, cols, "cols")?),
-            slf.clone().unbind(),
-        ))
+    fn cube<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+        cols: Vec<Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyGroupedData>> {
+        let columns = slf.borrow().grouping_columns(py, cols, "cols")?;
+        PyGroupedData::of_grouping(slf.as_any(), "cube", &columns, None)
     }
 
     // Grouping sets aggregation: `groupingSets([[a, b], [a], []], "a", "b")`.
     //
     // As PySpark's: `*cols` are the grouping columns, the columns of the result besides the
-    // aggregations, of Columns, names and ordinals, as are those of the sets.
+    // aggregations, of Columns, names and ordinals, as are those of the sets, of
+    // `GroupedData(df=self, group_type="grouping_sets", grouping_cols=..., grouping_sets=...)`,
+    // whose `_grouping_sets` are lists of the Columns of each set.
     #[pyo3(name = "groupingSets", signature = (groupingSets, *cols))]
     #[doc = connect_doc!(DataFrame.groupingSets)]
-    fn grouping_sets(
-        slf: &Bound<'_, Self>,
-        py: Python<'_>,
-        groupingSets: &Bound<'_, PyAny>,
-        cols: Vec<Bound<'_, PyAny>>,
-    ) -> PyResult<PyGroupedData> {
+    fn grouping_sets<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+        groupingSets: &Bound<'py, PyAny>,
+        cols: Vec<Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyGroupedData>> {
         let this = slf.borrow();
 
         use pyo3::types::{PyInt, PyString};
@@ -2365,10 +2358,8 @@ impl PyDataFrame {
         }
         // As PySpark's `_to_cols(cols)`, of the columns themselves, not a list of them.
         let columns = this.grouping_column_list(py, cols, "cols")?;
-        Ok(PyGroupedData::new(
-            this.dataframe.grouping_sets_with_columns(sets, columns),
-            slf.clone().unbind(),
-        ))
+        drop(this);
+        PyGroupedData::of_grouping(slf.as_any(), "grouping_sets", &columns, Some(&sets[..]))
     }
 
     // Drop duplicates within the event-time watermark.
@@ -2659,12 +2650,13 @@ impl PyDataFrame {
         crate::stat_arguments::fillna(&self.dataframe, value, subset)
     }
 
-    // Statistical functions (`df.stat`), of this DataFrame, their `df`, as PySpark's.
+    // Statistical functions (`df.stat`): a new object at each access, as PySpark's
+    // `DataFrameStatFunctions(self)`, of this DataFrame object, its `df`.
     #[getter]
     #[pyo3(name = "stat")]
     #[doc = connect_doc!(DataFrame.stat)]
-    fn stat(slf: &Bound<'_, Self>) -> crate::stat::PyStatFunctions {
-        crate::stat::PyStatFunctions::new(slf.borrow().dataframe.stat(), slf.clone().unbind())
+    fn stat<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, crate::stat::PyStatFunctions>> {
+        crate::stat::PyStatFunctions::of_frame(slf.as_any())
     }
 
     // `df.crosstab(col1, col2)` - pyspark exposes it on DataFrame as well as
@@ -3248,11 +3240,11 @@ impl PyDataFrame {
     // Alias for groupBy.
     #[pyo3(signature = (*cols))]
     #[doc = connect_doc!(DataFrame.groupby)]
-    fn groupby(
-        slf: &Bound<'_, Self>,
-        py: Python<'_>,
-        cols: Vec<Bound<'_, PyAny>>,
-    ) -> PyResult<PyGroupedData> {
+    fn groupby<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+        cols: Vec<Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyGroupedData>> {
         Self::groupBy(slf, py, cols)
     }
 
@@ -4037,12 +4029,12 @@ impl PyDataFrame {
         PyDataStreamWriter::new(writer)
     }
 
-    // Null-handling functions (`df.na.drop()/fill()/replace()`), of this DataFrame, their
-    // `df`, as PySpark's.
+    // Null-handling functions (`df.na.drop()/fill()/replace()`): a new object at each access,
+    // as PySpark's `DataFrameNaFunctions(self)`, of this DataFrame object, its `df`.
     #[getter]
     #[doc = connect_doc!(DataFrame.na)]
-    fn na(slf: &Bound<'_, Self>) -> PyDataFrameNaFunctions {
-        PyDataFrameNaFunctions::new(slf.borrow().dataframe.clone(), slf.clone().unbind())
+    fn na<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyDataFrameNaFunctions>> {
+        PyDataFrameNaFunctions::of_frame(slf.as_any())
     }
 
     // Merge-into (`df.mergeInto("table", cond)`), returning a V2 merge builder, of the table as
@@ -4425,132 +4417,138 @@ impl PyDataFrame {
     }
 }
 
-// Python wrapper for `DataFrameNaFunctions` (`df.na`).
+// Python wrapper for `DataFrameNaFunctions` (`df.na`). As PySpark's plain class, it keeps its
+// state in its `__dict__`, its `df`, whose methods its methods call, as PySpark's do, and it is
+// subclassed and constructed of PySpark's arguments (see `crate::state`).
 #[doc = connect_doc!(DataFrameNaFunctions)]
 #[pyclass(
     name = "DataFrameNaFunctions",
     module = "pyspark.sql.connect.dataframe",
+    subclass,
     weakref,
     dict
 )]
-pub struct PyDataFrameNaFunctions {
-    /// The reference of the null functions to the parts of the plan of `frame`, of which `df` is
-    /// a clone, which `__traverse__` reports (see [`crate::gc::Parts`]).
-    parts: crate::gc::Parts,
-    df: spark_connect::dataframe::DataFrame,
-    /// The DataFrame of `df.na`, as PySpark's `DataFrameNaFunctions.df`.
-    frame: Py<PyDataFrame>,
-    /// Set once the value is written, as `__traverse__` reads `frame`, which is not valid while
-    /// the object is created (see [`crate::gc::GcReady`]).
-    gc_ready: crate::gc::GcReady,
-}
+pub struct PyDataFrameNaFunctions {}
 
 impl PyDataFrameNaFunctions {
-    fn new(df: spark_connect::dataframe::DataFrame, frame: Py<PyDataFrame>) -> Self {
-        PyDataFrameNaFunctions {
-            parts: Python::attach(|py| crate::gc::Parts::of(py, df.held_parts())),
-            df,
-            frame,
-            gc_ready: crate::gc::GcReady::new(),
-        }
+    /// The null functions of `df`, as `df.na` makes them: `DataFrameNaFunctions(df)`, of the
+    /// DataFrame object, which PySpark's `__init__` keeps as its `df`.
+    fn of_frame<'py>(df: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyDataFrameNaFunctions>> {
+        let na = Bound::new(df.py(), PyDataFrameNaFunctions {})?;
+        Self::__init__(&na, df)?;
+        Ok(na)
+    }
+
+    /// The `df` of the functions, which each of PySpark's methods reads, `self.df`, to call its
+    /// method: of the `AttributeError` of functions whose `__init__` never ran.
+    fn frame<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        crate::state::attr(slf.as_any(), pyo3::intern!(slf.py(), "df"))
     }
 }
 
 #[pymethods]
 impl PyDataFrameNaFunctions {
-    /// The shallow copy of the null functions, as PySpark's `copy.copy`: of the same DataFrame,
-    /// with the instance attributes of these.
-    fn __copy__(slf: &Bound<'_, Self>) -> PyResult<Py<Self>> {
-        let py = slf.py();
-        let this = slf.borrow();
-        let copy = Py::new(
-            py,
-            PyDataFrameNaFunctions::new(this.df.clone(), this.frame.clone_ref(py)),
-        )?;
-        crate::reduce::copy_instance_dict(slf.as_any(), copy.bind(py).as_any())?;
-        Ok(copy)
+    /// Null functions of no state, as the `object.__new__` of PySpark's plain class: of any
+    /// arguments, which `__init__` takes, so that a subclass of another `__init__` is built as it
+    /// is in PySpark. The class shows the signature of `__init__`, as `inspect.signature` of
+    /// PySpark's class does.
+    #[new]
+    #[pyo3(signature = (*_args, **_kwargs), text_signature = "(df)")]
+    fn py_new(_args: &Bound<'_, PyTuple>, _kwargs: Option<&Bound<'_, PyDict>>) -> Self {
+        PyDataFrameNaFunctions {}
     }
 
-    /// As PySpark's null functions, a Python object that holds its DataFrame, which Python's
-    /// garbage collector sees: the DataFrame is reported, and the parts of the plan of which
-    /// these functions hold a clone (see [`crate::gc`]).
-    fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
-        if !self.gc_ready.get() {
-            return Ok(());
-        }
-        visit.call(&self.frame)?;
-        self.parts.visit(&visit)
+    /// `DataFrameNaFunctions(df)`, as PySpark Connect's `__init__`, which keeps its argument as
+    /// it is, as the `df` of the functions: `df.na.df` is `df`.
+    fn __init__(slf: &Bound<'_, Self>, df: &Bound<'_, PyAny>) -> PyResult<()> {
+        crate::state::assign(slf.as_any(), &[(pyo3::intern!(slf.py(), "df"), df)])
     }
 
-    /// Break a reference cycle that the garbage collector found unreachable: the null functions
-    /// drop their clone of the plan, and their reference to its parts.
-    fn __clear__(&mut self) {
-        if self.gc_ready.get() {
-            self.parts.release();
-            self.df.clear_plan();
-        }
+    /// The state of the functions, their `__dict__`, as `object.__getstate__` gives that of
+    /// PySpark's plain object, which a copy and a pickle keep (see `state::getstate`).
+    fn __getstate__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        crate::state::getstate(slf.as_any())
     }
 
-    /// The reduce of the null functions, as PySpark's: `na` of their DataFrame, which unpickles
-    /// with it, and their instance attributes.
-    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
-        let py = slf.py();
-        let frame = slf.borrow().frame.clone_ref(py).into_any().into_bound(py);
-        let reduced = crate::reduce::getattr_reduce(py, frame, "na")?;
-        crate::reduce::reduce_with_instance_dict(slf.as_any(), reduced.into_any())
-    }
-
-    /// The DataFrame of these functions, as PySpark's `DataFrameNaFunctions.df`: `df.na.df` is
-    /// `df`.
-    #[getter(df)]
-    fn frame(&self, py: Python<'_>) -> Py<PyDataFrame> {
-        self.frame.clone_ref(py)
+    /// The reduce of the functions, as PySpark's plain object's: `copyreg.__newobj__` of their
+    /// class, of their `__dict__`, so a copy is of the same DataFrame, and a deep copy and a pickle
+    /// of a copy of it (see `state::reduce_ex`).
+    fn __reduce_ex__<'py>(slf: &Bound<'py, Self>, protocol: i32) -> PyResult<Bound<'py, PyAny>> {
+        crate::state::reduce_ex(slf.as_any(), protocol)
     }
 
     // Drop rows containing nulls, as PySpark's `DataFrameNaFunctions.drop`, which is
-    // `DataFrame.dropna`.
+    // `self.df.dropna(how=how, thresh=thresh, subset=subset)`, a call of the method of the
+    // DataFrame, of a subclass or of any object too, of its default `how` of "any".
     #[pyo3(
-        signature = (how=None, thresh=None, subset=None),
+        signature = (how=crate::options::DefaultedOption::Omitted, thresh=None, subset=None),
         text_signature = "($self, how='any', thresh=None, subset=None)"
     )]
     #[doc = connect_doc!(DataFrameNaFunctions.drop)]
-    fn drop(
-        &self,
-        how: Option<&Bound<'_, PyAny>>,
-        thresh: Option<&Bound<'_, PyAny>>,
-        subset: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<PyDataFrame> {
-        crate::stat_arguments::dropna(&self.df, how, thresh, subset)
+    fn drop<'py>(
+        slf: &Bound<'py, Self>,
+        how: crate::options::DefaultedOption,
+        thresh: Option<&Bound<'py, PyAny>>,
+        subset: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let py = slf.py();
+        let how = match how {
+            crate::options::DefaultedOption::Omitted => pyo3::intern!(py, "any").clone().into_any(),
+            crate::options::DefaultedOption::Given(how) => how.into_bound(py),
+        };
+        let kwargs = PyDict::new(py);
+        kwargs.set_item(pyo3::intern!(py, "how"), how)?;
+        kwargs.set_item(pyo3::intern!(py, "thresh"), thresh)?;
+        kwargs.set_item(pyo3::intern!(py, "subset"), subset)?;
+        Self::frame(slf)?.call_method(pyo3::intern!(py, "dropna"), (), Some(&kwargs))
     }
 
-    // Fill nulls, as PySpark's `DataFrameNaFunctions.fill`, which is `DataFrame.fillna`.
+    // Fill nulls, as PySpark's `DataFrameNaFunctions.fill`, which is
+    // `self.df.fillna(value=value, subset=subset)`.
     #[pyo3(signature = (value, subset=None))]
     #[doc = connect_doc!(DataFrameNaFunctions.fill)]
-    fn fill(
-        &self,
-        value: &Bound<'_, PyAny>,
-        subset: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<PyDataFrame> {
-        crate::stat_arguments::fillna(&self.df, value, subset)
+    fn fill<'py>(
+        slf: &Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+        subset: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let py = slf.py();
+        let kwargs = PyDict::new(py);
+        kwargs.set_item(pyo3::intern!(py, "value"), value)?;
+        kwargs.set_item(pyo3::intern!(py, "subset"), subset)?;
+        Self::frame(slf)?.call_method(pyo3::intern!(py, "fillna"), (), Some(&kwargs))
     }
 
     // Replace values, as PySpark's `DataFrameNaFunctions.replace`, which is
-    // `DataFrame.replace`.
+    // `self.df.replace(to_replace, value, subset)`, of PySpark's `_NoValue` of an omitted value.
     #[pyo3(signature = (to_replace, value=ReplaceValue::Omitted, subset=None))]
     #[doc = connect_doc!(DataFrameNaFunctions.replace)]
-    fn replace(
-        &self,
-        to_replace: &Bound<'_, PyAny>,
+    fn replace<'py>(
+        slf: &Bound<'py, Self>,
+        to_replace: &Bound<'py, PyAny>,
         value: ReplaceValue,
-        subset: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<PyDataFrame> {
-        replace_values(&self.df, to_replace, value, subset)
+        subset: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let py = slf.py();
+        let value = match value {
+            ReplaceValue::Omitted => no_value(py)?.clone(),
+            ReplaceValue::Given(value) => value.into_bound(py),
+        };
+        Self::frame(slf)?.call_method1(pyo3::intern!(py, "replace"), (to_replace, value, subset))
     }
+}
+
+/// PySpark's `pyspark._globals._NoValue`, the default `value` of `replace`, which tells an
+/// omitted value apart from None.
+fn no_value(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
+    static NO_VALUE: pyo3::sync::PyOnceLock<Py<PyAny>> = pyo3::sync::PyOnceLock::new();
+    NO_VALUE.import(py, "pyspark._globals", "_NoValue")
 }
 
 /// The `value` argument of `DataFrame.replace`, where PySpark tells an omitted value apart
 /// from None: `replace(to_replace)` requires a dict `to_replace`, while
-/// `replace(to_replace, None)` replaces with nulls.
+/// `replace(to_replace, None)` replaces with nulls. PySpark's `_NoValue`, its default, is an
+/// omitted value too, as `DataFrameNaFunctions.replace` gives it.
 pub enum ReplaceValue {
     Omitted,
     Given(Py<PyAny>),
@@ -4560,6 +4558,9 @@ impl<'a, 'py> FromPyObject<'a, 'py> for ReplaceValue {
     type Error = PyErr;
 
     fn extract(obj: Borrowed<'a, 'py, PyAny>) -> PyResult<Self> {
+        if obj.is(no_value(obj.py())?) {
+            return Ok(ReplaceValue::Omitted);
+        }
         Ok(ReplaceValue::Given(obj.to_owned().unbind()))
     }
 }
