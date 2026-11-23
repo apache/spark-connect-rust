@@ -60,46 +60,6 @@ except ImportError:
 # and "Subclasses" of dev/parity/known-differences.md say: each change removes its own, and a test
 # of one of them that passes fails the run (strict).
 _DIFFERS_BY_CHANGE = {
-    "the streaming queries, their manager and its listener bus": {
-        "vars": [
-            "StreamingQueryManager",
-            "StreamingQueryListenerBus",
-            "StreamingQuery",
-        ],
-        "attributes": [
-            "StreamingQueryManager",
-            "StreamingQueryListenerBus",
-            "StreamingQuery",
-        ],
-        "copies": [
-            "StreamingQueryManager: copy",
-            "StreamingQueryListenerBus: copy",
-            "StreamingQueryListenerBus: deepcopy",
-            "StreamingQueryListenerBus: pickle",
-            "StreamingQueryListenerBus: cloudpickle",
-            "StreamingQuery: copy",
-            "StreamingQuery: deepcopy",
-            "StreamingQuery: pickle",
-            "StreamingQuery: cloudpickle",
-        ],
-        "construct": [
-            "pyspark.sql.connect.streaming.query.StreamingQueryManager",
-            "pyspark.sql.connect.streaming.query.StreamingQueryListenerBus",
-            "pyspark.sql.connect.streaming.query.StreamingQuery",
-        ],
-        "uninit": [
-            "pyspark.sql.connect.streaming.query.StreamingQueryManager",
-            "pyspark.sql.connect.streaming.query.StreamingQueryListenerBus",
-            "pyspark.sql.connect.streaming.query.StreamingQuery",
-        ],
-        "foreign": [
-            "pyspark.sql.connect.streaming.query.StreamingQueryManager",
-            "pyspark.sql.connect.streaming.query.StreamingQuery",
-        ],
-        "cycle": [
-            "StreamingQuery",
-        ],
-    },
     "the grouped data, the cogrouped data, na and stat": {
         "vars": [
             "GroupedData of groupBy",

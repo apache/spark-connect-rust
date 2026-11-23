@@ -531,24 +531,3 @@ def builder_reduce(
     factories, as PySpark's Builder keeps them in its ``__dict__``, which ``_builder_of`` gives
     back."""
     return _builder_of, (options, channel_builder, hook_factories)
-
-
-def _worker_streaming_query(  # pragma: no cover - only the server's worker runs it
-    session: Any, query_id: str, run_id: str, name: Optional[str]
-) -> Any:
-    """PySpark's StreamingQuery of ``session``, of the ID of the query, of its run and of its
-    name, as the drop-in's query of that state."""
-    from pyspark.sql.connect.streaming.query import StreamingQuery
-
-    return StreamingQuery(session, query_id, run_id, name)
-
-
-def streaming_query_reduce(
-    session: Any, query_id: str, run_id: str, name: Optional[str]
-) -> tuple[Callable[..., Any], tuple[Any, ...]]:
-    """The reduce of a StreamingQuery of ``session``, of the state that ``_of_state`` takes."""
-    return _state_reduce(
-        "StreamingQuery",
-        _worker_streaming_query,
-        (session, query_id, run_id, name),
-    )

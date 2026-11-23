@@ -69,6 +69,14 @@ MODULES = (
     "pyspark.sql.connect.tvf",
 )
 
+# The classes of the modules of ``MODULES`` that are native in the drop-in, by their modules, whose
+# public members have docstrings of their own in PySpark rather than those that the module assigns
+# of a classic class: of the docstrings of those members (the listener bus of a
+# StreamingQueryManager, PySpark Connect's own class).
+OWN_MEMBERS = {
+    "pyspark.sql.connect.streaming.query": ("StreamingQueryListenerBus",),
+}
+
 # The modules of PySpark whose classes are native in the drop-in, of the docstrings of all their
 # classes, and of the classes of their classes (`SparkSession.Builder`), and of their public members,
 # as Python finds them on each class.
@@ -136,6 +144,22 @@ def docstrings(pyspark_src: str) -> dict[str, str]:
             doc = docs.raw(module, name)
             if doc is not None:
                 found[name] = doc
+        for cls in OWN_MEMBERS.get(module, ()):
+            for name, node in source.defs.items():
+                member = name[len(cls) + 1 :]
+                if (
+                    not name.startswith(cls + ".")
+                    or "." in member
+                    or member.startswith("_")
+                    or name in found
+                    or not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                ):
+                    continue
+                # The docstring of a public member of the class of its own, of none of no
+                # docstring.
+                doc = docs.raw(module, name)
+                if doc is not None:
+                    found[name] = doc
         for name, node in source.defs.items():
             if (
                 name.count(".") != 1

@@ -10,6 +10,7 @@ use spark_connect::streaming::{
 use spark_connect::udf::PythonUDFPayload;
 use spark_connect_core::error::{Result as SparkResult, SparkError};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::dataframe::{PyDataFrame, WriterState};
@@ -23,16 +24,121 @@ use crate::readwriter::{
     reader_plan_error, reader_schema, table_name_of, with_plan_error, UnsentFormat,
 };
 
-/// Adapts Python listeners to the native bus: deserialize one typed event for the whole
-/// snapshot, then dispatch it through Python's callback-exception isolation helper. Decode
-/// errors return to the bus, and terminal failures produce the reference handler warning.
+/// One entry of the `_listener_bus` of a `StreamingQueryListenerBus`, registered in the native bus
+/// of its session, which keeps the subscription of the session to the events of the server while it
+/// has registrations. An event is posted once to the `post_to_all` of each bus of the
+/// registrations, which calls the listeners of its `_listener_bus` as they are then, as the handler
+/// thread of PySpark's bus posts it: so each entry of the list gets it, one that the bus did not
+/// append too, and a listener once for each of its entries. Decode errors return to the native bus,
+/// and terminal failures produce the reference handler warning.
 struct PyListenerAdapter {
-    listener: Py<PyAny>,
+    /// The `StreamingQueryListenerBus` of the entry.
+    bus: Py<PyAny>,
+    /// The `_listener_bus` of the bus and the listener of the entry, as `append` appended it.
+    entry: Option<ListenerEntry>,
     /// The id of this registration in the bus of its session, once the bus has added it. It is
     /// kept here, not on the listener: the listener is the user's object, which may have no
     /// attributes to set (`__slots__`), and may be added by several threads and to several
     /// sessions at once.
     id: std::sync::OnceLock<String>,
+    /// Set while the `StreamingQueryListenerBus` itself ends this registration, of a removal, a
+    /// close or an append that failed, which changes its list as PySpark's does.
+    released: AtomicBool,
+}
+
+/// The list of a `StreamingQueryListenerBus`, and the listener of one of its entries.
+struct ListenerEntry {
+    entries: Py<PyAny>,
+    listener: Py<PyAny>,
+}
+
+impl PyListenerAdapter {
+    /// The adapter of `listener`, a registration of the native bus, if it is one.
+    fn of(listener: &dyn StreamingQueryListener) -> Option<&PyListenerAdapter> {
+        listener.as_any()?.downcast_ref::<PyListenerAdapter>()
+    }
+
+    /// Whether this is the registration of the entry `listener` of the list `entries`, by their
+    /// identities.
+    fn is_entry(&self, entries: &Bound<'_, PyAny>, listener: &Bound<'_, PyAny>) -> bool {
+        self.entry.as_ref().is_some_and(|entry| {
+            entry.entries.bind(entries.py()).is(entries)
+                && entry.listener.bind(entries.py()).is(listener)
+        })
+    }
+}
+
+impl Drop for PyListenerAdapter {
+    /// A registration that the native bus ended, at the end of its subscription or of its session,
+    /// takes its entry off the list of its bus, as the handler thread of PySpark's bus clears the
+    /// list when its events fail: at once on a thread of Python, else on the delivery thread (see
+    /// `deliver::run`), with the exception that is set on the thread kept.
+    fn drop(&mut self) {
+        if self.released.load(Ordering::Acquire) {
+            return;
+        }
+        if let Some(entry) = self.entry.take() {
+            crate::deliver::run(move |py| {
+                let _ = remove_identical(entry.entries.bind(py), entry.listener.bind(py));
+            });
+        }
+    }
+}
+
+/// Remove the first item of the list `entries` that is `listener`, by its identity.
+fn remove_identical(entries: &Bound<'_, PyAny>, listener: &Bound<'_, PyAny>) -> PyResult<()> {
+    let entries = entries.cast::<PyList>()?;
+    if let Some(index) = entries.iter().position(|item| item.is(listener)) {
+        entries.del_item(index)?;
+    }
+    Ok(())
+}
+
+/// Remove the first item of `entries` that is `listener` or equal to it, as PySpark's bus removes a
+/// listener of its list: of none, nothing, as another removal took it.
+fn remove_equal(entries: &Bound<'_, PyAny>, listener: &Bound<'_, PyAny>) -> PyResult<()> {
+    let py = entries.py();
+    match entries.call_method1(pyo3::intern!(py, "remove"), (listener,)) {
+        Ok(_) => Ok(()),
+        Err(error) if error.is_instance_of::<pyo3::exceptions::PyValueError>(py) => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+/// Run `f` holding `lock`, of its `__enter__` and `__exit__`, as PySpark's bus runs the block of
+/// its `with self._lock:`.
+fn with_lock<T>(lock: &Bound<'_, PyAny>, f: impl FnOnce() -> PyResult<T>) -> PyResult<T> {
+    let py = lock.py();
+    lock.call_method0(pyo3::intern!(py, "__enter__"))?;
+    let result = f();
+    let exited = lock.call_method1(
+        pyo3::intern!(py, "__exit__"),
+        (py.None(), py.None(), py.None()),
+    );
+    let value = result?;
+    exited?;
+    Ok(value)
+}
+
+/// Clear the bus `bus` as PySpark's handler thread does once its events failed:
+/// `with self._lock: self._execution_thread = None; self._listener_bus.clear()`.
+fn clear_bus(bus: &Bound<'_, PyAny>) -> PyResult<()> {
+    let py = bus.py();
+    let lock = crate::state::attr(bus, pyo3::intern!(py, "_lock"))?;
+    with_lock(&lock, || {
+        bus.setattr(pyo3::intern!(py, "_execution_thread"), py.None())?;
+        crate::state::attr(bus, pyo3::intern!(py, "_listener_bus"))?
+            .call_method0(pyo3::intern!(py, "clear"))?;
+        Ok(())
+    })
+}
+
+/// Clear the listener bus of the manager `manager`, its `_sqlb`, as [`clear_bus`] does.
+pub(crate) fn clear_listeners_of(manager: &Bound<'_, PyAny>) -> PyResult<()> {
+    clear_bus(&crate::state::attr(
+        manager,
+        pyo3::intern!(manager.py(), "_sqlb"),
+    )?)
 }
 
 /// An unisolated dispatch failure. Keep Python errors intact so synchronous starts
@@ -48,9 +154,11 @@ impl From<PyErr> for ListenerDispatchError {
     }
 }
 
-/// Decode before any callback, sharing one Python object across every registration.
-/// The same path handles synchronous starts and asynchronous protocol events, including
-/// mixed native/Python snapshots. Keep native errors typed until the reporting boundary.
+/// Decode before any callback, sharing one Python object across every registration, and post it
+/// once to each bus of the registrations, of its `post_to_all`, as PySpark's handler thread posts
+/// the events of its bus. The same path handles synchronous starts and asynchronous protocol
+/// events, including mixed native/Python snapshots. Keep native errors typed until the reporting
+/// boundary.
 fn post_listener_event<'a>(
     py: Python<'_>,
     listeners: impl IntoIterator<Item = &'a dyn StreamingQueryListener>,
@@ -65,16 +173,17 @@ fn post_listener_event<'a>(
         (event.event_type, event.event_json.as_str()),
         Some(&kwargs),
     )?;
+    // The buses that the event was posted to, each once.
+    let mut posted: Vec<Bound<'_, PyAny>> = Vec::new();
     for listener in listeners {
-        match listener
-            .as_any()
-            .and_then(|any| any.downcast_ref::<PyListenerAdapter>())
-        {
+        match PyListenerAdapter::of(listener) {
             Some(adapter) => {
-                module.call_method1(
-                    "_dispatch_listener_event",
-                    (adapter.listener.bind(py), &decoded),
-                )?;
+                let bus = adapter.bus.bind(py);
+                if posted.iter().any(|seen| seen.is(bus)) {
+                    continue;
+                }
+                bus.call_method1(pyo3::intern!(py, "post_to_all"), (&decoded,))?;
+                posted.push(bus.clone());
             }
             // Native callbacks keep their usual ability to wait for Python work.
             None if started => crate::gc::detach(py, || listener.on_event(event)),
@@ -145,7 +254,7 @@ impl StreamingQueryListener for PyListenerAdapter {
                 .str()
                 .and_then(|text| Ok(text.to_cow()?.into_owned()))
                 .unwrap_or_else(|_| error.message());
-            // Of PySpark's `_query_event_handler`.
+            // Of PySpark's `_query_event_handler`, which then clears its bus.
             let _ = warn(
                 py,
                 380,
@@ -155,11 +264,28 @@ impl StreamingQueryListener for PyListenerAdapter {
                     message
                 ),
             );
+            // The registrations of the bus end with the failed subscription: of the list that this
+            // clears, so that their ends do not take the listeners that are appended since.
+            let bus = self.bus.bind(py);
+            if let Ok(manager) = bus
+                .cast::<PyStreamingQueryListenerBus>()
+                .map_err(PyErr::from)
+                .and_then(PyStreamingQueryListenerBus::manager_of)
+            {
+                for registration in manager.listeners() {
+                    if let Some(adapter) = PyListenerAdapter::of(registration.as_ref()) {
+                        if adapter.bus.bind(py).is(bus) {
+                            adapter.released.store(true, Ordering::Release);
+                        }
+                    }
+                }
+            }
+            let _ = clear_bus(bus);
         });
         true
     }
 
-    /// The adapter, of which `StreamingQueryManager._sqlb` gives back the Python listener.
+    /// The adapter, of which `StreamingQueryListenerBus` finds the registrations of its entries.
     fn as_any(&self) -> Option<&dyn std::any::Any> {
         Some(self)
     }
@@ -1680,16 +1806,16 @@ impl PyDataStreamWriter {
     #[pyo3(signature = (path=None, format=None, outputMode=None, partitionBy=None, queryName=None, **options))]
     #[allow(non_snake_case, clippy::too_many_arguments)]
     #[doc = connect_doc!(DataStreamWriter.start)]
-    fn start(
+    fn start<'py>(
         &self,
-        py: Python<'_>,
+        py: Python<'py>,
         path: Option<&Bound<'_, PyAny>>,
         format: Option<&Bound<'_, PyAny>>,
         outputMode: Option<&Bound<'_, PyAny>>,
         partitionBy: Option<&Bound<'_, PyAny>>,
         queryName: Option<&Bound<'_, PyAny>>,
         options: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<PyStreamingQuery> {
+    ) -> PyResult<Bound<'py, PyStreamingQuery>> {
         let writer = self.apply_write_opts(format, outputMode, partitionBy, queryName, options)?;
         // PySpark's start sets these on the writer before it checks the path, which it sets in
         // its string field only `if path:`, so that a false one, such as 0, is no path.
@@ -1705,22 +1831,24 @@ impl PyDataStreamWriter {
                 .start_with_event_handler(path.as_deref().unwrap_or(""), post_started_event)
                 .map_err(Box::new)
         })?;
-        Ok(PyStreamingQuery::new(query))
+        // As PySpark's `StreamingQuery(self._session, ...)`, of the session object of the writer.
+        let session = crate::session::session_object(py, &query.spark_session())?;
+        PyStreamingQuery::of_query(session.bind(py).as_any(), &query)
     }
 
     #[pyo3(signature = (tableName, format=None, outputMode=None, partitionBy=None, queryName=None, **options))]
     #[allow(non_snake_case, clippy::too_many_arguments)]
     #[doc = connect_doc!(DataStreamWriter.toTable)]
-    fn toTable(
+    fn toTable<'py>(
         &self,
-        py: Python<'_>,
+        py: Python<'py>,
         tableName: &Bound<'_, PyAny>,
         format: Option<&Bound<'_, PyAny>>,
         outputMode: Option<&Bound<'_, PyAny>>,
         partitionBy: Option<&Bound<'_, PyAny>>,
         queryName: Option<&Bound<'_, PyAny>>,
         options: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<PyStreamingQuery> {
+    ) -> PyResult<Bound<'py, PyStreamingQuery>> {
         let writer = self.apply_write_opts(format, outputMode, partitionBy, queryName, options)?;
         // As the path of `start`, PySpark sets the table in its string field only `if
         // tableName:`, so that a false one, such as "", starts the query as `start()` does.
@@ -1738,7 +1866,8 @@ impl PyDataStreamWriter {
             }
             .map_err(Box::new)
         })?;
-        Ok(PyStreamingQuery::new(query))
+        let session = crate::session::session_object(py, &query.spark_session())?;
+        PyStreamingQuery::of_query(session.bind(py).as_any(), &query)
     }
 
     // `DataStreamWriter.foreachBatch(func)`: cloudpickle the `(batch_df, batch_id)`
@@ -1930,93 +2059,123 @@ fn streaming_function_command(
     }
 }
 
-// Python wrapper for StreamingQuery.
+// Python wrapper for StreamingQuery. As PySpark's plain class, its state is its `__dict__`: the
+// `_session`, `_query_id`, `_run_id` and `_name` that its `__init__` sets, of any objects, which
+// `id`, `runId` and `name` give back and its methods read when they make their requests.
 #[pyclass(
     name = "StreamingQuery",
     module = "pyspark.sql.connect.streaming.query",
+    subclass,
     weakref,
     dict
 )]
-pub struct PyStreamingQuery {
-    inner: StreamingQuery,
-}
+pub struct PyStreamingQuery {}
 
 impl PyStreamingQuery {
-    pub fn new(query: StreamingQuery) -> Self {
-        PyStreamingQuery { inner: query }
+    /// The query of `query`, of the session object `session`, as PySpark's manager and writer make
+    /// it: `StreamingQuery(session, queryId, runId, name)`.
+    pub(crate) fn of_query<'py>(
+        session: &Bound<'py, PyAny>,
+        query: &StreamingQuery,
+    ) -> PyResult<Bound<'py, PyStreamingQuery>> {
+        let py = session.py();
+        let made = Bound::new(py, PyStreamingQuery {})?;
+        let name = query.name().into_pyobject(py)?.into_any();
+        Self::__init__(
+            &made,
+            session,
+            PyString::new(py, query.id()).as_any(),
+            PyString::new(py, query.run_id()).as_any(),
+            Some(&name),
+        )?;
+        Ok(made)
+    }
+
+    /// The core query of the state of `slf`, as PySpark's `_execute_streaming_query_cmd` reads it
+    /// at each request: its `_query_id` and its `_run_id`, then the client of its `_session`.
+    fn query_of(slf: &Bound<'_, Self>) -> PyResult<StreamingQuery> {
+        let py = slf.py();
+        let query_id: String =
+            crate::state::attr(slf.as_any(), pyo3::intern!(py, "_query_id"))?.extract()?;
+        let run_id: String =
+            crate::state::attr(slf.as_any(), pyo3::intern!(py, "_run_id"))?.extract()?;
+        let session = crate::state::attr(slf.as_any(), pyo3::intern!(py, "_session"))?;
+        let session = crate::state::session_of_value(&session, pyo3::intern!(py, "client"))?;
+        Ok(StreamingQuery::from_parts(session, query_id, run_id, None))
     }
 }
 
 #[pymethods]
 impl PyStreamingQuery {
-    /// The shallow copy of a streaming query, as PySpark's `copy.copy`: of the same query, with
-    /// the instance attributes of this one.
-    fn __copy__(slf: &Bound<'_, Self>) -> PyResult<Py<Self>> {
-        let py = slf.py();
-        let copy = Py::new(py, PyStreamingQuery::new(slf.borrow().inner.clone()))?;
-        crate::reduce::copy_instance_dict(slf.as_any(), copy.bind(py).as_any())?;
-        Ok(copy)
+    #[new]
+    #[pyo3(
+        signature = (*_args, **_kwargs),
+        text_signature = "(session, queryId, runId, name=None)"
+    )]
+    fn py_new(_args: &Bound<'_, PyTuple>, _kwargs: Option<&Bound<'_, PyDict>>) -> Self {
+        PyStreamingQuery {}
     }
 
-    /// The reduce of a streaming query, as PySpark's pickle of its session and its state, which
-    /// `_of_state` gives back, with the instance attributes of the query.
-    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
-        use crate::reduce::state_reduce;
-
+    /// `StreamingQuery(session, queryId, runId, name=None)`, as PySpark Connect's `__init__`,
+    /// which keeps its arguments as they are.
+    #[pyo3(signature = (session, queryId, runId, name=None))]
+    #[allow(non_snake_case)]
+    fn __init__(
+        slf: &Bound<'_, Self>,
+        session: &Bound<'_, PyAny>,
+        queryId: &Bound<'_, PyAny>,
+        runId: &Bound<'_, PyAny>,
+        name: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<()> {
         let py = slf.py();
-        let this = slf.borrow();
-        let session = crate::session::session_object(py, &this.inner.spark_session())?;
-
-        let args = PyTuple::new(
-            py,
-            [
-                session.into_bound(py).into_any(),
-                this.inner.id().into_pyobject(py)?.into_any(),
-                this.inner.run_id().into_pyobject(py)?.into_any(),
-                this.inner.name().into_pyobject(py)?.into_any(),
+        let none = py.None().into_bound(py);
+        crate::state::assign(
+            slf.as_any(),
+            &[
+                (pyo3::intern!(py, "_session"), session),
+                (pyo3::intern!(py, "_query_id"), queryId),
+                (pyo3::intern!(py, "_run_id"), runId),
+                (pyo3::intern!(py, "_name"), name.unwrap_or(&none)),
             ],
-        )?;
-        let reduced = state_reduce(py, "streaming_query_reduce", args)?;
-        crate::reduce::reduce_with_instance_dict(slf.as_any(), reduced)
+        )
     }
 
-    /// A streaming query of its state, as `__reduce__` gives it: of the session `session`, the
-    /// query ID, the run ID and the name.
-    #[staticmethod]
-    fn _of_state(
-        py: Python<'_>,
-        session: Py<crate::session::PySparkSession>,
-        query_id: String,
-        run_id: String,
-        name: Option<String>,
-    ) -> PyStreamingQuery {
-        let session = session.borrow(py).session.clone();
-        PyStreamingQuery::new(StreamingQuery::from_parts(session, query_id, run_id, name))
+    /// The state of the query, its `__dict__`, as `object.__getstate__` gives that of PySpark's
+    /// plain object, which a copy and a pickle keep (see `state::getstate`).
+    fn __getstate__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        crate::state::getstate(slf.as_any())
+    }
+
+    /// The reduce of the query, as PySpark's plain object's: `copyreg.__newobj__` of its class, of
+    /// its `__dict__` (see `state::reduce_ex`).
+    fn __reduce_ex__<'py>(slf: &Bound<'py, Self>, protocol: i32) -> PyResult<Bound<'py, PyAny>> {
+        crate::state::reduce_ex(slf.as_any(), protocol)
     }
 
     #[getter]
     #[doc = connect_doc!(StreamingQuery.id)]
-    fn id(&self) -> String {
-        self.inner.id().to_string()
+    fn id<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        crate::state::attr(slf.as_any(), pyo3::intern!(slf.py(), "_query_id"))
     }
 
     #[getter]
     #[doc = connect_doc!(StreamingQuery.runId)]
-    fn runId(&self) -> String {
-        self.inner.run_id().to_string()
+    fn runId<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        crate::state::attr(slf.as_any(), pyo3::intern!(slf.py(), "_run_id"))
     }
 
     #[getter]
     #[doc = connect_doc!(StreamingQuery.name)]
-    fn name(&self) -> Option<String> {
-        self.inner.name().map(|s| s.to_string())
+    fn name<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        crate::state::attr(slf.as_any(), pyo3::intern!(slf.py(), "_name"))
     }
 
     #[getter]
     #[doc = connect_doc!(StreamingQuery.isActive)]
-    fn isActive(&self, py: Python<'_>) -> PyResult<bool> {
-        crate::interrupt::interruptible_without_parts(py, &self.inner.spark_session(), || {
-            self.inner.is_active()
+    fn isActive(slf: &Bound<'_, Self>) -> PyResult<bool> {
+        let query = Self::query_of(slf)?;
+        crate::interrupt::interruptible_without_parts(slf.py(), &query.spark_session(), || {
+            query.is_active()
         })
     }
 
@@ -2024,10 +2183,12 @@ impl PyStreamingQuery {
     // `isTriggerActive`.
     #[getter]
     #[doc = connect_doc!(StreamingQuery.status)]
-    fn status<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+    fn status<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyDict>> {
+        let py = slf.py();
+        let query = Self::query_of(slf)?;
         let status =
-            crate::interrupt::interruptible_without_parts(py, &self.inner.spark_session(), || {
-                self.inner.status().map_err(Box::new)
+            crate::interrupt::interruptible_without_parts(py, &query.spark_session(), || {
+                query.status().map_err(Box::new)
             })?;
         let dict = PyDict::new(py);
         dict.set_item("message", status.status_message)?;
@@ -2037,34 +2198,35 @@ impl PyStreamingQuery {
     }
 
     #[doc = connect_doc!(StreamingQuery.stop)]
-    fn stop(&self, py: Python<'_>) -> PyResult<()> {
-        crate::interrupt::interruptible_without_parts(py, &self.inner.spark_session(), || {
-            self.inner.stop().map_err(Box::new)
+    fn stop(slf: &Bound<'_, Self>) -> PyResult<()> {
+        let query = Self::query_of(slf)?;
+        crate::interrupt::interruptible_without_parts(slf.py(), &query.spark_session(), || {
+            query.stop().map_err(Box::new)
         })
     }
 
     #[pyo3(signature = (timeout=None))]
     #[doc = connect_doc!(StreamingQuery.awaitTermination)]
     fn awaitTermination(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         timeout: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Option<bool>> {
         let timeout_ms = pyspark_timeout_ms(timeout)?;
-        crate::interrupt::interruptible_without_parts(py, &self.inner.spark_session(), || {
-            self.inner
-                .await_termination_ms(timeout_ms)
-                .map_err(Box::new)
+        let query = Self::query_of(slf)?;
+        crate::interrupt::interruptible_without_parts(slf.py(), &query.spark_session(), || {
+            query.await_termination_ms(timeout_ms).map_err(Box::new)
         })
     }
 
     // The last progress of the query, as PySpark's `StreamingQueryProgress`, or None.
     #[getter]
     #[doc = connect_doc!(StreamingQuery.lastProgress)]
-    fn lastProgress<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
+    fn lastProgress<'py>(slf: &Bound<'py, Self>) -> PyResult<Option<Bound<'py, PyAny>>> {
+        let py = slf.py();
+        let query = Self::query_of(slf)?;
         let progress =
-            crate::interrupt::interruptible_without_parts(py, &self.inner.spark_session(), || {
-                self.inner.last_progress().map_err(Box::new)
+            crate::interrupt::interruptible_without_parts(py, &query.spark_session(), || {
+                query.last_progress().map_err(Box::new)
             })?;
         match progress {
             Some(json) => progress_from_json(py, &json).map(Some),
@@ -2075,9 +2237,11 @@ impl PyStreamingQuery {
     // The recent progress of the query, each as PySpark's `StreamingQueryProgress`.
     #[getter]
     #[doc = connect_doc!(StreamingQuery.recentProgress)]
-    fn recentProgress<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyAny>>> {
-        crate::interrupt::interruptible_without_parts(py, &self.inner.spark_session(), || {
-            self.inner.recent_progress().map_err(Box::new)
+    fn recentProgress<'py>(slf: &Bound<'py, Self>) -> PyResult<Vec<Bound<'py, PyAny>>> {
+        let py = slf.py();
+        let query = Self::query_of(slf)?;
+        crate::interrupt::interruptible_without_parts(py, &query.spark_session(), || {
+            query.recent_progress().map_err(Box::new)
         })?
         .iter()
         .map(|json| progress_from_json(py, json))
@@ -2085,9 +2249,10 @@ impl PyStreamingQuery {
     }
 
     #[doc = connect_doc!(StreamingQuery.processAllAvailable)]
-    fn processAllAvailable(&self, py: Python<'_>) -> PyResult<()> {
-        crate::interrupt::interruptible_without_parts(py, &self.inner.spark_session(), || {
-            self.inner.process_all_available().map_err(Box::new)
+    fn processAllAvailable(slf: &Bound<'_, Self>) -> PyResult<()> {
+        let query = Self::query_of(slf)?;
+        crate::interrupt::interruptible_without_parts(slf.py(), &query.spark_session(), || {
+            query.process_all_available().map_err(Box::new)
         })
     }
 
@@ -2095,11 +2260,13 @@ impl PyStreamingQuery {
     // `StreamingQuery.explain(extended=False)`.
     #[pyo3(signature = (extended=ProtoBool(None)), text_signature = "($self, extended=False)")]
     #[doc = connect_doc!(StreamingQuery.explain)]
-    fn explain(&self, py: Python<'_>, extended: ProtoBool) -> PyResult<()> {
+    fn explain(slf: &Bound<'_, Self>, extended: ProtoBool) -> PyResult<()> {
+        let py = slf.py();
         let extended = extended.value(py)?;
+        let query = Self::query_of(slf)?;
         let plan =
-            crate::interrupt::interruptible_without_parts(py, &self.inner.spark_session(), || {
-                self.inner.explain(extended).map_err(Box::new)
+            crate::interrupt::interruptible_without_parts(py, &query.spark_session(), || {
+                query.explain(extended).map_err(Box::new)
             })?;
         py.import("builtins")?.call_method1("print", (plan,))?;
         Ok(())
@@ -2109,10 +2276,12 @@ impl PyStreamingQuery {
     // `pyspark.errors.exceptions.connect`, of the message of the server without the type of
     // its Java exception, and with its JVM stack trace, and of the error class as its reason.
     #[doc = connect_doc!(StreamingQuery.exception)]
-    fn exception(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+    fn exception(slf: &Bound<'_, Self>) -> PyResult<Option<Py<PyAny>>> {
+        let py = slf.py();
+        let query = Self::query_of(slf)?;
         let exception =
-            crate::interrupt::interruptible_without_parts(py, &self.inner.spark_session(), || {
-                self.inner.exception().map_err(Box::new)
+            crate::interrupt::interruptible_without_parts(py, &query.spark_session(), || {
+                query.exception().map_err(Box::new)
             })?;
         let Some(exception) = exception else {
             return Ok(None);
@@ -2134,28 +2303,38 @@ impl PyStreamingQuery {
     }
 }
 
-// Python wrapper for StreamingQueryManager, of the listener bus of its session.
+// Python wrapper for StreamingQueryManager. As PySpark's plain class, its state is its
+// `__dict__`: the `_session` that its `__init__` sets, of any object, of whose client its methods
+// make their requests, and the `_sqlb` that it makes, its `StreamingQueryListenerBus`, which its
+// listeners are added to and removed from.
 #[pyclass(
     name = "StreamingQueryManager",
     module = "pyspark.sql.connect.streaming.query",
+    subclass,
     weakref,
     dict
 )]
-pub struct PyStreamingQueryManager {
-    inner: StreamingQueryManager,
-    /// The session, which the listeners get as their `spark`.
-    session: spark_connect::session::SparkSession,
-}
+pub struct PyStreamingQueryManager {}
 
 impl PyStreamingQueryManager {
-    pub fn new(
-        manager: StreamingQueryManager,
-        session: spark_connect::session::SparkSession,
-    ) -> Self {
-        PyStreamingQueryManager {
-            inner: manager,
-            session,
-        }
+    /// The manager of `session`, as `spark.streams` makes it: `StreamingQueryManager(spark)`.
+    pub(crate) fn of_session<'py>(
+        session: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyStreamingQueryManager>> {
+        let manager = Bound::new(session.py(), PyStreamingQueryManager {})?;
+        Self::__init__(&manager, session)?;
+        Ok(manager)
+    }
+
+    /// The `_session` of the manager and the core manager of its client, as PySpark's
+    /// `_execute_streaming_query_manager_cmd` reads them at each request.
+    fn manager_of<'py>(
+        slf: &Bound<'py, Self>,
+    ) -> PyResult<(Bound<'py, PyAny>, StreamingQueryManager)> {
+        let py = slf.py();
+        let session = crate::state::attr(slf.as_any(), pyo3::intern!(py, "_session"))?;
+        let core = crate::state::session_of_value(&session, pyo3::intern!(py, "client"))?;
+        Ok((session, core.streams()))
     }
 }
 
@@ -2172,136 +2351,343 @@ fn warn(py: Python<'_>, line: u32, message: String) -> PyResult<()> {
     )
 }
 
-/// `StreamingQueryManager._sqlb`, as PySpark Connect's `StreamingQueryListenerBus`, of its
-/// `_listener_bus`: the client-side listeners of the session, in the order that they were added,
-/// which Apache Spark's tests read to remove them.
-#[pyclass(
-    name = "StreamingQueryListenerBus",
-    module = "pyspark.sql.connect.streaming.query",
-    frozen
-)]
-pub struct PyStreamingQueryListenerBus {
-    manager: StreamingQueryManager,
-}
-
-#[pymethods]
-impl PyStreamingQueryListenerBus {
-    #[getter]
-    fn _listener_bus(&self, py: Python<'_>) -> Vec<Py<PyAny>> {
-        self.manager
-            .listeners()
-            .iter()
-            .filter_map(|listener| {
-                let adapter = listener.as_any()?.downcast_ref::<PyListenerAdapter>()?;
-                Some(adapter.listener.clone_ref(py))
-            })
-            .collect()
-    }
+/// The warning of PySpark's bus of a removal that failed of `error`.
+fn removal_failed(py: Python<'_>, error: impl std::fmt::Display) -> PyResult<()> {
+    // Of PySpark's `StreamingQueryListenerBus.remove`.
+    warn(
+        py,
+        332,
+        format!(
+            "Failed to remove the listener because of exception: {error}\n\
+             The listener is not removed, please remove it again."
+        ),
+    )
 }
 
 #[pymethods]
 impl PyStreamingQueryManager {
-    /// The shallow copy of a streaming query manager, as PySpark's `copy.copy`: of the same
-    /// session and listener bus, with the instance attributes of this one.
-    fn __copy__(slf: &Bound<'_, Self>) -> PyResult<Py<Self>> {
-        let py = slf.py();
-        let this = slf.borrow();
-        let copy = Py::new(
-            py,
-            PyStreamingQueryManager {
-                inner: this.inner.clone(),
-                session: this.session.clone(),
-            },
-        )?;
-        crate::reduce::copy_instance_dict(slf.as_any(), copy.bind(py).as_any())?;
-        Ok(copy)
+    #[new]
+    #[pyo3(signature = (*_args, **_kwargs), text_signature = "(session)")]
+    fn py_new(_args: &Bound<'_, PyTuple>, _kwargs: Option<&Bound<'_, PyDict>>) -> Self {
+        PyStreamingQueryManager {}
     }
 
-    /// The reduce of a streaming query manager, as PySpark's pickle of its `__dict__`, of its
-    /// session and then of its listener bus, which holds a lock that nothing copies: `streams` of
-    /// the session, with a state of a lock and the instance attributes of the manager. So no copy
-    /// but the shallow one succeeds, and each fails as PySpark's does: a pickle at the session,
-    /// of its creator, and cloudpickle and `copy.deepcopy` at the lock, which cloudpickle's
-    /// protocols 0 and 1 pickle by its class, which then fails to unpickle.
-    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+    /// `StreamingQueryManager(session)`, as PySpark Connect's `__init__`, which keeps its argument
+    /// as it is and makes its listener bus, `StreamingQueryListenerBus(self)`, of the class of the
+    /// module.
+    fn __init__(slf: &Bound<'_, Self>, session: &Bound<'_, PyAny>) -> PyResult<()> {
         let py = slf.py();
-        let session = crate::session::session_object(py, &slf.borrow().session)?;
-        let reduced =
-            crate::reduce::getattr_reduce(py, session.into_bound(py).into_any(), "streams")?;
-        let state = PyDict::new(py);
-        state.set_item("_sqlb", py.import("threading")?.call_method0("Lock")?)?;
-        state.call_method1("update", (slf.getattr("__dict__")?,))?;
-        let state = [reduced.get_item(0)?, reduced.get_item(1)?, state.into_any()];
-        Ok(PyTuple::new(py, state)?.into_any())
+        crate::state::assign(slf.as_any(), &[(pyo3::intern!(py, "_session"), session)])?;
+        let bus = py
+            .import("pyspark.sql.connect.streaming.query")?
+            .getattr(pyo3::intern!(py, "StreamingQueryListenerBus"))?
+            .call1((slf,))?;
+        crate::state::assign(slf.as_any(), &[(pyo3::intern!(py, "_sqlb"), &bus)])
+    }
+
+    /// The state of the manager, its `__dict__`, as `object.__getstate__` gives that of PySpark's
+    /// plain object, which a copy and a pickle keep (see `state::getstate`).
+    fn __getstate__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        crate::state::getstate(slf.as_any())
+    }
+
+    /// The reduce of the manager, as PySpark's plain object's: `copyreg.__newobj__` of its class,
+    /// of its `__dict__` (see `state::reduce_ex`).
+    fn __reduce_ex__<'py>(slf: &Bound<'py, Self>, protocol: i32) -> PyResult<Bound<'py, PyAny>> {
+        crate::state::reduce_ex(slf.as_any(), protocol)
+    }
+
+    // Remove all client-side listeners of the bus and stop its subscription, as PySpark's
+    // `self._sqlb.close()`.
+    fn close(slf: &Bound<'_, Self>) -> PyResult<()> {
+        let py = slf.py();
+        crate::state::attr(slf.as_any(), pyo3::intern!(py, "_sqlb"))?
+            .call_method0(pyo3::intern!(py, "close"))?;
+        Ok(())
     }
 
     #[getter]
     #[doc = connect_doc!(StreamingQueryManager.active)]
-    fn active(&self, py: Python<'_>) -> PyResult<Vec<PyStreamingQuery>> {
-        let queries =
-            crate::interrupt::interruptible_without_parts(py, &self.inner.spark_session(), || {
-                self.inner.active().map_err(Box::new)
-            })?;
-        Ok(queries.into_iter().map(PyStreamingQuery::new).collect())
+    fn active<'py>(slf: &Bound<'py, Self>) -> PyResult<Vec<Bound<'py, PyStreamingQuery>>> {
+        let (session, manager) = Self::manager_of(slf)?;
+        let queries = crate::interrupt::interruptible_without_parts(
+            slf.py(),
+            &manager.spark_session(),
+            || manager.active().map_err(Box::new),
+        )?;
+        queries
+            .iter()
+            .map(|query| PyStreamingQuery::of_query(&session, query))
+            .collect()
     }
 
     #[doc = connect_doc!(StreamingQueryManager.get)]
-    fn get(&self, py: Python<'_>, id: &str) -> PyResult<Option<PyStreamingQuery>> {
-        let query =
-            crate::interrupt::interruptible_without_parts(py, &self.inner.spark_session(), || {
-                self.inner.get(id).map_err(Box::new)
-            })?;
-        Ok(query.map(PyStreamingQuery::new))
+    fn get<'py>(
+        slf: &Bound<'py, Self>,
+        id: &str,
+    ) -> PyResult<Option<Bound<'py, PyStreamingQuery>>> {
+        let (session, manager) = Self::manager_of(slf)?;
+        let query = crate::interrupt::interruptible_without_parts(
+            slf.py(),
+            &manager.spark_session(),
+            || manager.get(id).map_err(Box::new),
+        )?;
+        query
+            .map(|query| PyStreamingQuery::of_query(&session, &query))
+            .transpose()
     }
 
     #[pyo3(signature = (timeout=None))]
     #[doc = connect_doc!(StreamingQueryManager.awaitAnyTermination)]
     fn awaitAnyTermination(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         timeout: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Option<bool>> {
         let timeout_ms = pyspark_timeout_ms(timeout)?;
-        crate::interrupt::interruptible_without_parts(py, &self.inner.spark_session(), || {
-            self.inner
+        let (_, manager) = Self::manager_of(slf)?;
+        crate::interrupt::interruptible_without_parts(slf.py(), &manager.spark_session(), || {
+            manager
                 .await_any_termination_ms(timeout_ms)
                 .map_err(Box::new)
         })
     }
 
     #[doc = connect_doc!(StreamingQueryManager.resetTerminated)]
-    fn resetTerminated(&self, py: Python<'_>) -> PyResult<()> {
-        crate::interrupt::interruptible_without_parts(py, &self.inner.spark_session(), || {
-            self.inner.reset_terminated().map_err(Box::new)
+    fn resetTerminated(slf: &Bound<'_, Self>) -> PyResult<()> {
+        let (_, manager) = Self::manager_of(slf)?;
+        crate::interrupt::interruptible_without_parts(slf.py(), &manager.spark_session(), || {
+            manager.reset_terminated().map_err(Box::new)
         })
     }
 
-    // Register a client-side listener object (with onQueryStarted/Progress/Idle/
-    // Terminated callbacks). Mirrors `StreamingQueryManager.addListener`: the listener gets the
-    // session as its `spark`, and the native Rust bus of the session dispatches its events to
-    // it. A listener added twice is in the bus twice, and each registration keeps its own id
-    // (see `PyListenerAdapter::id`); nothing is stored on the listener. Should the server fail
-    // to add its listener, this warns, as PySpark Connect's does.
-    // A terminal event-stream end or error clears the registrations; add listeners again
-    // to open a new subscription.
+    // Register a client-side listener object (with onQueryStarted/Progress/Idle/Terminated
+    // callbacks), as PySpark's `listener._set_spark_session(self._session)` and
+    // `self._sqlb.append(listener)`: of the session of the manager, to its listener bus.
     #[doc = connect_doc!(StreamingQueryManager.addListener)]
-    fn addListener(&self, py: Python<'_>, listener: Py<PyAny>) -> PyResult<()> {
-        let session = crate::session::session_object(py, &self.session)?;
-        listener
-            .bind(py)
-            .call_method1("_set_spark_session", (session,))?;
+    fn addListener(slf: &Bound<'_, Self>, listener: &Bound<'_, PyAny>) -> PyResult<()> {
+        let py = slf.py();
+        let session = crate::state::attr(slf.as_any(), pyo3::intern!(py, "_session"))?;
+        listener.call_method1(pyo3::intern!(py, "_set_spark_session"), (session,))?;
+        crate::state::attr(slf.as_any(), pyo3::intern!(py, "_sqlb"))?
+            .call_method1(pyo3::intern!(py, "append"), (listener,))?;
+        Ok(())
+    }
+
+    // Remove a client-side listener object, as PySpark's `self._sqlb.remove(listener)`.
+    #[doc = connect_doc!(StreamingQueryManager.removeListener)]
+    fn removeListener(slf: &Bound<'_, Self>, listener: &Bound<'_, PyAny>) -> PyResult<()> {
+        let py = slf.py();
+        crate::state::attr(slf.as_any(), pyo3::intern!(py, "_sqlb"))?
+            .call_method1(pyo3::intern!(py, "remove"), (listener,))?;
+        Ok(())
+    }
+
+    /// The events of the listener bus of the server, an iterator of `(event type, JSON)`, of the
+    /// Rust core's listener event stream. A private name, as PySpark's manager has no such
+    /// method: its listener bus reads the events itself.
+    fn _stream_listener_events(slf: &Bound<'_, Self>) -> PyResult<PyListenerEventStream> {
+        let (_, manager) = Self::manager_of(slf)?;
+        let session = manager.spark_session();
+        let stream = crate::interrupt::interruptible_without_parts(slf.py(), &session, || {
+            manager.listener_event_stream().map_err(Box::new)
+        })?;
+        Ok(PyListenerEventStream::new(stream, session))
+    }
+}
+
+// Python wrapper for StreamingQueryListenerBus, the listener bus of a StreamingQueryManager, its
+// `_sqlb`. As PySpark's plain class, its state is its `__dict__`: the `_sqm` that its `__init__`
+// sets, of any object, the `_listener_bus` list of its listeners, which `append` and `remove`
+// change and `post_to_all` posts the events to, the `_execution_thread` and the `_lock`, which
+// they hold while they read and change the list. The subscription of the session to the events of
+// the server is the native bus's, of a registration of each entry that `append` adds, whose thread
+// posts the events: `_execution_thread` stays None, as no thread of Python runs it, and the lock is
+// not held while the listeners are called, so that a listener may add or remove listeners (see
+// `dev/parity/known-differences.md`).
+#[pyclass(
+    name = "StreamingQueryListenerBus",
+    module = "pyspark.sql.connect.streaming.query",
+    subclass,
+    weakref,
+    dict
+)]
+#[doc = connect_doc!(StreamingQueryListenerBus)]
+pub struct PyStreamingQueryListenerBus {}
+
+impl PyStreamingQueryListenerBus {
+    /// The core manager of the client of the `_session` of the `_sqm` of the bus, as PySpark's bus
+    /// reads them when it makes a request.
+    fn manager_of(slf: &Bound<'_, Self>) -> PyResult<StreamingQueryManager> {
+        let py = slf.py();
+        let sqm = crate::state::attr(slf.as_any(), pyo3::intern!(py, "_sqm"))?;
+        let session = crate::state::attr(&sqm, pyo3::intern!(py, "_session"))?;
+        Ok(crate::state::session_of_value(&session, pyo3::intern!(py, "client"))?.streams())
+    }
+
+    /// The registrations of the entries of `entries`, a list of the bus, in the native bus of
+    /// `manager`, in its order.
+    fn registrations(
+        manager: &StreamingQueryManager,
+        entries: &Bound<'_, PyAny>,
+    ) -> Vec<Arc<dyn StreamingQueryListener>> {
+        manager
+            .listeners()
+            .into_iter()
+            .filter(|listener| {
+                PyListenerAdapter::of(listener.as_ref()).is_some_and(|adapter| {
+                    adapter
+                        .entry
+                        .as_ref()
+                        .is_some_and(|entry| entry.entries.bind(entries.py()).is(entries))
+                })
+            })
+            .collect()
+    }
+
+    /// Mark `registrations`, of [`registrations`](Self::registrations), as ended of the bus itself,
+    /// or not.
+    fn release(registrations: &[Arc<dyn StreamingQueryListener>], released: bool) {
+        for registration in registrations {
+            if let Some(adapter) = PyListenerAdapter::of(registration.as_ref()) {
+                adapter.released.store(released, Ordering::Release);
+            }
+        }
+    }
+}
+
+#[pymethods]
+impl PyStreamingQueryListenerBus {
+    #[new]
+    #[pyo3(signature = (*_args, **_kwargs), text_signature = "(sqm)")]
+    fn py_new(_args: &Bound<'_, PyTuple>, _kwargs: Option<&Bound<'_, PyDict>>) -> Self {
+        PyStreamingQueryListenerBus {}
+    }
+
+    /// `StreamingQueryListenerBus(sqm)`, as PySpark Connect's `__init__`: its manager, kept as it
+    /// is, an empty list of listeners, no thread, and a new `threading.Lock`.
+    fn __init__(slf: &Bound<'_, Self>, sqm: &Bound<'_, PyAny>) -> PyResult<()> {
+        let py = slf.py();
+        static LOCK: pyo3::sync::PyOnceLock<Py<PyAny>> = pyo3::sync::PyOnceLock::new();
+        let lock = LOCK.import(py, "threading", "Lock")?.call0()?;
+        let none = py.None().into_bound(py);
+        crate::state::assign(
+            slf.as_any(),
+            &[
+                (pyo3::intern!(py, "_sqm"), sqm),
+                (
+                    pyo3::intern!(py, "_listener_bus"),
+                    PyList::empty(py).as_any(),
+                ),
+                (pyo3::intern!(py, "_execution_thread"), &none),
+                (pyo3::intern!(py, "_lock"), &lock),
+            ],
+        )
+    }
+
+    /// The state of the bus, its `__dict__`, as `object.__getstate__` gives that of PySpark's
+    /// plain object, which a copy and a pickle keep (see `state::getstate`).
+    fn __getstate__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        crate::state::getstate(slf.as_any())
+    }
+
+    /// The reduce of the bus, as PySpark's plain object's: `copyreg.__newobj__` of its class, of
+    /// its `__dict__` (see `state::reduce_ex`).
+    fn __reduce_ex__<'py>(slf: &Bound<'py, Self>, protocol: i32) -> PyResult<Bound<'py, PyAny>> {
+        crate::state::reduce_ex(slf.as_any(), protocol)
+    }
+
+    // Remove all the listeners of the bus and end the subscription of the session, as PySpark's
+    // `close` removes each listener of its list: a server removal failure warns and keeps the
+    // listeners registered, as PySpark Connect's does, so close can be retried. A bus of no
+    // listeners does nothing.
+    fn close(slf: &Bound<'_, Self>) -> PyResult<()> {
+        let py = slf.py();
+        let entries = crate::state::attr(slf.as_any(), pyo3::intern!(py, "_listener_bus"))?;
+        if !entries.is_truthy()? {
+            return Ok(());
+        }
+        let manager = match Self::manager_of(slf) {
+            Ok(manager) => manager,
+            Err(error) => return removal_failed(py, error.value(py)),
+        };
+        // The registrations of the list, which the close ends, as the removal of each of its
+        // entries does.
+        let registrations = Self::registrations(&manager, &entries);
+        Self::release(&registrations, true);
+        let closed = crate::interrupt::interruptible_caught_without_parts(
+            py,
+            &manager.spark_session(),
+            || manager.close().map_err(Box::new),
+        );
+        match closed {
+            Ok(Ok(())) => {
+                drop(registrations);
+                let lock = crate::state::attr(slf.as_any(), pyo3::intern!(py, "_lock"))?;
+                with_lock(&lock, || {
+                    entries.call_method0(pyo3::intern!(py, "clear"))?;
+                    Ok(())
+                })
+            }
+            Ok(Err(error)) => {
+                Self::release(&registrations, false);
+                removal_failed(py, spark_error_to_py_exception(*error).value(py))
+            }
+            Err(error) => {
+                Self::release(&registrations, false);
+                Err(error)
+            }
+        }
+    }
+
+    // Append a listener to the bus, as PySpark's: to its list, and to the native bus of the
+    // session, which subscribes the session to the events of the server with its first listener.
+    // Should the server fail to add its listener, this warns and takes the listener off the list,
+    // as PySpark Connect's does. A signal that ends the wait for the server leaves the listener in
+    // the bus, as PySpark's append, which appends it first, leaves it.
+    #[doc = connect_doc!(StreamingQueryListenerBus.append)]
+    fn append(slf: &Bound<'_, Self>, listener: &Bound<'_, PyAny>) -> PyResult<()> {
+        let py = slf.py();
+        let lock = crate::state::attr(slf.as_any(), pyo3::intern!(py, "_lock"))?;
+        let entries = with_lock(&lock, || {
+            let entries = crate::state::attr(slf.as_any(), pyo3::intern!(py, "_listener_bus"))?;
+            entries.call_method1(pyo3::intern!(py, "append"), (listener,))?;
+            Ok(entries)
+        })?;
+        // As PySpark's, whose `except Exception` of the registration warns, and removes the
+        // listener of its list.
+        let failed = |error: String| -> PyResult<()> {
+            with_lock(&lock, || remove_equal(&entries, listener))?;
+            // Of PySpark's `StreamingQueryListenerBus.append`.
+            warn(
+                py,
+                297,
+                format!(
+                    "Failed to add the listener because of exception: {error}\n\
+                     The listener is not added, please add it again."
+                ),
+            )
+        };
+        let manager = match Self::manager_of(slf) {
+            Ok(manager) => manager,
+            Err(error) => return failed(error.value(py).to_string()),
+        };
         let adapter = Arc::new(PyListenerAdapter {
-            listener,
+            bus: slf.clone().into_any().unbind(),
+            entry: Some(ListenerEntry {
+                entries: entries.clone().unbind(),
+                listener: listener.clone().unbind(),
+            }),
             id: std::sync::OnceLock::new(),
+            released: AtomicBool::new(false),
         });
-        let registration = Arc::clone(&adapter);
+        let registration: Arc<dyn StreamingQueryListener> = adapter.clone();
         // As PySpark's append, whose `except Exception` also catches the error of an interrupt
         // that the server failed, which replaces the KeyboardInterrupt of a signal.
-        match crate::interrupt::interruptible_caught_without_parts(
+        let added = crate::interrupt::interruptible_caught_without_parts(
             py,
-            &self.inner.spark_session(),
+            &manager.spark_session(),
             || {
-                self.inner
+                manager
                     .add_listener(registration)
                     .map(|id| {
                         // Set once, by the only call that adds this adapter, as soon as the bus has
@@ -2311,139 +2697,154 @@ impl PyStreamingQueryManager {
                     })
                     .map_err(Box::new)
             },
-        )? {
-            Ok(()) => Ok(()),
-            Err(error) => {
-                // As PySpark's append, which then removes the listener from its bus: the
-                // registration that an add that a signal ended keeps.
+        );
+        match added {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(error)) => {
+                adapter.released.store(true, Ordering::Release);
+                // The registration that an add that a signal ended keeps.
                 if let Some(id) = adapter.id.get() {
-                    self.inner.discard_listener(id);
+                    manager.discard_listener(id);
                 }
-                // Of PySpark's `StreamingQueryListenerBus.append`.
-                warn(
-                    py,
-                    297,
-                    format!(
-                        "Failed to add the listener because of exception: {}\n\
-                         The listener is not added, please add it again.",
-                        spark_error_to_py_exception(*error).value(py)
-                    ),
-                )
+                failed(spark_error_to_py_exception(*error).value(py).to_string())
+            }
+            Err(error) => {
+                // A signal that ended the add before the native bus had the registration: the
+                // entry goes with it. One that the native bus keeps stays, with its entry.
+                if adapter.id.get().is_none() {
+                    adapter.released.store(true, Ordering::Release);
+                    with_lock(&lock, || remove_identical(&entries, listener))?;
+                }
+                Err(error)
             }
         }
     }
 
-    // Remove a previously-added client-side listener object. Mirrors
-    // `StreamingQueryManager.removeListener`: one registration of the listener is removed from
-    // the bus of the session, the first one that the bus has, as PySpark's `list.remove` of
-    // its bus finds it: the first that is the listener, or equal to it. The registrations of
-    // the listener in the buses of other sessions stay. Should the server fail to remove its
-    // listener, this warns, and the listener stays, as PySpark Connect's does.
-    // The registrations are read from the bus, so a removal that did not complete, such as a
-    // callback coalesced with another caller's in-progress last-listener removal or close,
-    // leaves its registration there to be removed again, and those that a terminal end of the
-    // event stream cleared are not looked for.
-    #[doc = connect_doc!(StreamingQueryManager.removeListener)]
-    fn removeListener(&self, py: Python<'_>, listener: Py<PyAny>) -> PyResult<()> {
-        let listener = listener.bind(py);
+    // Remove a listener of the bus, as PySpark's: the first entry of its list that is the
+    // listener, or equal to it, as PySpark's `in` and `list.remove` find it, and its registration
+    // in the native bus of the session, whose last one ends the subscription, as PySpark's
+    // removal of its last listener does. Should the server fail to remove its listener, this warns,
+    // and the listener stays, as PySpark Connect's does. A registration that is still being added
+    // by another thread is after this removal, which then leaves its entry.
+    #[doc = connect_doc!(StreamingQueryListenerBus.remove)]
+    fn remove(slf: &Bound<'_, Self>, listener: &Bound<'_, PyAny>) -> PyResult<()> {
+        let py = slf.py();
+        let lock = crate::state::attr(slf.as_any(), pyo3::intern!(py, "_lock"))?;
+        let (entries, entry) = with_lock(&lock, || {
+            let entries = crate::state::attr(slf.as_any(), pyo3::intern!(py, "_listener_bus"))?;
+            let mut found = None;
+            for item in entries.try_iter()? {
+                let item = item?;
+                if item.is(listener) || item.eq(listener)? {
+                    found = Some(item);
+                    break;
+                }
+            }
+            Ok((entries, found))
+        })?;
+        let Some(entry) = entry else {
+            return Ok(());
+        };
+        let manager = match Self::manager_of(slf) {
+            Ok(manager) => manager,
+            Err(error) => return removal_failed(py, error.value(py)),
+        };
         // The registrations that this call did not remove: another call removed them first,
         // or their removal is left to the caller that is closing the bus.
         let mut tried: Vec<String> = Vec::new();
         loop {
-            // The first registration in the order of the bus that is the listener or equal to
-            // it. The entries after it are not compared, as PySpark's `in` and `list.remove`
-            // stop at the first match.
+            let mut registered = false;
+            let mut pending = false;
             let mut first = None;
-            for candidate in self.inner.listeners() {
-                let Some(adapter) = candidate
-                    .as_any()
-                    .and_then(|any| any.downcast_ref::<PyListenerAdapter>())
-                else {
+            for registration in manager.listeners() {
+                let Some(adapter) = PyListenerAdapter::of(registration.as_ref()) else {
                     continue;
                 };
+                if !adapter.is_entry(&entries, &entry) {
+                    continue;
+                }
+                registered = true;
                 // A registration without an id is still being added by another thread: this
                 // removal is before it.
                 let Some(id) = adapter.id.get() else {
+                    pending = true;
                     continue;
                 };
                 if tried.contains(id) {
                     continue;
                 }
-                let found = adapter.listener.bind(py);
-                if found.is(listener) || found.eq(listener)? {
-                    first = Some(id.clone());
-                    break;
-                }
+                first = Some((id.clone(), Arc::clone(&registration)));
+                break;
             }
-            let Some(id) = first else {
+            let Some((id, registration)) = first else {
+                // An entry of no registration, such as one that the native bus ended, or that a
+                // user put on the list, is taken off it.
+                if !registered && !pending {
+                    with_lock(&lock, || remove_equal(&entries, listener))?;
+                }
                 return Ok(());
             };
-            match crate::interrupt::interruptible_caught_without_parts(
+            let adapter = PyListenerAdapter::of(registration.as_ref()).expect("an adapter");
+            adapter.released.store(true, Ordering::Release);
+            let removed = crate::interrupt::interruptible_caught_without_parts(
                 py,
-                &self.inner.spark_session(),
-                || self.inner.remove_listener_found(&id).map_err(Box::new),
-            )? {
+                &manager.spark_session(),
+                || manager.remove_listener_found(&id).map_err(Box::new),
+            );
+            match removed {
+                Ok(Ok(true)) => {
+                    drop(registration);
+                    let entries =
+                        crate::state::attr(slf.as_any(), pyo3::intern!(py, "_listener_bus"))?;
+                    return with_lock(&lock, || remove_equal(&entries, listener));
+                }
                 // The bus is read again once this is tried: a call that removed this
                 // registration first leaves the next match to this one, which may have been
                 // added since the bus was read.
-                Ok(false) => tried.push(id),
-                Ok(true) => return Ok(()),
+                Ok(Ok(false)) => {
+                    adapter.released.store(false, Ordering::Release);
+                    tried.push(id);
+                }
+                Ok(Err(error)) => {
+                    adapter.released.store(false, Ordering::Release);
+                    return removal_failed(py, spark_error_to_py_exception(*error).value(py));
+                }
                 Err(error) => {
-                    // Of PySpark's `StreamingQueryListenerBus.remove`.
-                    return warn(
-                        py,
-                        332,
-                        format!(
-                            "Failed to remove the listener because of exception: {}\n\
-                             The listener is not removed, please remove it again.",
-                            spark_error_to_py_exception(*error).value(py)
-                        ),
-                    );
+                    adapter.released.store(false, Ordering::Release);
+                    return Err(error);
                 }
             }
         }
     }
 
-    /// The listener bus of the session, as PySpark Connect's `_sqlb`.
-    #[getter]
-    fn _sqlb(&self) -> PyStreamingQueryListenerBus {
-        PyStreamingQueryListenerBus {
-            manager: self.session.streams(),
-        }
+    #[staticmethod]
+    fn deserialize<'py>(py: Python<'py>, event: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+        // As PySpark's, of the `event_type` and the `event_json` of a StreamingQueryListenerEvent.
+        let event_type = event.getattr(pyo3::intern!(py, "event_type"))?;
+        let event_json = event.getattr(pyo3::intern!(py, "event_json"))?;
+        py.import("pyspark.sql.connect.streaming.query")?
+            .call_method1("_deserialize_listener_event", (event_type, event_json))
     }
 
-    // Remove all client-side listeners and stop the dispatch thread. Mirrors
-    // `StreamingQueryManager.close`. A server removal failure warns and keeps the
-    // listeners registered, as PySpark Connect's does, so close can be retried.
-    fn close(&self, py: Python<'_>) -> PyResult<()> {
-        if let Err(error) = crate::interrupt::interruptible_caught_without_parts(
-            py,
-            &self.inner.spark_session(),
-            || self.inner.close().map_err(Box::new),
-        )? {
-            // Of PySpark's `StreamingQueryListenerBus.remove`, which its `close` calls.
-            return warn(
-                py,
-                332,
-                format!(
-                    "Failed to remove the listener because of exception: {}\n\
-                     The listener is not removed, please remove it again.",
-                    spark_error_to_py_exception(*error).value(py)
-                ),
-            );
+    // Post an event to the listeners of the bus, as PySpark's: each of its list, in its order, of
+    // the list as it is then, read under the lock, which the calls of the listeners do not hold.
+    // The exception of a listener warns, and the others get the event.
+    #[doc = connect_doc!(StreamingQueryListenerBus.post_to_all)]
+    fn post_to_all(slf: &Bound<'_, Self>, event: &Bound<'_, PyAny>) -> PyResult<()> {
+        let py = slf.py();
+        let lock = crate::state::attr(slf.as_any(), pyo3::intern!(py, "_lock"))?;
+        let listeners = with_lock(&lock, || {
+            let entries = crate::state::attr(slf.as_any(), pyo3::intern!(py, "_listener_bus"))?;
+            entries.try_iter()?.collect::<PyResult<Vec<_>>>()
+        })?;
+        let module = py.import("pyspark.sql.connect.streaming.query")?;
+        for listener in listeners {
+            module.call_method1(
+                pyo3::intern!(py, "_dispatch_listener_event"),
+                (listener, event),
+            )?;
         }
         Ok(())
-    }
-
-    /// The events of the listener bus of the server, an iterator of `(event type, JSON)`, of the
-    /// Rust core's listener event stream. A private name, as PySpark's manager has no such
-    /// method: its listener bus reads the events itself.
-    fn _stream_listener_events(&self, py: Python<'_>) -> PyResult<PyListenerEventStream> {
-        let session = self.inner.spark_session();
-        let stream = crate::interrupt::interruptible_without_parts(py, &session, || {
-            self.inner.listener_event_stream().map_err(Box::new)
-        })?;
-        Ok(PyListenerEventStream::new(stream, session))
     }
 }
 

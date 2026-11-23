@@ -1091,19 +1091,18 @@ requests of the unpickled object pickle as it is then. This case still differs:
   `SparkSession.__del__` closes the client of a session object that is freed, and the exit hook of a
   closed client sends nothing; the drop-in closes a session once the program dropped its objects and
   the objects that hold it, also when a `conf` or a `client` of it is kept, so it sends nothing at
-  exit either. Once its `catalog` is read, a session object of either client is in a reference
-  cycle with its `Catalog`, which holds the session as its `_sparkSession`, so that a drop does not
-  free it: it stays open until a collection of the garbage collector frees it, which the allocations
-  of the program decide, and an exit before that sends its `clean_cache` (and its release, with
-  `SPARK_CONNECT_RELEASE_SESSION_ON_EXIT`). So it is of PySpark's once its `streams` is read, of the
-  `StreamingQueryManager` of its `_sqm`, which holds the session too. The drop-in's session keeps
-  its streams without a cycle, so it is freed when the program drops it, as PySpark's is after a
-  collection (`gc.collect()`), and its exit sends nothing, whatever the timing of the collections.
-  The same
-  goes for the other cycles that keep a PySpark session until a collection, such as that of an error
-  that the `_handle_error` of its client raises again (`raise error`), whose traceback keeps the
-  frame that holds the error and, with it, the frames of the calls that led to it and their
-  variables. PySpark 4.3.0 then does not exit at all when no collection frees the session before the
+  exit either. Once its `catalog` or its `streams` is read, a session object of either client is in
+  a reference cycle with its `Catalog`, which holds the session as its `_sparkSession`, or with its
+  `StreamingQueryManager`, which holds it as its `_session`, so that a drop does not free it: it
+  stays open until a collection of the garbage collector frees it, which the allocations of the
+  program decide, and an exit before that sends its `clean_cache` (and its release, with
+  `SPARK_CONNECT_RELEASE_SESSION_ON_EXIT`). The drop-in's session has none of the other cycles that
+  keep a PySpark session until a collection, so it is freed when the program drops it, as PySpark's
+  is after a collection (`gc.collect()`), and its exit sends nothing, whatever the timing of the
+  collections: such as that of an error that the `_handle_error` of its client raises again
+  (`raise error`), whose traceback keeps the frame that holds the error and, with it, the frames of
+  the calls that led to it and their variables. PySpark 4.3.0 then does not exit at all when no
+  collection frees the session before the
   teardown of the interpreter, as of the cycle of its `streams`, or of any of these cycles under
   `gc.disable()`, and it does not while a session other than its default one is left open to the end
   (of `newSession()`, or `SparkSession(connection=...)`): its `SparkSession.__del__` closes the
@@ -1121,19 +1120,34 @@ requests of the unpickled object pickle as it is then. This case still differs:
   readers, writers, builders and the other objects of a session or a DataFrame hold their
   state in the Rust core: their `__dict__` holds the attributes that a user sets on them,
   which their copies and pickles keep as PySpark's do, but not their state, which PySpark's
-  holds there (`vars(spark.streams)` is empty, where PySpark's has `_session` and `_sqlb`). These
-  are not of them, and hold their state in their `__dict__`, as PySpark's: an `Observation`, of its
-  `_name`, `_result` and `_error`, and the `Catalog`, the `TableValuedFunction`, the
-  `DataSourceRegistration` and the `RuntimeConf` of a session, of the session of their
-  `_sparkSession` (`sparkSession` of a registration) and of the client of their `_client`, which
-  their methods read when they make their requests, as PySpark's (see `docs/compatibility.md`).
-  What remains of these is inherent, as the transport is native: the requests of a catalog and of
-  the table-valued functions are made by the native transport of the session that they hold, or,
-  of another object, as a proxy of a session, of the session of the drop-in's client of its
-  `client`, where PySpark's call the methods of that client, such as its `to_table`. So the methods
-  that a subclass of the drop-in's client overrides are not called by them, a client of another
-  class raises a `TypeError` of it, and the DataFrames that they make are of that session, which a
-  DataFrame holds natively (above), where PySpark's are of the object that they hold. A
+  holds there (`vars(spark.read)` is empty, where PySpark's has `_client`, `_format`, `_schema` and
+  `_options`). These are not of them, and hold their state in their `__dict__`, as PySpark's: an
+  `Observation`, of its `_name`, `_result` and `_error`; the `Catalog`, the `TableValuedFunction`,
+  the `DataSourceRegistration` and the `RuntimeConf` of a session, of the session of their
+  `_sparkSession` (`sparkSession` of a registration) and of the client of their `_client`; and the
+  `StreamingQueryManager` of `spark.streams`, of its `_session` and its `_sqlb`, its
+  `StreamingQueryListenerBus`, of its `_sqm`, `_listener_bus`, `_execution_thread` and `_lock`,
+  and a `StreamingQuery`, of its `_session`, `_query_id`, `_run_id` and `_name`. Their methods read
+  their state when they make their requests, as PySpark's, and the events of the listeners of
+  streaming queries are posted to the listeners of the `_listener_bus` as they are then (see
+  `docs/compatibility.md`). Of the listener bus, the subscription of the session to the events is
+  the native listener bus's, of which Rust programs get the events too, whose thread posts them and
+  which keeps a registration of each listener that `append` adds: `_execution_thread` stays None,
+  where PySpark's holds the `threading.Thread` of its handler while the bus has listeners, and the
+  `_lock` is held while the list is read or changed, but not while the listeners are called, where
+  PySpark's holds it around the calls, so that a listener may add or remove listeners of its
+  callbacks, where PySpark's waits for ever. The end of the events, of the server, of a stop of the
+  session or of a close of its client, takes the listeners off the list, as PySpark's handler
+  clears it when its events fail, and `close()` removes every listener, where PySpark's removes
+  each other one, as it removes them from the list that it iterates. What remains of these is
+  inherent, as the transport is native: the requests of a catalog, of the table-valued functions,
+  of a streaming query and of a manager are made by the native transport of the session that they
+  hold, or, of another object, as a proxy of a session, of the session of the drop-in's client of
+  its `client`, where PySpark's call the methods of that client, such as its `to_table` and its
+  `execute_command`. So the methods that a subclass of the drop-in's client overrides are not
+  called by them, a client of another class raises a `TypeError` of it, and the DataFrames that a
+  catalog and the table-valued functions make are of that session, which a DataFrame holds natively
+  (above), where PySpark's are of the object that they hold. A
   `RuntimeConf` calls the `config` of a client of another class, or of a subclass that overrides
   it, and a registration the `register_data_source` of the `_client` of its `sparkSession`, as
   PySpark's do. Calling the methods of the client for each request would be a second
@@ -1142,8 +1156,9 @@ requests of the unpickled object pickle as it is then. This case still differs:
   its interrupts and its decoding of the results, in Rust.
 - **Subclasses** (intentional; the state is native). PySpark's classes are plain classes that a user
   subclasses. The drop-in's DataFrame, `Observation`, the `SparkSession`, `Catalog`,
-  `TableValuedFunction`, `DataSourceRegistration`, `RuntimeConf`, `DataFrameReader` and
-  `DataStreamReader` of `pyspark.sql.connect`, `SparkSession.Hook`, `StorageLevel`,
+  `TableValuedFunction`, `DataSourceRegistration`, `RuntimeConf`, `StreamingQuery`,
+  `StreamingQueryManager`, `StreamingQueryListenerBus`, `DataFrameReader` and `DataStreamReader` of
+  `pyspark.sql.connect`, `SparkSession.Hook`, `StorageLevel`,
   `PythonEvalType` and the data types are subclassed as PySpark's: a subclass constructs of the
   arguments of its `__init__`, and its copies and pickles are of the subclass (but those of a
   session, which are the active session of its ID, as PySpark's), and PySpark's pickle of a reader,
@@ -1151,10 +1166,11 @@ requests of the unpickled object pickle as it is then. This case still differs:
   The `Window` of `pyspark.sql.window` and of `pyspark.sql.connect.window`, and the classic
   `Column`, `DataFrameNaFunctions`, `DataFrameStatFunctions`, `WindowSpec` and `TableArg`, are
   PySpark's classes, which construct and subclass as PySpark's. The catalog, the table-valued
-  functions, the registration and the runtime configuration keep their state in their `__dict__`,
-  as PySpark's (see the row above): their `__init__` keeps any object, which their first use reads,
-  and one whose `__init__` never ran raises the `AttributeError` of the first attribute that
-  PySpark's method reads (`_sparkSession`, `sparkSession`, `_client`). The session and the readers
+  functions, the registration, the runtime configuration and the streaming queries, their manager
+  and its listener bus keep their state in their `__dict__`, as PySpark's (see the row above): their
+  `__init__` keeps any object, which their first use reads, and one whose `__init__` never ran
+  raises the `AttributeError` of the first attribute that PySpark's method reads (`_sparkSession`,
+  `sparkSession`, `_client`, `_query_id`, `_session`, `_lock`). The session and the readers
   are of the native state of a session, which the `__init__` of the class, of PySpark's arguments,
   gives them: one whose `__init__` never ran, as of a subclass whose `__init__` does not call it,
   is of the session of no server, whose requests raise `NO_ACTIVE_SESSION` and whose `is_stopped`
@@ -1173,9 +1189,7 @@ requests of the unpickled object pickle as it is then. This case still differs:
     `LogicalPlan` of a DataFrame;
   - `GroupedData`, `PandasCogroupedOps`: a DataFrame and the expressions of its grouping;
   - `DataFrameNaFunctions`, `DataFrameStatFunctions`: a DataFrame of a native plan;
-  - `WindowSpec`, `TableArg`: expressions and a `WindowFrame`, a `SubqueryExpression`;
-  - `StreamingQueryManager`, `StreamingQuery`: a session and the IDs of a query, of the
-    listener bus and the queries of the Rust core.
+  - `WindowSpec`, `TableArg`: expressions and a `WindowFrame`, a `SubqueryExpression`.
 
   A Python subclass of a data type (`StringType`, `DecimalType`, `ArrayType`, `StructField`,
   `StructType` and the others) is of the core type of its class, and runs its own methods where
@@ -1289,8 +1303,8 @@ mypy and pyright type an application as with `pyspark-client` (see `docs/compati
   `python/tests/test_type_stubs_offline.py` lists the names that the stubs declare and the drop-in
   does not have, with their reasons: the classic-only `DataFrame.rdd`, as type checkers of
   `pyspark-client` see it, the type variables of the annotations of `pyspark.sql.types`, and the
-  base and the internal class of PySpark Connect's classes that the drop-in implements natively,
-  the `OptionUtils` of its readers and writers and its `StreamingQueryListenerBus`.
+  base of PySpark Connect's readers and writers, which the drop-in implements natively, their
+  `OptionUtils`.
 - **The internals of PySpark Connect** (intentional). The private attributes of the Connect
   classes that PySpark annotates with its plans and expressions (`DataFrameWriter._write`, ...)
   are `Any`, as the drop-in builds them in Rust (`UNRESOLVED_IMPORTS` of the generator).

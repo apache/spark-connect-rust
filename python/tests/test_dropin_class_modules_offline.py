@@ -1108,7 +1108,6 @@ def test_every_native_class_has_its_bare_name_as_its_c_name(objects):
         F.col("a")._expr,
         SparkSession._active_session,
         objects["spark"]._downgrade(),
-        objects["streams"]._sqlb,
         inspect.getattr_static(native.LogisticRegression, "maxIter"),
     ]
     module_classes = {cls for cls in vars(native).values() if isinstance(cls, type)}

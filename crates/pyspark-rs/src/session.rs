@@ -1946,6 +1946,16 @@ impl PandasArrowSettings {
 }
 
 impl PySparkSession {
+    /// Clear the listeners of the listener bus of the `streams` of the session, if it has one,
+    /// once a stop or a close of the session ended the subscription of its listeners, as the
+    /// handler thread of PySpark's bus clears its list when the close of the client ends its
+    /// events. Its errors, as of a bus that a user replaced, are left.
+    fn clear_stream_listeners(&self, py: Python<'_>) {
+        if let Some(manager) = self.streams.get() {
+            let _ = crate::streaming::clear_listeners_of(manager.bind(py).as_any());
+        }
+    }
+
     /// Upload local files, or `file:` URIs, as artifacts of the session, each named by the first
     /// of the flags that it matches, as PySpark's `SparkConnectClient.add_artifacts`, which gives
     /// its `ArtifactManager` one path at a time: a path is parsed, and a local file opened (see
@@ -4198,21 +4208,23 @@ impl PySparkSession {
     // Get the StreamingQueryManager for managing active streaming queries (`spark.streams`):
     // the same object at each access, as PySpark Connect's.
     //
-    // The native manager is of the Rust-side listener bus of the session, so
-    // `addListener`/`removeListener`/`close` are implemented in the core (Rust clients get the
-    // feature too).
+    // Its listener bus registers its listeners in the native listener bus of the session, of the
+    // core (Rust clients get the feature too).
     #[getter]
     #[pyo3(name = "streams")]
     #[doc = connect_doc!(SparkSession.streams)]
-    fn streams(&self, py: Python<'_>) -> PyResult<Py<PyStreamingQueryManager>> {
-        if let Some(manager) = self.streams.get() {
+    //
+    // As PySpark's `StreamingQueryManager(self)`, the manager holds the session object as its
+    // `_session`, and the session the manager, a reference cycle, which a collection frees, as
+    // PySpark's.
+    fn streams(slf: &Bound<'_, Self>) -> PyResult<Py<PyStreamingQueryManager>> {
+        let py = slf.py();
+        if let Some(manager) = slf.borrow().streams.get() {
             return Ok(manager.clone_ref(py));
         }
-        let manager = Py::new(
-            py,
-            PyStreamingQueryManager::new(self.session.streams(), self.session.clone()),
-        )?;
-        Ok(self.streams.get_or_init(|| manager).clone_ref(py))
+        // Made without a borrow of the session, as its `__init__` runs Python code.
+        let manager = PyStreamingQueryManager::of_session(slf.as_any())?.unbind();
+        Ok(slf.borrow().streams.get_or_init(|| manager).clone_ref(py))
     }
 
     /// The `streams` and the `catalog` that the session keeps, Python objects that Python's
@@ -4299,6 +4311,7 @@ impl PySparkSession {
             };
             crate::progress::forget_session(&self.session);
             crate::profiler::forget_session(&self.session);
+            self.clear_stream_listeners(py);
             if let Err(error) = released {
                 // As PySpark's stop, whose `except Exception as e` logs the exception of the
                 // release through the logger of Spark Connect, which is disabled unless
@@ -4579,9 +4592,13 @@ impl PySparkSession {
         // that the program dropped, which a finalizer may close.
         if !self.session.has_releases_to_wait_for() {
             crate::gc::detach_without_parts(py, || self.session.close_at_once());
-            return Ok(());
+        } else {
+            crate::interrupt::abortable_without_session(py, || {
+                self.session.close_after_releases()
+            })?;
         }
-        crate::interrupt::abortable_without_session(py, || self.session.close_after_releases())
+        self.clear_stream_listeners(py);
+        Ok(())
     }
 
     /// Keep the session alive until the interpreter exits, for a client that no session object

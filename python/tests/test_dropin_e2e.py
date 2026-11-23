@@ -8079,3 +8079,42 @@ def test_the_catalog_tvf_registration_and_conf_make_the_requests_of_their_dict_a
     assert list(get.get.keys) == [key]
     assert [(p.key, p.value) for p in set_.set.pairs] == [(key, "7")]
     assert len(client.operations) == 5
+
+
+def test_the_streaming_queries_and_their_manager_make_the_requests_of_their_dict_as_pysparks(
+    session,
+):
+    # As official PySpark 4.3.0, whose StreamingQuery, StreamingQueryManager and
+    # StreamingQueryListenerBus keep their state in their __dict__, which their methods read at
+    # each request: a query or a manager of a proxy of the session makes the requests of the
+    # session of its client, and the queries that a manager gives are of its `_session`.
+    from pyspark.sql.connect.streaming.query import StreamingQuery, StreamingQueryManager
+
+    class Proxy:
+        def __init__(self, spark):
+            self.spark = spark
+
+        def __getattr__(self, name):
+            return getattr(self.spark, name)
+
+    manager = session.streams
+    assert list(vars(manager)) == ["_session", "_sqlb"] and manager._session is session
+    bus = manager._sqlb
+    assert list(vars(bus)) == ["_sqm", "_listener_bus", "_execution_thread", "_lock"]
+    assert bus._sqm is manager and bus._listener_bus == []
+    query = (
+        session.readStream.format("rate").load()
+        .writeStream.format("memory").queryName("dictsub_streams").start()
+    )
+    try:
+        assert list(vars(query)) == ["_session", "_query_id", "_run_id", "_name"]
+        assert query._session is session and query.name == "dictsub_streams"
+        proxy = Proxy(session)
+        of_proxy = StreamingQuery(proxy, query.id, query.runId)
+        assert of_proxy.isActive and of_proxy._session is proxy and of_proxy.name is None
+        [active] = StreamingQueryManager(proxy).active
+        assert active.id == query.id and active._session is proxy
+        assert manager.get(query.id)._session is session
+    finally:
+        query.stop()
+    assert not StreamingQuery(Proxy(session), query.id, query.runId).isActive
