@@ -20,6 +20,7 @@
 //! preface and the settings that the connector exchanges for hyper, and the texts of the failures,
 //! as grpcio gives them in its dialect and as the Rust client does otherwise.
 
+use super::subchannel::Subchannel;
 use super::*;
 use std::sync::atomic::AtomicUsize;
 use tokio::net::TcpListener;
@@ -2791,4 +2792,36 @@ async fn a_call_on_the_connection_of_a_subchannel_whose_server_went_away_fails_o
         assert_eq!(subchannel.counts(), (failures + 1, connections));
         channel.shutdown();
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_pass_of_a_rust_client_makes_one_attempt_of_each_address() {
+    // A Rust client's channel goes idle of the failure of its pass, which fails its calls, and
+    // asks no subchannel to connect again then, as gRPC's `pick_first` asks once every subchannel
+    // failed in transient failure only: each call makes one attempt of the address, where an
+    // attempt asked for as the channel let go of the list was made as it had started.
+    let target = failing_target(false);
+    let pool: Arc<Pool> = Arc::default();
+    // The subchannel of the address of the target, which the test holds, so that every attempt of
+    // the channel is of it, and none that is asked for is aborted.
+    let held = Subchannel::of(
+        &pool,
+        Address::Unix {
+            path: b"/nonexistent-spark-connect-test/s.sock".to_vec(),
+            abstract_name: false,
+        },
+        &SubchannelArgs::new(&target, "http://localhost", None, false),
+        &target,
+        &tonic::transport::Endpoint::from_static("http://localhost"),
+        &tokio::runtime::Handle::current(),
+    );
+    let channel = channel_in(target, Arc::clone(&pool));
+    for call in 1..=4 {
+        assert!(picked(&channel).await.is_err());
+        assert!(channel.is_idle());
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        assert_eq!(held.counts(), (call, 0));
+        assert!(held.snapshot().idle);
+    }
+    assert_eq!(pool.len(), 1);
 }

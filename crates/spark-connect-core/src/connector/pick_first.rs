@@ -213,6 +213,9 @@ enum Outcome {
 /// gRPC's subchannel list.
 struct List {
     entries: Vec<Entry>,
+    /// Whether the list is of the dialect of grpcio, whose subchannels connect again once every
+    /// one failed, where a Rust client's channel goes idle (see [`List::step`]).
+    grpcio: bool,
     /// The index of the subchannel of the attempt of the first pass, of happy eyeballs.
     attempting: usize,
     /// Whether the attempt of that subchannel started.
@@ -229,10 +232,15 @@ struct List {
 }
 
 impl List {
-    /// The list of `subchannels`, which wake `watcher`.
-    fn new(subchannels: Vec<Arc<Subchannel>>, watcher: &Arc<tokio::sync::Notify>) -> Self {
+    /// The list of `subchannels`, which wake `watcher`, in the dialect of grpcio if `grpcio`.
+    fn new(
+        subchannels: Vec<Arc<Subchannel>>,
+        watcher: &Arc<tokio::sync::Notify>,
+        grpcio: bool,
+    ) -> Self {
         let mut list = Self {
             entries: Vec::with_capacity(subchannels.len()),
+            grpcio,
             attempting: 0,
             started: false,
             timer: None,
@@ -329,10 +337,13 @@ impl List {
         }
         if self.complete {
             // As gRPC's `pick_first` once every subchannel failed: each one connects again as it
-            // is idle, and each time as many failures as subchannels came, the last is reported.
-            for (entry, snapshot) in self.entries.iter().zip(&snapshots) {
-                if snapshot.idle {
-                    entry.subchannel.request_connection();
+            // is idle, and each time as many failures as subchannels came, the last is reported;
+            // of the dialect of grpcio, as a Rust client's channel lets go of a list that failed.
+            if self.grpcio {
+                for (entry, snapshot) in self.entries.iter().zip(&snapshots) {
+                    if snapshot.idle {
+                        entry.subchannel.request_connection();
+                    }
                 }
             }
             let size = self.entries.len() as u64;
@@ -381,9 +392,15 @@ impl List {
         if self.attempting >= self.entries.len() && self.entries.iter().all(|entry| entry.failed) {
             self.complete = true;
             self.failures = 0;
-            for (entry, snapshot) in self.entries.iter().zip(&snapshots) {
-                if snapshot.idle {
-                    entry.subchannel.request_connection();
+            // As gRPC's `MaybeFinishHappyEyeballsPass`, which connects each idle subchannel again,
+            // in the dialect of grpcio: a Rust client's channel goes idle of the failure, which
+            // fails its calls, of no attempt more, as an attempt requested here would be aborted
+            // once the channel lets go of the list, or made all the same if it started.
+            if self.grpcio {
+                for (entry, snapshot) in self.entries.iter().zip(&snapshots) {
+                    if snapshot.idle {
+                        entry.subchannel.request_connection();
+                    }
                 }
             }
             return Outcome::Failed(self.last_failure());
@@ -835,7 +852,7 @@ impl ClientChannel {
                 )
             })
             .collect();
-        let list = List::new(subchannels, &self.wake);
+        let list = List::new(subchannels, &self.wake, self.grpcio());
         state.last_picked = None;
         if state.picked.is_some() {
             match list.first_ready() {
