@@ -50,6 +50,9 @@ rustls-native-certs = "0.8"
 [target.'cfg(unix)'.dependencies]
 # The texts of `gai_strerror`, which tell the failures of the system's resolver apart.
 libc = "0.2"
+# The connections of the connector, of TCP and of Unix sockets, whose `connect` it makes itself, so
+# that a failure as it starts is told from one later, as gRPC's core tells them.
+socket2 = "0.6"
 
 [target.'cfg(all(target_arch = "aarch64", not(target_os = "windows")))'.dependencies]
 # sha2 0.10 requires this feature for ARM hardware acceleration; sha2-asm excludes Windows.

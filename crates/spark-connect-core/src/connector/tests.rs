@@ -121,6 +121,8 @@ fn target(addresses: Vec<SocketAddr>, grpcio: bool) -> Target {
         tls: None,
         local: false,
         grpcio,
+        form: None,
+        names: None,
         addresses: Some(addresses),
         resolves_never: false,
         lookups: Default::default(),
@@ -216,7 +218,10 @@ fn the_failures_have_grpc_core_s_texts_in_grpcio_s_dialect_and_the_rust_client_s
     // The texts of grpcio 1.85.1 for each failure, of the probes against loopback servers.
     let refused = os_error(libc::ECONNREFUSED);
     let reset = os_error(libc::ECONNRESET);
-    let at = |address, failure| ChannelFailure::Addresses { address, failure };
+    let at = |address: SocketAddr, failure| ChannelFailure::Addresses {
+        address: address.into(),
+        failure,
+    };
     let all = "failed to connect to all addresses; last error:";
     let cases = [
         (
@@ -1230,4 +1235,428 @@ fn a_self_issued_certificate_is_one_whose_issuer_is_its_subject() {
     assert!(self_issued(&certs().ca));
     assert!(!self_issued(&certs().localhost.cert));
     assert!(!self_issued(b"not a certificate"));
+}
+
+/// A target of the target of gRPC `form`, of no address that the tests resolve, in the dialect of
+/// grpcio if `grpcio`.
+fn form_target(form: ChannelTarget, grpcio: bool) -> Target {
+    Target {
+        host: "localhost".to_string(),
+        port: 443,
+        tunnel: None,
+        tls: None,
+        local: false,
+        grpcio,
+        form: None,
+        names: None,
+        addresses: None,
+        resolves_never: false,
+        lookups: Default::default(),
+    }
+    .of_channel_target(Some(form), None)
+}
+
+/// The text of the failure of the attempts to `target`, in the dialect of grpcio.
+async fn failure_of(target: &Target) -> String {
+    attempt(target, Duration::from_secs(20))
+        .await
+        .err()
+        .expect("the target does not connect")
+        .text(true)
+}
+
+#[tokio::test]
+async fn the_addresses_of_a_target_of_grpc_are_tried_in_turn() {
+    // As gRPC's `pick_first` of the addresses of `ipv4:`, of no lookup: the refused address fails,
+    // and the next one connects; of none, the calls fail of `empty address list`.
+    let refused = closed_port();
+    let (server, _) = settings_server().await;
+    let addresses = |addresses: Vec<SocketAddr>| ChannelTarget::Addresses {
+        addresses,
+        authority: String::new(),
+    };
+    let target = form_target(addresses(vec![refused.address, server]), true);
+    assert!(attempt(&target, Duration::from_secs(20)).await.is_ok());
+    assert_eq!(target.lookups.load(Ordering::SeqCst), 1);
+    let target = form_target(addresses(vec![refused.address]), true);
+    assert_eq!(
+        failure_of(&target).await,
+        format!(
+            "failed to connect to all addresses; last error: UNKNOWN: ipv4:{}: Failed to connect \
+             to remote host: Connection refused",
+            refused.address
+        )
+    );
+    assert_eq!(
+        failure_of(&form_target(addresses(vec![]), true)).await,
+        "empty address list"
+    );
+    let none = attempt(
+        &form_target(addresses(vec![]), false),
+        Duration::from_secs(1),
+    )
+    .await;
+    assert_eq!(none.err().unwrap().text(false), "the target has no address");
+}
+
+#[tokio::test]
+async fn the_names_of_a_target_of_grpc_are_resolved_as_c_ares_resolves_them() {
+    let (server, _) = settings_server().await;
+    let name = |host: &str| ChannelTarget::Name {
+        host: host.to_string(),
+        port: server.port(),
+        name: format!("{host}:{}", server.port()),
+    };
+    // Four decimal numbers are an address, of leading zeros too, and the names under `localhost`
+    // the loopback, of any character.
+    for host in [
+        "127.000.0.1",
+        "127.0.0.01",
+        "x..localhost",
+        "a!b.localhost",
+        "LocalHost.",
+    ] {
+        let target = form_target(name(host), true);
+        assert!(
+            attempt(&target, Duration::from_secs(20)).await.is_ok(),
+            "{host}"
+        );
+    }
+    // A name of a character that c-ares does not take, of an empty label, or of a label of more
+    // than 63 characters, is not resolved.
+    let long_label = format!("{}.test", "a".repeat(64));
+    for host in [
+        "local!host",
+        "local..host",
+        ".foo.invalid",
+        long_label.as_str(),
+    ] {
+        let target = form_target(name(host), true);
+        let port = server.port();
+        assert_eq!(
+            failure_of(&target).await,
+            format!(
+                "errors resolving {host}:{port}: [field:hostname lookup error:address lookup \
+                 failed for {host}:{port}: Misformatted domain name]"
+            )
+        );
+    }
+    // A name that gRPC's resolver does not take fails of the error that it gives.
+    let unresolvable = ChannelTarget::Unresolvable {
+        name: "localhost:abc".to_string(),
+        detail: "Failed to parse port in name: localhost:abc".to_string(),
+    };
+    assert_eq!(
+        failure_of(&form_target(unresolvable, true)).await,
+        "errors resolving localhost:abc: [field:hostname lookup error:Failed to parse port in \
+         name: localhost:abc]"
+    );
+}
+
+#[test]
+fn a_name_is_one_that_c_ares_asks_for() {
+    for name in [
+        "spark.example.com",
+        "a-b_c/d*e",
+        "a.",
+        ".",
+        "x".repeat(63).as_str(),
+    ] {
+        assert!(is_ares_name(name), "{name}");
+    }
+    let long = vec!["a".repeat(60); 5].join(".");
+    for name in ["a b", "a!b", "a..b", "..", ".a", "a:b", long.as_str()] {
+        assert!(!is_ares_name(name), "{name}");
+    }
+    if cfg!(unix) {
+        for name in ["127.1", "0x7f.0.0.1", "2130706433", "127.0.0.1"] {
+            assert!(read_as_an_address(name), "{name}");
+        }
+        assert!(!read_as_an_address("127.1."));
+        assert!(!read_as_an_address("localhost"));
+    }
+}
+
+#[test]
+fn a_connect_that_fails_as_it_starts_has_grpc_core_s_text() {
+    let unix = Address::Unix {
+        path: b"/tmp/none.sock".to_vec(),
+        abstract_name: false,
+    };
+    let failure = ChannelFailure::Addresses {
+        address: unix.clone(),
+        failure: Failure::ConnectNow(os_error(libc::ENOENT)),
+    };
+    assert_eq!(
+        failure.text(true),
+        "failed to connect to all addresses; last error: FAILED_PRECONDITION: \
+         unix:/tmp/none.sock: connect failed: addr: unix:/tmp/none.sock error: No such file or \
+         directory"
+    );
+    assert_eq!(
+        failure.text(false),
+        "failed to connect to all addresses; last error: unix:/tmp/none.sock: unix connect \
+         error: No such file or directory (os error 2)"
+    );
+    let unreachable = ChannelFailure::Addresses {
+        address: SocketAddr::V6(std::net::SocketAddrV6::new(
+            "fe80::1".parse().unwrap(),
+            15002,
+            0,
+            1,
+        ))
+        .into(),
+        failure: Failure::ConnectNow(os_error(libc::ENETUNREACH)),
+    };
+    assert_eq!(
+        unreachable.text(true),
+        "failed to connect to all addresses; last error: FAILED_PRECONDITION: \
+         ipv6:%5Bfe80::1%251%5D:15002: connect failed: addr: ipv6:%5Bfe80::1%251%5D:15002 error: \
+         Network is unreachable"
+    );
+    let abstract_name = Address::Unix {
+        path: b"name".to_vec(),
+        abstract_name: true,
+    };
+    assert_eq!(grpc_address(&abstract_name), "unix-abstract:name");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_target_of_unix_sockets_connects_to_them_in_turn() {
+    use tokio::net::UnixListener;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("spark.sock");
+    let missing = directory.path().join("none.sock");
+    let listener = UnixListener::bind(&path).unwrap();
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let _ = stream.write_all(&EMPTY_SETTINGS).await;
+                let mut buffer = [0u8; 1024];
+                while matches!(stream.read(&mut buffer).await, Ok(read) if read > 0) {}
+            });
+        }
+    });
+    let bytes = |path: &std::path::Path| path.to_str().unwrap().as_bytes().to_vec();
+    let unix = |paths: Vec<Vec<u8>>| ChannelTarget::Unix {
+        paths,
+        abstract_names: false,
+    };
+    let target = form_target(unix(vec![bytes(&missing), bytes(&path)]), true);
+    assert!(attempt(&target, Duration::from_secs(20)).await.is_ok());
+    let missing_text = missing.to_str().unwrap();
+    assert_eq!(
+        failure_of(&form_target(unix(vec![bytes(&missing)]), true)).await,
+        format!(
+            "failed to connect to all addresses; last error: FAILED_PRECONDITION: \
+             unix:{missing_text}: connect failed: addr: unix:{missing_text} error: No such file \
+             or directory"
+        )
+    );
+    // gRPC's local credentials of TCP refuse a Unix socket.
+    let mut local = form_target(unix(vec![bytes(&path)]), true);
+    local.local = true;
+    assert_eq!(
+        failure_of(&local).await,
+        format!(
+            "failed to connect to all addresses; last error: UNKNOWN: unix:{}: Endpoint is neither \
+             UDS or TCP loopback address.",
+            path.to_str().unwrap()
+        )
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_target_of_abstract_unix_sockets_connects_to_them() {
+    use std::os::linux::net::SocketAddrExt;
+    let name = format!("spark-connect-core-test-{}", std::process::id());
+    let address = std::os::unix::net::SocketAddr::from_abstract_name(name.as_bytes()).unwrap();
+    let listener = std::os::unix::net::UnixListener::bind_addr(&address).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let listener = tokio::net::UnixListener::from_std(listener).unwrap();
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let _ = stream.write_all(&EMPTY_SETTINGS).await;
+                let mut buffer = [0u8; 1024];
+                while matches!(stream.read(&mut buffer).await, Ok(read) if read > 0) {}
+            });
+        }
+    });
+    let abstract_target = |name: &str| {
+        form_target(
+            ChannelTarget::Unix {
+                paths: vec![name.as_bytes().to_vec()],
+                abstract_names: true,
+            },
+            true,
+        )
+    };
+    assert!(attempt(&abstract_target(&name), Duration::from_secs(20))
+        .await
+        .is_ok());
+    let none = format!("{name}-none");
+    assert_eq!(
+        failure_of(&abstract_target(&none)).await,
+        format!(
+            "failed to connect to all addresses; last error: FAILED_PRECONDITION: \
+             unix-abstract:{none}: connect failed: addr: unix-abstract:{none} error: Connection \
+             refused"
+        )
+    );
+}
+
+#[tokio::test]
+async fn the_calls_of_a_target_that_grpc_refuses_fail_of_its_status() {
+    // Of the code and the message of the status, as gRPC's channel of a target that is not valid
+    // fails each call, and not of `UNAVAILABLE`, which a failure of a connection is.
+    let message = "Failed to create channel to 'a?':the target uri is not valid: dns:///a?";
+    let connector = Connector::new(form_target(
+        ChannelTarget::Refused {
+            code: 2,
+            message: message.to_string(),
+        },
+        true,
+    ));
+    let channel = tonic::transport::Endpoint::from_static("http://localhost")
+        .connect_with_connector_lazy(connector);
+    let mut grpc = tonic::client::Grpc::new(channel);
+    for _ in 0..2 {
+        grpc.ready().await.unwrap();
+        let status = grpc
+            .unary::<spark_connect_proto::ConfigRequest, spark_connect_proto::ConfigResponse, _>(
+                tonic::Request::new(spark_connect_proto::ConfigRequest::default()),
+                tonic::codegen::http::uri::PathAndQuery::from_static(
+                    "/spark.connect.SparkConnectService/Config",
+                ),
+                tonic_prost::ProstCodec::default(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), tonic::Code::Unknown);
+        assert_eq!(status.message(), message);
+    }
+    assert_eq!(grpc_message("a%b\u{e9}"), "a%25b%C3%A9");
+}
+
+/// The target of a TLS server at `address` of gRPC's TLS name `name` of a target, trusting the
+/// certificate `root`.
+fn tls_target_of_name(address: SocketAddr, name: Option<&str>, root: &[u8]) -> Target {
+    Target {
+        tls: Some(Tls::of_target_name(name, Roots::Only(pem(root).as_bytes())).unwrap()),
+        ..target(vec![address], true)
+    }
+}
+
+#[tokio::test]
+async fn the_tls_of_a_target_of_grpc_verifies_grpcs_name_of_it() {
+    // Of the probes of grpcio 1.85.1 (a certificate of `localhost` and `127.0.0.1`): the name of a
+    // target is the host of its authority up to a `%`, an IP address checked against the addresses
+    // of the certificate; a name that is neither an address nor a name of DNS (`x*y.localhost`, a
+    // list of addresses, none) fails the check of the name once the chain is verified, as gRPC's
+    // (`Hostname Verification Check failed`), and so does a name of another certificate.
+    let address = tls_server(&certs().localhost, true, true).await;
+    for name in ["localhost", "LOCALHOST", "127.0.0.1", "[127.0.0.1]"] {
+        let target = tls_target_of_name(address, Some(name), &certs().ca);
+        assert!(
+            attempt(&target, Duration::from_secs(5)).await.is_ok(),
+            "{name}"
+        );
+    }
+    let hostname = format!(
+        "failed to connect to all addresses; last error: UNKNOWN: ipv4:{address}: Custom \
+         verification check failed with error: UNAUTHENTICATED: Hostname Verification Check \
+         failed."
+    );
+    for name in [
+        Some("x*y.localhost"),
+        Some("a%2Fb.localhost"),
+        Some("127.0.0.1:1,127.0.0.1:2"),
+        Some("other.test"),
+        Some("::1"),
+        None,
+    ] {
+        let target = tls_target_of_name(address, name, &certs().ca);
+        assert_eq!(failure_of(&target).await, hostname, "{name:?}");
+    }
+    // The chain first: of a root that does not sign it, its error, whatever the name.
+    let target = tls_target_of_name(address, Some("x*y.localhost"), &certs().other.cert);
+    assert!(
+        failure_of(&target)
+            .await
+            .contains("CERTIFICATE_VERIFY_FAILED"),
+        "{}",
+        failure_of(&target).await
+    );
+}
+
+#[test]
+fn the_tunnel_of_a_target_of_grpc_names_the_server_of_grpcs_proxy_mapper() {
+    let proxy = || {
+        Some(crate::proxy::HttpProxy {
+            authority: "proxy.test:3128".to_string(),
+            host: "proxy.test".to_string(),
+            port: 3128,
+            authorization: None,
+        })
+    };
+    let names = |authority: &str, proxied: Option<(&str, &str)>| TargetNames {
+        authority: authority.to_string(),
+        proxied: proxied.map(|(host, server)| (host.to_string(), server.to_string())),
+    };
+    let tunnel_of = |form: ChannelTarget, names: Option<TargetNames>| {
+        Target::new("localhost", 443, proxy(), None)
+            .of_channel_target(Some(form), names)
+            .tunnel
+            .map(|tunnel| tunnel.authority)
+    };
+    let addresses = ChannelTarget::Addresses {
+        addresses: vec![
+            "127.0.0.1:1".parse().unwrap(),
+            "127.0.0.1:2".parse().unwrap(),
+        ],
+        authority: "127.0.0.1:1,127.0.0.1:2".to_string(),
+    };
+    assert_eq!(
+        tunnel_of(
+            addresses.clone(),
+            Some(names(
+                "127.0.0.1:1,127.0.0.1:2",
+                Some(("127.0.0.1:1,127.0.0.1:2", "[127.0.0.1:1,127.0.0.1:2]:443"))
+            ))
+        ),
+        Some("[127.0.0.1:1,127.0.0.1:2]:443".to_string())
+    );
+    assert_eq!(
+        tunnel_of(addresses, None),
+        Some("127.0.0.1:1,127.0.0.1:2".to_string())
+    );
+    // An abstract Unix socket is proxied as gRPC proxies it, through the proxy's name; one of a
+    // path is not.
+    let abstract_socket = ChannelTarget::Unix {
+        paths: vec![b"rv62220ab".to_vec()],
+        abstract_names: true,
+    };
+    let target = Target::new("localhost", 443, proxy(), None).of_channel_target(
+        Some(abstract_socket),
+        Some(names("rv62220ab", Some(("rv62220ab", "rv62220ab:443")))),
+    );
+    assert_eq!(
+        target
+            .tunnel
+            .as_ref()
+            .map(|tunnel| tunnel.authority.as_str()),
+        Some("rv62220ab:443")
+    );
+    assert_eq!(target.name(), "proxy.test:3128");
+    let path_socket = ChannelTarget::Unix {
+        paths: vec![b"/tmp/a.sock".to_vec()],
+        abstract_names: false,
+    };
+    assert_eq!(
+        tunnel_of(path_socket, Some(names("tmp%2Fa.sock", None))),
+        None
+    );
 }

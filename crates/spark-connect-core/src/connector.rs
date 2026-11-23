@@ -68,6 +68,7 @@ use tokio::net::TcpStream;
 use tokio::time::Instant;
 use tokio_rustls::rustls;
 
+use crate::channel::{ChannelTarget, TargetNames};
 use crate::proxy::HttpProxy;
 
 /// Whether the transport speaks as grpcio, where a Rust client would not: the texts of the
@@ -158,6 +159,13 @@ pub(crate) struct Tls {
         Arc<rustls::client::WebPkiServerVerifier>,
     )>,
     server_name: rustls::pki_types::ServerName<'static>,
+    /// The name that the certificates are checked against, as given, by which the connections of
+    /// the process are told apart (see [`Target::key`]).
+    name: String,
+    /// Whether rustls can check the certificates against the name: of a name that is neither an
+    /// IP address nor a name of DNS, which no certificate matches, each session's certificate
+    /// fails its check of the name once its chain is verified (see [`Tls::of_target_name`]).
+    verifiable: bool,
 }
 
 impl Tls {
@@ -167,7 +175,44 @@ impl Tls {
     /// parsed are skipped; of none to trust, the TLS is made all the same, and each attempt
     /// fails. The error is the message of what cannot be configured.
     pub(crate) fn new(domain: &str, roots: Roots<'_>) -> Result<Self, String> {
-        use rustls::pki_types::{pem::PemObject, CertificateDer, ServerName};
+        use rustls::pki_types::ServerName;
+        let (store, provider) = Self::store_of(roots);
+        let server_name = ServerName::try_from(domain.to_string())
+            .map_err(|error| format!("invalid server name {domain:?}: {error}"))?;
+        Self::of_store(store, provider, server_name, domain, true)
+    }
+
+    /// The TLS of a channel to a target of gRPC, of the name `name` that gRPC's TLS verifies of its
+    /// authority (see `crate::channel::TargetNames::tls_name`), whose sessions trust `roots`. As
+    /// gRPC's check of the peer, an IP address is checked against the addresses of the
+    /// certificate and a name of DNS against its names; of a name that is neither, as of a `*` or
+    /// of a list of addresses, or of none, the TLS is made all the same, of no SNI, and each
+    /// session's certificate fails its check of the name once its chain is verified, as gRPC's
+    /// fails (`Hostname Verification Check failed`), so that nothing is sent to its server.
+    pub(crate) fn of_target_name(name: Option<&str>, roots: Roots<'_>) -> Result<Self, String> {
+        use rustls::pki_types::ServerName;
+        let unbracketed = name.map(|name| name.trim_start_matches('[').trim_end_matches(']'));
+        let server_name = unbracketed.and_then(|name| match name.parse::<std::net::IpAddr>() {
+            Ok(ip) => Some(ServerName::IpAddress(ip.into())),
+            Err(_) => ServerName::try_from(name.to_string()).ok(),
+        });
+        let verifiable = server_name.is_some();
+        let server_name = server_name.unwrap_or(ServerName::IpAddress(
+            std::net::IpAddr::from(std::net::Ipv4Addr::UNSPECIFIED).into(),
+        ));
+        let (store, provider) = Self::store_of(roots);
+        Self::of_store(
+            store,
+            provider,
+            server_name,
+            name.unwrap_or_default(),
+            verifiable,
+        )
+    }
+
+    /// The roots of `roots`, and the crypto provider (see [`Tls::new`]).
+    fn store_of(roots: Roots<'_>) -> (rustls::RootCertStore, Arc<rustls::crypto::CryptoProvider>) {
+        use rustls::pki_types::{pem::PemObject, CertificateDer};
         let provider = rustls::crypto::CryptoProvider::get_default()
             .cloned()
             .unwrap_or_else(|| Arc::new(rustls::crypto::ring::default_provider()));
@@ -195,12 +240,25 @@ impl Tls {
                 }
             }
         }
-        let server_name = ServerName::try_from(domain.to_string())
-            .map_err(|error| format!("invalid server name {domain:?}: {error}"))?;
+        (store, provider)
+    }
+
+    /// The TLS of the roots `store` of `provider`, to the server of `server_name`, which is the
+    /// name `name` if `verifiable`.
+    fn of_store(
+        store: rustls::RootCertStore,
+        provider: Arc<rustls::crypto::CryptoProvider>,
+        server_name: rustls::pki_types::ServerName<'static>,
+        name: &str,
+        verifiable: bool,
+    ) -> Result<Self, String> {
+        let name = name.to_string();
         if store.is_empty() {
             return Ok(Self {
                 trust: None,
                 server_name,
+                name,
+                verifiable,
             });
         }
         let webpki = rustls::client::WebPkiServerVerifier::builder_with_provider(
@@ -222,6 +280,8 @@ impl Tls {
         Ok(Self {
             trust: Some((Arc::new(config), webpki)),
             server_name,
+            name,
+            verifiable,
         })
     }
 
@@ -232,6 +292,7 @@ impl Tls {
         let verifier = Arc::new(Verifier {
             inner: webpki.clone(),
             self_signed: Default::default(),
+            verifiable: self.verifiable,
         });
         let mut config = (**config).clone();
         config
@@ -248,6 +309,9 @@ struct Verifier {
     inner: Arc<rustls::client::WebPkiServerVerifier>,
     /// How the last chain that the verifier did not trust is self-signed, if it is.
     self_signed: Mutex<Option<SelfSigned>>,
+    /// Whether the name of the server can be checked (see [`Tls::of_target_name`]): else a
+    /// certificate of a chain that is verified is not of the name.
+    verifiable: bool,
 }
 
 /// How a chain of certificates that is not trusted is self-signed, which BoringSSL's error tells.
@@ -287,7 +351,21 @@ impl rustls::client::danger::ServerCertVerifier for Verifier {
             };
             *self.self_signed.lock().unwrap_or_else(|e| e.into_inner()) = self_signed;
         }
-        verified
+        if self.verifiable {
+            return verified;
+        }
+        // Of a name that no certificate matches: the chain first, as BoringSSL verifies it in the
+        // handshake, then the name, as gRPC checks it once the handshake is done.
+        match verified {
+            Ok(_)
+            | Err(rustls::Error::InvalidCertificate(
+                rustls::CertificateError::NotValidForName
+                | rustls::CertificateError::NotValidForNameContext { .. },
+            )) => Err(rustls::Error::InvalidCertificate(
+                rustls::CertificateError::NotValidForName,
+            )),
+            Err(error) => Err(error),
+        }
     }
 
     fn verify_tls12_signature(
@@ -371,6 +449,11 @@ pub(crate) struct Target {
     /// Whether the connections speak as grpcio (see [`set_grpcio_dialect`]), as the transport
     /// did when the channel was made.
     grpcio: bool,
+    /// The target of gRPC that the channel connects to in place of its host and its port (see
+    /// [`Target::of_channel_target`]), if any.
+    form: Option<ChannelTarget>,
+    /// gRPC's names of the target of gRPC, if any, of which the tunnel of a proxy names the server.
+    names: Option<TargetNames>,
     /// The addresses of the host, resolved by the tests rather than by the system's resolver.
     #[cfg(test)]
     addresses: Option<Vec<SocketAddr>>,
@@ -414,6 +497,8 @@ impl Target {
             tls,
             local: false,
             grpcio: grpcio_dialect(),
+            form: None,
+            names: None,
             #[cfg(test)]
             addresses: None,
             #[cfg(test)]
@@ -431,6 +516,60 @@ impl Target {
         self
     }
 
+    /// This target, of the target of gRPC `form`, if any (see [`ChannelTarget`]), of gRPC's names
+    /// `names` of it: the connections are made to the host and the port of a name, to the
+    /// addresses or to the Unix sockets of the target in turn, or the calls of a target that gRPC
+    /// refuses fail of its status (see [`refused_connection`]). The tunnel of a proxy names the
+    /// server of gRPC's proxy mapper (`[127.0.0.1:1,127.0.0.1:2]:443`), or without names, the name
+    /// or the addresses of the target; a socket of `unix:`, which gRPC does not proxy, and a target
+    /// that gRPC refuses have none, and an abstract one is proxied as gRPC proxies it.
+    pub(crate) fn of_channel_target(
+        mut self,
+        form: Option<ChannelTarget>,
+        names: Option<TargetNames>,
+    ) -> Self {
+        match &form {
+            Some(ChannelTarget::Name { host, port, name }) => match &mut self.tunnel {
+                Some(tunnel) => tunnel.authority = name.clone(),
+                None => {
+                    self.host = unbracketed(host).to_string();
+                    self.port = *port;
+                }
+            },
+            Some(ChannelTarget::Unresolvable { name, .. }) => {
+                if let Some(tunnel) = &mut self.tunnel {
+                    tunnel.authority = name.clone();
+                }
+            }
+            Some(ChannelTarget::Addresses { authority, .. }) => {
+                if let Some(tunnel) = &mut self.tunnel {
+                    tunnel.authority = authority.clone();
+                }
+            }
+            Some(ChannelTarget::Unix {
+                abstract_names: false,
+                ..
+            })
+            | Some(ChannelTarget::Refused { .. }) => {
+                self.tunnel = None;
+            }
+            Some(ChannelTarget::Unix { .. }) | None => {}
+        }
+        if let (
+            Some(tunnel),
+            Some(TargetNames {
+                proxied: Some((_, server)),
+                ..
+            }),
+        ) = (&mut self.tunnel, &names)
+        {
+            tunnel.authority = server.clone();
+        }
+        self.form = form;
+        self.names = names;
+        self
+    }
+
     /// What the connections of this target are made of, by which the channels of the process
     /// share them (see `crate::client`): the host and the port, the tunnel and its credentials,
     /// the name of the server of the TLS, whose roots are those of the process, local
@@ -443,23 +582,34 @@ impl Target {
                 .tunnel
                 .as_ref()
                 .map(|tunnel| (tunnel.authority.clone(), tunnel.authorization.clone())),
-            tls: self
-                .tls
-                .as_ref()
-                .map(|tls| tls.server_name.to_str().into_owned()),
+            tls: self.tls.as_ref().map(|tls| tls.name.clone()),
             local: self.local,
             grpcio: self.grpcio,
+            form: self.form.clone(),
         }
     }
 
     /// What a new channel of the same server and TLS as this target connects to, through `proxy`,
     /// in the dialect of the transport now.
     pub(crate) fn renewed(&self, host: &str, port: u16, proxy: Option<HttpProxy>) -> Self {
-        Self::new(host, port, proxy, self.tls.clone()).of_local_credentials(self.local)
+        Self::new(host, port, proxy, self.tls.clone())
+            .of_local_credentials(self.local)
+            .of_channel_target(self.form.clone(), self.names.clone())
     }
 
-    /// The name that gRPC resolves for this target, `host:port`, as its errors give it.
+    /// The name that gRPC resolves for this target, `host:port`, as its errors give it: of a name
+    /// of a target of gRPC, the name as the target has it, but through a proxy, whose name is
+    /// resolved.
     fn name(&self) -> String {
+        match &self.form {
+            Some(ChannelTarget::Name { name, .. })
+            | Some(ChannelTarget::Unresolvable { name, .. })
+                if self.tunnel.is_none() =>
+            {
+                return name.clone();
+            }
+            _ => {}
+        }
         if self.host.contains(':') {
             format!("[{}]:{}", self.host, self.port)
         } else {
@@ -467,10 +617,10 @@ impl Target {
         }
     }
 
-    /// The addresses of the host, in the order of the system's resolver (RFC 6724), as gRPC's
-    /// resolver sorts them; of `localhost` in the dialect of grpcio, as c-ares gives them (see
-    /// [`localhost_addresses`]).
-    async fn resolve(&self) -> Result<Vec<SocketAddr>, ResolveFailure> {
+    /// The addresses of the target: of a target of gRPC, its addresses or its Unix sockets, or the
+    /// failure of a name that gRPC's resolver does not resolve; else the addresses of the host (see
+    /// [`Target::resolve_host`]).
+    async fn resolve(&self) -> Result<Vec<Address>, ResolveFailure> {
         #[cfg(test)]
         self.lookups.fetch_add(1, Ordering::SeqCst);
         #[cfg(test)]
@@ -479,12 +629,66 @@ impl Target {
         }
         #[cfg(test)]
         if let Some(addresses) = &self.addresses {
-            return Ok(addresses.clone());
+            return Ok(addresses.iter().copied().map(Address::Ip).collect());
         }
+        match &self.form {
+            Some(ChannelTarget::Addresses { addresses, .. }) if self.tunnel.is_none() => {
+                return Ok(addresses.iter().copied().map(Address::Ip).collect());
+            }
+            Some(ChannelTarget::Unresolvable { detail, .. }) if self.tunnel.is_none() => {
+                return Err(ResolveFailure::Unparsable(detail.clone()));
+            }
+            Some(ChannelTarget::Unix {
+                paths,
+                abstract_names,
+            }) if self.tunnel.is_none() => {
+                return Ok(paths
+                    .iter()
+                    .map(|path| Address::Unix {
+                        path: path.clone(),
+                        abstract_name: *abstract_names,
+                    })
+                    .collect());
+            }
+            _ => {}
+        }
+        let addresses = self.resolve_host().await?;
+        Ok(addresses.into_iter().map(Address::Ip).collect())
+    }
+
+    /// The addresses of the host, in the order of the system's resolver (RFC 6724), as gRPC's
+    /// resolver sorts them; in the dialect of grpcio, as c-ares, gRPC's resolver, takes the host:
+    /// an address of four decimal numbers, of leading zeros too, and an IPv6 address of a zone,
+    /// are those addresses; `localhost` and the names under it are the loopback (see
+    /// [`localhost_addresses`]); a name of a character other than `[A-Za-z0-9-._/*]`, of an empty
+    /// label or of one of more than 63 characters, or longer than DNS takes, is not resolved
+    /// (`Misformatted domain name`); and a name that the system's resolver would read as an
+    /// address, as of `inet_aton` (`127.1`), is a name that it looks up.
+    async fn resolve_host(&self) -> Result<Vec<SocketAddr>, ResolveFailure> {
         if let Ok(ip) = self.host.parse::<std::net::IpAddr>() {
             return Ok(vec![SocketAddr::new(ip, self.port)]);
         }
-        let resolved = match tokio::net::lookup_host((self.host.as_str(), self.port)).await {
+        let mut lookup = std::borrow::Cow::Borrowed(self.host.as_str());
+        if self.grpcio {
+            // As c-ares takes the name, a C string, up to its first NUL.
+            let host = self.host.split('\0').next().unwrap_or_default();
+            lookup = std::borrow::Cow::Borrowed(host);
+            if let Some(ip) = crate::grpc_target::ares_numeric_v4(host) {
+                return Ok(vec![SocketAddr::new(ip.into(), self.port)]);
+            }
+            if let Some(address) = crate::grpc_target::ipv6_literal(host, self.port) {
+                return Ok(vec![address]);
+            }
+            if !is_localhost(host) {
+                if !is_ares_name(host) {
+                    return Err(ResolveFailure::BadName);
+                }
+                if read_as_an_address(host) {
+                    lookup = std::borrow::Cow::Owned(format!("{host}."));
+                }
+            }
+        }
+        let resolved = match tokio::net::lookup_host((lookup.as_ref(), self.port)).await {
             Ok(addresses) => {
                 let addresses: Vec<_> = addresses.collect();
                 if addresses.is_empty() {
@@ -495,7 +699,7 @@ impl Target {
             }
             Err(error) => Err(ResolveFailure::of(&error)),
         };
-        if self.grpcio && is_localhost(&self.host) {
+        if self.grpcio && is_localhost(self.host.split('\0').next().unwrap_or_default()) {
             return Ok(localhost_addresses(resolved.unwrap_or_default(), self.port));
         }
         resolved
@@ -511,6 +715,7 @@ pub(crate) struct TargetKey {
     tls: Option<String>,
     local: bool,
     grpcio: bool,
+    form: Option<ChannelTarget>,
 }
 
 /// Whether `host` is a name of the loopback of RFC 6761, `localhost` or a name under it, which
@@ -518,6 +723,49 @@ pub(crate) struct TargetKey {
 fn is_localhost(host: &str) -> bool {
     let host = host.strip_suffix('.').unwrap_or(host).to_ascii_lowercase();
     host == "localhost" || host.ends_with(".localhost")
+}
+
+/// Whether c-ares takes `name` as a name of DNS that it asks for: of the characters
+/// `[A-Za-z0-9-._/*]`, of labels of 1 to 63 characters but the root after a last `.`, and of no
+/// more than the 255 bytes of a name of DNS.
+fn is_ares_name(name: &str) -> bool {
+    let of_name = |c: char| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_' | '/' | '*');
+    if !name.chars().all(of_name) {
+        return false;
+    }
+    let labels = name.strip_suffix('.').unwrap_or(name);
+    if labels.is_empty() {
+        return true;
+    }
+    let mut length = 1;
+    for label in labels.split('.') {
+        if label.is_empty() || label.len() > 63 {
+            return false;
+        }
+        length += label.len() + 1;
+    }
+    length <= 255
+}
+
+/// Whether the system's resolver reads `name` as an IPv4 address, as `inet_aton` does, where
+/// c-ares asks for it as a name.
+#[cfg(unix)]
+fn read_as_an_address(name: &str) -> bool {
+    extern "C" {
+        fn inet_aton(cp: *const libc::c_char, inp: *mut libc::in_addr) -> libc::c_int;
+    }
+    let Ok(name) = std::ffi::CString::new(name) else {
+        return false;
+    };
+    let mut address = libc::in_addr { s_addr: 0 };
+    // SAFETY: `name` is a C string, and `address` a place for the address, for the call.
+    unsafe { inet_aton(name.as_ptr(), &mut address) != 0 }
+}
+
+/// Whether the system's resolver reads `name` as an IPv4 address: not known here.
+#[cfg(not(unix))]
+fn read_as_an_address(_name: &str) -> bool {
+    false
 }
 
 /// The addresses of a name of the loopback (see [`is_localhost`]) as c-ares, grpcio's resolver,
@@ -586,6 +834,11 @@ enum ResolveFailure {
     /// The lookup did not end by the connect deadline, which bounds it as it bounds the rest of
     /// the attempt.
     Timeout,
+    /// The name is not one that c-ares asks for (see [`is_ares_name`]).
+    BadName,
+    /// The name of a target of gRPC is not one that its resolver resolves, of the error that it
+    /// gives (see [`ChannelTarget::Unresolvable`]).
+    Unparsable(String),
     /// Any other error of the resolver, as it gives it.
     Other(String),
 }
@@ -637,7 +890,8 @@ impl ResolveFailure {
             Self::ServerFailure(_) => "DNS server returned general failure",
             Self::NoData => "DNS server returned answer with no data",
             Self::Timeout => "Timeout while contacting DNS servers",
-            Self::Other(message) => message,
+            Self::BadName => "Misformatted domain name",
+            Self::Unparsable(detail) | Self::Other(detail) => detail,
         }
     }
 
@@ -647,9 +901,11 @@ impl ResolveFailure {
             Self::NotFound(message)
             | Self::NoServers(message)
             | Self::ServerFailure(message)
+            | Self::Unparsable(message)
             | Self::Other(message) => message,
             Self::NoData => "the name has no address",
             Self::Timeout => "timed out",
+            Self::BadName => "misformatted domain name",
         }
     }
 }
@@ -727,8 +983,11 @@ impl IoFailure {
 /// Why the connection to one address failed.
 #[derive(Debug, Clone)]
 enum Failure {
-    /// The TCP connection failed, as when it is refused.
+    /// The connection failed once it was started, as when it is refused.
     Connect(IoFailure),
+    /// The connection failed as it was started, of the error of `connect`, as of a Unix socket
+    /// of no file or a network that is not reachable.
+    ConnectNow(IoFailure),
     /// The TCP connection was not made by the deadline.
     ConnectTimeout,
     /// The peer closed the connection in `phase`.
@@ -762,13 +1021,22 @@ enum Failure {
 }
 
 impl Failure {
-    /// The code and the text of this failure in gRPC's core, as grpcio's `last error` gives them
-    /// (`UNKNOWN`, `Failed to connect to remote host: Connection refused`).
-    fn grpc(&self) -> (&'static str, String) {
+    /// The code and the text of this failure of a connection to `address` in gRPC's core, as
+    /// grpcio's `last error` gives them (`UNKNOWN`, `Failed to connect to remote host: Connection
+    /// refused`).
+    fn grpc(&self, address: &Address) -> (&'static str, String) {
         match self {
             Self::Connect(error) => (
                 "UNKNOWN",
                 format!("Failed to connect to remote host: {}", error.strerror()),
+            ),
+            Self::ConnectNow(error) => (
+                "FAILED_PRECONDITION",
+                format!(
+                    "connect failed: addr: {} error: {}",
+                    grpc_address(address),
+                    error.strerror()
+                ),
             ),
             Self::ConnectTimeout => ("UNKNOWN", "tcp handshaker shutdown".to_string()),
             Self::Closed(Phase::Tls) => (
@@ -835,11 +1103,17 @@ impl Failure {
         }
     }
 
-    /// The text of this failure of the Rust client.
-    fn rust(&self) -> String {
+    /// The text of this failure of a connection to `address` of the Rust client.
+    fn rust(&self, address: &Address) -> String {
+        let kind = match address {
+            Address::Ip(_) => "tcp",
+            Address::Unix { .. } => "unix",
+        };
         match self {
-            Self::Connect(error) => format!("tcp connect error: {}", error.text),
-            Self::ConnectTimeout => "tcp connect error: timed out".to_string(),
+            Self::Connect(error) | Self::ConnectNow(error) => {
+                format!("{kind} connect error: {}", error.text)
+            }
+            Self::ConnectTimeout => format!("{kind} connect error: timed out"),
             Self::Closed(phase) => format!("{}: the connection was closed", phase.rust_name()),
             Self::Read(phase, error) | Self::Write(phase, error) => {
                 format!("{}: {}", phase.rust_name(), error.text)
@@ -983,8 +1257,48 @@ fn boringssl_error(error: &rustls::Error, self_signed: Option<SelfSigned>) -> St
     )
 }
 
-/// The URI of an address in gRPC's errors: `ipv4:127.0.0.1:1`, `ipv6:%5B::1%5D:1`.
-fn grpc_address(address: &SocketAddr) -> String {
+/// An address that a connection is made to: of TCP, or of a Unix socket, of its path or of its
+/// abstract name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Address {
+    Ip(SocketAddr),
+    Unix { path: Vec<u8>, abstract_name: bool },
+}
+
+impl From<SocketAddr> for Address {
+    fn from(address: SocketAddr) -> Self {
+        Address::Ip(address)
+    }
+}
+
+/// The address as the Rust client's texts give it: `127.0.0.1:1`, `[::1]:1`, `unix:/tmp/a.sock`,
+/// `unix-abstract:name`.
+impl std::fmt::Display for Address {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Address::Ip(address) => write!(f, "{address}"),
+            Address::Unix { .. } => f.write_str(&grpc_address(self)),
+        }
+    }
+}
+
+/// The URI of an address in gRPC's errors: `ipv4:127.0.0.1:1`, `ipv6:%5B::1%5D:1`,
+/// `unix:/tmp/a.sock`, `unix-abstract:name`.
+fn grpc_address(address: &Address) -> String {
+    let address = match address {
+        Address::Ip(address) => address,
+        Address::Unix {
+            path,
+            abstract_name,
+        } => {
+            let scheme = if *abstract_name {
+                "unix-abstract"
+            } else {
+                "unix"
+            };
+            return format!("{scheme}:{}", String::from_utf8_lossy(path));
+        }
+    };
     match address {
         SocketAddr::V4(address) => format!("ipv4:{address}"),
         SocketAddr::V6(address) => {
@@ -997,24 +1311,36 @@ fn grpc_address(address: &SocketAddr) -> String {
     }
 }
 
-/// Why a channel could not connect, which fails its calls: the name did not resolve, or the
-/// attempts to all its addresses failed, of which the last one to fail is given.
+/// Why a channel could not connect, which fails its calls: the name did not resolve, the target
+/// has no address, or the attempts to all its addresses failed, of which the last one to fail is
+/// given.
 #[derive(Debug, Clone)]
 enum ChannelFailure {
     Resolve {
         name: String,
         failure: ResolveFailure,
     },
+    /// A target of gRPC of no address, as `ipv4:` (see [`ChannelTarget::Addresses`]).
+    NoAddress,
     Addresses {
-        address: SocketAddr,
+        address: Address,
         failure: Failure,
     },
+    /// The connection to the server of a target that gRPC refuses failed (see
+    /// [`refused_connection`]), which it does not.
+    Refused(String),
 }
 
 impl ChannelFailure {
     /// The details of the failed calls of the channel, in the dialect of grpcio if `grpcio`.
     fn text(&self, grpcio: bool) -> String {
         match self {
+            Self::Resolve {
+                name,
+                failure: ResolveFailure::Unparsable(detail),
+            } if grpcio => {
+                format!("errors resolving {name}: [field:hostname lookup error:{detail}]")
+            }
             Self::Resolve { name, failure } if grpcio => format!(
                 "errors resolving {name}: [field:hostname lookup error:address lookup failed for \
                  {name}: {}]",
@@ -1026,8 +1352,10 @@ impl ChannelFailure {
                     failure.rust_text()
                 )
             }
+            Self::NoAddress if grpcio => "empty address list".to_string(),
+            Self::NoAddress => "the target has no address".to_string(),
             Self::Addresses { address, failure } if grpcio => {
-                let (code, text) = failure.grpc();
+                let (code, text) = failure.grpc(address);
                 format!(
                     "failed to connect to all addresses; last error: {code}: {}: {text}",
                     grpc_address(address)
@@ -1035,8 +1363,9 @@ impl ChannelFailure {
             }
             Self::Addresses { address, failure } => format!(
                 "failed to connect to all addresses; last error: {address}: {}",
-                failure.rust()
+                failure.rust(address)
             ),
+            Self::Refused(text) => text.clone(),
         }
     }
 }
@@ -1096,17 +1425,98 @@ impl Ready {
     }
 }
 
-/// The TCP connection of an attempt, of the generation of the process that made it (see
+/// The stream of a connection: of TCP, or of a Unix socket.
+enum Stream {
+    Tcp(TcpStream),
+    #[cfg(unix)]
+    Unix(tokio::net::UnixStream),
+}
+
+impl Stream {
+    #[cfg(unix)]
+    fn as_raw_fd(&self) -> std::os::fd::RawFd {
+        match self {
+            Stream::Tcp(tcp) => std::os::fd::AsRawFd::as_raw_fd(tcp),
+            Stream::Unix(unix) => std::os::fd::AsRawFd::as_raw_fd(unix),
+        }
+    }
+}
+
+impl AsyncRead for Stream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            Stream::Tcp(stream) => Pin::new(stream).poll_read(cx, buf),
+            #[cfg(unix)]
+            Stream::Unix(stream) => Pin::new(stream).poll_read(cx, buf),
+        }
+    }
+}
+
+impl AsyncWrite for Stream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        match self.get_mut() {
+            Stream::Tcp(stream) => Pin::new(stream).poll_write(cx, buf),
+            #[cfg(unix)]
+            Stream::Unix(stream) => Pin::new(stream).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[std::io::IoSlice<'_>],
+    ) -> Poll<std::io::Result<usize>> {
+        match self.get_mut() {
+            Stream::Tcp(stream) => Pin::new(stream).poll_write_vectored(cx, bufs),
+            #[cfg(unix)]
+            Stream::Unix(stream) => Pin::new(stream).poll_write_vectored(cx, bufs),
+        }
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        match self {
+            Stream::Tcp(stream) => stream.is_write_vectored(),
+            #[cfg(unix)]
+            Stream::Unix(stream) => stream.is_write_vectored(),
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            Stream::Tcp(stream) => Pin::new(stream).poll_flush(cx),
+            #[cfg(unix)]
+            Stream::Unix(stream) => Pin::new(stream).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            Stream::Tcp(stream) => Pin::new(stream).poll_shutdown(cx),
+            #[cfg(unix)]
+            Stream::Unix(stream) => Pin::new(stream).poll_shutdown(cx),
+        }
+    }
+}
+
+/// The connection of an attempt, of the generation of the process that made it (see
 /// [`crate::fork`]): its socket is one that a child of a `fork()` closes, and a drop of it in a
 /// child leaves it as it is, rather than removing it from the epoll instance of the runtime of the
 /// parent, which the child shares, as that would stop the parent from reading it.
-struct Socket(crate::fork::ForkLocal<TcpStream>);
+struct Socket(crate::fork::ForkLocal<Stream>);
 
 impl Socket {
-    fn new(tcp: TcpStream) -> Self {
+    fn new(stream: Stream) -> Self {
         #[cfg(unix)]
-        crate::fork::opened(std::os::fd::AsRawFd::as_raw_fd(&tcp));
-        Self(crate::fork::ForkLocal::new(tcp))
+        crate::fork::opened(stream.as_raw_fd());
+        Self(crate::fork::ForkLocal::new(stream))
     }
 }
 
@@ -1114,7 +1524,7 @@ impl Drop for Socket {
     fn drop(&mut self) {
         #[cfg(unix)]
         if self.0.is_current() {
-            crate::fork::closing(std::os::fd::AsRawFd::as_raw_fd(&*self.0));
+            crate::fork::closing(self.0.as_raw_fd());
         }
     }
 }
@@ -1162,21 +1572,38 @@ impl AsyncWrite for Socket {
 /// The connection to `address` of `target`, with the deadline `deadline`.
 async fn connect_address(
     target: &Target,
-    address: SocketAddr,
+    address: &Address,
     deadline: Instant,
 ) -> Result<Ready, Failure> {
-    let tcp = match tokio::time::timeout_at(deadline, TcpStream::connect(address)).await {
-        Ok(Ok(tcp)) => tcp,
-        Ok(Err(error)) => return Err(Failure::Connect(IoFailure::of(&error))),
-        Err(_) => return Err(Failure::ConnectTimeout),
+    let (mut tcp, refused) = match address {
+        Address::Ip(address) => {
+            let tcp = match tokio::time::timeout_at(deadline, connect_tcp(*address)).await {
+                Ok(Ok(tcp)) => tcp,
+                Ok(Err(failure)) => return Err(failure),
+                Err(_) => return Err(Failure::ConnectTimeout),
+            };
+            // As the handshake of gRPC's local credentials of TCP, which reads the local address
+            // of the connection, that to the proxy of a tunnel too, and not the address it was
+            // made to, so that one to `0.0.0.0` is of the loopback.
+            let refused = target.local && !tcp.local_addr().is_ok_and(is_of_the_loopback);
+            // As tonic's connector of an endpoint, of its defaults.
+            let _ = tcp.set_nodelay(true);
+            (Socket::new(Stream::Tcp(tcp)), refused)
+        }
+        Address::Unix {
+            path,
+            abstract_name,
+        } => {
+            let unix =
+                match tokio::time::timeout_at(deadline, connect_unix(path, *abstract_name)).await {
+                    Ok(Ok(unix)) => unix,
+                    Ok(Err(failure)) => return Err(failure),
+                    Err(_) => return Err(Failure::ConnectTimeout),
+                };
+            // gRPC's local credentials of TCP refuse a Unix socket.
+            (unix, target.local)
+        }
     };
-    // As the handshake of gRPC's local credentials of TCP, which reads the local address of the
-    // connection, that to the proxy of a tunnel too, and not the address it was made to, so that
-    // one to `0.0.0.0` is of the loopback.
-    let refused = target.local && !tcp.local_addr().is_ok_and(is_of_the_loopback);
-    // As tonic's connector of an endpoint, of its defaults.
-    let _ = tcp.set_nodelay(true);
-    let mut tcp = Socket::new(tcp);
     let mut replay = Vec::new();
     if let Some(tunnel) = &target.tunnel {
         let mut dropped = TunnelDropped(target.grpcio);
@@ -1198,6 +1625,85 @@ async fn connect_address(
         io,
         replay: settings,
     })
+}
+
+/// The TCP connection to `address`: of [`Failure::ConnectNow`] when `connect` fails as it starts,
+/// as gRPC's core tells it from one that fails later ([`Failure::Connect`]).
+#[cfg(unix)]
+async fn connect_tcp(address: SocketAddr) -> Result<TcpStream, Failure> {
+    let now = |error: std::io::Error| Failure::ConnectNow(IoFailure::of(&error));
+    let socket = socket2::Socket::new(
+        socket2::Domain::for_address(address),
+        socket2::Type::STREAM,
+        Some(socket2::Protocol::TCP),
+    )
+    .map_err(now)?;
+    socket.set_nonblocking(true).map_err(now)?;
+    if let Err(error) = socket.connect(&address.into()) {
+        if error.raw_os_error() != Some(libc::EINPROGRESS) {
+            return Err(now(error));
+        }
+    }
+    let later = |error: std::io::Error| Failure::Connect(IoFailure::of(&error));
+    let tcp = TcpStream::from_std(std::net::TcpStream::from(socket)).map_err(later)?;
+    // As tokio's connection, which is made once the socket is writable, of its error, if any.
+    tcp.writable().await.map_err(later)?;
+    match tcp.take_error() {
+        Ok(None) => Ok(tcp),
+        Ok(Some(error)) | Err(error) => Err(later(error)),
+    }
+}
+
+/// The TCP connection to `address`.
+#[cfg(not(unix))]
+async fn connect_tcp(address: SocketAddr) -> Result<TcpStream, Failure> {
+    TcpStream::connect(address)
+        .await
+        .map_err(|error| Failure::Connect(IoFailure::of(&error)))
+}
+
+/// The connection to the Unix socket of the path `path`, or of the abstract name `path` if
+/// `abstract_name`, as gRPC's core makes it: of [`Failure::ConnectNow`] when `connect` fails, as
+/// it does at once of a socket of no file or of no listener.
+#[cfg(unix)]
+async fn connect_unix(path: &[u8], abstract_name: bool) -> Result<Socket, Failure> {
+    use std::os::unix::ffi::OsStrExt;
+    let now = |error: std::io::Error| Failure::ConnectNow(IoFailure::of(&error));
+    let mut name = Vec::with_capacity(path.len() + 1);
+    if abstract_name {
+        name.push(0);
+    }
+    name.extend_from_slice(path);
+    let address = socket2::SockAddr::unix(std::ffi::OsStr::from_bytes(&name)).map_err(now)?;
+    let socket =
+        socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None).map_err(now)?;
+    socket.set_nonblocking(true).map_err(now)?;
+    if let Err(error) = socket.connect(&address) {
+        // A listener whose backlog is full takes the connection later, as gRPC waits for it.
+        if !matches!(
+            error.raw_os_error(),
+            Some(libc::EINPROGRESS) | Some(libc::EAGAIN)
+        ) {
+            return Err(now(error));
+        }
+    }
+    let later = |error: std::io::Error| Failure::Connect(IoFailure::of(&error));
+    let unix = tokio::net::UnixStream::from_std(std::os::unix::net::UnixStream::from(socket))
+        .map_err(later)?;
+    unix.writable().await.map_err(later)?;
+    match unix.take_error() {
+        Ok(None) => Ok(Socket::new(Stream::Unix(unix))),
+        Ok(Some(error)) | Err(error) => Err(later(error)),
+    }
+}
+
+/// The connection to a Unix socket, which this system does not make.
+#[cfg(not(unix))]
+async fn connect_unix(_path: &[u8], _abstract_name: bool) -> Result<Socket, Failure> {
+    Err(Failure::ConnectNow(IoFailure {
+        errno: None,
+        text: "Unix sockets are not supported".to_string(),
+    }))
 }
 
 /// Whether `address`, the local address of a connection, is of the loopback as gRPC's local
@@ -1450,13 +1956,19 @@ async fn attempt_after(
         name: target.name(),
         failure,
     })?;
+    if addresses.is_empty() {
+        return Err(ChannelFailure::NoAddress);
+    }
     let mut started = 0;
     let mut pending = FuturesUnordered::new();
-    let start = |address: SocketAddr| {
+    let start = |address: Address| {
         let deadline = Instant::now() + per_address;
-        async move { (address, connect_address(target, address, deadline).await) }
+        async move {
+            let result = connect_address(target, &address, deadline).await;
+            (address, result)
+        }
     };
-    pending.push(start(addresses[0]));
+    pending.push(start(addresses[0].clone()));
     started += 1;
     let mut next_start = Instant::now() + delay;
     loop {
@@ -1467,7 +1979,7 @@ async fn attempt_after(
                 Err(failure) => {
                     log_failure(target.grpcio, &address, &failure);
                     if more {
-                        pending.push(start(addresses[started]));
+                        pending.push(start(addresses[started].clone()));
                         started += 1;
                         next_start = Instant::now() + delay;
                     } else if pending.is_empty() {
@@ -1477,7 +1989,7 @@ async fn attempt_after(
                 }
             },
             _ = tokio::time::sleep_until(next_start), if more => {
-                pending.push(start(addresses[started]));
+                pending.push(start(addresses[started].clone()));
                 started += 1;
                 next_start = Instant::now() + delay;
             }
@@ -1521,7 +2033,7 @@ fn log_proxy_failure(message: String) {
 
 /// Log the failure of the attempt to `address`, as gRPC's core logs the failures of the TLS
 /// handshake and of the tunnel of a proxy to stderr (see [`crate::grpc_log`]).
-fn log_failure(grpcio: bool, address: &SocketAddr, failure: &Failure) {
+fn log_failure(grpcio: bool, address: &Address, failure: &Failure) {
     if !grpcio {
         return;
     }
@@ -1542,7 +2054,7 @@ fn log_failure(grpcio: bool, address: &SocketAddr, failure: &Failure) {
     | Failure::Write(Phase::Proxy, _)
     | Failure::Timeout(Phase::Proxy) = failure
     {
-        let (code, text) = failure.grpc();
+        let (code, text) = failure.grpc(address);
         // grpcio names an endpoint that is closing `[unknown]`, as a tunnel that timed out.
         let address = if matches!(failure, Failure::Timeout(Phase::Proxy)) {
             "[unknown]".to_string()
@@ -1662,6 +2174,12 @@ impl tonic::codegen::Service<tonic::codegen::http::Uri> for Connector {
     fn call(&mut self, _: tonic::codegen::http::Uri) -> Self::Future {
         let shared = self.0.clone();
         Box::pin(async move {
+            if let Some(ChannelTarget::Refused { code, message }) = &shared.target.form {
+                return match refused_connection(*code, message).await {
+                    Ok(ready) => Ok(TokioIo::new(Handover::new(ready))),
+                    Err(failure) => Err(ConnectError::of(&failure, shared.target.grpcio)),
+                };
+            }
             *shared.last_call.lock().unwrap_or_else(|e| e.into_inner()) = Instant::now();
             {
                 let mut state = shared.state();
@@ -1708,6 +2226,55 @@ impl tonic::codegen::Service<tonic::codegen::http::Uri> for Connector {
             }
         })
     }
+}
+
+/// The connection of a target that gRPC refuses (see [`ChannelTarget::Refused`]): to a server of
+/// HTTP/2 in memory, which answers each call of the status of `code` and `message`, in the
+/// trailers of a response of no message, so that the calls fail of the code and the message, as
+/// gRPC's channel of the target fails them, and are not retried as a failure of a connection
+/// (`UNAVAILABLE`) would be.
+async fn refused_connection(code: i32, message: &str) -> Result<Ready, ChannelFailure> {
+    let (client, server) = tokio::io::duplex(64 * 1024);
+    tokio::spawn(serve_refusals(server, code, grpc_message(message)));
+    let mut io: Box<dyn Io> = Box::new(client);
+    let replay = read_settings(&mut io, Vec::new(), Instant::now() + CONNECT_TIMEOUT)
+        .await
+        .map_err(|failure| ChannelFailure::Refused(format!("{failure:?}")))?;
+    Ok(Ready { io, replay })
+}
+
+/// The server of [`refused_connection`] on `io`: each call is answered of the status `code` and
+/// `message`, a `grpc-message` already encoded.
+async fn serve_refusals(io: tokio::io::DuplexStream, code: i32, message: String) {
+    let Ok(mut connection) = h2::server::handshake(io).await else {
+        return;
+    };
+    while let Some(Ok((_, mut respond))) = connection.accept().await {
+        let response = tonic::codegen::http::Response::builder()
+            .status(200)
+            .header("content-type", "application/grpc")
+            .header("grpc-status", code.to_string())
+            .header("grpc-message", message.as_str())
+            .body(());
+        if let Ok(response) = response {
+            let _ = respond.send_response(response, true);
+        }
+    }
+}
+
+/// `message` as the `grpc-message` of gRPC encodes it: its bytes that are not printable ASCII,
+/// and `%`, percent-encoded.
+fn grpc_message(message: &str) -> String {
+    message
+        .bytes()
+        .map(|b| {
+            if (0x20..=0x7e).contains(&b) && b != b'%' {
+                (b as char).to_string()
+            } else {
+                format!("%{b:02X}")
+            }
+        })
+        .collect()
 }
 
 /// gRPC's backoff of the connections of a channel that failed.

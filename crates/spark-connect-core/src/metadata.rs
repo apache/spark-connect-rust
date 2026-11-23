@@ -411,9 +411,70 @@ fn refusal(status: Option<&str>, headers: &http::HeaderMap) -> Option<tonic::Sta
     )
 }
 
+/// The mark of a request whose metadata `MetadataSource` gives as it is sent, which [`Checked`]
+/// reads then (see `SparkConnectClient::set_metadata_source`), and the metadata of the call
+/// credentials, the `authorization` of the token, which gRPC sends after the metadata of the call.
+#[derive(Clone)]
+pub(crate) struct PendingMetadata {
+    pub(crate) source: std::sync::Arc<dyn crate::channel::MetadataSource>,
+    pub(crate) after: Vec<(
+        tonic::metadata::AsciiMetadataKey,
+        tonic::metadata::AsciiMetadataValue,
+    )>,
+}
+
+/// Append `metadata`, the metadata of a call, of its order, to `headers`, and then `after`, as
+/// gRPC sends the metadata of a call and then that of its call credentials. A key of several values
+/// keeps them all, in their order.
+pub(crate) fn append_metadata(
+    headers: &mut http::HeaderMap,
+    metadata: tonic::metadata::MetadataMap,
+    after: &[(
+        tonic::metadata::AsciiMetadataKey,
+        tonic::metadata::AsciiMetadataValue,
+    )],
+) {
+    let mut metadata = metadata;
+    for (key, value) in after {
+        metadata.append(key.clone(), value.clone());
+    }
+    // The iterator names the first value of each key only, and the values after it of None.
+    let mut last = None;
+    for (name, value) in metadata.into_headers() {
+        if name.is_some() {
+            last = name;
+        }
+        if let Some(name) = &last {
+            headers.append(name.clone(), value);
+        }
+    }
+}
+
+/// The error of the source of the metadata of a call, as the source of the status that fails the
+/// call, which is then the error of the call as it is, of no retry (see [`metadata_failure`]).
+#[derive(Debug)]
+pub(crate) struct MetadataFailed(pub(crate) crate::error::SparkError);
+
+impl std::fmt::Display for MetadataFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.0, f)
+    }
+}
+
+impl std::error::Error for MetadataFailed {}
+
+/// The error of the source of the metadata of the call that `status` failed, if the source failed
+/// it (see [`MetadataFailed`]).
+pub(crate) fn metadata_failure(status: &tonic::Status) -> Option<crate::error::SparkError> {
+    std::error::Error::source(status)?
+        .downcast_ref::<MetadataFailed>()
+        .map(|failed| failed.0.clone())
+}
+
 /// The channel of a client, whose responses of metadata past the limits of gRPC fail their calls
-/// (see the module): their headers as they come, and their trailers as the body ends; and whose
-/// calls in flight end when the client is closed.
+/// (see the module): their headers as they come, and their trailers as the body ends; whose
+/// calls in flight end when the client is closed; and whose request of [`PendingMetadata`] is sent
+/// once its source gave its metadata, or fails of the error of the source, unsent.
 #[derive(Clone)]
 pub(crate) struct Checked {
     pub(crate) channel: Channel,
@@ -430,30 +491,91 @@ impl Service<http::Request<tonic::body::Body>> for Checked {
         self.channel.poll_ready(cx).map_err(Into::into)
     }
 
-    fn call(&mut self, request: http::Request<tonic::body::Body>) -> Self::Future {
-        let response = self.channel.call(request);
+    fn call(&mut self, mut request: http::Request<tonic::body::Body>) -> Self::Future {
         let closed = Arc::clone(&self.closed);
+        let Some(PendingMetadata { source, after }) =
+            request.extensions_mut().remove::<PendingMetadata>()
+        else {
+            return Box::pin(checked_response(self.channel.call(request), closed));
+        };
+        // The channel that `poll_ready` made ready, which takes the request once its metadata is
+        // read, as tower's services are called once ready.
+        let fresh = self.channel.clone();
+        let mut channel = std::mem::replace(&mut self.channel, fresh);
         Box::pin(async move {
-            // As grpcio's `close`, which cancels the calls in flight on its channel: a call whose
-            // response has not begun ends as the client closes the channel.
-            let mut response = tokio::select! {
-                biased;
-                response = response => response?,
-                () = closed.closed() => {
-                    return Err(Box::new(tonic::Status::cancelled(
-                        crate::client::CLOSED_CHANNEL,
-                    )) as StdError);
+            let pairs = match source.metadata().await {
+                Ok(pairs) => pairs,
+                Err(error) => {
+                    let mut status = tonic::Status::unknown(error.to_string());
+                    status.set_source(std::sync::Arc::new(MetadataFailed(error)));
+                    return Err(Box::new(status) as StdError);
                 }
             };
-            if let Some(status) = refusal(Some(response.status().as_str()), response.headers()) {
-                return Err(Box::new(status) as StdError);
+            match call_metadata(&pairs) {
+                Ok(metadata) => append_metadata(request.headers_mut(), metadata, &after),
+                Err(status) => return Err(Box::new(status) as StdError),
             }
-            if let Some(status) = read_details(response.headers_mut()) {
-                return Err(Box::new(status) as StdError);
-            }
-            Ok(response.map(|body| CheckedBody::new(body, closed)))
+            checked_response(channel.call(request), closed).await
         })
     }
+}
+
+/// The metadata of a call of `pairs`, the keys and the values of a source of the metadata (see
+/// `crate::channel::MetadataSource`), as gRPC's core validates them: a key of `[0-9a-z_.-]`, a
+/// value of printable ASCII and the space, or of any bytes, sent in base64, of a key of `-bin`; a
+/// `user-agent`, which grpcio replaces with its own, is not sent. Of another, gRPC's `INTERNAL`
+/// (`Invalid metadata`), which fails the call.
+pub(crate) fn call_metadata(
+    pairs: &[(Vec<u8>, Vec<u8>)],
+) -> Result<tonic::metadata::MetadataMap, tonic::Status> {
+    let invalid = || tonic::Status::internal("Invalid metadata");
+    let mut metadata = tonic::metadata::MetadataMap::new();
+    for (key, value) in pairs {
+        let legal = |b: &u8| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_.-".contains(b);
+        if key.is_empty() || !key.iter().all(legal) {
+            return Err(invalid());
+        }
+        if key.ends_with(b"-bin") {
+            let key = tonic::metadata::BinaryMetadataKey::from_bytes(key).map_err(|_| invalid())?;
+            metadata.append_bin(key, tonic::metadata::BinaryMetadataValue::from_bytes(value));
+            continue;
+        }
+        if key == b"user-agent" {
+            continue;
+        }
+        if !value.iter().all(|b| (0x20..=0x7e).contains(b)) {
+            return Err(invalid());
+        }
+        let key = tonic::metadata::AsciiMetadataKey::from_bytes(key).map_err(|_| invalid())?;
+        let value = tonic::metadata::AsciiMetadataValue::try_from(value.as_slice())
+            .map_err(|_| invalid())?;
+        metadata.append(key, value);
+    }
+    Ok(metadata)
+}
+
+/// The response of `response`, the call of the channel of [`Checked`], whose headers past the
+/// limits of gRPC, or of details that are not read, fail the call, and which ends as cancelled
+/// when the client closes the channel before it begins, as grpcio's `close` cancels the calls in
+/// flight on its channel.
+async fn checked_response(
+    response: <Channel as Service<http::Request<tonic::body::Body>>>::Future,
+    closed: Arc<crate::client::ChannelClosed>,
+) -> Result<http::Response<CheckedBody>, StdError> {
+    let mut response = tokio::select! {
+        biased;
+        response = response => response?,
+        () = closed.closed() => {
+            return Err(Box::new(tonic::Status::cancelled(crate::client::CLOSED_CHANNEL)) as StdError);
+        }
+    };
+    if let Some(status) = refusal(Some(response.status().as_str()), response.headers()) {
+        return Err(Box::new(status) as StdError);
+    }
+    if let Some(status) = read_details(response.headers_mut()) {
+        return Err(Box::new(status) as StdError);
+    }
+    Ok(response.map(|body| CheckedBody::new(body, closed)))
 }
 
 /// The body of a response of [`Checked`], whose trailers past the limits fail its call, and which
@@ -957,5 +1079,88 @@ mod tests {
         ]);
         let status = checked(None, &past, true, || 0.0).unwrap();
         assert!(status.details().is_empty() && status.metadata().is_empty());
+    }
+
+    #[test]
+    fn the_metadata_of_a_source_is_checked_as_grpc_s_core_checks_it() {
+        let pair = |key: &str, value: &[u8]| (key.as_bytes().to_vec(), value.to_vec());
+        let metadata = call_metadata(&[
+            pair("x-a", b"one"),
+            pair("x-a", b"two"),
+            pair("x-bin", &[0, 1, 255]),
+            pair("user-agent", b"mine"),
+        ])
+        .unwrap();
+        let values: Vec<&str> = metadata
+            .get_all("x-a")
+            .iter()
+            .map(|value| value.to_str().unwrap())
+            .collect();
+        assert_eq!(values, ["one", "two"]);
+        assert_eq!(
+            metadata
+                .get_bin("x-bin")
+                .unwrap()
+                .to_bytes()
+                .unwrap()
+                .as_ref(),
+            &[0, 1, 255]
+        );
+        assert!(metadata.get("user-agent").is_none());
+        for pairs in [
+            vec![pair("Bad:Key", b"v")],
+            vec![pair("", b"v")],
+            vec![pair("x-a", b"v\n")],
+            vec![pair("x-a", &[0xc3, 0xa9])],
+        ] {
+            let status = call_metadata(&pairs).unwrap_err();
+            assert_eq!(status.code(), tonic::Code::Internal);
+            assert_eq!(status.message(), "Invalid metadata");
+        }
+    }
+
+    #[test]
+    fn the_metadata_of_a_call_is_sent_of_its_order_and_the_token_last() {
+        // Of the review of SPARK-62220: grpcio sends every value of a key, in its order, and the
+        // `authorization` of its call credentials after the metadata of the call.
+        let pair = |key: &str, value: &str| (key.as_bytes().to_vec(), value.as_bytes().to_vec());
+        let metadata = call_metadata(&[
+            pair("x-seq", "2"),
+            pair("authorization", "Bearer FROM-METADATA"),
+            pair("x-dup", "1"),
+            pair("x-dup", "2"),
+        ])
+        .unwrap();
+        let token = (
+            tonic::metadata::AsciiMetadataKey::from_static("authorization"),
+            tonic::metadata::AsciiMetadataValue::from_static("Bearer TOKEN"),
+        );
+        let mut headers = http::HeaderMap::new();
+        headers.insert("te", http::HeaderValue::from_static("trailers"));
+        append_metadata(&mut headers, metadata, &[token]);
+        let values = |key: &str| -> Vec<&str> {
+            headers
+                .get_all(key)
+                .iter()
+                .map(|value| value.to_str().unwrap())
+                .collect()
+        };
+        assert_eq!(values("x-seq"), ["2"]);
+        assert_eq!(values("x-dup"), ["1", "2"]);
+        assert_eq!(
+            values("authorization"),
+            ["Bearer FROM-METADATA", "Bearer TOKEN"]
+        );
+        assert_eq!(values("te"), ["trailers"]);
+    }
+
+    #[test]
+    fn the_error_of_a_source_is_the_error_of_its_call() {
+        let error = crate::error::SparkError::builtin_value_msg("of the source");
+        let mut status = tonic::Status::unknown(error.to_string());
+        status.set_source(std::sync::Arc::new(MetadataFailed(error)));
+        let failure = metadata_failure(&status).unwrap();
+        assert!(failure.to_string().contains("of the source"));
+        assert!(metadata_failure(&tonic::Status::unknown("other")).is_none());
     }
 }
