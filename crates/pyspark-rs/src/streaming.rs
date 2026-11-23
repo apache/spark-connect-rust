@@ -17,8 +17,9 @@ use crate::dataframe::{PyDataFrame, WriterState};
 use crate::errors::spark_error_to_py_exception;
 use crate::interrupt::interruptible;
 use crate::options::{
-    option_key, put_option_skip_none, put_shared_option, reader_option_text, skip_none_shared,
-    stream_option_text, utf32le_of, DefaultedOption, OptionKey, OptionText, UnencodableOptions,
+    option_key, put_option_skip_none, put_reader_option_of_copies, put_shared_option,
+    reader_option_text, skip_none_shared, stream_option_text, utf32le_of, DefaultedOption,
+    OptionKey, OptionText, UnencodableOptions,
 };
 use crate::readwriter::{
     reader_plan_error, reader_schema, table_name_of, with_plan_error, UnsentFormat,
@@ -393,8 +394,9 @@ pub struct PyDataStreamReader {
     /// is, and whose `DataSource` asserts at `load`, after the path ([`stream_reader_format`]).
     unsent_format: Option<UnsentFormat>,
     /// The options that UTF-8 cannot encode, which the copies of this reader share, as they share
-    /// `options` ([`UnencodableOptions`]).
-    unencodable_options: Arc<WriterState<UnencodableOptions>>,
+    /// `options` ([`UnencodableOptions`]), of a lock that is taken only with the GIL, as Python's
+    /// garbage collector reads them (see [`crate::options::SharedObjects`]).
+    unencodable_options: Arc<crate::gc::GilMutex<UnencodableOptions>>,
     /// The Python object of `unencodable_options`, which the copies of this reader share too, and
     /// which reports the keys of its options that are objects to Python's garbage collector, as
     /// the `_options` dict of PySpark's copies holds them (see [`crate::options::SharedObjects`]).
@@ -426,7 +428,7 @@ fn stream_reader_format(
 impl PyDataStreamReader {
     pub fn new(reader: DataStreamReader) -> Self {
         let options = reader.get_options().clone();
-        let unencodable_options = Arc::new(WriterState::new(UnencodableOptions::default()));
+        let unencodable_options = Arc::new(crate::gc::GilMutex::new(UnencodableOptions::default()));
         PyDataStreamReader {
             inner: without_options(reader, &options),
             options: Arc::new(WriterState::new(options)),
@@ -485,7 +487,21 @@ impl PyDataStreamReader {
         key: &OptionKey,
         value: Option<&OptionText>,
     ) -> DataStreamReader {
-        put_shared_option(r, &self.unencodable_options, key, value)
+        Python::attach(|py| put_shared_option(py, r, &self.unencodable_options, key, value))
+    }
+
+    /// Set the option `key` to `value` on the options that this reader shares with its copies, as
+    /// PySpark's `option` sets its dict: no borrow of the reader is held while the keys are
+    /// compared, as Python code ([`put_reader_option_of_copies`]).
+    fn put_option_of_copies(slf: &Bound<'_, Self>, key: &OptionKey, value: &OptionText) {
+        let (options, unencodable) = {
+            let this = slf.borrow();
+            (
+                Arc::clone(&this.options),
+                Arc::clone(&this.unencodable_options),
+            )
+        };
+        put_reader_option_of_copies(slf.py(), &options, &unencodable, key, Some(value));
     }
 
     /// `r` with the options of `options` set, **skipping** those that are None, as the format
@@ -495,7 +511,15 @@ impl PyDataStreamReader {
         r: DataStreamReader,
         options: &[(&str, Option<&Bound<'_, PyAny>>)],
     ) -> PyResult<DataStreamReader> {
-        skip_none_shared(r, &self.unencodable_options, options, stream_option_text)
+        Python::attach(|py| {
+            skip_none_shared(
+                py,
+                r,
+                &self.unencodable_options,
+                options,
+                stream_option_text,
+            )
+        })
     }
 
     /// `r` with the `**options` of a call set, **skipping** those that are None, as `options` and
@@ -506,13 +530,20 @@ impl PyDataStreamReader {
         options: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<DataStreamReader> {
         crate::options::check_keyword_keys(options)?;
-        let mut unencodable = self.unencodable_options.get();
-        for (key, value) in options.into_iter().flat_map(|options| options.iter()) {
-            let key = option_key(&key)?;
-            r = put_option_skip_none(r, &mut unencodable, &key, Some(&value), reader_option_text)?;
-        }
-        self.unencodable_options.set(unencodable);
-        Ok(r)
+        Python::attach(|py| {
+            for (key, value) in options.into_iter().flat_map(|options| options.iter()) {
+                let key = option_key(&key)?;
+                r = put_option_skip_none(
+                    py,
+                    r,
+                    &self.unencodable_options,
+                    &key,
+                    Some(&value),
+                    reader_option_text,
+                )?;
+            }
+            Ok(r)
+        })
     }
 
     /// `r` with the schema `schema` of `Option`, if there is one, as [`Self::set_schema`] sets it.
@@ -549,7 +580,7 @@ impl PyDataStreamReader {
     /// Fail a `DataSource` of this reader, which PySpark builds at its call and asserts that each
     /// key of its options is a str, with the bare `AssertionError` of that assertion.
     fn check_data_source(&self) -> PyResult<()> {
-        if self.unencodable_options.get().has_object_key() {
+        if Python::attach(|py| self.unencodable_options.lock(py).has_object_key()) {
             return Err(pyo3::exceptions::PyAssertionError::new_err(()));
         }
         Ok(())
@@ -558,20 +589,20 @@ impl PyDataStreamReader {
     /// The reader `r` with the options of the bytes keys that are UTF-8, which PySpark's `Read`
     /// plan sends as their text.
     fn with_decodable_keys(&self, r: DataStreamReader) -> DataStreamReader {
-        self.unencodable_options
-            .get()
-            .decodable_pairs()
+        Python::attach(|py| self.unencodable_options.lock(py).decodable_pairs())
             .into_iter()
             .fold(r, |r, (key, value)| r.option(&key, &value))
     }
 
     /// The error of the plan of this reader, as [`reader_plan_error`] gives it.
     fn plan_error(&self) -> Option<SparkError> {
-        reader_plan_error(
-            self.unsent_format.as_ref(),
-            self.unencodable_schema.as_deref(),
-            &self.unencodable_options.get(),
-        )
+        Python::attach(|py| {
+            reader_plan_error(
+                self.unsent_format.as_ref(),
+                self.unencodable_schema.as_deref(),
+                &self.unencodable_options.lock(py),
+            )
+        })
     }
 }
 
@@ -631,6 +662,9 @@ impl PyDataStreamReader {
         let py = slf.py();
         let this = slf.borrow();
         let session = crate::session::session_object(py, &this.inner.spark_session())?;
+        // Of a copy of the options, as the Python objects of the state are made apart from its
+        // lock.
+        let options = this.unencodable_options.lock(py).clone_ref(py);
         let args = PyTuple::new(
             py,
             [
@@ -643,7 +677,7 @@ impl PyDataStreamReader {
                 crate::readwriter::unencodable_state(
                     py,
                     this.unencodable_schema.as_deref(),
-                    &this.unencodable_options.get(),
+                    &options,
                 )?,
             ],
         )?;
@@ -686,7 +720,7 @@ impl PyDataStreamReader {
             }
             if let Some(options) = take("_options")? {
                 for (key, value) in options.cast_into::<PyDict>()?.iter() {
-                    Self::option(slf.borrow_mut(), &key, &value)?;
+                    Self::option(slf, &key, &value)?;
                 }
             }
             if let Some(source_name) = take("_source_name")? {
@@ -787,36 +821,45 @@ impl PyDataStreamReader {
         Ok(slf)
     }
 
+    // The key and the value are converted, and the keys compared, as Python code, with no borrow
+    // of the reader held, as PySpark's dict holds none: a key whose `__eq__` releases the GIL or
+    // sets an option of this reader again stops no call of another thread, nor its own.
     #[doc = connect_doc!(DataStreamReader.option)]
     fn option<'py>(
-        mut slf: PyRefMut<'py, Self>,
+        slf: &Bound<'py, Self>,
         key: &Bound<'_, PyAny>,
         value: &Bound<'_, PyAny>,
-    ) -> PyResult<PyRefMut<'py, Self>> {
+    ) -> PyResult<Bound<'py, Self>> {
         // None -> option left unset, before the key is looked at, as PySpark's returns at once;
         // other values as `str()`, so a bool is "True" (reference `DataStreamReader.option`,
         // unlike `options` and `load`).
         if value.is_none() {
-            return Ok(slf);
+            return Ok(slf.clone());
         }
         let key = option_key(key)?;
-        let value = stream_option_text(value)?;
-        let state = slf.put_option(slf.state(), &key, value.as_ref());
-        slf.set_state(state);
-        Ok(slf)
+        if let Some(value) = stream_option_text(value)? {
+            Self::put_option_of_copies(slf, &key, &value);
+        }
+        Ok(slf.clone())
     }
 
     // Mirrors reference `DataStreamReader.options(**options)`: keyword args; None values
-    // skipped, booleans lowercased.
+    // skipped, booleans lowercased. As PySpark's, an `option` of each in turn, so that one that
+    // fails to convert keeps those before it, of no borrow of the reader held as `option`.
     #[pyo3(signature = (**options))]
     #[doc = connect_doc!(DataStreamReader.options)]
     fn options<'py>(
-        mut slf: PyRefMut<'py, Self>,
+        slf: &Bound<'py, Self>,
         options: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<PyRefMut<'py, Self>> {
-        let state = slf.skip_none_kwargs(slf.state(), options)?;
-        slf.set_state(state);
-        Ok(slf)
+    ) -> PyResult<Bound<'py, Self>> {
+        crate::options::check_keyword_keys(options)?;
+        for (key, value) in options.into_iter().flat_map(|options| options.iter()) {
+            let key = option_key(&key)?;
+            if let Some(value) = reader_option_text(&value)? {
+                Self::put_option_of_copies(slf, &key, &value);
+            }
+        }
+        Ok(slf.clone())
     }
 
     /// The format that the reader keeps, a Python object, which Python's garbage collector sees;
@@ -965,7 +1008,7 @@ impl PyDataStreamReader {
             return Err(crate::readwriter::changes_of_schema_error(py));
         }
         let (name, error) = table_name_of(tableName)?;
-        let error = error.or_else(|| self.unencodable_options.get().error());
+        let error = error.or_else(|| self.unencodable_options.lock(py).error());
         let r = self.with_decodable_keys(self.state());
         Ok(PyDataFrame::new(with_plan_error(r.changes(&name), error)))
     }
@@ -1039,7 +1082,8 @@ impl PyDataStreamReader {
     #[doc = connect_doc!(DataStreamReader.table)]
     fn table(&self, tableName: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
         let (name, error) = table_name_of(tableName)?;
-        let error = error.or_else(|| self.unencodable_options.get().error());
+        let py = tableName.py();
+        let error = error.or_else(|| self.unencodable_options.lock(py).error());
         let r = self.with_decodable_keys(self.state());
         Ok(PyDataFrame::new(with_plan_error(r.table(&name), error)))
     }

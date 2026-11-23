@@ -581,6 +581,17 @@ For every method matching a pyspark name:
   tells (`crate::gc::_watch_reported_parts`,
   `test_no_part_that_the_collector_sees_is_cloned_without_the_gil_by_a_call`): add a call of a new
   API that runs without the GIL to it.
+  The options that the shallow copies of a reader, a writer or a session builder share, whose keys
+  and values may be any objects, are reported through one Python object too
+  (`crate::options::SharedObjects`), of a state whose lock is a `crate::gc::GilMutex`: taken only
+  with the GIL (of a `Python` token), and held only while no Python code runs and the GIL is not
+  released, as a thread that wants it waits with the GIL held. Their objects are cloned only with
+  the GIL (`OptionObject::clone_ref`; `OptionKey` and `UnencodableOptions` have no `Clone`), so the
+  count that `UnencodableOptions::visit_objects` reads changes only while no collection runs. Their
+  keys are compared with their `==`, Python code, on a copy, which replaces them unless they changed
+  meanwhile (`crate::options::change_options`), with no lock and no borrow of the holder held, as
+  PySpark's dicts compare them. The check of the clones of the tests logs a release of the GIL by
+  the binding, the Python code of an option, and a lock found held, while a thread holds one.
 - **Streaming listeners and progress holders:** Keep progress holders (`StreamingQueryProgress`,
   `StateOperatorProgress`, etc.) as faithful pure-Python implementations parsed from server
   JSON, not Rust-backed. The listener bus (subscribe/dispatch) is genuinely Rust-backed;

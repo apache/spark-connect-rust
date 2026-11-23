@@ -49,9 +49,12 @@ def pytest_configure(config):
 
 
 def _violations(count, logs, where):
+    # Of the clones of parts, and of the locks of the states of options (`crate::gc::GilMutex`),
+    # which a thread holds only while no Python code runs and the GIL is not released.
     return (
         f"{count} clone(s) of parts of plans and expressions without the GIL that no call of the "
-        f"extension counts or marks busy, {where}:\n\n" + "\n\n".join(logs)
+        f"extension counts or marks busy, or lock(s) of the states of options held across Python "
+        f"code or a release of the GIL, {where}:\n\n" + "\n\n".join(logs)
     )
 
 
