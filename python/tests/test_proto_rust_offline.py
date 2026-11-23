@@ -8619,3 +8619,61 @@ def test_clear_field_of_a_member_of_an_unset_child_held_clears_its_oneof_as_upbs
     # first (its `EnsureReified`), so the member of the oneof that the message holds is cleared;
     # of one that Python no longer holds (upb holds its unset children weakly), it is not.
     assert _clear_field_of_a_member_cases(ours) == _clear_field_of_a_member_cases(upb)
+
+
+
+def _copy_into_unset_children_cases(C):
+    """CopyFrom into a message whose unset children, of several levels, Python holds."""
+    P, R = C("spark.connect.Plan"), C("spark.connect.Relation")
+
+    def rel():
+        return R(
+            read={"data_source": {"format": "csv", "paths": ["a"], "options": {"k": "v"}}},
+            common={"plan_id": 1},
+        )
+
+    def nested():
+        p = P()
+        stub = p.root
+        deep = stub.read
+        deeper = deep.data_source
+        p.CopyFrom(P(root=rel()))
+        deeper.format = "json"
+        return [p.root is stub, p.root.read is deep, p.root.read.data_source is deeper, _hex(p)]
+
+    def nested_changed_at_the_middle():
+        p = P()
+        deep = p.root.read
+        p.CopyFrom(P(root=rel()))
+        deep.data_source.format = "json"
+        return [p.root.read is deep, _hex(p)]
+
+    def unset_by_the_copy():
+        # The copy sets `read`; the unset child of `limit` (of the same oneof) stays unset, and
+        # setting it sets the member.
+        p = P()
+        stub = p.root
+        other = stub.limit
+        p.CopyFrom(P(root=rel()))
+        before = _hex(p)
+        other.limit = 5
+        return [p.root is stub, before, _hex(p), p.root.HasField("read")]
+
+    def copied_twice():
+        p = P()
+        deep = p.root.read
+        p.CopyFrom(P(root=rel()))
+        p.CopyFrom(P(root=R(read={"named_table": {"unparsed_identifier": "t"}})))
+        deep.data_source.format = "json"
+        return [p.root.read is deep, _hex(p), _hex(deep)]
+
+    cases = [nested, nested_changed_at_the_middle, unset_by_the_copy, copied_twice]
+    return {case.__name__: _outcome(case) for case in cases}
+
+
+def test_copies_into_unset_children_of_many_levels_keep_what_they_copied_as_upbs(upb):
+    # The unset children that Python holds of a message that a CopyFrom sets, of any level, are
+    # the messages of the copy, as upb's are (of its `SyncSubobjs`): a change of one keeps what the
+    # copy set, where a change of an unset child below the first level replaced the copied
+    # message with the unset child, of the change only.
+    assert _copy_into_unset_children_cases(ours) == _copy_into_unset_children_cases(upb)

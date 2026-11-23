@@ -1497,7 +1497,8 @@ impl PyMessage {
 
     /// Replace the fields with `slots` and the unknown fields with `unknown`, as upb's `CopyFrom`
     /// copies a message: an unset child that the message gave out becomes the child of its field
-    /// when the copy sets that field, and stays unset (and the field's) when it does not.
+    /// when the copy sets that field (see [`PyMessage::adopt`]), and stays unset (and the field's)
+    /// when it does not.
     fn replace_slots(&mut self, py: Python<'_>, slots: Slots, unknown: Vec<u8>) -> PyResult<()> {
         let mut replaced = Vec::with_capacity(slots.len());
         for (index, slot) in slots.into_vec() {
@@ -1507,23 +1508,13 @@ impl PyMessage {
                         let mut c = copied.bind(py).borrow_mut();
                         (std::mem::take(&mut c.slots), std::mem::take(&mut c.unknown))
                     };
-                    {
-                        let mut child = stub.bind(py).try_borrow_mut()?;
-                        child.parent = None;
-                        child.slots = fields;
-                        child.unknown = unknown;
-                    }
+                    Self::adopt(py, stub.bind(py), fields, unknown)?;
                     Slot::Message(stub)
                 }
                 (Slot::Native(Value::Message(copied)), Some(stub)) => {
                     // The stub holds the fields of the copy, as it would of the object of it.
                     let fields = copied.fields.clone_native_at(py, copied.generation);
-                    {
-                        let mut child = stub.bind(py).try_borrow_mut()?;
-                        child.parent = None;
-                        child.slots = fields.slots;
-                        child.unknown = fields.unknown;
-                    }
+                    Self::adopt(py, stub.bind(py), fields.slots, fields.unknown)?;
                     Slot::Message(stub)
                 }
                 (slot, stub) => {
@@ -1538,6 +1529,61 @@ impl PyMessage {
         self.slots = Slots::from_vec(replaced);
         self.unknown = unknown;
         Ok(())
+    }
+
+    /// Give `stub`, an unset child of a field that a copy sets, the fields `slots` and `unknown`
+    /// of the copy's child, as upb's `Reify` of the stub does: the stub is a message of its own
+    /// from then on, and its own unset children of the fields that the copy's child sets take
+    /// theirs in turn (upb's `SyncSubobjs`), so that the objects that Python holds of any level
+    /// are those of the copy, and a change of one keeps the fields that the copy set.
+    fn adopt(
+        py: Python<'_>,
+        stub: &Bound<'_, PyMessage>,
+        slots: Slots,
+        unknown: Vec<u8>,
+    ) -> PyResult<()> {
+        grow(|| {
+            let lazy = {
+                let mut child = stub.try_borrow_mut()?;
+                child.parent = None;
+                child.fields.slots = slots;
+                child.fields.unknown = unknown;
+                std::mem::take(&mut child.lazy)
+            };
+            for (index, grandchild) in lazy {
+                enum Set {
+                    Native(Arc<Native>),
+                    Object(Py<PyMessage>),
+                }
+                let set = match stub.borrow().slots.get(index) {
+                    Some(Slot::Native(Value::Message(m))) => Some(Set::Native(m.clone())),
+                    Some(Slot::Message(m)) => Some(Set::Object(m.clone_ref(py))),
+                    _ => None,
+                };
+                let (slots, unknown) = match set {
+                    Some(Set::Native(m)) => {
+                        let fields = m.fields.clone_native_at(py, m.generation);
+                        (fields.slots, fields.unknown)
+                    }
+                    Some(Set::Object(m)) => {
+                        let mut m = m.bind(py).try_borrow_mut()?;
+                        (
+                            std::mem::take(&mut m.fields.slots),
+                            std::mem::take(&mut m.fields.unknown),
+                        )
+                    }
+                    None => {
+                        stub.borrow_mut().lazy.push((index, grandchild));
+                        continue;
+                    }
+                };
+                Self::adopt(py, grandchild.bind(py), slots, unknown)?;
+                // The value that the object replaces is dropped once the stub is no longer
+                // borrowed.
+                let _replaced = stub.borrow_mut().set_slot(index, Slot::Message(grandchild));
+            }
+            Ok(())
+        })
     }
 
     /// The child of the singular message field `index` to merge into: the set one, else a new
