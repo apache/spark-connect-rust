@@ -8020,3 +8020,62 @@ def test_the_functions_run_those_of_spark_connect_of_their_names_as_pysparks(
         F.col("s")
     monkeypatch.delenv("PYSPARK_NO_NAMESPACE_SHARE")
     assert df.select(F.col("s")).first().s == "aB"
+
+
+def test_the_catalog_tvf_registration_and_conf_make_the_requests_of_their_dict_as_pysparks(
+    session,
+):
+    # As official PySpark 4.3.0, whose Catalog, TableValuedFunction, DataSourceRegistration and
+    # RuntimeConf keep the session or the client of their __init__ in their __dict__, which their
+    # methods read at each request: of a proxy of the session, a catalog and the table-valued
+    # functions make the requests of the session of its client, and a RuntimeConf of a client of
+    # another class calls its config, of the ConfigRequest.Operation of each request.
+    from pyspark.sql.connect.catalog import Catalog
+    from pyspark.sql.connect.conf import RuntimeConf
+    from pyspark.sql.connect.tvf import TableValuedFunction
+
+    class Proxy:
+        def __init__(self, spark):
+            self.spark = spark
+
+        def __getattr__(self, name):
+            return getattr(self.spark, name)
+
+    class Recording:
+        def __init__(self, client):
+            self.client, self.operations = client, []
+
+        def config(self, operation):
+            self.operations.append(operation)
+            return self.client.config(operation)
+
+    assert vars(session.catalog) == {"_sparkSession": session}
+    assert vars(session.tvf) == {"_sparkSession": session}
+    assert vars(session.dataSource) == {"sparkSession": session}
+    assert vars(session.conf) == {"_client": session.client}
+    proxy = Proxy(session)
+    catalog = Catalog(proxy)
+    assert catalog.currentDatabase() == session.catalog.currentDatabase()
+    assert catalog.databaseExists("default")
+    session.catalog._sparkSession = proxy
+    try:
+        assert session.catalog.currentDatabase() == "default"
+    finally:
+        session.catalog._sparkSession = session
+    tvf = TableValuedFunction(proxy)
+    assert tvf.range(3).count() == 3
+    assert tvf.explode(F.array(F.lit(1), F.lit(2))).collect() == [Row(col=1), Row(col=2)]
+    key = "spark.sql.shuffle.partitions"
+    client = Recording(session.client)
+    conf = RuntimeConf(client)
+    previous = conf.get(key)
+    try:
+        conf.set(key, 7)
+        assert session.conf.get(key) == "7" and conf.get(key) == "7"
+        assert conf.isModifiable(key) is True
+    finally:
+        conf.set(key, previous)
+    get, set_, *_ = client.operations
+    assert list(get.get.keys) == [key]
+    assert [(p.key, p.value) for p in set_.set.pairs] == [(key, "7")]
+    assert len(client.operations) == 5

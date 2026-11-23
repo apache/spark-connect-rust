@@ -7,21 +7,39 @@ use crate::dataframe::column_or_name;
 use crate::dataframe::PyDataFrame;
 use crate::errors::ResultExt;
 
-// Python wrapper for the table-valued-function namespace (`spark.tvf`).
+// Python wrapper for the table-valued-function namespace (`spark.tvf`). As PySpark's plain class,
+// it keeps its state in its `__dict__`, its `_sparkSession`, which its functions read when they
+// make their DataFrames, and it is subclassed and constructed of PySpark's arguments (see
+// `crate::state`).
 #[doc = connect_doc!(TableValuedFunction)]
 #[pyclass(
     name = "TableValuedFunction",
     module = "pyspark.sql.connect.tvf",
+    subclass,
     weakref,
     dict
 )]
-pub struct PyTableValuedFunction {
-    inner: TableValuedFunction,
-}
+pub struct PyTableValuedFunction {}
 
 impl PyTableValuedFunction {
-    pub fn new(inner: TableValuedFunction) -> Self {
-        PyTableValuedFunction { inner }
+    /// The table-valued functions of `session`, as `spark.tvf` makes them:
+    /// `TableValuedFunction(spark)`, of the session object, which PySpark's `__init__` keeps as
+    /// its `_sparkSession`.
+    pub(crate) fn of_session<'py>(
+        session: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyTableValuedFunction>> {
+        let tvf = Bound::new(session.py(), PyTableValuedFunction {})?;
+        Self::__init__(&tvf, session)?;
+        Ok(tvf)
+    }
+
+    /// The table-valued functions of the core of the session of `_sparkSession`, which PySpark's
+    /// `_fn` reads as it makes its DataFrame, `DataFrame(plan, self._sparkSession)`, of the client
+    /// of its requests (see `state::session_of_value`).
+    fn tvf_of(slf: &Bound<'_, Self>) -> PyResult<TableValuedFunction> {
+        let py = slf.py();
+        let session = crate::state::attr(slf.as_any(), pyo3::intern!(py, "_sparkSession"))?;
+        Ok(crate::state::session_of_value(&session, pyo3::intern!(py, "client"))?.tvf())
     }
 }
 
@@ -33,86 +51,109 @@ fn cols(items: Vec<Bound<'_, PyAny>>) -> PyResult<Vec<spark_connect::column::Col
 
 #[pymethods]
 impl PyTableValuedFunction {
-    /// The shallow copy of the table-valued functions, as PySpark's `copy.copy`: of the same
-    /// session, with the instance attributes of these.
-    fn __copy__(slf: &Bound<'_, Self>) -> PyResult<Py<Self>> {
-        let py = slf.py();
-        let copy = Py::new(py, PyTableValuedFunction::new(slf.borrow().inner.clone()))?;
-        crate::reduce::copy_instance_dict(slf.as_any(), copy.bind(py).as_any())?;
-        Ok(copy)
+    /// Table-valued functions of no state, as the `object.__new__` of PySpark's plain class: of
+    /// any arguments, which `__init__` takes, so that a subclass of another `__init__` is built as
+    /// it is in PySpark. The class shows the signature of `__init__`, as `inspect.signature` of
+    /// PySpark's class does.
+    #[new]
+    #[pyo3(signature = (*_args, **_kwargs), text_signature = "(sparkSession)")]
+    fn py_new(
+        _args: &Bound<'_, pyo3::types::PyTuple>,
+        _kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
+    ) -> Self {
+        PyTableValuedFunction {}
     }
 
-    /// The reduce of the table-valued functions, as PySpark's: `tvf` of their session, which
-    /// unpickles with it, and their instance attributes.
-    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+    /// `TableValuedFunction(sparkSession)`, as PySpark Connect's `__init__`, which keeps its
+    /// argument as it is, as the `_sparkSession` of the functions.
+    #[allow(non_snake_case)]
+    fn __init__(slf: &Bound<'_, Self>, sparkSession: &Bound<'_, PyAny>) -> PyResult<()> {
         let py = slf.py();
-        let session = crate::session::session_object(py, slf.borrow().inner.spark_session())?;
-        let reduced = crate::reduce::getattr_reduce(py, session.into_bound(py).into_any(), "tvf")?;
-        crate::reduce::reduce_with_instance_dict(slf.as_any(), reduced.into_any())
+        crate::state::assign(
+            slf.as_any(),
+            &[(pyo3::intern!(py, "_sparkSession"), sparkSession)],
+        )
     }
 
-    // Each argument is taken by its `int()`, as PySpark's `spark.tvf.range` takes them, which
-    // is `spark.range`.
+    /// The state of the functions, their `__dict__`, as `object.__getstate__` gives that of
+    /// PySpark's plain object, which a copy and a pickle keep (see `state::getstate`).
+    fn __getstate__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        crate::state::getstate(slf.as_any())
+    }
+
+    /// The reduce of the functions, as PySpark's plain object's: `copyreg.__newobj__` of their
+    /// class, of their `__dict__` (see `state::reduce_ex`).
+    fn __reduce_ex__<'py>(slf: &Bound<'py, Self>, protocol: i32) -> PyResult<Bound<'py, PyAny>> {
+        crate::state::reduce_ex(slf.as_any(), protocol)
+    }
+
+    // As PySpark's `spark.tvf.range`, which is `self._sparkSession.range(start, end, step,
+    // numPartitions)`, a call of the `range` of the object, of PySpark's default step of 1.
     #[pyo3(
         signature = (start, end=None, step=crate::session::RangeStep::Omitted, numPartitions=None),
         text_signature = "($self, start, end=None, step=1, numPartitions=None)"
     )]
     #[allow(non_snake_case)]
     #[doc = connect_doc!(TableValuedFunction.range)]
-    fn range(
-        &self,
-        py: Python<'_>,
-        start: &Bound<'_, PyAny>,
-        end: Option<&Bound<'_, PyAny>>,
+    fn range<'py>(
+        slf: &Bound<'py, Self>,
+        start: &Bound<'py, PyAny>,
+        end: Option<&Bound<'py, PyAny>>,
         step: crate::session::RangeStep,
-        numPartitions: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<PyDataFrame> {
-        let mut args = crate::plan_args::PlanArgs::new();
-        let (start, end, step, num_partitions) =
-            crate::session::range_arguments(&mut args, start, end, step, numPartitions)?;
-        let df = crate::gc::detach_without_parts(py, || {
-            self.inner
-                .range(start, Some(end), step, num_partitions)
-                .map_err(Box::new)
-        })
-        .to_pyerr()?;
-        Ok(PyDataFrame::new(args.plan(df)))
+        numPartitions: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let py = slf.py();
+        let step = match step {
+            crate::session::RangeStep::Omitted => 1i64.into_pyobject(py)?.into_any(),
+            crate::session::RangeStep::Given(step) => step.into_bound(py),
+        };
+        crate::state::attr(slf.as_any(), pyo3::intern!(py, "_sparkSession"))?.call_method1(
+            pyo3::intern!(py, "range"),
+            (start, end, step, numPartitions),
+        )
     }
 
     #[doc = connect_doc!(TableValuedFunction.explode)]
-    fn explode(&self, collection: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+    fn explode(slf: &Bound<'_, Self>, collection: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
         let c = column_or_name(collection)?;
-        Ok(PyDataFrame::new(self.inner.explode(&c).to_pyerr()?))
+        Ok(PyDataFrame::new(Self::tvf_of(slf)?.explode(&c).to_pyerr()?))
     }
 
     #[pyo3(name = "explode_outer")]
     #[doc = connect_doc!(TableValuedFunction.explode_outer)]
-    fn explode_outer(&self, collection: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+    fn explode_outer(
+        slf: &Bound<'_, Self>,
+        collection: &Bound<'_, PyAny>,
+    ) -> PyResult<PyDataFrame> {
         let c = column_or_name(collection)?;
-        Ok(PyDataFrame::new(self.inner.explode_outer(&c).to_pyerr()?))
+        Ok(PyDataFrame::new(
+            Self::tvf_of(slf)?.explode_outer(&c).to_pyerr()?,
+        ))
     }
 
     #[doc = connect_doc!(TableValuedFunction.inline)]
-    fn inline(&self, input: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+    fn inline(slf: &Bound<'_, Self>, input: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
         let c = column_or_name(input)?;
-        Ok(PyDataFrame::new(self.inner.inline(&c).to_pyerr()?))
+        Ok(PyDataFrame::new(Self::tvf_of(slf)?.inline(&c).to_pyerr()?))
     }
 
     #[pyo3(name = "inline_outer")]
     #[doc = connect_doc!(TableValuedFunction.inline_outer)]
-    fn inline_outer(&self, input: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+    fn inline_outer(slf: &Bound<'_, Self>, input: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
         let c = column_or_name(input)?;
-        Ok(PyDataFrame::new(self.inner.inline_outer(&c).to_pyerr()?))
+        Ok(PyDataFrame::new(
+            Self::tvf_of(slf)?.inline_outer(&c).to_pyerr()?,
+        ))
     }
 
     #[pyo3(name = "json_tuple", signature = (input, *fields))]
     #[doc = connect_doc!(TableValuedFunction.json_tuple)]
     fn json_tuple(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         input: &Bound<'_, PyAny>,
         fields: Vec<Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
+        let py = slf.py();
         // As PySpark's, which asks for fields before it takes the arguments.
         if fields.is_empty() {
             return Err(crate::column::raise_pyspark(
@@ -125,69 +166,88 @@ impl PyTableValuedFunction {
         let inp = column_or_name(input)?;
         let fs = cols(fields)?;
         Ok(PyDataFrame::new(
-            self.inner.json_tuple(&inp, fs).to_pyerr()?,
+            Self::tvf_of(slf)?.json_tuple(&inp, fs).to_pyerr()?,
         ))
     }
 
     #[doc = connect_doc!(TableValuedFunction.posexplode)]
-    fn posexplode(&self, collection: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+    fn posexplode(slf: &Bound<'_, Self>, collection: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
         let c = column_or_name(collection)?;
-        Ok(PyDataFrame::new(self.inner.posexplode(&c).to_pyerr()?))
+        Ok(PyDataFrame::new(
+            Self::tvf_of(slf)?.posexplode(&c).to_pyerr()?,
+        ))
     }
 
     #[pyo3(name = "posexplode_outer")]
     #[doc = connect_doc!(TableValuedFunction.posexplode_outer)]
-    fn posexplode_outer(&self, collection: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+    fn posexplode_outer(
+        slf: &Bound<'_, Self>,
+        collection: &Bound<'_, PyAny>,
+    ) -> PyResult<PyDataFrame> {
         let c = column_or_name(collection)?;
         Ok(PyDataFrame::new(
-            self.inner.posexplode_outer(&c).to_pyerr()?,
+            Self::tvf_of(slf)?.posexplode_outer(&c).to_pyerr()?,
         ))
     }
 
     #[pyo3(signature = (n, *fields))]
     #[doc = connect_doc!(TableValuedFunction.stack)]
-    fn stack(&self, n: &Bound<'_, PyAny>, fields: Vec<Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
+    fn stack(
+        slf: &Bound<'_, Self>,
+        n: &Bound<'_, PyAny>,
+        fields: Vec<Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
         let nc = column_or_name(n)?;
         let fs = cols(fields)?;
-        Ok(PyDataFrame::new(self.inner.stack(&nc, fs).to_pyerr()?))
+        Ok(PyDataFrame::new(
+            Self::tvf_of(slf)?.stack(&nc, fs).to_pyerr()?,
+        ))
     }
 
     #[doc = connect_doc!(TableValuedFunction.collations)]
-    fn collations(&self, py: Python<'_>) -> PyResult<PyDataFrame> {
+    fn collations(slf: &Bound<'_, Self>) -> PyResult<PyDataFrame> {
+        let tvf = Self::tvf_of(slf)?;
         Ok(PyDataFrame::new(
-            crate::gc::detach_without_parts(py, || self.inner.collations()).to_pyerr()?,
+            crate::gc::detach_without_parts(slf.py(), || tvf.collations()).to_pyerr()?,
         ))
     }
 
     #[pyo3(name = "sql_keywords")]
     #[doc = connect_doc!(TableValuedFunction.sql_keywords)]
-    fn sql_keywords(&self, py: Python<'_>) -> PyResult<PyDataFrame> {
+    fn sql_keywords(slf: &Bound<'_, Self>) -> PyResult<PyDataFrame> {
+        let tvf = Self::tvf_of(slf)?;
         Ok(PyDataFrame::new(
-            crate::gc::detach_without_parts(py, || self.inner.sql_keywords()).to_pyerr()?,
+            crate::gc::detach_without_parts(slf.py(), || tvf.sql_keywords()).to_pyerr()?,
         ))
     }
 
     #[pyo3(name = "variant_explode")]
     #[doc = connect_doc!(TableValuedFunction.variant_explode)]
-    fn variant_explode(&self, input: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+    fn variant_explode(slf: &Bound<'_, Self>, input: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
         let c = column_or_name(input)?;
-        Ok(PyDataFrame::new(self.inner.variant_explode(&c).to_pyerr()?))
+        Ok(PyDataFrame::new(
+            Self::tvf_of(slf)?.variant_explode(&c).to_pyerr()?,
+        ))
     }
 
     #[pyo3(name = "variant_explode_outer")]
     #[doc = connect_doc!(TableValuedFunction.variant_explode_outer)]
-    fn variant_explode_outer(&self, input: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+    fn variant_explode_outer(
+        slf: &Bound<'_, Self>,
+        input: &Bound<'_, PyAny>,
+    ) -> PyResult<PyDataFrame> {
         let c = column_or_name(input)?;
         Ok(PyDataFrame::new(
-            self.inner.variant_explode_outer(&c).to_pyerr()?,
+            Self::tvf_of(slf)?.variant_explode_outer(&c).to_pyerr()?,
         ))
     }
 
     #[pyo3(name = "python_worker_logs")]
     #[doc = connect_doc!(TableValuedFunction.python_worker_logs)]
-    fn python_worker_logs(&self, py: Python<'_>) -> PyResult<PyDataFrame> {
+    fn python_worker_logs(slf: &Bound<'_, Self>) -> PyResult<PyDataFrame> {
+        let tvf = Self::tvf_of(slf)?;
         Ok(PyDataFrame::new(
-            crate::gc::detach_without_parts(py, || self.inner.python_worker_logs()).to_pyerr()?,
+            crate::gc::detach_without_parts(slf.py(), || tvf.python_worker_logs()).to_pyerr()?,
         ))
     }
 }

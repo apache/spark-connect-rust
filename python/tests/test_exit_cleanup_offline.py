@@ -58,6 +58,15 @@ _CHILD = textwrap.dedent("""
     if mode == "new_session_dataframe":
         # Only a DataFrame of the new session is left, which holds the session.
         dataframe = sessions.pop().range(3)
+    if mode in ("new_session_catalog_dropped", "new_session_catalog_collected"):
+        # The catalog of the new session holds the session, which keeps the catalog: a reference
+        # cycle, which its drop does not free, and which a collection frees.
+        sessions[1].catalog
+        del sessions[1]
+        if mode == "new_session_catalog_collected":
+            import gc
+
+            gc.collect()
     if mode == "new_session_dropped_wait":
         spark.stop()
         print("ready", flush=True)
@@ -269,6 +278,24 @@ def test_i_a_new_session_that_a_dataframe_holds_cleans_its_ml_cache_at_exit(
     _, (_, session_id) = _run_child(exit_service.remote, "new_session_dataframe", variable)
     expected = ["clean_cache", "release_session"] if variable else ["clean_cache"]
     assert _exit_requests(exit_service, session_id) == expected
+
+
+@pytest.mark.parametrize("variable", [None, "true"])
+def test_i_a_dropped_new_session_whose_catalog_was_read_is_open_until_a_collection(
+    exit_service, variable
+):
+    # (i) As PySpark's: once its catalog is read, a session and its Catalog, which holds the
+    # session as its `_sparkSession`, are a reference cycle, which the drop of the session does not
+    # free. So a newSession() that the child dropped after it read its catalog is open until a
+    # collection frees it: an exit before that sends its clean_cache (and its release, with the
+    # release variable), as PySpark's exit does, and after a collection, which closes it, nothing.
+    _, (_, dropped_id) = _run_child(exit_service.remote, "new_session_catalog_dropped", variable)
+    expected = ["clean_cache", "release_session"] if variable else ["clean_cache"]
+    assert _exit_requests(exit_service, dropped_id) == expected
+    _, (_, collected_id) = _run_child(
+        exit_service.remote, "new_session_catalog_collected", variable
+    )
+    assert _exit_requests(exit_service, collected_id) == []
 
 
 @pytest.mark.parametrize(

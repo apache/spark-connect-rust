@@ -296,6 +296,7 @@ jobs:
             tests/test_dropin_class_modules_offline.py \
             tests/test_dropin_classic_session_offline.py \
             tests/test_dropin_functions_package_offline.py \
+            tests/test_dropin_object_state_offline.py \
             tests/test_arrow_handoff.py \
             tests/test_ml_offline.py \
             tests/test_ml_api_offline.py \

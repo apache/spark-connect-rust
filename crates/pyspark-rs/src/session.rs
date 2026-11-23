@@ -4070,28 +4070,36 @@ impl PySparkSession {
     #[getter]
     #[pyo3(name = "catalog")]
     #[doc = connect_doc!(SparkSession.catalog)]
-    fn catalog(&self, py: Python<'_>) -> PyResult<Py<PyCatalog>> {
-        if let Some(catalog) = self.catalog.get() {
+    //
+    // As PySpark's `Catalog(self)`, the catalog holds the session object as its `_sparkSession`,
+    // and the session the catalog, a reference cycle, which a collection frees, as PySpark's.
+    fn catalog(slf: &Bound<'_, Self>) -> PyResult<Py<PyCatalog>> {
+        let py = slf.py();
+        if let Some(catalog) = slf.borrow().catalog.get() {
             return Ok(catalog.clone_ref(py));
         }
-        let catalog = Py::new(py, PyCatalog::new(self.session.catalog()))?;
-        Ok(self.catalog.get_or_init(|| catalog).clone_ref(py))
+        // Made without a borrow of the session, as its `__init__` runs Python code.
+        let catalog = PyCatalog::of_session(slf.as_any())?.unbind();
+        Ok(slf.borrow().catalog.get_or_init(|| catalog).clone_ref(py))
     }
 
-    // Runtime configuration (`spark.conf`).
+    // Runtime configuration (`spark.conf`): a new one at each access, as PySpark's
+    // `RuntimeConf(self.client)`, of the client object of the session.
     #[getter]
     #[pyo3(name = "conf")]
     #[doc = connect_doc!(SparkSession.conf)]
-    fn conf(&self) -> crate::conf::PyRuntimeConf {
-        crate::conf::PyRuntimeConf::new(&self.session)
+    fn conf<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, crate::conf::PyRuntimeConf>> {
+        let client = Self::client(slf)?;
+        crate::conf::PyRuntimeConf::of_client(client.bind(slf.py()))
     }
 
-    // Table-valued functions namespace (`spark.tvf`).
+    // Table-valued functions namespace (`spark.tvf`): a new one at each access, as PySpark's
+    // `TableValuedFunction(self)`.
     #[getter]
     #[pyo3(name = "tvf")]
     #[doc = connect_doc!(SparkSession.tvf)]
-    fn tvf(&self) -> crate::tvf::PyTableValuedFunction {
-        crate::tvf::PyTableValuedFunction::new(self.session.tvf())
+    fn tvf<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, crate::tvf::PyTableValuedFunction>> {
+        crate::tvf::PyTableValuedFunction::of_session(slf.as_any())
     }
 
     // Copy a local file to the Spark-managed filesystem (`copyFromLocalToFs`), with the errors
@@ -5166,11 +5174,9 @@ impl PySparkSession {
     // Mirrors `SparkSession.dataSource.register`. Used to register custom data sources.
     #[getter]
     #[doc = connect_doc!(SparkSession.dataSource)]
-    fn dataSource(&self, py: Python<'_>) -> PyResult<PyDataSourceRegistration> {
-        Ok(PyDataSourceRegistration::new(session_object(
-            py,
-            &self.session,
-        )?))
+    fn dataSource<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyDataSourceRegistration>> {
+        // A new one at each access, as PySpark's `DataSourceRegistration(self)`.
+        PyDataSourceRegistration::of_session(slf.as_any())
     }
 
     #[getter]
