@@ -1432,6 +1432,13 @@ impl Parts {
         Parts::default()
     }
 
+    /// Whether these hold no [`SharedPart`], so that [`Parts::visit`] reports nothing: the object
+    /// that holds them reaches no Python object through them, now or later, as an object's parts
+    /// are made once, of its value.
+    pub(crate) fn holds_no_shared(&self) -> bool {
+        self.shared.is_empty()
+    }
+
     /// The parts of `references`, the references that an object of the binding holds to the
     /// parts of its value, each of one field of the value, as `held_parts` of a value of the core
     /// gives them.

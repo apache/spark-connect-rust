@@ -72,12 +72,18 @@ fn expressions_of<'py>(
     py: Python<'py>,
     cols: Vec<Bound<'py, PyAny>>,
 ) -> PyResult<Vec<Bound<'py, PyAny>>> {
+    // The `_expr` of the Column of `F._to_col` of a column name is read of the Column, of a patch
+    // of the attribute lookup of the class `Column`.
+    let unpatched = crate::column::column_class_is_original(py, false);
     window_column_items(cols, &crate::origin::CallSiteOrigin::new())?
         .into_iter()
         .map(|column| match column {
             WindowColumn::Object(column) => crate::column::expression_attr(&column),
-            WindowColumn::Name(column) => {
+            WindowColumn::Name(column) if unpatched => {
                 Ok(crate::column::expression_object(py, column)?.into_any())
+            }
+            WindowColumn::Name(column) => {
+                crate::column::expression_attr(crate::column::column_object(py, column)?.as_any())
             }
         })
         .collect()
@@ -88,14 +94,21 @@ fn expressions_of<'py>(
 /// another of its `asc()`, ascending with nulls first. The `asc()` of a column name, and of a
 /// Column of the class, which no subclass overrides, is made at once, as the class's `asc` makes it
 /// (`asc_nulls_first`, of its origin); that of another Column is the `asc()` that it has.
-fn sort_expressions_of<'py>(
+pub(crate) fn sort_expressions_of<'py>(
     py: Python<'py>,
     cols: Vec<Bound<'py, PyAny>>,
 ) -> PyResult<Vec<Bound<'py, PyAny>>> {
     let origin = crate::origin::CallSiteOrigin::new();
+    // Of the class `Column` as the module made it, of no patch of its `asc` nor of its attribute
+    // lookup, which the `asc()` of PySpark's `_sort_col` would call.
+    let unpatched = crate::column::column_class_is_original(py, true);
     let ascending = |column: Column| -> PyResult<Bound<'py, PyAny>> {
         let _origin = origin.with("asc_nulls_first")?;
         Ok(crate::column::expression_object(py, column.asc_nulls_first())?.into_any())
+    };
+    let ascending_of = |column: &Bound<'py, PyAny>| -> PyResult<Bound<'py, PyAny>> {
+        let sorted = column.call_method0(pyo3::intern!(py, "asc"))?;
+        crate::column::expression_attr(&sorted)
     };
     window_column_items(cols, &origin)?
         .into_iter()
@@ -105,13 +118,18 @@ fn sort_expressions_of<'py>(
                 if is_sort_order(&expression) {
                     return Ok(expression);
                 }
-                if column.get_type().is(py.get_type::<PyColumn>()) {
+                if unpatched && column.get_type().is(py.get_type::<PyColumn>()) {
                     return ascending(crate::column::expression_value(&expression)?);
                 }
-                let sorted = column.call_method0(pyo3::intern!(py, "asc"))?;
-                crate::column::expression_attr(&sorted)
+                ascending_of(&column)
             }
-            WindowColumn::Name(column) => ascending(column),
+            WindowColumn::Name(column) if unpatched => ascending(column),
+            // Of the Column of `F._to_col`, whose `_expr` `_sort_col` reads, and then its `asc()`.
+            WindowColumn::Name(column) => {
+                let column = crate::column::column_object(py, column)?;
+                crate::column::expression_attr(column.as_any())?;
+                ascending_of(column.as_any())
+            }
         })
         .collect()
 }
@@ -514,31 +532,44 @@ fn is_window_frame(value: &Bound<'_, PyAny>) -> PyResult<bool> {
 /// (residue (a) of the design: the expression is a value of the call).
 pub(crate) fn window_spec_of(
     window: &Bound<'_, PyAny>,
-) -> PyResult<(WindowSpec, Option<SparkError>)> {
+) -> PyResult<(WindowSpec, Option<SparkError>, bool)> {
     let py = window.py();
-    let partition = crate::state::attr(window, pyo3::intern!(py, "_partitionSpec"))?;
+    // Of its attribute lookup, as PySpark's reads of `self._windowSpec._partitionSpec`, which no
+    // `__getattr__` of the client's class reads again, so of no check of a recursion.
+    let partition = window.getattr(pyo3::intern!(py, "_partitionSpec"))?;
+    list_of_window(&partition)?;
     let partition_spec = entries_of(&partition, |item| {
         match item.cast::<crate::column::PyColumnExpression>() {
             Ok(expression) => Ok(expression.borrow().column().expression().clone()),
             Err(_) => Ok(expression_value(item)?.expression().clone()),
         }
     })?;
-    let order = crate::state::attr(window, pyo3::intern!(py, "_orderSpec"))?;
+    let order = window.getattr(pyo3::intern!(py, "_orderSpec"))?;
+    list_of_window(&order)?;
     let order_spec = entries_of(&order, sort_order_of)?;
     let mut spec = WindowSpec {
         partition_spec,
         order_spec,
         frame_spec: None,
     };
-    let frame = crate::state::attr(window, pyo3::intern!(py, "_frame"))?;
+    let frame = window.getattr(pyo3::intern!(py, "_frame"))?;
     if frame.is_none() {
-        return Ok((spec, None));
+        return Ok((spec, None, true));
     }
     let rows = frame
         .getattr(pyo3::intern!(py, "_isRowFrame"))?
         .is_truthy()?;
-    let start = window_bound(&frame.getattr(pyo3::intern!(py, "_start"))?, true, rows)?;
-    let end = window_bound(&frame.getattr(pyo3::intern!(py, "_end"))?, false, rows)?;
+    let (start, end) = (
+        frame.getattr(pyo3::intern!(py, "_start"))?,
+        frame.getattr(pyo3::intern!(py, "_end"))?,
+    );
+    // The core renders the offset of a bound, which is PySpark's rendering of an int of a long,
+    // and not of a bool or of an int of another class.
+    let rendered = [&start, &end].iter().all(|bound| {
+        bound.is_exact_instance_of::<pyo3::types::PyInt>() && bound.extract::<i64>().is_ok()
+    });
+    let start = window_bound(&start, true, rows)?;
+    let end = window_bound(&end, false, rows)?;
     let mut error = None;
     let mut held = |bound: Result<FrameBound, SparkError>| match bound {
         Ok(bound) => bound,
@@ -552,13 +583,28 @@ pub(crate) fn window_spec_of(
         true => spec.rows_between(start, end),
         false => spec.range_between(start, end),
     };
-    Ok((spec, error))
+    Ok((spec, error, rendered))
 }
 
 /// The core expression of `item`, an expression of a window specification: of this client, the
 /// `_expr` of a Column, or of PySpark's classes, of its `to_plan` (see `column::expression_value`).
 fn expression_value(item: &Bound<'_, PyAny>) -> PyResult<Column> {
     crate::column::expression_value(item)
+}
+
+/// Check that `entries`, the partitioning or the ordering of a window, is a list, as PySpark's
+/// `WindowExpression.children` concatenates them to the list of its window function: of
+/// another object, the `TypeError` of that concatenation, which PySpark raises when a plan of the
+/// window expression is made (`_collect_references`), and the drop-in when the window expression
+/// is made of the window.
+fn list_of_window(entries: &Bound<'_, PyAny>) -> PyResult<()> {
+    if entries.is_instance_of::<PyList>() {
+        return Ok(());
+    }
+    let type_name = entries.get_type().name()?.to_string();
+    Err(pyo3::exceptions::PyTypeError::new_err(format!(
+        "can only concatenate list (not \"{type_name}\") to list"
+    )))
 }
 
 /// The values of `of` of the entries of `entries`, a list of a window specification, in their
@@ -609,16 +655,28 @@ fn sort_order_of(item: &Bound<'_, PyAny>) -> PyResult<SortOrder> {
         })
     })
     .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+    // A rendering that fails is the error of the rendering of the window expression, as of a
+    // Column (see `column::converted_expression`).
+    let rendered_column =
+        |bytes: &[u8], text: PyResult<Bound<'_, pyo3::types::PyString>>| match text
+            .and_then(|text| text.extract::<String>())
+        {
+            Ok(text) => crate::column::sent_column(bytes, text),
+            Err(error) => crate::column::unrenderable_column(
+                crate::column::sent_column(bytes, String::new())?,
+                error,
+            ),
+        };
     let Some((child, ascending, nulls_last)) = sort else {
-        let expression = crate::column::sent_column(planned.as_bytes(), item.repr()?.extract()?)?;
+        let expression = rendered_column(planned.as_bytes(), item.str())?;
         return Ok(SortOrder::asc_nulls_first(expression.expression().clone()));
     };
     let py = item.py();
     let rendered = match item.getattr(pyo3::intern!(py, "_child")) {
-        Ok(child) => child.str()?,
-        Err(_) => item.str()?,
+        Ok(child) => child.str(),
+        Err(_) => item.str(),
     };
-    let child = crate::column::sent_column(&child, rendered.extract()?)?;
+    let child = rendered_column(&child, rendered)?;
     Ok(SortOrder {
         child: child.expression().clone(),
         ascending,

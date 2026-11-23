@@ -16294,6 +16294,34 @@ def test_a_column_whose_expression_is_replaced_holds_and_reports_the_new_express
     del holders, tuples, target
 
 
+def test_the_expression_of_a_column_of_no_python_object_is_not_tracked_by_the_collector(
+        mock_connect):
+    # A `_ColumnExpression` reports the parts of Python objects of its expression, the functions of
+    # its UDFs: one of none reaches no Python object, now or later, so the collector does not track
+    # it, as CPython does not track an object that holds no other, and a Column of it is of two
+    # tracked objects, as PySpark's (its Column and its expression); one of a UDF is tracked, and a
+    # cycle through it is collected.
+    import gc
+    import weakref
+
+    from pyspark.sql import functions as F
+
+    plain = F.col("a") + 1
+    assert gc.is_tracked(plain) and not gc.is_tracked(plain._expr)
+
+    class Job:
+        pass
+
+    job = Job()
+    column = F.udf(lambda x, job=job: job, "long")("id")
+    assert gc.is_tracked(column._expr)
+    job.column = column
+    freed = weakref.ref(job)
+    del job, column
+    gc.collect()
+    assert freed() is None
+
+
 def test_holders_that_share_a_plan_are_made_and_freed_on_threads_as_the_collector_runs(
         mock_connect):
     # Threads that make and drop holders that share plans of the functions of UDFs and of plans

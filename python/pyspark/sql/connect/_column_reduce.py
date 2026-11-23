@@ -267,6 +267,26 @@ def column_of(
     )
 
 
+# The object of ``cls``, a subclass of the class of the object that ``make(*args)`` gives back, a
+# Column or a table argument, as a pickle of an object of a subclass unpickles, as PySpark's
+# pickle of a plain object unpickles it (``copyreg.__newobj__`` of the class, then its
+# ``__dict__``): an object of ``cls`` of no state, of the entries of the ``__dict__`` of that
+# object, and of its session of a table argument of the client, which the client keeps natively.
+# The pickle sets the other entries of the ``__dict__`` of the object then, its state.
+def instance_of(cls: Any, make: Callable[..., Any], args: tuple[Any, ...]) -> Any:
+    made = make(*args)
+    obj = cls.__new__(cls)
+    try:
+        from pyspark import _pyspark
+    except ImportError:
+        pass
+    else:
+        if isinstance(made, _pyspark.TableArg):
+            _pyspark.TableArg._take_session_of(obj, made)
+    obj.__dict__.update(made.__dict__)
+    return obj
+
+
 # ``column`` of the origin of ``expression``, the bytes of the expression of a pickled Column, as
 # PySpark's unpickled expression keeps its ``origin``: of a Column that the unpickle makes again of
 # its parts, a sort order or a CASE WHEN, which takes the origin of the call that unpickles it

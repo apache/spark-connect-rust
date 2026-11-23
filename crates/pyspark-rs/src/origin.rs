@@ -9,9 +9,11 @@ use pyo3::types::PyDict;
 use spark_connect::origin::{set_current, Origin, OriginGuard};
 
 static UTILS: PyOnceLock<Py<PyModule>> = PyOnceLock::new();
+/// `pyspark.errors.utils.is_debugging_enabled` as the module first gave it.
+static IS_DEBUGGING_ENABLED: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static SYS: PyOnceLock<Py<PyModule>> = PyOnceLock::new();
 /// The directory of the `pyspark` package, as `os.path.dirname(pyspark.__file__)`.
-static PYSPARK_ROOT: PyOnceLock<String> = PyOnceLock::new();
+static PYSPARK_ROOT: PyOnceLock<Py<pyo3::types::PyString>> = PyOnceLock::new();
 /// Whether the imports of IPython and ipykernel were tried, once per process. A failed import
 /// is not retried, and a module imported later is still seen in `sys.modules`.
 static IPYTHON_IMPORTS_TRIED: AtomicBool = AtomicBool::new(false);
@@ -67,7 +69,17 @@ fn origin_of(py: Python<'_>, fragment: &str) -> PyResult<Option<Origin>> {
     let utils = UTILS
         .get_or_try_init(py, || py.import("pyspark.errors.utils").map(Bound::unbind))?
         .bind(py);
-    if !utils.call_method0("is_debugging_enabled")?.is_truthy()? {
+    // `is_debugging_enabled()` gives its cache once it is set, which it never unsets: read it
+    // at once then, and call the function before, which sets it, and of a patch of the function.
+    let function = utils.getattr(pyo3::intern!(py, "is_debugging_enabled"))?;
+    let original = IS_DEBUGGING_ENABLED.get_or_init(py, || function.clone().unbind());
+    let cached = utils.getattr(pyo3::intern!(py, "_enable_debugging_cache"))?;
+    let enabled = if cached.is_none() || !function.is(original.bind(py)) {
+        function.call0()?
+    } else {
+        cached
+    };
+    if !enabled.is_truthy()? {
         return Ok(None);
     }
     let call_site = match call_site(py, 1) {
@@ -152,24 +164,38 @@ fn call_site(py: Python<'_>, depth: usize) -> PyResult<String> {
     let sys = SYS
         .get_or_try_init(py, || py.import("sys").map(Bound::unbind))?
         .bind(py);
-    let pyspark_root = PYSPARK_ROOT.get_or_try_init(py, || {
-        let file = py.import("pyspark")?.getattr("__file__")?;
-        py.import("os")?
-            .getattr("path")?
-            .call_method1("dirname", (file,))?
-            .extract::<String>()
-    })?;
+    let pyspark_root = PYSPARK_ROOT
+        .get_or_try_init(py, || {
+            let file = py.import("pyspark")?.getattr("__file__")?;
+            py.import("os")?
+                .getattr("path")?
+                .call_method1("dirname", (file,))?
+                .cast_into::<pyo3::types::PyString>()
+                .map(Bound::unbind)
+                .map_err(PyErr::from)
+        })?
+        .bind(py);
 
     // The frames as `inspect` walks them from the innermost: `sys._getframe(0)` is the Python
-    // frame that called the API function, as the native code of it adds no frame.
+    // frame that called the API function, as the native code of it adds no frame. The file of a
+    // frame is checked as a Python str, whose substring the root is or not, and made a Rust one
+    // only for a frame that the call site names.
     let mut selected = Vec::with_capacity(depth);
-    let mut frame = sys.call_method1("_getframe", (0,))?;
+    // SAFETY: the GIL is held; the frame is borrowed of the thread state, or null without one,
+    // which is then None, as `sys._getframe(0)` raises of no frame, which this call never has.
+    let mut frame = match unsafe { pyo3::ffi::PyEval_GetFrame() } {
+        frame if frame.is_null() => sys.call_method1(pyo3::intern!(py, "_getframe"), (0,))?,
+        frame => unsafe { Bound::from_borrowed_ptr(py, frame.cast()) },
+    };
     while selected.len() < depth && !frame.is_none() {
-        let file: String = frame.getattr("f_code")?.getattr("co_filename")?.extract()?;
-        if !file.contains(pyspark_root.as_str()) {
-            selected.push((file, frame.getattr("f_lineno")?));
+        let file = frame
+            .getattr(pyo3::intern!(py, "f_code"))?
+            .getattr(pyo3::intern!(py, "co_filename"))?;
+        if !file.contains(pyspark_root)? {
+            let file: String = file.extract()?;
+            selected.push((file, frame.getattr(pyo3::intern!(py, "f_lineno"))?));
         }
-        frame = frame.getattr("f_back")?;
+        frame = frame.getattr(pyo3::intern!(py, "f_back"))?;
     }
 
     let Some((ipython, ipykernel)) = loaded_ipython(py, sys)? else {
@@ -203,11 +229,17 @@ fn call_site(py: Python<'_>, depth: usize) -> PyResult<String> {
     Ok(cells.join("\n"))
 }
 
-/// The "file:line" of each frame, joined by newlines.
+/// The "file:line" of each frame, joined by newlines: of the int of a line number at once, and of
+/// the `str` of another value, as None.
 fn join_frames(frames: &[(String, Bound<'_, PyAny>)]) -> PyResult<String> {
     let lines: Vec<String> = frames
         .iter()
-        .map(|(file, lineno)| Ok(format!("{file}:{lineno}")))
+        .map(|(file, lineno)| match lineno.extract::<i64>() {
+            Ok(line) if lineno.is_exact_instance_of::<pyo3::types::PyInt>() => {
+                Ok(format!("{file}:{line}"))
+            }
+            _ => Ok(format!("{file}:{lineno}")),
+        })
         .collect::<PyResult<_>>()?;
     Ok(lines.join("\n"))
 }
@@ -218,16 +250,18 @@ fn loaded_ipython<'py>(
     py: Python<'py>,
     sys: &Bound<'py, PyModule>,
 ) -> PyResult<Option<(Bound<'py, PyAny>, Bound<'py, PyAny>)>> {
-    let modules = sys.getattr("modules")?;
+    let modules = sys.getattr(pyo3::intern!(py, "modules"))?;
     let modules = modules.cast::<PyDict>()?;
-    let find = |name: &str| modules.get_item(name);
-    let (mut ipython, mut ipykernel) = (find("IPython")?, find("ipykernel")?);
+    let ipython_name = pyo3::intern!(py, "IPython");
+    let ipykernel_name = pyo3::intern!(py, "ipykernel");
+    let find = |name: &Bound<'py, pyo3::types::PyString>| modules.get_item(name);
+    let (mut ipython, mut ipykernel) = (find(ipython_name)?, find(ipykernel_name)?);
     if (ipython.is_none() || ipykernel.is_none())
         && !IPYTHON_IMPORTS_TRIED.swap(true, Ordering::Relaxed)
     {
         // `import IPython`, then `import ipykernel`, as `_capture_call_site` does.
         let _ = py.import("IPython").and_then(|_| py.import("ipykernel"));
-        (ipython, ipykernel) = (find("IPython")?, find("ipykernel")?);
+        (ipython, ipykernel) = (find(ipython_name)?, find(ipykernel_name)?);
     }
     Ok(ipython.zip(ipykernel))
 }

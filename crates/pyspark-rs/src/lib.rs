@@ -185,6 +185,8 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyDataFrameNaFunctions>()?;
     m.add_class::<PyColumn>()?;
     column::install_getattr(m)?;
+    // Of the class as the module makes it, of its `__getattr__`, before user code could patch it.
+    column::remember_column_class(m.py())?;
     row::register(m)?;
     m.add_class::<PyGroupedData>()?;
     m.add_class::<PyCoGroupedData>()?;
