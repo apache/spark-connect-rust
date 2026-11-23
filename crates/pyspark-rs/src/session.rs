@@ -21,125 +21,62 @@ use crate::streaming::{PyDataStreamReader, PyStreamingQueryManager};
 // Mirrors PySpark Connect's `pyspark.sql.connect.session.SparkSession.Builder`: each method sets
 // its option on the builder and returns it, and `SparkSession.builder` is a new builder of each
 // access. `pyspark.sql.SparkSession.builder` is PySpark's classic builder, which makes the
-// session with this one.
+// session with this one. As PySpark's plain class, it keeps its state in its `__dict__`, its
+// `_options`, `_channel_builder` and `_hook_factories`, which its setters set and its `create`,
+// `getOrCreate` and `_apply_options` read, and it is subclassed (see `crate::state`).
 #[doc = connect_doc!(SparkSession.Builder)]
 #[pyclass(
     name = "Builder",
     module = "pyspark.sql.connect.session",
+    subclass,
     weakref,
     dict
 )]
-pub struct PySparkSessionBuilder {
-    /// The options of `remote`, `config` and `appName`, which the shallow copies of this builder
-    /// share, as PySpark's builder shares its `_options` dict with them: an option that one of
-    /// them sets is the option of each. Of a lock that is taken only with the GIL, as Python's
-    /// garbage collector reads them (see [`crate::options::SharedObjects`]).
-    options: std::sync::Arc<crate::gc::GilMutex<BuilderOptions>>,
-    /// The hook factories of `_registerHook`, which a new session calls with itself, as
-    /// PySpark's builder does: a list, which the shallow copies of this builder share, as they
-    /// share PySpark's `_hook_factories` list. None once the garbage collector cleared it.
-    hook_factories: Option<Py<PyList>>,
-    /// The channel builder of `channelBuilder`, which the session connects with, instead of
-    /// `remote()`: PySpark's `_channel_builder`, which is not an option, but an attribute of the
-    /// builder, which a shallow copy has too, and which a `channelBuilder` sets on its builder
-    /// alone.
-    channel_builder: Option<Py<PyAny>>,
-    /// The Python object of `options`, which the shallow copies of this builder share too, and
-    /// which reports the keys and the values of its options that are objects to Python's garbage
-    /// collector, as PySpark's `_options` dict holds them (see
-    /// [`crate::options::SharedObjects`]).
-    shared: Option<Py<crate::options::PySharedObjects>>,
-}
+pub struct PySparkSessionBuilder {}
 
-impl crate::options::SharedObjects for crate::gc::GilMutex<BuilderOptions> {
-    fn visit(&self, visit: &pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
-        match self.try_lock_in_traverse(visit) {
-            Some(options) => options.unencodable.visit_objects(visit),
-            None => Ok(()),
-        }
+/// PySpark's `to_str` of a value of an option of a builder (`pyspark.sql.utils.to_str`), which
+/// its `config` keeps in its `_options`: None for None, a bool lowercased, and else the `str()`
+/// of the value.
+fn to_str<'py>(value: Option<&Bound<'py, PyAny>>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    let Some(value) = value.filter(|value| !value.is_none()) else {
+        return Ok(py.None().into_bound(py));
+    };
+    if let Ok(flag) = value.cast::<pyo3::types::PyBool>() {
+        let text = if flag.is_true() { "true" } else { "false" };
+        return Ok(pyo3::types::PyString::new(py, text).into_any());
     }
-
-    fn clear(&self, py: Python<'_>) {
-        let unencodable = self
-            .try_lock(py)
-            .map(|mut options| std::mem::take(&mut options.unencodable));
-        drop(unencodable);
-    }
+    Ok(value.str()?.into_any())
 }
 
-/// The options of a session builder, which its shallow copies share (see
-/// [`PySparkSessionBuilder::options`]). The lock of them is held only to read or replace them,
-/// while no Python code runs, as the threads of the copies may wait for it (see
-/// [`crate::gc::GilMutex`]).
-#[derive(Default)]
-struct BuilderOptions {
-    /// The URL of `remote()` or of `config("spark.remote")`: None when it is not set, and
-    /// `Some(None)` when it is set to None, which PySpark's `create` asserts ([`session_url`]).
-    remote_url: Option<Option<String>>,
-    /// Runtime configs set via `.config(...)`, applied after the session connects.
-    configs: Vec<(String, Option<String>)>,
-    /// The configs that the session does not take, as PySpark's options dict keeps them: a key
-    /// that is not a str or a str that UTF-8 cannot encode, or a value that cannot be encoded.
-    /// `getOrCreate` fails with the first of them, as PySpark's `_set_all` does.
-    unencodable: crate::options::UnencodableOptions,
-}
-
-impl BuilderOptions {
-    /// Set an option whose value may be None, which PySpark keeps in its options: such a key is
-    /// not set on the session, as `_set_all` sends it without a value. `spark.remote` is the URL
-    /// of the session, as PySpark Connect's `config` keeps it (the builder of
-    /// `pyspark.sql.SparkSession`, PySpark's classic one, validates the startup URLs).
-    fn set_value(&mut self, key: &str, value: Option<String>) {
-        if key == "spark.remote" {
-            self.remote_url = Some(value);
+/// The pairs of the request of PySpark's `session.conf._set_all(configs=opts, silent=True)` of
+/// `opts`, a dict, as its `KeyValue(key=k, value=v)` takes them in their order: a bool value as
+/// `"true"` or `"false"` and an int as its `str()`, a key and a value of None unset (the key then
+/// the empty one), and the others as protobuf's string fields take them, of the error of the first
+/// that it does not take, a key before its value (see `options::str_argument`), before anything
+/// is sent.
+fn set_all_pairs(opts: &Bound<'_, PyDict>) -> PyResult<Vec<(String, Option<String>)>> {
+    let py = opts.py();
+    let mut pairs = Vec::with_capacity(opts.len());
+    for (key, value) in opts.iter() {
+        let value = if let Ok(flag) = value.cast::<pyo3::types::PyBool>() {
+            let text = if flag.is_true() { "true" } else { "false" };
+            pyo3::types::PyString::new(py, text).into_any()
+        } else if value.is_instance_of::<pyo3::types::PyInt>() {
+            value.str()?.into_any()
         } else {
-            self.configs.push((key.to_string(), value));
-        }
+            value
+        };
+        let key = match key.is_none() {
+            true => String::new(),
+            false => crate::options::str_argument(&key)?,
+        };
+        let value = match value.is_none() {
+            true => None,
+            false => Some(crate::options::str_argument(&value)?),
+        };
+        pairs.push((key, value));
     }
-}
-
-/// The URL of the session of a builder of the URL `remote_url` ([`BuilderOptions::remote_url`]):
-/// that of `remote()`, as PySpark Connect's builder, which raises
-/// `SESSION_NEED_CONN_STR_OR_BUILDER` without one. `SPARK_REMOTE` is read by the builder of
-/// `pyspark.sql.SparkSession`, PySpark's classic one, which gives its URL to this builder. A URL
-/// that is set to None fails the assertion of PySpark Connect's `create`.
-fn session_url(py: Python<'_>, remote_url: Option<Option<String>>) -> PyResult<String> {
-    match remote_url {
-        Some(None) => Err(pyo3::exceptions::PyAssertionError::new_err(())),
-        Some(Some(url)) => Ok(url),
-        None => Err(crate::column::raise_pyspark(
-            py,
-            "PySparkValueError",
-            "SESSION_NEED_CONN_STR_OR_BUILDER",
-            &[],
-        )),
-    }
-}
-
-impl PySparkSessionBuilder {
-    pub fn new(py: Python<'_>) -> Self {
-        let options = std::sync::Arc::new(crate::gc::GilMutex::new(BuilderOptions::default()));
-        PySparkSessionBuilder {
-            shared: Py::new(py, crate::options::PySharedObjects::new(options.clone())).ok(),
-            options,
-            hook_factories: Some(PyList::empty(py).unbind()),
-            channel_builder: None,
-        }
-    }
-
-    /// The options of this builder and of its copies, locked, with the GIL.
-    fn options(&self, py: Python<'_>) -> crate::gc::GilGuard<'_, BuilderOptions> {
-        self.options.lock(py)
-    }
-
-    /// The hook factories, in the order that `_registerHook` registered them.
-    fn factories(&self, py: Python<'_>) -> Vec<Py<PyAny>> {
-        self.hook_factories
-            .iter()
-            .flat_map(|factories| factories.bind(py).iter())
-            .map(Bound::unbind)
-            .collect()
-    }
+    Ok(pairs)
 }
 
 /// Install `builder` as the class attribute `builder` of the native SparkSession: PySpark
@@ -157,132 +94,88 @@ pub fn _install_builder(py: Python<'_>, builder: &Bound<'_, PyAny>) -> PyResult<
 
 #[pymethods]
 impl PySparkSessionBuilder {
-    /// Construct a fresh builder, so `SparkSession.Builder()` works like pyspark
-    /// (in addition to the `SparkSession.builder` class attribute).
+    /// A builder of no state, as the `object.__new__` of PySpark's plain class: of any
+    /// arguments, which `__init__` takes, so that a subclass of another `__init__` is built as it
+    /// is in PySpark. The class shows the signature of `__init__`, as `inspect.signature` of
+    /// PySpark's class does.
     #[new]
-    fn py_new(py: Python<'_>) -> Self {
-        PySparkSessionBuilder::new(py)
+    #[pyo3(signature = (*_args, **_kwargs), text_signature = "()")]
+    fn py_new(_args: &Bound<'_, PyTuple>, _kwargs: Option<&Bound<'_, PyDict>>) -> Self {
+        PySparkSessionBuilder {}
+    }
+
+    /// `SparkSession.Builder()`, as PySpark Connect's `__init__`, which takes no arguments, of
+    /// CPython's errors of any: its state, an empty dict of options, no channel builder, and an
+    /// empty list of hook factories.
+    #[pyo3(signature = (*args, **kwargs))]
+    fn __init__(
+        slf: &Bound<'_, Self>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        let py = slf.py();
+        if let Some((key, _)) = kwargs.and_then(|kwargs| kwargs.iter().next()) {
+            return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+                "SparkSession.Builder.__init__() got an unexpected keyword argument '{}'",
+                key.str()?.to_cow()?
+            )));
+        }
+        if !args.is_empty() {
+            return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+                "SparkSession.Builder.__init__() takes 1 positional argument but {} were given",
+                args.len() + 1
+            )));
+        }
+        crate::state::assign(
+            slf.as_any(),
+            &[
+                (pyo3::intern!(py, "_options"), PyDict::new(py).as_any()),
+                (
+                    pyo3::intern!(py, "_channel_builder"),
+                    &py.None().into_bound(py),
+                ),
+                (
+                    pyo3::intern!(py, "_hook_factories"),
+                    PyList::empty(py).as_any(),
+                ),
+            ],
+        )
     }
 
     /// The class attribute `_lock`, PySpark's `threading.RLock` of the builders, which their
-    /// `config`, `remote`, `appName`, `channelBuilder`, `_registerHook` and the options that
-    /// `create` and `getOrCreate` set hold, as PySpark's do (see `with_builder_lock`): one for
-    /// all of them, another than `SparkSession._lock`.
+    /// `config`, `channelBuilder`, `_registerHook` and `_apply_options` hold, as PySpark's do
+    /// (see `with_builder_lock`): one for all of them, another than `SparkSession._lock`.
     #[classattr]
     fn _lock(py: Python<'_>) -> PyResult<Py<PyAny>> {
         Ok(py.import("threading")?.call_method0("RLock")?.unbind())
     }
 
-    /// The shallow copy of a builder, as PySpark's `copy.copy` of its `__dict__`: the copy shares
-    /// the options and the hook factories of this builder, as PySpark's copy shares its
-    /// `_options` dict and its `_hook_factories` list, so that a `remote`, a `config` or a
-    /// `_registerHook` of either one is seen by both. It has the channel builder of this one,
-    /// which a `channelBuilder` of either one replaces on that one alone, as it rebinds the
-    /// attribute of PySpark's, and the instance attributes of this one.
-    fn __copy__(slf: &Bound<'_, Self>) -> PyResult<Py<Self>> {
-        let py = slf.py();
-        let copy = {
-            let this = slf.borrow();
-            PySparkSessionBuilder {
-                options: std::sync::Arc::clone(&this.options),
-                hook_factories: this.hook_factories.as_ref().map(|list| list.clone_ref(py)),
-                channel_builder: this.channel_builder.as_ref().map(|cb| cb.clone_ref(py)),
-                shared: this.shared.as_ref().map(|shared| shared.clone_ref(py)),
-            }
-        };
-        let copy = Py::new(py, copy)?;
-        crate::reduce::copy_instance_dict(slf.as_any(), copy.bind(py).as_any())?;
-        Ok(copy)
+    /// The state of the builder, its `__dict__`, as `object.__getstate__` gives that of
+    /// PySpark's plain object, which a copy and a pickle keep (see `state::getstate`).
+    fn __getstate__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        crate::state::getstate(slf.as_any())
     }
 
-    /// The reduce of a builder, as PySpark's pickle of its state: its options, the URL first,
-    /// its channel builder and its hook factories, which `builder_reduce` gives the builder back
-    /// from, and its instance attributes.
-    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
-        let py = slf.py();
-        let this = slf.borrow();
-        let options = {
-            let options = this.options(py);
-            let mut pairs = Vec::with_capacity(options.configs.len() + 1);
-            if let Some(url) = &options.remote_url {
-                pairs.push(("spark.remote".to_string(), url.clone()));
-            }
-            pairs.extend(options.configs.iter().cloned());
-            pairs
-        };
-        let options = PyList::new(
-            py,
-            options
-                .into_iter()
-                .map(|(key, value)| {
-                    PyTuple::new(
-                        py,
-                        [
-                            key.into_pyobject(py)?.into_any(),
-                            value.into_pyobject(py)?.into_any(),
-                        ],
-                    )
-                })
-                .collect::<PyResult<Vec<_>>>()?,
-        )?;
-        let hook_factories = PyList::new(py, this.factories(py))?;
-        let args = PyTuple::new(
-            py,
-            [
-                options.into_any(),
-                crate::reduce::optional_object(py, this.channel_builder.as_ref()),
-                hook_factories.into_any(),
-            ],
-        )?;
-        let reduced = crate::reduce::state_reduce(py, "builder_reduce", args)?;
-        crate::reduce::reduce_with_instance_dict(slf.as_any(), reduced)
-    }
-
-    /// As PySpark's builder, a Python object whose `__dict__` holds its channel builder and the
-    /// list of its hook factories (`_channel_builder` and `_hook_factories`), which Python's
-    /// garbage collector sees: they are reported, so a reference cycle through one, such as a
-    /// channel builder or a hook factory that keeps the builder, is freed. Each builder holds a
-    /// reference of its own to its channel builder and to the list, which the shallow copies of
-    /// the builder share and which reports the factories itself, as PySpark's list does: so no
-    /// reference is counted twice, and the collector frees a factory only with the last builder
-    /// that reaches it. So does the Python object of the options that the copies share, which
-    /// reports the keys and the values of the options that are objects. Only `Option<Py<_>>`
-    /// fields are read, which are `None` while the object is created, so no
-    /// [`crate::gc::GcReady`] is needed.
-    fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
-        if let Some(channel_builder) = &self.channel_builder {
-            visit.call(channel_builder)?;
-        }
-        if let Some(hook_factories) = &self.hook_factories {
-            visit.call(hook_factories)?;
-        }
-        if let Some(shared) = &self.shared {
-            visit.call(shared)?;
-        }
-        Ok(())
-    }
-
-    /// Break a reference cycle that the garbage collector found unreachable: the builder drops
-    /// its channel builder and its references to the list of its hook factories and to the
-    /// object of its options, which a copy that is reachable still holds.
-    fn __clear__(&mut self) {
-        self.channel_builder = None;
-        self.hook_factories = None;
-        self.shared = None;
+    /// The reduce of the builder, as PySpark's plain object's: `copyreg.__newobj__` of its class,
+    /// of its `__dict__`, so a copy shares the dict of its options and the list of its hook
+    /// factories, and a deep copy and a pickle copy them (see `state::reduce_ex`).
+    fn __reduce_ex__<'py>(slf: &Bound<'py, Self>, protocol: i32) -> PyResult<Bound<'py, PyAny>> {
+        crate::state::reduce_ex(slf.as_any(), protocol)
     }
 
     // Set the remote Spark Connect server URL. Returns the builder (chainable).
-    // Mirrors PySpark Connect's `SparkSession.Builder.remote(location="sc://localhost")`: the
-    // URL is the positional argument or the keyword `location`, and `sc://localhost` when there
-    // is none. (`pyspark.sql.SparkSession.builder` is PySpark's classic builder, whose
-    // `remote(url)` gives its URL to this builder in its options.)
+    // Mirrors PySpark Connect's `SparkSession.Builder.remote(location="sc://localhost")`, which is
+    // `self.config("spark.remote", location)`, a call of the `config` of the builder, of a
+    // subclass too: the URL is the positional argument or the keyword `location`, and
+    // `sc://localhost` when there is none. (`pyspark.sql.SparkSession.builder` is PySpark's
+    // classic builder, whose `remote(url)` gives its URL to this builder in its options.)
     // An explicit None is kept as None, as PySpark's `config("spark.remote", None)` keeps it:
     // `create` and `getOrCreate` fail its assertion, unless a session exists already, and a later
     // `remote` replaces it.
     //
-    // As PySpark's `config("spark.remote", location)`, the URL is kept as an option of any
-    // value: a value that is not a str (such as bytes) is `str()` of it, which `create` and
-    // `getOrCreate` reject as an invalid URL, and a str that UTF-8 cannot encode fails there too.
+    // As PySpark's, the URL is kept as an option of any value: a value that is not a str (such as
+    // bytes) is `str()` of it, which `create` and `getOrCreate` reject as an invalid URL, and a str
+    // that UTF-8 cannot encode fails there too, of the error of its channel.
     #[pyo3(
         signature = (*args, **kwargs),
         text_signature = "($self, location='sc://localhost')"
@@ -291,7 +184,7 @@ impl PySparkSessionBuilder {
         slf: &Bound<'py, Self>,
         args: &Bound<'py, PyTuple>,
         kwargs: Option<&Bound<'py, PyDict>>,
-    ) -> PyResult<Bound<'py, Self>> {
+    ) -> PyResult<Bound<'py, PyAny>> {
         // The arguments are checked as CPython checks them, so that an omitted URL is told from
         // a None one, which is an argument of its own.
         crate::options::check_keyword_keys(kwargs)?;
@@ -317,87 +210,61 @@ impl PySparkSessionBuilder {
             }
             given.push(value);
         }
-        // As PySpark's `config("spark.remote", location)`, which holds the lock of the builder.
-        with_builder_lock(slf, || {
-            let key = crate::options::OptionKey::Text(crate::options::OptionText::literal(
-                "spark.remote",
-            ));
-            let value = match given.first() {
-                Some(location) => crate::options::reader_option_text(location)?,
-                None => Some(crate::options::OptionText::literal("sc://localhost")),
-            };
-            slf.borrow().put_config(slf.py(), key, value);
-            Ok(slf.clone())
-        })
+        let py = slf.py();
+        let location = match given.into_iter().next() {
+            Some(location) => location,
+            None => pyo3::types::PyString::new(py, "sc://localhost").into_any(),
+        };
+        slf.call_method1(pyo3::intern!(py, "config"), ("spark.remote", location))
     }
 
     // Set a config option, or several via `map`. Mirrors
-    // `SparkSession.Builder.config(key=None, value=None, *, map=None, conf=None)`.
-    // `spark.remote` sets the connect endpoint; other keys are applied as runtime confs
-    // on connect. `conf` accepts a `SparkConf` (its `getAll()` pairs are applied).
+    // `SparkSession.Builder.config(key=None, value=None, *, map=None)`, which, while it holds the
+    // lock of the builder, sets `self._options[k] = to_str(v)` of each item of `map`, or else
+    // `self._options[key] = to_str(value)`, of any key and value, which `create` and
+    // `getOrCreate` send. `conf` accepts a `SparkConf`, of which each of its `getAll()` pairs is
+    // set so.
     #[pyo3(signature = (key=None, value=None, map=None, conf=None, **unexpected), text_signature = "($self, key=None, value=None, map=None, conf=None)")]
     fn config<'py>(
         slf: &Bound<'py, Self>,
-        key: Option<&Bound<'_, PyAny>>,
-        value: Option<&Bound<'_, PyAny>>,
-        map: Option<&Bound<'_, PyDict>>,
-        conf: Option<&Bound<'_, PyAny>>,
-        unexpected: Option<&Bound<'_, PyDict>>,
+        key: Option<&Bound<'py, PyAny>>,
+        value: Option<&Bound<'py, PyAny>>,
+        map: Option<&Bound<'py, PyAny>>,
+        conf: Option<&Bound<'py, PyAny>>,
+        unexpected: Option<&Bound<'py, PyDict>>,
     ) -> PyResult<Bound<'py, Self>> {
+        let py = slf.py();
         crate::options::check_unexpected_keywords("SparkSession.Builder.config", unexpected)?;
-        // As PySpark's, which sets the options while it holds the lock of the builder.
         with_builder_lock(slf, || {
-            let this = slf.borrow();
-            // PySpark keeps the options in a dict, and sends each in a `KeyValue` of the key as
-            // it is, whose constructor leaves a key of None unset, the empty key.
-            if let Some(k) = key {
-                let k = crate::options::option_key(k)?;
-                let v = match value {
-                    Some(v) => crate::options::reader_option_text(v)?,
-                    None => None,
-                };
-                this.put_config(slf.py(), k, v);
-            }
-            if let Some(m) = map {
-                for (k, v) in m.iter() {
-                    let ks = if k.is_none() {
-                        crate::options::OptionKey::Text(crate::options::OptionText::literal(""))
-                    } else {
-                        crate::options::option_key(&k)?
-                    };
-                    let vs = crate::options::reader_option_text(&v)?;
-                    this.put_config(slf.py(), ks, vs);
+            let options = crate::state::attr(slf.as_any(), pyo3::intern!(py, "_options"))?;
+            if let Some(map) = map {
+                for item in map.call_method0(pyo3::intern!(py, "items"))?.try_iter()? {
+                    let (k, v) = item?.extract::<(Bound<'py, PyAny>, Bound<'py, PyAny>)>()?;
+                    options.set_item(k, to_str(Some(&v), py)?)?;
                 }
+            } else if conf.is_none() || key.is_some() {
+                options.set_item(key, to_str(value, py)?)?;
             }
-            if let Some(c) = conf {
-                // A SparkConf: apply its (key, value) pairs via getAll().
-                for pair in c.call_method0("getAll")?.try_iter()? {
+            if let Some(conf) = conf {
+                // A SparkConf: its (key, value) pairs of getAll().
+                for pair in conf.call_method0("getAll")?.try_iter()? {
                     let pair = pair?;
-                    let k: String = crate::str_text(&pair.get_item(0)?)?;
-                    let v: String = crate::str_text(&pair.get_item(1)?)?;
-                    this.options(slf.py()).set_value(&k, Some(v));
+                    options.set_item(pair.get_item(0)?, to_str(Some(&pair.get_item(1)?), py)?)?;
                 }
             }
             Ok(slf.clone())
         })
     }
 
-    // `appName` - the option `spark.app.name`, as PySpark's builder sets. Like any option,
-    // it is set on the session silently, so it has no effect on a running server.
+    // `appName` - the option `spark.app.name`, as PySpark's builder sets it, of
+    // `self.config("spark.app.name", name)`. Like any option, it is set on the session silently, so
+    // it has no effect on a running server.
     #[pyo3(name = "appName")]
     fn app_name<'py>(
         slf: &Bound<'py, Self>,
-        name: &Bound<'_, PyAny>,
-    ) -> PyResult<Bound<'py, Self>> {
-        // As PySpark's `config("spark.app.name", name)`, which holds the lock of the builder.
-        with_builder_lock(slf, || {
-            let key = crate::options::OptionKey::Text(crate::options::OptionText::literal(
-                "spark.app.name",
-            ));
-            let value = crate::options::reader_option_text(name)?;
-            slf.borrow().put_config(slf.py(), key, value);
-            Ok(slf.clone())
-        })
+        name: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        slf.call_method1(pyo3::intern!(slf.py(), "config"), ("spark.app.name", name))
     }
 
     // `master`, which PySpark Connect's builder takes and ignores, of any value: a session of
@@ -410,27 +277,27 @@ impl PySparkSessionBuilder {
     /// `_registerHook` - register a factory of a `SparkSession.Hook`, as PySpark's builder: a
     /// session that the builder creates calls it with itself, and calls the `on_execute_plan`
     /// of the hook with each `ExecutePlanRequest` of its executions before it sends it. It is
-    /// appended to the list that the shallow copies of the builder share, as PySpark's.
+    /// appended to the list of `_hook_factories`, which the shallow copies of the builder share,
+    /// as PySpark's.
     #[pyo3(name = "_registerHook")]
     fn register_hook<'py>(
         slf: &Bound<'py, Self>,
         hook_factory: &Bound<'_, PyAny>,
     ) -> PyResult<Bound<'py, Self>> {
         with_builder_lock(slf, || {
-            if let Some(factories) = &slf.borrow().hook_factories {
-                factories.bind(slf.py()).append(hook_factory)?;
-            }
+            crate::state::attr(slf.as_any(), pyo3::intern!(slf.py(), "_hook_factories"))?
+                .call_method1(pyo3::intern!(slf.py(), "append"), (hook_factory,))?;
             Ok(slf.clone())
         })
     }
 
     // `channelBuilder` - the channel builder that the session connects with, of any object, as
-    // PySpark's `SparkSession.Builder.channelBuilder` keeps it: the session that the builder
-    // creates is of the `sc://` URL of its endpoint (of `_host` and `_port`) and its connection
-    // parameters, read then, and raises the errors of PySpark's client for an object that is not
-    // one (see `url_of_channel_builder`). Custom gRPC channels and interceptors are a concept of
-    // the Python transport and do not apply to the native Rust transport, but the endpoint and
-    // the parameters do.
+    // PySpark's `SparkSession.Builder.channelBuilder` keeps it, as its `_channel_builder`: the
+    // session that the builder creates is of the `sc://` URL of its endpoint (of `_host` and
+    // `_port`) and its connection parameters, read then, and raises the errors of PySpark's client
+    // for an object that is not one (see `url_of_channel_builder`). Custom gRPC channels and
+    // interceptors are a concept of the Python transport and do not apply to the native Rust
+    // transport, but the endpoint and the parameters do.
     #[pyo3(name = "channelBuilder")]
     #[allow(non_snake_case)]
     #[doc = connect_doc!(SparkSession.Builder.channelBuilder)]
@@ -439,11 +306,10 @@ impl PySparkSessionBuilder {
         channelBuilder: &Bound<'_, PyAny>,
     ) -> PyResult<Bound<'py, Self>> {
         with_builder_lock(slf, || {
-            let replaced = slf
-                .borrow_mut()
-                .channel_builder
-                .replace(channelBuilder.clone().unbind());
-            drop(replaced);
+            crate::state::assign(
+                slf.as_any(),
+                &[(pyo3::intern!(slf.py(), "_channel_builder"), channelBuilder)],
+            )?;
             Ok(slf.clone())
         })
     }
@@ -462,13 +328,78 @@ impl PySparkSessionBuilder {
         ))
     }
 
-    // Get the active session of this thread, or else the default session, or create one
-    // (`getOrCreate`), and set the options of the builder on it. Mirrors PySpark Connect's: the
-    // URL is that of `remote()`, and an existing session is returned whatever its URL. As
-    // PySpark's, it holds `SparkSession._lock` all the while, and the options are set on a
-    // session that it creates twice, by `create` and again.
+    /// Set the options of the builder on `session`, as PySpark's `_apply_options`: the
+    /// `spark.sql.` options of the last of the `PYSPARK_REMOTE_INIT_CONF_<i>` of the environment,
+    /// of `PYSPARK_REMOTE_INIT_CONF_LEN` of them, and then those of `self._options`, which it reads
+    /// while it holds the lock of the builder, but `spark.remote` and `spark.master`, which a
+    /// session does not take, in one request whose failures are ignored, such as those of static
+    /// configurations, as `session.conf._set_all(configs=opts, silent=True)`, whose warnings it
+    /// warns: the first option that the request does not take fails it before any option is set.
+    fn _apply_options(slf: &Bound<'_, Self>, session: &Bound<'_, PyAny>) -> PyResult<()> {
+        let py = slf.py();
+        let environ = py.import("os")?.getattr("environ")?;
+        let count = environ.call_method1("get", ("PYSPARK_REMOTE_INIT_CONF_LEN", "0"))?;
+        let count: i64 = py
+            .get_type::<pyo3::types::PyInt>()
+            .call1((count,))?
+            .extract()?;
+        let json = py.import("json")?;
+        let mut init_opts = PyDict::new(py).into_any();
+        for i in 0..count {
+            let conf = environ.get_item(format!("PYSPARK_REMOTE_INIT_CONF_{i}"))?;
+            init_opts = json.call_method1("loads", (conf,))?;
+        }
+        let invalid_opts = PyList::new(py, ["spark.remote", "spark.master"])?;
+        with_builder_lock(slf, || {
+            let opts = PyDict::new(py);
+            for item in init_opts
+                .call_method0(pyo3::intern!(py, "items"))?
+                .try_iter()?
+            {
+                let (k, v) = item?.extract::<(Bound<'_, PyAny>, Bound<'_, PyAny>)>()?;
+                if !invalid_opts.contains(&k)?
+                    && k.call_method1(pyo3::intern!(py, "startswith"), ("spark.sql.",))?
+                        .is_truthy()?
+                {
+                    opts.set_item(k, v)?;
+                }
+            }
+            let options = crate::state::attr(slf.as_any(), pyo3::intern!(py, "_options"))?;
+            for item in options
+                .call_method0(pyo3::intern!(py, "items"))?
+                .try_iter()?
+            {
+                let (k, v) = item?.extract::<(Bound<'_, PyAny>, Bound<'_, PyAny>)>()?;
+                if !invalid_opts.contains(&k)? {
+                    opts.set_item(k, v)?;
+                }
+            }
+            if opts.is_empty() {
+                return Ok(());
+            }
+            let pairs = set_all_pairs(&opts)?;
+            let pairs: Vec<(&str, Option<&str>)> = pairs
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.as_deref()))
+                .collect();
+            let session = session.cast::<PySparkSession>()?.borrow().session.clone();
+            let conf = session.conf();
+            let warnings = crate::interrupt::interruptible_without_parts(py, &session, || {
+                conf.set_pairs(&pairs, Some(true)).map_err(Box::new)
+            })?;
+            // As PySpark's `RuntimeConf._set_all`, which warns each warning of the server.
+            crate::conf::warn_all(py, 61, &warnings)
+        })
+    }
+
+    // Get the active session of this thread, or else the default session, or create one, of the
+    // `create` of the builder, of a subclass too (`getOrCreate`), and set the options of the
+    // builder on it, of its `_apply_options`. Mirrors PySpark Connect's: the URL is that of
+    // `remote()`, and an existing session is returned whatever its URL. As PySpark's, it holds
+    // `SparkSession._lock` all the while, and the options are set on a session that it creates
+    // twice, by `create` and again.
     #[pyo3(name = "getOrCreate")]
-    fn get_or_create(slf: &Bound<'_, Self>) -> PyResult<Py<PySparkSession>> {
+    fn get_or_create<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
         let py = slf.py();
         with_session_lock(py, || {
             let existing = {
@@ -483,158 +414,75 @@ impl PySparkSessionBuilder {
                 active_session(py).or_else(|| default_session(py))
             };
             let session = match existing {
-                Some(session) => session,
+                Some(session) => session.into_bound(py).into_any(),
                 // The URL is needed only to create a session, as PySpark's getOrCreate.
-                None => Self::create(slf)?,
+                None => slf.call_method0(pyo3::intern!(py, "create"))?,
             };
-            Self::apply_options(slf, &session.borrow(py).session)?;
+            slf.call_method1(pyo3::intern!(py, "_apply_options"), (&session,))?;
             log_client_banner(py);
             Ok(session)
         })
     }
 
     // `create()` - a new session, which is the default session, and the active one of this
-    // thread, only when they are not set. Mirrors PySpark's, which makes the session with the
-    // hooks of its factories before it holds `SparkSession._lock` to make it the default.
+    // thread, only when they are not set. Mirrors PySpark's, which reads the `_channel_builder`
+    // and the `_options` of the builder: it is an error to give both a channel builder and a
+    // `spark.remote`, or neither, and a `spark.remote` of None fails its assertion. It makes the
+    // session with the hooks of the factories of its `_hook_factories` before it holds
+    // `SparkSession._lock` to make it the default, and then sets the options of its
+    // `_apply_options`.
     fn create(slf: &Bound<'_, Self>) -> PyResult<Py<PySparkSession>> {
         let py = slf.py();
-        let ((url, of_builder), factories, channel_builder) = {
-            let this = slf.borrow();
-            let channel_builder = this
-                .channel_builder
-                .as_ref()
-                .map(|channel_builder| channel_builder.clone_ref(py));
-            (
-                this.connection_url(py)?,
-                this.factories(py),
-                channel_builder,
-            )
+        let channel_builder =
+            crate::state::attr(slf.as_any(), pyo3::intern!(py, "_channel_builder"))?;
+        let options = crate::state::attr(slf.as_any(), pyo3::intern!(py, "_options"))?;
+        let has_channel_builder = !channel_builder.is_none();
+        let has_spark_remote = options.contains("spark.remote")?;
+        if has_channel_builder == has_spark_remote {
+            return Err(crate::column::raise_pyspark(
+                py,
+                "PySparkValueError",
+                "SESSION_NEED_CONN_STR_OR_BUILDER",
+                &[],
+            ));
+        }
+        let (url, of_builder) = if has_channel_builder {
+            url_of_channel_builder(&channel_builder, None)?
+        } else {
+            let remote = options.call_method1(pyo3::intern!(py, "get"), ("spark.remote",))?;
+            let remote = to_str(Some(&remote), py)?;
+            if remote.is_none() {
+                return Err(pyo3::exceptions::PyAssertionError::new_err(()));
+            }
+            // A str that UTF-8 cannot encode fails as PySpark's channel of it fails, of the
+            // `encode` of its endpoint (see `url_of_channel_builder`).
+            match remote.extract::<String>() {
+                Ok(url) => (url, OfChannelBuilder::default()),
+                Err(_) => url_of_channel_builder(&remote, None)?,
+            }
         };
+        let factories = crate::state::attr(slf.as_any(), pyo3::intern!(py, "_hook_factories"))?;
+        let factories = hook_factories_of(factories.is_truthy()?.then_some(factories))?;
         let user = of_builder.user.as_ref().map(|user| user.clone_ref(py));
         let session = new_session(py, &url, of_builder)?;
-        if let Some(channel_builder) = channel_builder {
+        if has_channel_builder {
             // As PySpark's session of a channel builder, whose client's `_builder` it is.
             init_client_state(
                 py,
                 session.bind(py),
-                channel_builder.bind(py),
+                &channel_builder,
                 None,
                 user.as_ref().map(|user| user.bind(py)),
             )?;
         }
         install_hook_factories(py, &factories, &session)?;
         set_default_and_active(py, &session)?;
-        Self::apply_options(slf, &session.borrow(py).session)?;
+        slf.call_method1(
+            pyo3::intern!(py, "_apply_options"),
+            (session.clone_ref(py),),
+        )?;
         log_client_banner(py);
         Ok(session)
-    }
-}
-
-impl PySparkSessionBuilder {
-    /// The connection URL of the session that the builder creates: that of the channel builder
-    /// of `channelBuilder`, or else of `remote()`. As PySpark Connect's `create`, it is an error
-    /// to give both a channel builder and a URL, or neither.
-    fn connection_url(&self, py: Python<'_>) -> PyResult<(String, OfChannelBuilder)> {
-        let remote_url = self.options(py).remote_url.clone();
-        match &self.channel_builder {
-            Some(_) if remote_url.is_some() => Err(crate::column::raise_pyspark(
-                py,
-                "PySparkValueError",
-                "SESSION_NEED_CONN_STR_OR_BUILDER",
-                &[],
-            )),
-            Some(channel_builder) => url_of_channel_builder(channel_builder.bind(py), None),
-            None => Ok((session_url(py, remote_url)?, OfChannelBuilder::default())),
-        }
-    }
-
-    /// Set the config `key` to `value`, or to None, as PySpark's `config` keeps it in its options:
-    /// a key and a value that the session takes are set, and the others are kept until
-    /// `getOrCreate` fails with them ([`BuilderOptions::unencodable`]). The entries that are kept
-    /// are compared with the `==` of their keys, which is Python code, so they are changed apart
-    /// from the lock of the options ([`crate::options::change_options`]), which sets the config
-    /// with them.
-    fn put_config(
-        &self,
-        py: Python<'_>,
-        key: crate::options::OptionKey,
-        value: Option<crate::options::OptionText>,
-    ) {
-        let name = key.core_text().and_then(|name| name.text.clone());
-        let text = match &value {
-            None => Some(None),
-            Some(value) => value.text.clone().map(Some),
-        };
-        crate::options::change_options(
-            py,
-            &self.options,
-            |options| &mut options.unencodable,
-            |unencodable| match (name.clone(), text.clone()) {
-                (Some(name), Some(text)) => {
-                    unencodable.remove(py, &key);
-                    Some((name, text))
-                }
-                _ => {
-                    let value = value.clone().map(crate::options::OptionKey::Text);
-                    unencodable.set(py, &key, value);
-                    None
-                }
-            },
-            |options, config| {
-                if let Some((name, text)) = config {
-                    options.set_value(name, text.clone());
-                }
-            },
-        );
-    }
-
-    /// Set the options of the builder on `session`, as PySpark's `_apply_options`: in one
-    /// request whose failures are ignored, such as those of static configurations, and
-    /// without `spark.master`, which a session does not take. As PySpark's, it holds the lock of
-    /// the builder while it reads the options and sends them.
-    fn apply_options(slf: &Bound<'_, Self>, session: &SparkSession) -> PyResult<()> {
-        with_builder_lock(slf, || slf.borrow().send_options(slf.py(), session))
-    }
-
-    /// Send the options of the builder to `session` (see [`Self::apply_options`]).
-    // SparkError is large, as the core crate allows for its API.
-    #[allow(clippy::result_large_err)]
-    fn send_options(&self, py: Python<'_>, session: &SparkSession) -> PyResult<()> {
-        let mut options: Vec<(String, Option<String>)> = Vec::new();
-        let error = {
-            let builder_options = self.options(py);
-            // A later value of a key replaces an earlier one, as the options of PySpark's builder
-            // do.
-            for (key, value) in builder_options
-                .configs
-                .iter()
-                .filter(|(key, _)| key != "spark.master")
-            {
-                match options.iter_mut().find(|(k, _)| k == key) {
-                    Some(entry) => entry.1 = value.clone(),
-                    None => options.push((key.clone(), value.clone())),
-                }
-            }
-            builder_options.unencodable.error()
-        };
-        // PySpark builds the request of every option first, so the first option that does not
-        // encode fails it before any option is set.
-        if let Some(error) = error {
-            return Err(crate::errors::spark_error_to_py_exception(error));
-        }
-        if options.is_empty() {
-            return Ok(());
-        }
-        let pairs: Vec<(&str, Option<&str>)> = options
-            .iter()
-            .map(|(key, value)| (key.as_str(), value.as_deref()))
-            .collect();
-        let conf = session.conf();
-        let warnings = crate::interrupt::interruptible_without_parts(py, session, || {
-            conf.set_pairs(&pairs, Some(true)).map_err(Box::new)
-        })?;
-        // As PySpark's `RuntimeConf._set_all`, which warns each warning of the server.
-        crate::conf::warn_all(py, 61, &warnings)
     }
 }
 

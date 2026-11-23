@@ -226,32 +226,16 @@ _DIFFERS_BY_CHANGE = {
         "vars": [
             "SparkSession",
             "SparkSession of streams and catalog",
-            "SparkSession.Builder",
-            "SparkSession.Builder of its setters",
         ],
         "attributes": [
             "SparkSession",
             "SparkSession of streams and catalog",
-            "SparkSession.Builder",
-            "SparkSession.Builder of its setters",
-        ],
-        "copies": [
-            "SparkSession.Builder: copy",
-            "SparkSession.Builder: deepcopy",
-            "SparkSession.Builder: pickle",
-            "SparkSession.Builder: cloudpickle",
-            "SparkSession.Builder of its setters: copy",
-            "SparkSession.Builder of its setters: deepcopy",
-            "SparkSession.Builder of its setters: pickle",
-            "SparkSession.Builder of its setters: cloudpickle",
         ],
         "construct": [
             "pyspark.sql.connect.session.SparkSession",
-            "pyspark.sql.connect.session.SparkSession.Builder",
         ],
         "uninit": [
             "pyspark.sql.connect.session.SparkSession",
-            "pyspark.sql.connect.session.SparkSession.Builder",
         ],
     },
     "the Column, the WindowSpec and the TableArg": {
@@ -928,3 +912,122 @@ def test_a_catalog_makes_its_requests_of_the_session_of_its_state(objects):
     finally:
         other.release_session_on_close = False
         other.stop()
+
+
+def _config_sets(objects):
+    # The pairs and the silent flag of each ConfigRequest.Set that the mock server received, of a
+    # value of None for a value that is not set.
+    import pyspark.sql.connect.proto as pb2
+
+    sets = []
+    for raw in objects.service.config_requests:
+        operation = pb2.ConfigRequest.FromString(raw).operation
+        if operation.HasField("set"):
+            pairs = operation.set.pairs
+            sets.append(
+                ([(p.key, p.value if p.HasField("value") else None) for p in pairs], operation.set.silent)
+            )
+    return sets
+
+
+def test_a_builder_creates_its_session_of_the_state_that_it_holds_then_as_pysparks(objects):
+    # PySpark's Builder reads its `_options`, `_channel_builder` and `_hook_factories` when it
+    # creates a session: an assignment of them is what `create` reads, its options but
+    # `spark.remote` and `spark.master` are set on the session in one silent request, after the
+    # `spark.sql.` options of the last init conf of the environment, `remote` and `appName` call
+    # its `config`, and `getOrCreate` calls its `create` and its `_apply_options`, of a subclass
+    # too, on the session that it makes or finds.
+    import os
+
+    from pyspark.errors import PySparkValueError
+    from pyspark.sql.connect.session import SparkSession
+
+    remote, made, calls = objects.service.remote, [], []
+
+    class Sub(SparkSession.Builder):
+        def config(self, key=None, value=None, *, map=None):
+            calls.append(("config", key))
+            return super().config(key, value, map=map)
+
+        def create(self):
+            calls.append(("create",))
+            made.append(super().create())
+            return made[-1]
+
+        def _apply_options(self, session):
+            calls.append(("_apply_options", session is made[-1]))
+            return super()._apply_options(session)
+
+    try:
+        builder = SparkSession.Builder().remote(remote)
+        builder._options = {"spark.remote": remote, "k": 7, "spark.master": "m", "f": False}
+        objects.service.reset()
+        made.append(builder.create())
+        assert _config_sets(objects) == [([("k", "7"), ("f", "false")], True)]
+        environ = {
+            "PYSPARK_REMOTE_INIT_CONF_LEN": "2",
+            "PYSPARK_REMOTE_INIT_CONF_0": '{"spark.sql.a": "1"}',
+            "PYSPARK_REMOTE_INIT_CONF_1": '{"spark.sql.b": "2", "spark.c": "3", "spark.sql.k": "i"}',
+        }
+        os.environ.update(environ)
+        try:
+            objects.service.reset()
+            made.append(SparkSession.Builder().remote(remote).config("spark.sql.k", "b").create())
+        finally:
+            for key in environ:
+                del os.environ[key]
+        assert _config_sets(objects) == [([("spark.sql.b", "2"), ("spark.sql.k", "b")], True)]
+        objects.service.reset()
+        session = Sub().remote(remote).appName("n").config("spark.sql.z", 1).getOrCreate()
+        assert session is objects.spark
+        assert calls == [
+            ("config", "spark.remote"),
+            ("config", "spark.app.name"),
+            ("config", "spark.sql.z"),
+            ("_apply_options", False),
+        ]
+        assert _config_sets(objects) == [([("spark.app.name", "n"), ("spark.sql.z", "1")], True)]
+        for builder in (SparkSession.Builder(), SparkSession.Builder().remote(remote)):
+            builder._channel_builder = remote
+            if "spark.remote" in builder._options:
+                with pytest.raises(PySparkValueError) as raised:
+                    builder.create()
+                assert raised.value.getCondition() == "SESSION_NEED_CONN_STR_OR_BUILDER"
+            else:
+                made.append(builder.create())
+        builder = SparkSession.Builder()
+        builder._options["spark.remote"] = None
+        with pytest.raises(AssertionError):
+            builder.create()
+    finally:
+        _stop_sessions(*made)
+
+
+def test_the_options_of_a_builder_are_sent_as_pysparks_set_all_sends_them(objects):
+    # PySpark's `_apply_options` sends the options in the KeyValues of one ConfigRequest.Set, as
+    # protobuf takes them: a key of None is unset, the empty key, bytes of UTF-8 are their text,
+    # and the first that protobuf refuses fails the request before it is sent, of its error.
+    from pyspark.sql.connect.session import SparkSession
+
+    remote, made = objects.service.remote, []
+    try:
+        for key, value, sent in [
+            (None, "v", [("", "v")]),
+            ("k", None, [("k", None)]),
+            (b"bk", "v", [("bk", "v")]),
+        ]:
+            objects.service.reset()
+            made.append(SparkSession.Builder().remote(remote).config(key, value).create())
+            assert _config_sets(objects) == [(sent, True)]
+        for key, value, error in [
+            (1, "v", TypeError),
+            ("k\udc80", "v", UnicodeEncodeError),
+            ("k", "v\udc80", UnicodeEncodeError),
+            (b"\xff", "v", UnicodeDecodeError),
+        ]:
+            objects.service.reset()
+            with pytest.raises(error):
+                made.append(SparkSession.Builder().remote(remote).config(key, value).create())
+            assert _config_sets(objects) == []
+    finally:
+        _stop_sessions(*made)

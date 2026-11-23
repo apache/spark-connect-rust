@@ -8226,3 +8226,37 @@ def test_grouped_data_na_and_stat_make_their_dataframes_of_their_dict_as_pyspark
     assert DataFrameNaFunctions(Proxy(df)).drop().count() == 2
     assert DataFrameNaFunctions(Proxy(df)).fill(0.0).where("v = 0.0").count() == 1
     assert DataFrameStatFunctions(Proxy(df)).crosstab("k", "s").count() == 2
+
+
+def test_a_builder_creates_its_session_of_its_dict_as_pysparks(session):
+    # As official PySpark 4.3.0, whose SparkSession.Builder keeps its options, its channel builder
+    # and its hook factories in its __dict__, which its create reads: the builder of a subclass
+    # makes a session of the options that are assigned to it, which its _apply_options sets on that
+    # session, and of the hooks of its factories.
+    from pyspark.sql.connect.session import SparkSession as ConnectSession
+
+    remote, applied, hooked = os.environ["SPARK_REMOTE"], [], []
+
+    class Builder(ConnectSession.Builder):
+        def _apply_options(self, session):
+            applied.append(session)
+            return super()._apply_options(session)
+
+    def factory(created):
+        hooked.append(created)
+        return ConnectSession.Hook()
+
+    builder = Builder().remote(remote)._registerHook(factory)
+    assert vars(builder) == {
+        "_options": {"spark.remote": remote},
+        "_channel_builder": None,
+        "_hook_factories": [factory],
+    }
+    builder._options["spark.sql.shuffle.partitions"] = 7
+    created = builder.create()
+    try:
+        assert applied == [created] and hooked == [created] and created is not session
+        assert created.conf.get("spark.sql.shuffle.partitions") == "7"
+        assert created.range(3).count() == 3
+    finally:
+        created.stop()

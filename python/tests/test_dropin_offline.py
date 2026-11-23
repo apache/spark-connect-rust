@@ -45235,8 +45235,8 @@ def test_a_builder_remote_set_to_none_fails_create_as_pyspark(mock_connect, monk
         assert replaced is not spark
     finally:
         replaced.stop()
-    # A remote without an argument is the default URL.
-    assert "sc://localhost" in repr(SparkSession.builder.remote().__reduce__())
+    # A remote without an argument is the default URL, which the builder keeps in its options.
+    assert SparkSession.builder.remote()._options == {"spark.remote": "sc://localhost"}
 
 
 def test_empty_rows_send_the_json_of_a_raw_nullable_schema_as_pyspark(mock_connect):
@@ -45547,9 +45547,10 @@ def test_worker_reconstructors_replay_every_setting_as_pyspark(mock_connect, mon
     assert [(sink.command, sink.python_ver) for sink in sinks] == [
         (command, python_ver) for _, command, python_ver in commands]
     assert cloudpickle.loads(commands[0][1]).__name__ == "on_batch"
-    # The builder of a worker is rebuilt by the same calls, which keep its options and hooks.
-    options, _, hooks = cloudpickle.loads(cloudpickle.dumps(builder)).__reduce__()[1]
-    assert options == [("k", "v")] and len(hooks) == 1
+    # The builder pickles as PySpark's, of its class and its __dict__, which the PySpark of a
+    # worker loads as it is: of its options and its hooks.
+    rebuilt = cloudpickle.loads(cloudpickle.dumps(builder))
+    assert rebuilt._options == {"k": "v"} and len(rebuilt._hook_factories) == 1
 
 
 def test_plain_pickles_name_the_session_creator_as_pyspark(mock_connect):
@@ -45647,7 +45648,7 @@ def test_session_builders_copy_and_pickle_as_pyspark(mock_connect):
     # A plain pickle of a builder succeeds, as of PySpark's, and keeps the options.
     rebuilt = pickle.loads(pickle.dumps(builder))
     assert type(rebuilt) is type(builder)
-    assert ("k", "v") in rebuilt.__reduce__()[1][0]
+    assert rebuilt._options == {"spark.remote": "sc://localhost:15013", "k": "v"}
 
 
 def test_builders_merge_actions_and_queries_keep_their_instance_attributes_as_pyspark(

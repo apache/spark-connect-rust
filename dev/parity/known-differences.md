@@ -1194,7 +1194,7 @@ requests of the unpickled object pickle as it is then. This case still differs:
   reads its server-side session ID and whether its executions are reattachable of a closed session
   of its connection, which has the defaults, where PySpark's client keeps its own.
 - **The `__dict__` of the objects of a session** (intentional; the state is native). The
-  readers, writers, builders and the other objects of a session or a DataFrame hold their
+  readers, writers and the other objects of a session or a DataFrame hold their
   state in the Rust core: their `__dict__` holds the attributes that a user sets on them,
   which their copies and pickles keep as PySpark's do, but not their state, which PySpark's
   holds there (`vars(spark.read)` is empty, where PySpark's has `_client`, `_format`, `_schema` and
@@ -1204,13 +1204,15 @@ requests of the unpickled object pickle as it is then. This case still differs:
   `_sparkSession` (`sparkSession` of a registration) and of the client of their `_client`; the
   `StreamingQueryManager` of `spark.streams`, of its `_session` and its `_sqlb`, its
   `StreamingQueryListenerBus`, of its `_sqm`, `_listener_bus`, `_execution_thread` and `_lock`,
-  and a `StreamingQuery`, of its `_session`, `_query_id`, `_run_id` and `_name`; and the
-  `GroupedData` of a DataFrame, of its `_df`, `_group_type`, `_grouping_cols`, `_pivot_col`,
-  `_pivot_values` and `_grouping_sets`, its `PandasCogroupedOps`, of the grouped data of its `_gd1`
-  and `_gd2`, and its `DataFrameNaFunctions` and `DataFrameStatFunctions`, of their `df`, whose
-  methods theirs call. Their methods read their state when they make their requests or their
-  plans, as PySpark's, and the events of the listeners of
-  streaming queries are posted to the listeners of the `_listener_bus` as they are then (see
+  and a `StreamingQuery`, of its `_session`, `_query_id`, `_run_id` and `_name`; the `GroupedData`
+  of a DataFrame, of its `_df`, `_group_type`, `_grouping_cols`, `_pivot_col`, `_pivot_values` and
+  `_grouping_sets`, its `PandasCogroupedOps`, of the grouped data of its `_gd1` and `_gd2`, and its
+  `DataFrameNaFunctions` and `DataFrameStatFunctions`, of their `df`, whose methods theirs call; and
+  the `SparkSession.Builder` of Spark Connect, of its `_options` (the `to_str` of each value),
+  `_channel_builder` and `_hook_factories`, which its setters set and its `create`, `getOrCreate`
+  and `_apply_options` read. Their methods read their state when they make their requests or their
+  plans, as PySpark's, and the events of the listeners of streaming queries are posted to the
+  listeners of the `_listener_bus` as they are then (see
   `docs/compatibility.md`). Of the listener bus, the subscription of the session to the events is
   the native listener bus's, of which Rust programs get the events too, whose thread posts them and
   which keeps a registration of each listener that `append` adds: `_execution_thread` stays None,
@@ -1245,7 +1247,7 @@ requests of the unpickled object pickle as it is then. This case still differs:
   `TableValuedFunction`, `DataSourceRegistration`, `RuntimeConf`, `StreamingQuery`,
   `StreamingQueryManager`, `StreamingQueryListenerBus`, `DataFrameReader`, `DataStreamReader`,
   `GroupedData`, `PandasCogroupedOps`, `DataFrameNaFunctions` and `DataFrameStatFunctions` of
-  `pyspark.sql.connect`, `SparkSession.Hook`, `StorageLevel`,
+  `pyspark.sql.connect`, `SparkSession.Builder`, `SparkSession.Hook`, `StorageLevel`,
   `PythonEvalType` and the data types are subclassed as PySpark's: a subclass constructs of the
   arguments of its `__init__`, and its copies and pickles are of the subclass (but those of a
   session, which are the active session of its ID, as PySpark's), and PySpark's pickle of a reader,
