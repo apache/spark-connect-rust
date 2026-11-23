@@ -22398,6 +22398,140 @@ def test_customized_pandas_without_rows_reads_the_settings_once(mock_connect, sc
     assert len(service.execute_requests) == before_execute
 
 
+def test_create_dataframe_of_a_pandas_frame_of_another_width_zips_it_as_pyspark(mock_connect):
+    # As PySpark's conversion of a pandas DataFrame of rows under a struct, which zips the columns
+    # with the fields: the columns past the fields are dropped, and not converted, by each of its
+    # conversions of a column; of no fields the rows too, as the table of no columns has none; and
+    # of fewer columns, the conversion of the columns and then the rename of the table to the
+    # names of the fields raise, of PyArrow's ArrowInvalid. So does the row path of a struct of a
+    # class of its own (`accepts_pandas_schema`), and of the row path without PyArrow, a frame of
+    # fewer columns raises AXIS_LENGTH_MISMATCH.
+    import datetime
+
+    pd = pytest.importorskip("pandas")
+    pa = pytest.importorskip("pyarrow")
+    from pyspark.errors import PySparkTypeError, PySparkValueError
+
+    spark, service = mock_connect
+
+    def st(*names, t=None, cls=T.StructType):
+        return cls([T.StructField(name, t or T.LongType()) for name in names])
+
+    class Iterated(T.StructType):
+        # Of an iteration of its own, which the row path converts the frames of.
+        def __iter__(self):
+            return iter(self.fields)
+
+    def sent(frame, schema):
+        table, json_schema = _local_rows_relation_of(service, spark.createDataFrame(frame, schema))
+        return table.to_pylist(), [field["name"] for field in json_schema["fields"]]
+
+    a, ab = {"a": [1]}, {"a": [1], "b": [2]}
+    for cls in (T.StructType, Iterated):
+        assert sent(pd.DataFrame(ab), st("a", cls=cls)) == ([{"a": 1}], ["a"])
+        assert sent(pd.DataFrame({**ab, "c": [3]}), st("x", "y", cls=cls)) == (
+            [{"x": 1, "y": 2}], ["x", "y"])
+        # The columns past the fields are not converted.
+        assert sent(pd.DataFrame({"a": [1], "b": [object()]}), st("a", cls=cls)) == (
+            [{"a": 1}], ["a"])
+        overflowing = pd.DataFrame({"a": [1], "b": [2**40]})
+        assert sent(overflowing, st("a", t=T.IntegerType(), cls=cls)) == ([{"a": 1}], ["a"])
+    for frame, t, value in [
+        (pd.DataFrame({"a": [1.5], "b": [2.5]}), T.DoubleType(), 1.5),
+        (pd.DataFrame({"a": ["x"], "b": ["y"]}), T.StringType(), "x"),
+        (pd.DataFrame({"a": pd.array([1, None], dtype="Int64"),
+                       "b": pd.array([2, 3], dtype="Int64")}), T.LongType(), 1),
+        (pd.DataFrame({"a": [datetime.date(2020, 1, 1)], "b": [datetime.date(2021, 1, 1)]}),
+         T.DateType(), datetime.date(2020, 1, 1)),
+    ]:
+        rows, names = sent(frame, st("a", t=t))
+        assert names == ["a"] and list(rows[0]) == ["a"] and rows[0]["a"] == value, (rows, t)
+    # Of no fields, no row, and a frame of no columns of an index is of its index, as PySpark's
+    # table of `pa.RecordBatch.from_pandas`, also of the row path, which takes PySpark's
+    # conversion where PyArrow is: a naive DatetimeIndex is of UTC wall clocks, which the
+    # session time zone does not shift. Of no fields, its columns are one more than the fields.
+    for cls in (T.StructType, Iterated):
+        assert sent(pd.DataFrame(ab), cls([])) == ([], [])
+        assert sent(pd.DataFrame(index=[0]), st("a", cls=cls)) == ([{"a": 0}], ["a"])
+        assert sent(pd.DataFrame(index=pd.DatetimeIndex(["2020-01-01"])),
+                    st("t", t=T.TimestampType(), cls=cls)) == (
+            [{"t": datetime.datetime(2020, 1, 1, tzinfo=datetime.timezone.utc)}], ["t"])
+        with pytest.raises(PySparkValueError) as error:
+            spark.createDataFrame(pd.DataFrame(index=[0]), cls([]))
+        assert error.value.getCondition() == "AXIS_LENGTH_MISMATCH"
+        assert error.value.getMessageParameters() == {
+            "expected_length": "0", "actual_length": "1"}
+    # The row path, where PyArrow is, raises the errors of PySpark's conversion of a column that
+    # it zips with the fields, of a frame of any width, and reads no label of a column.
+    class Label:
+        def __str__(self):
+            raise RuntimeError("str of a label")
+
+    for frame in (pd.DataFrame({"a": ["x"], "b": [1]}), pd.DataFrame({"a": ["x"]})):
+        with pytest.raises(PySparkValueError, match="with name 'a' to Arrow Array \\(int64\\)"):
+            spark.createDataFrame(frame, st("a", cls=Iterated))
+    for labels in ([Label()], [Label(), "b"]):
+        frame = pd.DataFrame([[1] * len(labels)], columns=pd.Index(labels, dtype=object))
+        assert sent(frame, st("a", cls=Iterated)) == ([{"a": 1}], ["a"])
+
+    # A struct of a Python subclass whose `names` is a property, which the native `__init__` does
+    # not assign through, so that its `names` are not as many as its `fields`, takes the row path
+    # of its rows (SPARK-62231), as before, where PySpark's conversion would raise IndexError.
+    class StructName(T.StructType):
+        @property
+        def names(self):
+            return [n.upper() for n in self.__dict__.get("_names", [])]
+
+        @names.setter
+        def names(self, value):
+            self.__dict__["_names"] = list(value)
+
+    assert sent(pd.DataFrame(a), StructName([T.StructField("a", T.LongType())])) == (
+        [{"a": 1}], ["a"])
+
+    # A struct of an element that is not a StructField, put in the place of a field within the
+    # names that the struct cached, zips the columns with the fields too (SPARK-62189).
+    class DuckField:
+        def __init__(self):
+            self.name, self.dataType, self.nullable, self.metadata = "d", T.LongType(), True, {}
+
+        def jsonValue(self):
+            return {"name": "d", "type": "long", "nullable": True, "metadata": {}}
+
+    ducked = st("a", "b")
+    ducked.fields[1] = DuckField()
+    assert sent(pd.DataFrame({"a": [1], "b": [2], "c": [3]}), ducked) == (
+        [{"a": 1, "b": 2}], ["a", "d"])
+    with pytest.raises(pa.ArrowInvalid, match="^tried to rename a table of 1 columns but only 2 "):
+        spark.createDataFrame(pd.DataFrame(a), ducked)
+    before = len(service.execute_requests), len(service.analyze_requests)
+    for cls in (T.StructType, Iterated):
+        for frame, schema in [(pd.DataFrame(a), st("a", "b", cls=cls)),
+                              (pd.DataFrame(a), st("a", "b", "c", cls=cls))]:
+            with pytest.raises(pa.ArrowInvalid) as error:
+                spark.createDataFrame(frame, schema)
+            assert str(error.value) == (
+                f"tried to rename a table of 1 columns but only {len(schema.fields)} names were "
+                "provided")
+        # Of the conversion of the columns first.
+        with pytest.raises(PySparkValueError, match="with name 'a' to Arrow Array \\(int64\\)"):
+            spark.createDataFrame(pd.DataFrame({"a": ["x"]}), st("a", "b", cls=cls))
+        with pytest.raises(PySparkTypeError, match="with name 'a' to Arrow Array \\(string\\)"):
+            spark.createDataFrame(pd.DataFrame(a), st("a", "b", t=T.StringType(), cls=cls))
+    assert (len(service.execute_requests), len(service.analyze_requests)) == before
+    # The row path without PyArrow drops the columns past the fields too, and of no fields the
+    # rows: its relation is of no data.
+    with _pandas_row_path():
+        assert sent(pd.DataFrame(ab), st("a")) == ([{"a": 1}], ["a"])
+        spark.createDataFrame(pd.DataFrame(ab), T.StructType()).toArrow()
+        request = parse_message(service.execute_requests[-1])
+        local = parse_message(parse_message(parse_message(request[3][0])[1][0])[11][0])
+        assert 1 not in local and json.loads(local[2][0])["fields"] == []
+        with pytest.raises(PySparkValueError) as error:
+            spark.createDataFrame(pd.DataFrame(a), st("a", "b"))
+        assert error.value.getCondition() == "AXIS_LENGTH_MISMATCH"
+
+
 def test_customized_pandas_normalization_methods_do_not_run_as_pyspark(mock_connect):
     from pyspark.errors import PySparkValueError
 

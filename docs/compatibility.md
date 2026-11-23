@@ -3105,6 +3105,22 @@ PySpark's shares the list of its fields. The class's own types compare without t
 a user set, where PySpark's comparison of the `__dict__`s holds them: a `DecimalType(7, 3)` of an
 attribute equals `DecimalType(7, 3)`, where a type of a Python subclass compares them (see below).
 
+`createDataFrame` of a pandas DataFrame of rows under a struct converts it with PySpark's conversion
+where PyArrow is, also of a struct of a Python subclass that reads its fields of its own, and zips
+its columns with the fields, as that conversion does: the columns past the fields are dropped, and not
+converted, and of a struct of no fields the rows of a frame of columns too, as the table of the
+zip has no column and no row; of fewer columns than the fields, it raises the error of the
+conversion of a column that it zips with a field, if any, and then PyArrow's `ArrowInvalid` of the
+rename of its table to the names of the fields (`tried to rename a table of 1 columns but only 2
+names were provided`). A frame of no columns is the table of `pa.RecordBatch.from_pandas`, of its
+rows: of a RangeIndex, of no column, so `pd.DataFrame(index=range(2))` is two `Row()` under
+`StructType([])`; of another index, of a column of each level of the index, which the rename takes,
+so `pd.DataFrame(index=[0])` is `Row(a=0)` under `a long`, and raises `AXIS_LENGTH_MISMATCH` under
+`StructType([])`, of one more column than the fields. Without PyArrow, the frame takes the row path,
+which zips the columns with the fields too, but raises `AXIS_LENGTH_MISMATCH` of a frame of fewer
+columns than the fields, and does not take the columns of an index (see "pandas DataFrames without
+PyArrow" in `dev/parity/known-differences.md`).
+
 A `StructType` caches its `names` as it is made and as `add` adds a field, as PySpark's, so an
 in-place change of its `fields` list, such as a `StructField` appended, leaves `names` and
 `fieldNames()` as they were. `createDataFrame` takes local rows, and the struct values below the
@@ -3117,22 +3133,21 @@ raises for another number of names than columns.
 
 `createDataFrame` under a struct whose fields hold an element that is not a `StructField`, as
 `s.fields.append("x")` gives, at any level (in a struct inside it changed in place, also of a
-struct, an array or a map that is itself an element of `fields`), is PySpark's, of any data, but of
-a pandas DataFrame of another width than the fields, which raises `AXIS_LENGTH_MISMATCH` as of any
-struct (see `dev/parity/known-differences.md`). It converts the data as PySpark's conversion does,
-of its errors: of local rows or a pyarrow Table, it reads the fields, of the `AttributeError` of the
-first attribute that an element lacks, and takes local rows apart by the cached names first, of
-`AXIS_LENGTH_MISMATCH`; of a pandas DataFrame of rows, it deduplicates the names of the fields first
-(`_deduplicate_field_names`), of the `IndexError` of an element past the cached `names`; and of an
-array of rows, it reads no field and checks the width of the array. It then writes the `json()` of
-the schema object as PySpark's does, of no rows too, of the `jsonValue` of each element of the
-fields of its structs in their order, so it raises the `AttributeError` of an element of none, and
-of an element that has one sends the converted data of that JSON, with the names of the struct of a
-pandas DataFrame (`toDF`). A field of such a struct writes the collations of the strings of its
-arrays and maps into its metadata (`__COLLATIONS`), and its type without them, as PySpark's
-`StructField.jsonValue`, which reads the attributes of the types in its order, so a type of a
-Python subclass of a property of its own, such as a `dataType` that makes a new struct at each read,
-is written of what each read gives. Its other uses lower the struct, which raises (see
+struct, an array or a map that is itself an element of `fields`), is PySpark's, of any data. It
+converts the data as PySpark's conversion does, of its errors: of local rows or a pyarrow Table, it
+reads the fields, of the `AttributeError` of the first attribute that an element lacks, and takes
+local rows apart by the cached names first, of `AXIS_LENGTH_MISMATCH`; of a pandas DataFrame of
+rows, it deduplicates the names of the fields first (`_deduplicate_field_names`), of the
+`IndexError` of an element past the cached `names`, and zips the columns with the fields (see
+above); and of an array of rows, it reads no field and checks the width of the array. It then writes
+the `json()` of the schema object as PySpark's does, of no rows too, of the `jsonValue` of each
+element of the fields of its structs in their order, so it raises the `AttributeError` of an element
+of none, and of an element that has one sends the converted data of that JSON, with the names of the
+struct of a pandas DataFrame (`toDF`). A field of such a struct writes the collations of the strings
+of its arrays and maps into its metadata (`__COLLATIONS`), and its type without them, as PySpark's
+`StructField.jsonValue`, which reads the attributes of the types in its order, so a type of a Python
+subclass of a property of its own, such as a `dataType` that makes a new struct at each read, is
+written of what each read gives. Its other uses lower the struct, which raises (see
 `dev/parity/known-differences.md`).
 
 The parameters of a type are its attributes, as PySpark's: `t.scale = 3` makes a

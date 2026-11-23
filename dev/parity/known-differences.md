@@ -6,13 +6,6 @@ difference is intentional or tracked for a fix.
 
 ## `createDataFrame`
 
-- **A pandas DataFrame with a StructType of another width** (intentional, SPARK-60902).
-  PySpark's pandas conversion zips the DataFrame's columns with the schema's fields. With
-  fewer fields than columns it silently drops the extra columns, and with more fields it
-  raises PyArrow's `ArrowInvalid`. This client raises `AXIS_LENGTH_MISMATCH` for both
-  rather than drop data. Of more fields both clients fail, and only the class of the error
-  differs: `AXIS_LENGTH_MISMATCH` is PySpark's own error for local rows and for a list of names
-  of another width than the data.
 - **pandas DataFrames without PyArrow** (intentional optional-dependency fallback; PySpark
   Connect makes no session without PyArrow, whose `check_dependencies` raises
   `PACKAGE_NOT_INSTALLED`, so this path and the entries below that are of it extend the drop-in
@@ -31,17 +24,42 @@ difference is intentional or tracked for a fix.
   dropped as those of local rows are, to the microsecond below, without the error of a safe cast
   (PySpark's unsafe cast of a `datetime64[ns]` column rounds a time before 1970 toward 1970:
   `1969-12-31 23:59:59.999999999` is `1970-01-01 00:00:00` there, and `1969-12-31 23:59:59.999999`
-  here and in local rows), and its errors are its own. This fallback covers
+  here and in local rows), and its errors are its own. It zips the columns with the fields, as
+  PySpark's conversion does: the columns past the fields are dropped, and of a struct of no fields
+  the rows of a frame of columns too. Of a frame of fewer columns than the fields of its struct,
+  it raises `AXIS_LENGTH_MISMATCH`, where PySpark's conversion raises the error of the conversion
+  of a column that it zips with a field, if any, and then PyArrow's `ArrowInvalid` of its rename.
+  Of a frame of no columns whose index is not a RangeIndex, PySpark's table is of a column of each
+  level of the index (`pa.RecordBatch.from_pandas`), which the rename takes: `pd.DataFrame(index=
+  [0])` is `Row(a=0)` under `a long`, and raises `AXIS_LENGTH_MISMATCH` under `StructType([])`,
+  where this path raises `AXIS_LENGTH_MISMATCH` under `a long` and makes a `Row()` under
+  `StructType([])`. This fallback covers
   unavailable modules detected by `pyarrow_available`, not an installed PyArrow module that
-  fails during import. The row path also converts a frame, with PyArrow, when the type names
-  that the conversion and the importer resolve are rebound, or when the class of the struct of
-  the schema, or of one of its fields, overrides how the conversion reads it: its `fields`,
-  `names` or iteration, a field's `name`, `dataType`, `nullable` or `metadata`, or
-  `__getattribute__` or `__class__` (`accepts_pandas_schema`). The conversion would read the
-  override, and the importer the native type. A Python subclass of `StructType` or
-  `StructField` that overrides none of these takes PySpark's conversion, as in PySpark, with the
-  JSON of its core types, where PySpark sends its `json()`, which names a struct of a subclass by
-  its `typeName()` and which the server then fails to parse (see the types of
+  fails during import. With PyArrow, a frame whose struct of the schema, or one of its fields, is of
+  a Python subclass that overrides how the conversion reads it: its `fields`, `names` or iteration,
+  a field's `name`, `dataType`, `nullable` or `metadata`, or `__getattribute__` or `__class__`
+  (`accepts_pandas_schema`), which the fast path declines, converts with PySpark's conversion too,
+  which reads the override as PySpark's does, of its table, its errors and its columns
+  (`converts_row_path_frames`), when its `names` and `fields`, as Python reads them, are as many; of
+  a subclass whose `names` the native `__init__` does not set through its setter, the frame takes
+  the row path below, of the native types (SPARK-62231). The relation's schema is of the native
+  types of the fields, where PySpark's is the `json()` of the struct, which reads the overrides too:
+  of a field of a subclass whose `dataType` reads `StringType()` over a column of strs under `a
+  long`, PySpark's DataFrame is `struct<a:string>`, and the drop-in's table follows the override and
+  its schema does not, so its `schema` raises the server's `INVALID_COLUMN_OR_FIELD_DATA_TYPE`
+  ("Column or field col_0 is of type "STRING" while it's required to be "BIGINT""); the drop-in's
+  own `json()` does not read such a `dataType` either (SPARK-62236). When the native `StructType` or
+  `StructField` classes themselves are patched to read otherwise, or the type names that PySpark's
+  conversion resolves are rebound, the drop-in converts the frame of its rows, of the native types,
+  where PySpark's conversion reads the patch: it mostly raises
+  (`[UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION] LongType() is not supported`,
+  `ArrowNotImplementedError: Unsupported cast from timestamp[ns] to bool`, or the `AttributeError`
+  of a property of `StructField` that has no setter), or converts by the patched type (a public
+  `BooleanType` rebound over a column of ints `[1, 0, 2]` is `[1, 0, 1]` there and `[1, 0, 2]` here)
+  (SPARK-62237). A Python subclass of `StructType` or `StructField` that overrides none of these
+  takes PySpark's conversion, as in PySpark, with the JSON of its core types, where PySpark sends
+  its `json()`, which names a struct of a subclass by its `typeName()` and which the server then
+  fails to parse (see the types of
   `docs/compatibility.md`). So does a name that holds a NUL, at any depth, whose table the
   importer reads of its IPC stream, as the C data interface holds names as C strings.
 - **Nested pandas Decimal inference and failures** (intentional; related change:
@@ -130,8 +148,7 @@ difference is intentional or tracked for a fix.
   `to`, `cast`, `from_json` and a reader's schema), and raises `TypeError: StructType fields must be
   StructField objects` there, and an assignment of `fields` of such an element, and a `StructField`,
   an `ArrayType` or a `MapType` made of a struct of one, raise it at once. `createDataFrame` under
-  such a struct is PySpark's, of any data but a pandas DataFrame of another width than the fields
-  (see the first entry of this section), and so are the cached `names` of a list of `StructField`s
+  such a struct is PySpark's, of any data, and so are the cached `names` of a list of `StructField`s
   changed in place and their uses (see `docs/compatibility.md`).
 - **A schema that PySpark does not convert is requested once** (intentional; the errors are the
   same). PySpark's `_schema` keeps the schema that it requested only once its conversion of it
