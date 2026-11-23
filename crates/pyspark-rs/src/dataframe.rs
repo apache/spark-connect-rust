@@ -62,7 +62,8 @@ pub struct PyDataFrame {
     /// The information of the execution of the core that `_execution_info` was last set of, as
     /// PySpark's actions set it (see `Frame::publish_execution`): a later execution of the
     /// DataFrame sets it again, and an assignment of it stays until then.
-    published: std::sync::Mutex<Option<spark_connect::session::ExecutionInfo>>,
+    /// Boxed, as most DataFrames execute nothing, of no room in each of them.
+    published: std::sync::Mutex<Option<Box<spark_connect::session::ExecutionInfo>>>,
 }
 
 /// The answer kept in `cell`, else that of `ask`, which is kept unless it fails, as
@@ -420,30 +421,35 @@ impl<'py> IntoPyObject<'py> for NewDataFrame {
         // the class of the drop-in, of no descriptor of these.
         let fields = df.as_any().getattr(pyo3::intern!(py, "__dict__"))?;
         let fields = fields.cast::<PyDict>()?;
-        init_entries(fields, plan.as_any(), &session)?;
-        if let Some(schema) = self.cached_schema {
-            // As PySpark's `res._cached_schema = ...` after the DataFrame is made.
-            df.as_any()
-                .setattr(pyo3::intern!(py, "_cached_schema"), schema)?;
-        }
+        // The `_cached_schema` that PySpark's `res._cached_schema = ...` sets after the DataFrame
+        // is made, of the entry of the same place, as the class of the new DataFrame has no
+        // descriptor of it.
+        let cached_schema = self.cached_schema.map(|schema| schema.into_bound(py));
+        init_entries(fields, plan.as_any(), &session, cached_schema.as_ref())?;
         Ok(df)
     }
 }
 
 /// Set the entries of PySpark's `DataFrame.__init__` in `fields`, the `__dict__` of a new
-/// DataFrame, in its order: its `_plan` and `_session`, and the state of no request yet.
+/// DataFrame, in its order: its `_plan` and `_session`, and the state of no request yet, but for
+/// `cached_schema`, the `_cached_schema` that a method sets once it made the DataFrame, if any.
 fn init_entries(
     fields: &Bound<'_, PyDict>,
     plan: &Bound<'_, PyAny>,
     session: &Bound<'_, PyAny>,
+    cached_schema: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<()> {
     let py = fields.py();
+    let none = py.None().into_bound(py);
     fields.set_item(pyo3::intern!(py, "_plan"), plan)?;
     fields.set_item(pyo3::intern!(py, "_session"), session)?;
     fields.set_item(pyo3::intern!(py, "_support_repr_html"), false)?;
-    fields.set_item(pyo3::intern!(py, "_cached_schema"), py.None())?;
-    fields.set_item(pyo3::intern!(py, "_cached_schema_serialized"), py.None())?;
-    fields.set_item(pyo3::intern!(py, "_execution_info"), py.None())?;
+    fields.set_item(
+        pyo3::intern!(py, "_cached_schema"),
+        cached_schema.unwrap_or(&none),
+    )?;
+    fields.set_item(pyo3::intern!(py, "_cached_schema_serialized"), &none)?;
+    fields.set_item(pyo3::intern!(py, "_execution_info"), &none)?;
     Ok(())
 }
 
@@ -555,7 +561,7 @@ impl PyDataFrame {
         *this
             .published
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(info);
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Box::new(info));
         drop(this);
         crate::state::assign(slf.as_any(), &[(pyo3::intern!(py, "_execution_info"), &ei)])
     }
@@ -887,7 +893,7 @@ impl<'py> PlanFrame<'py> {
             PyDataFrame::of_caches(spark_connect::dataframe::DataFrameCaches::new()),
         )?;
         let fields = copy.as_any().getattr(pyo3::intern!(py, "__dict__"))?;
-        init_entries(fields.cast::<PyDict>()?, plan, session)?;
+        init_entries(fields.cast::<PyDict>()?, plan, session, None)?;
         property_schema(&copy)?.columns(py)?;
         let (support_repr_html, cached_schema) = state;
         fields.set_item(pyo3::intern!(py, "_support_repr_html"), support_repr_html)?;
@@ -1588,7 +1594,15 @@ impl PyDataFrame {
         if !self.gc_ready.get() {
             return Ok(());
         }
-        // Its lock is held only while no Python code runs.
+        // Of no lock while it holds nothing, as most DataFrames: the flag is set, with the GIL
+        // held, before a plan object is kept, and cleared once it went. Its lock is held only
+        // while no Python code runs.
+        if !self
+            .has_converted
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return Ok(());
+        }
         if let Ok(converted) = self.converted.try_lock() {
             if let Some((plan, made)) = converted.as_ref() {
                 visit.call(plan)?;
