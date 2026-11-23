@@ -2726,7 +2726,7 @@ fn json_of_native_values() -> bool {
 /// Whether PySpark's `jsonValue` of the type object `obj` reads otherwise (see
 /// `json_reads_otherwise`) at any of its levels, of the types that it keeps as their objects (see
 /// `keeps_object_of`).
-fn holds_json_reads_otherwise(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<bool> {
+pub(crate) fn holds_json_reads_otherwise(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<bool> {
     fn holds_own(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<bool> {
         Ok(json_reads_of_its_own(obj)? || keeps_object_of(py, obj, holds_own)?)
     }

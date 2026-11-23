@@ -3341,9 +3341,9 @@ read it by `isinstance`, and the methods of its class are PySpark's, of the meth
   map their types and flags, so a property of a subclass that overrides one is of the JSON, at any
   depth, and so is a patch of a native class (of `StringType.isUTF8BinaryCollation` patched to
   return False, a string is `"string collate UTF8_BINARY"`, of the `__COLLATIONS` metadata of its
-  field); `createDataFrame` of a pandas DataFrame, a pyarrow Table or data of no rows sends that
-  `json()` as the schema of its relation, as PySpark's, whose conversion reads the attributes
-  alike (see `dev/parity/known-differences.md`);
+  field); `createDataFrame` of a pandas DataFrame, a pyarrow Table, local data or data of no rows
+  sends that `json()` as the schema of its relation, as PySpark's, and converts the data with
+  PySpark's conversion, which reads the attributes alike (see `dev/parity/known-differences.md`);
 - the conversion of the local rows of `createDataFrame` takes the type objects of the schema, as
   PySpark's converters hold them: its errors name the object (`input for SubBooleanType() must not
   be None`), of its repr, and a geometry or a geography converts with the `toInternal` of a
@@ -3406,11 +3406,10 @@ What differs:
   `json()` of the schema object, which names a type of a subclass by its `typeName()`
   (`"subinteger"`) and which the server then fails to parse (`PARSE_SYNTAX_ERROR`), so sending it
   would only bring back that failure; of data of no rows it sends the `json()` of the object, as
-  PySpark, and so it does of a pandas DataFrame or a pyarrow Table under a struct that holds a type
-  that overrides a read of `jsonValue` (see above). Local rows under such a struct convert by the
-  native types, of their JSON, where PySpark's conversion reads the overrides (until SPARK-62258).
-  The readers, `from_json`, `from_xml`, `applyInPandasWithState` and `toDDL` send the `json()` of
-  the object, as PySpark's.
+  PySpark, and so it does of any data under a struct that holds a type that overrides a read of
+  `jsonValue` (see above), which PySpark's conversion converts, as PySpark's. The readers,
+  `from_json`, `from_xml`, `applyInPandasWithState` and `toDDL` send the `json()` of the object,
+  as PySpark's.
 
 The metadata of a field is the value that it was given, as PySpark's `metadata or {}` keeps it: a
 dict, or another value, such as a list or a str (see below). `==` compares it as Python compares

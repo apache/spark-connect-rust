@@ -114,17 +114,33 @@ difference is intentional or tracked for a fix.
   `__getattribute__` or `__class__`, which `json()` does not read. So does a name that holds a
   NUL, at any depth, whose table the importer reads of its IPC stream, as the C data interface
   holds names as C strings.
-- **Local data under types that override what PySpark's conversion reads** (tracked for a fix:
-  SPARK-62258). PySpark's conversion of local data (`LocalDataToArrowConversion`), of tuples,
-  lists, dicts, Rows and NumPy arrays, reads the fields of the struct and their attributes as
-  Python reads them, of a Python subclass of a property or an iteration of its own and of a patched
-  native class, and its relation sends the `json()` of the struct. The drop-in converts the rows by
-  the native types, of a relation of those types, as its rows are: under a field whose `dataType`
-  reads `StringType()` over `a long`, `createDataFrame([(1,)], schema)` is `struct<a:bigint>` of
-  `Row(a=1)`, where PySpark's is `struct<a:string>` of `Row(a='1')`, and `createDataFrame([("x",)],
-  schema)` raises `ArrowInvalid: Could not convert 'x' with type str: tried to convert to int64`,
-  where PySpark's is `Row(a='x')`. Data of no rows, a pandas DataFrame and a pyarrow Table are sent
-  with the `json()` of the struct, as PySpark's (see above).
+- **Local data under customized or patched types** (tracked for a fix: SPARK-62231,
+  SPARK-62251). As PySpark's createDataFrame, local data (tuples, lists, dicts, Rows, values that
+  are no rows and iterators) under a struct that holds a type of a Python subclass that overrides
+  what PySpark's conversion reads, at any level, or of a native class patched over one, converts
+  with PySpark's conversion (`LocalDataToArrowConversion`), which reads the fields of the struct,
+  their names, types and flags, and those of the types that they hold, as Python reads them, of
+  its errors, and the relation sends the `json()` of the struct: under a field whose `dataType`
+  reads `StringType()` over `a long`, `createDataFrame([(1,)], schema)` is `struct<a:string>` of
+  `Row(a='1')`, as PySpark's; and so is a NumPy array, whose table is of its columns, of the
+  `json()` of the struct. What differs:
+  - the `names` of a struct are those of the native `__init__`, which does not read the `name` of
+    each field through its class, as PySpark's `__init__` does (SPARK-62231), so a dict is taken
+    by the given names of the fields, where PySpark's takes it by the names that their `name`
+    properties read (`{"a": 1, "renamed": 2}` under a field `a` whose `name` reads `renamed` is
+    `Row(renamed=1)`, where PySpark's is `Row(renamed=2)`);
+  - a struct of a class that defines `names` or `fields`, whose `names` or `fields`, as Python
+    reads them, raise an `Exception` (as the `AttributeError` of the attribute that a setter
+    sets), or are not as many, converts by the native types, of the fields that it was given, and
+    of their JSON (SPARK-62231), as a pandas DataFrame of ones that are not as many (see above),
+    so of `names` that always raise, it converts where PySpark's conversion raises their error;
+  - a property of a field whose getter reads the state that its setter writes, and a class
+    attribute over a field's attribute, read as they read in the drop-in (SPARK-62231,
+    SPARK-62251), and a property of no setter patched over an attribute that PySpark's
+    `__init__` assigns makes PySpark raise `AttributeError: property of 'StructField' object has
+    no setter` where the drop-in converts, as of a pandas DataFrame (see above);
+  - without PyArrow, which PySpark's conversion needs, the native types convert the rows, of
+    their JSON (see "pandas DataFrames without PyArrow" above).
 - **Type names that PySpark Connect's other modules and PySpark's types read** (intentional). The
   other modules of PySpark Connect that its session imports bind the type names of
   `pyspark.sql.types` too, and PySpark's types read them when they are called, so a rebound name
@@ -1317,12 +1333,10 @@ requests of the unpickled object pickle as it is then. This case still differs:
     `TypeError` of `__slots__` without `__getstate__`;
   - the repr of an array, a map, a field or a struct that holds a type whose repr has a lone
     surrogate raises its `UnicodeEncodeError`;
-  - `createDataFrame` of local rows sends the JSON of the core types of its schema, as its rows
-    are of them (until SPARK-62258), and so does one of a pandas DataFrame or a pyarrow Table of
-    types that override none of the reads of `json()`, where PySpark sends the `json()` of the
-    object, which the server may fail to parse; of a struct that holds a type that overrides one,
-    of a pandas DataFrame, a pyarrow Table or data of no rows, it sends the `json()`, as PySpark
-    (see `createDataFrame` above);
+  - `createDataFrame` of data under types that override none of the reads of `json()` sends the
+    JSON of the core types of its schema, where PySpark sends the `json()` of the object, which
+    the server may fail to parse; of a struct that holds a type that overrides one, it sends the
+    `json()`, as PySpark (see `createDataFrame` above);
   - `simpleString()`, `repr()` and `treeString()` read the native values of the attributes that a
     subclass overrides with a property, where PySpark's read the property, as the drop-in's
     `json()` and `jsonValue()` now do (`struct<a:bigint>` and `StructField('a', LongType(), True)`
