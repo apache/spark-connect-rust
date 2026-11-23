@@ -343,7 +343,7 @@ native_model! {
         slf: &Bound<'_, Self>,
         args: &Bound<'_, PyTuple>,
         _kwargs: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<PyDataFrame> {
+    ) -> PyResult<crate::dataframe::NewDataFrame> {
         recommend(slf, "recommendForAllUsers", args)
     }
 
@@ -357,7 +357,7 @@ native_model! {
         slf: &Bound<'_, Self>,
         args: &Bound<'_, PyTuple>,
         _kwargs: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<PyDataFrame> {
+    ) -> PyResult<crate::dataframe::NewDataFrame> {
         recommend(slf, "recommendForAllItems", args)
     }
 
@@ -371,7 +371,7 @@ native_model! {
         slf: &Bound<'_, Self>,
         args: &Bound<'_, PyTuple>,
         _kwargs: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<PyDataFrame> {
+    ) -> PyResult<crate::dataframe::NewDataFrame> {
         recommend(slf, "recommendForUserSubset", args)
     }
 
@@ -385,7 +385,7 @@ native_model! {
         slf: &Bound<'_, Self>,
         args: &Bound<'_, PyTuple>,
         _kwargs: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<PyDataFrame> {
+    ) -> PyResult<crate::dataframe::NewDataFrame> {
         recommend(slf, "recommendForItemSubset", args)
     }
 }
@@ -400,7 +400,7 @@ fn recommend(
     slf: &Bound<'_, PyALSModel>,
     method: &str,
     args: &Bound<'_, PyTuple>,
-) -> PyResult<PyDataFrame> {
+) -> PyResult<crate::dataframe::NewDataFrame> {
     let target = slf.try_borrow()?.core.target()?;
     let args: Vec<Bound<'_, PyAny>> = args.iter().collect();
     crate::ml::object::attribute_relation_py(&target, method, &args)

@@ -167,7 +167,7 @@ fn pyfunc_make_udtf(
     args: Vec<Bound<'_, PyAny>>,
     deterministic: bool,
     named_args: Vec<(Bound<'_, pyo3::types::PyString>, Bound<'_, PyAny>)>,
-) -> PyResult<PyDataFrame> {
+) -> PyResult<crate::dataframe::NewDataFrame> {
     let py = session.py();
     let col_args = udf_arguments(args, named_args, true)?;
     let command = crate::udf_command::UdfCommand::of(command);

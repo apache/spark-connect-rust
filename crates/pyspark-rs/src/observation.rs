@@ -123,16 +123,16 @@ impl PyObservation {
     #[doc = connect_doc!(Observation._on)]
     fn _on(
         slf: &Bound<'_, Self>,
-        df: PyRef<'_, PyDataFrame>,
+        df: &Bound<'_, PyDataFrame>,
         exprs: Vec<Bound<'_, PyColumn>>,
-    ) -> PyResult<PyDataFrame> {
+    ) -> PyResult<crate::dataframe::NewDataFrame> {
+        let df = crate::dataframe::Frame::of(df)?;
         let exprs = exprs
             .iter()
             .map(|c| Ok(crate::column::column_of(c)?.expression().clone()))
             .collect::<PyResult<Vec<_>>>()?;
-        let observed = observe(slf.py(), &df, slf, exprs)?;
-        // The cached schema of the DataFrame, which observing does not change.
-        Ok(df.of_same_schema(observed))
+        // As PySpark's `DataFrame(plan.CollectMetrics(...), df._session)`, of no `_cached_schema`.
+        observe(slf.py(), &df, slf, exprs)
     }
 
     /// `copy.copy`, as of PySpark's Observation, a plain object: an Observation of the class and
@@ -481,10 +481,10 @@ fn copy_attributes(
 /// DataFrames of it set the metrics, as those of an Observation of their plans.
 pub(crate) fn observe(
     py: Python<'_>,
-    frame: &PyDataFrame,
+    frame: &crate::dataframe::Frame<'_>,
     observation: &Bound<'_, PyObservation>,
     exprs: Vec<Expression>,
-) -> PyResult<PyDataFrame> {
+) -> PyResult<crate::dataframe::NewDataFrame> {
     let df = &frame.dataframe;
     if !observation.getattr(intern!(py, "_result"))?.is_none() {
         return Err(raise_pyspark(
@@ -513,9 +513,15 @@ pub(crate) fn observe(
         .held_parts()
         .into_iter()
         .chain(exprs.iter().map(spark_connect::gc::PartRef::Expression));
+    // As PySpark's `Observation._on`, which reads `df.isStreaming`, its cached property.
+    let streaming = frame
+        .slf()
+        .as_any()
+        .getattr(intern!(py, "isStreaming"))?
+        .is_truthy()?;
     let _in_use = crate::gc::in_use_of_values(py, parts);
     let observed = crate::interrupt::interruptible(py, &df.spark_session(), || {
-        df.observe_with_streaming(&inner, exprs, || frame.streaming_once())
+        df.observe_with_streaming(&inner, exprs, || Ok(streaming))
     })?;
     observation.setattr(intern!(py, "_result"), PyDict::new(py))?;
     mirror_into(observation)?;
@@ -523,7 +529,7 @@ pub(crate) fn observe(
     // deep copy of the plan copies with the memo of the call. The clones of its state that do not
     // keep it alive find it by its weak reference.
     keep_handle(observation)?;
-    Ok(PyDataFrame::new(observed))
+    Ok(frame.derived(observed))
 }
 
 /// Have the executions of `session` convert the metrics of the Observations of their plans as

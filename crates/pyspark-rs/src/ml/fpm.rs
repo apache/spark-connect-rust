@@ -336,7 +336,7 @@ native_pymethods! {
     fn find_frequent_sequential_patterns(
         slf: &Bound<'_, Self>,
         dataset: &Bound<'_, PyAny>,
-    ) -> PyResult<PyDataFrame> {
+    ) -> PyResult<crate::dataframe::NewDataFrame> {
         let py = slf.py();
         let getters = [
             "getMinSupport",

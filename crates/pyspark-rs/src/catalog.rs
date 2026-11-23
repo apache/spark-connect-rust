@@ -595,7 +595,7 @@ impl PyCatalog {
         description: Option<&Bound<'_, PyAny>>,
         extra: &Bound<'_, pyo3::types::PyTuple>,
         options: Option<&Bound<'_, pyo3::types::PyDict>>,
-    ) -> PyResult<PyDataFrame> {
+    ) -> PyResult<crate::dataframe::NewDataFrame> {
         let py = slf.py();
         crate::options::check_keyword_keys(options)?;
         check_extra_positional("Catalog.createTable", 5, extra)?;

@@ -100,7 +100,7 @@ pub(crate) fn create_dataframe(
     schema: Option<&Bound<'_, PyAny>>,
     options: Option<&spark_connect::ArrowInputOptions>,
     pandas: bool,
-) -> PyResult<PyDataFrame> {
+) -> PyResult<crate::dataframe::NewDataFrame> {
     // As PySpark's createDataFrame, which first encodes each name of a list that is not a str, of
     // which most values raise the `AttributeError` of `encode`, before it reads any setting.
     if let Some(names) = schema.filter(|schema| {

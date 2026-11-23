@@ -158,13 +158,13 @@ pub fn pipeline_define_flow(
     dataflow_graph_id: &str,
     flow_name: &str,
     target: &str,
-    relation: PyRef<'_, PyDataFrame>,
+    relation: &Bound<'_, PyDataFrame>,
     sql_conf: Option<HashMap<String, String>>,
     scl_file: Option<String>,
     scl_line: Option<i32>,
 ) -> PyResult<()> {
     let sess = session.session.clone();
-    let df = relation.dataframe.clone();
+    let df = crate::dataframe::Frame::of(relation)?.dataframe.clone();
     let (gid, fname, tgt) = (
         dataflow_graph_id.to_string(),
         flow_name.to_string(),

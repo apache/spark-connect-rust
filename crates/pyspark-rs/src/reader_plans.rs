@@ -328,17 +328,26 @@ pub fn parse(
     })
 }
 
-/// The DataFrame of the plan `plan`, of the session of `client`, as PySpark's `_df` makes it of its
-/// `_client`: a session of this client, or the session of the drop-in's client of the `client` of
-/// another object (see `state::session_of_value`).
+/// The DataFrame of the plan `plan`, as PySpark's `_df` makes it of its `_client`,
+/// `DataFrame(plan, self._client)`: of `client` as it is, as its `_session`, which its requests
+/// resolve (see `dataframe::Frame::of`), and of the plan of the core of the session of `client`, a
+/// session of this client, or the session of the drop-in's client of the `client` of another
+/// object (see `state::session_of_value`); of an object of no session of the drop-in, of the
+/// session of no server, whose DataFrame then raises the error of its client at its requests.
 #[pyfunction]
 #[pyo3(name = "_read_dataframe")]
 pub fn read_dataframe(
     plan: &Bound<'_, PyReadPlan>,
     client: &Bound<'_, PyAny>,
-) -> PyResult<PyDataFrame> {
+) -> PyResult<crate::dataframe::NewDataFrame> {
     let py = plan.py();
-    let session = crate::state::session_of_value(client, pyo3::intern!(py, "client"))?;
+    let session = match crate::state::session_of_value(client, pyo3::intern!(py, "client")) {
+        Ok(session) => session,
+        Err(err) if err.is_instance_of::<pyo3::exceptions::PyException>(py) => {
+            crate::session::unconnected_session()?
+        }
+        Err(err) => return Err(err),
+    };
     let plan = plan.get();
     let df = match &plan.relation {
         ReadRelation::Source {
@@ -440,8 +449,7 @@ pub fn read_dataframe(
             options,
         } => {
             let child = plan.child.as_ref().expect("the plan of a Parse").bind(py);
-            let input = child.getattr(pyo3::intern!(py, "_df"))?;
-            let input = input.cast::<PyDataFrame>()?;
+            let input = child.cast::<crate::dataframe::PyNativePlan>()?;
             let mut reader = session.read().schema(schema.clone().unwrap_or_default());
             for (key, value) in options {
                 reader = reader.option(key, value);
@@ -451,5 +459,6 @@ pub fn read_dataframe(
                 .to_pyerr()?
         }
     };
-    Ok(PyDataFrame::new(with_plan_error(df, plan.error.clone())))
+    Ok(PyDataFrame::new(with_plan_error(df, plan.error.clone()))
+        .with_session(client.clone().unbind()))
 }

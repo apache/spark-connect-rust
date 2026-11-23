@@ -66,18 +66,13 @@ __all__ = ["DataFrameReader", "DataFrameWriter", "DataFrameWriterV2"]
 
 
 def _execution_info_callback(df: "DataFrame") -> Callable[["ExecutionInfo"], None]:
-    """The callback of the writers of ``df``, as PySpark's ``DataFrame.write`` and ``writeTo`` make
-    it: of the ``ExecutionInfo`` of the command of a write, which it sets as the execution
-    information of ``df``. Of the class of ``df``, which a pickle of the writer takes to a Python
-    worker of the server, where ``df`` is PySpark's DataFrame, of whose ``_execution_info`` it sets
-    it, as PySpark's callback does."""
+    """The callback of the writers of ``df``, as PySpark's ``DataFrame.write``, ``writeTo`` and
+    ``mergeInto`` make it: of the ``ExecutionInfo`` of the command of a write, which it sets as the
+    ``_execution_info`` of ``df``, as PySpark's callback does, also on a Python worker of the
+    server, to which a pickle of the writer takes it, where ``df`` is PySpark's DataFrame."""
 
     def cb(qe: "ExecutionInfo") -> None:
-        set_execution_info = getattr(type(df), "_set_execution_info", None)
-        if set_execution_info is None:
-            df._execution_info = qe  # type: ignore[attr-defined]
-        else:
-            set_execution_info(df, qe)
+        df._execution_info = qe  # type: ignore[attr-defined]
 
     return cb
 

@@ -76,6 +76,55 @@ impl Clone for DataFrame {
 /// Where a DataFrame keeps the information of its last execution.
 pub(crate) type ExecutionSlot = Arc<Mutex<Option<ExecutionInfo>>>;
 
+/// The caches of a DataFrame that are its own and not of its plan: of its schema, of the answer
+/// of `is_local_on_server` and of the information of its last execution, as PySpark keeps the
+/// `_cached_schema`, the `isLocal` and the `_execution_info` of each DataFrame, whatever object
+/// holds its plan. A binding whose object of a DataFrame keeps its plan in another object, as
+/// PySpark's DataFrame keeps its plan object, keeps these with the object of the DataFrame
+/// ([`DataFrame::caches`], [`DataFrame::with_session_and_caches`]). Not a stable API.
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct DataFrameCaches {
+    schema_cache: Arc<Mutex<Option<Arc<DataType>>>>,
+    is_local_cache: Arc<Mutex<Option<bool>>>,
+    execution: ExecutionSlot,
+}
+
+impl DataFrameCaches {
+    /// The caches of a new DataFrame, of nothing yet.
+    pub fn new() -> Self {
+        DataFrameCaches {
+            schema_cache: Arc::new(Mutex::new(None)),
+            is_local_cache: Arc::new(Mutex::new(None)),
+            execution: Arc::new(Mutex::new(None)),
+        }
+    }
+}
+
+impl DataFrameCaches {
+    /// The information of the last execution that these caches keep, if any, as
+    /// [`DataFrame::execution_info`] of a DataFrame of them.
+    pub fn execution_info(&self) -> Option<ExecutionInfo> {
+        self.execution.lock().unwrap().clone()
+    }
+
+    /// Forget the schema that these caches hold, unless a request of it is in flight, whose
+    /// schema they keep: as a binding does when the schema that it keeps of a DataFrame of them is
+    /// reset, so that the next request of the schema asks the server again, and concurrent first
+    /// requests still ask it once.
+    pub fn forget_schema(&self) {
+        if let Ok(mut cached) = self.schema_cache.try_lock() {
+            *cached = None;
+        }
+    }
+}
+
+impl Default for DataFrameCaches {
+    fn default() -> Self {
+        DataFrameCaches::new()
+    }
+}
+
 /// The plan of a DataFrame, a writer or a table argument whose plan is dropped, an empty relation:
 /// the garbage collector of a Python wrapper breaks a reference cycle through the wrapper this
 /// way (see [`DataFrame::clear_plan`]).
@@ -1880,12 +1929,53 @@ impl DataFrame {
     /// them. Not a stable API.
     #[doc(hidden)]
     pub fn of_plan_in(&self, session: SparkSession) -> DataFrame {
-        if !Arc::ptr_eq(self.session.plan_ids_shared(), session.plan_ids_shared()) {
+        if !self.is_numbered_in(&session) {
             session
                 .plan_ids()
                 .assign_ids_of(&self.plan, self.session.plan_ids());
         }
         DataFrame::of_shared_plan(session, Arc::clone(&self.plan))
+    }
+
+    /// Whether `session` is the session of this DataFrame, which gives its plan the plan IDs
+    /// that this DataFrame has: else [`DataFrame::of_plan_in`] gives its plan those IDs there.
+    /// Not a stable API.
+    #[doc(hidden)]
+    pub fn is_numbered_in(&self, session: &SparkSession) -> bool {
+        Arc::ptr_eq(self.session.plan_ids_shared(), session.plan_ids_shared())
+    }
+
+    /// The caches of this DataFrame, which are its own and not of its plan (see
+    /// [`DataFrameCaches`]). Not a stable API.
+    #[doc(hidden)]
+    pub fn caches(&self) -> DataFrameCaches {
+        DataFrameCaches {
+            schema_cache: Arc::clone(&self.schema_cache),
+            is_local_cache: Arc::clone(&self.is_local_cache),
+            execution: Arc::clone(&self.execution),
+        }
+    }
+
+    /// The DataFrame of the plan of this DataFrame of `session`, its session
+    /// ([`DataFrame::is_numbered_in`]), with `caches`: as a binding makes the DataFrame of its
+    /// requests of an object of a DataFrame whose plan another object holds, as PySpark's
+    /// DataFrame holds its plan object, of the session and the caches of the object of the
+    /// DataFrame. Not a stable API.
+    #[doc(hidden)]
+    pub fn with_session_and_caches(
+        &self,
+        session: SparkSession,
+        caches: &DataFrameCaches,
+    ) -> DataFrame {
+        debug_assert!(self.is_numbered_in(&session));
+        crate::gc::cloned(Arc::as_ptr(&self.plan) as usize);
+        DataFrame {
+            session,
+            plan: Arc::clone(&self.plan),
+            schema_cache: Arc::clone(&caches.schema_cache),
+            is_local_cache: Arc::clone(&caches.is_local_cache),
+            execution: Arc::clone(&caches.execution),
+        }
     }
 
     /// Give the plan of this DataFrame the plan ID `id` in its session, which its relation is

@@ -9,7 +9,7 @@ fn transform_native<T>(
     slf: &Bound<'_, T>,
     dataset: &Bound<'_, PyAny>,
     params: Option<&Bound<'_, PyAny>>,
-) -> PyResult<PyDataFrame>
+) -> PyResult<crate::dataframe::NewDataFrame>
 where
     T: Native + PyClass,
     T::Core: Transformer,
@@ -131,7 +131,7 @@ macro_rules! feature_transformer {
                     let copy = params_api::copy(slf, Some(map))?;
                     return Ok(copy.as_any().call_method1("transform", (dataset,))?.unbind());
                 }
-                Ok(crate::ml::object::new_py(slf.py(), transform_native(slf, dataset, params)?)?.into_any())
+                Ok(transform_native(slf, dataset, params)?.into_py(slf.py())?.into_any())
             }
             $($($extra)*)?
         }

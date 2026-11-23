@@ -77,7 +77,7 @@ pub(crate) fn dropna(
     how: Option<&Bound<'_, PyAny>>,
     thresh: Option<&Bound<'_, PyAny>>,
     subset: Option<&Bound<'_, PyAny>>,
-) -> PyResult<PyDataFrame> {
+) -> PyResult<crate::dataframe::NewDataFrame> {
     // PySpark compares `how` to "all" and "any" in Python: a str that UTF-8 cannot encode is
     // neither, as "" is not.
     let how = how
@@ -156,7 +156,7 @@ pub(crate) fn fillna(
     df: &DataFrame,
     value: &Bound<'_, PyAny>,
     subset: Option<&Bound<'_, PyAny>>,
-) -> PyResult<PyDataFrame> {
+) -> PyResult<crate::dataframe::NewDataFrame> {
     let dict = value.cast::<PyDict>().ok();
     if dict.is_none() && !is_primitive(value) {
         return Err(not_expected_type(
@@ -322,7 +322,7 @@ pub(crate) fn crosstab(
     stat: &StatFunctions,
     col1: &Bound<'_, PyAny>,
     col2: &Bound<'_, PyAny>,
-) -> PyResult<PyDataFrame> {
+) -> PyResult<crate::dataframe::NewDataFrame> {
     for (col, name) in [(col1, "col1"), (col2, "col2")] {
         if !col.is_instance_of::<PyString>() {
             return Err(not_expected_type(col, name, "str"));
@@ -340,7 +340,7 @@ pub(crate) fn freq_items(
     stat: &StatFunctions,
     cols: &Bound<'_, PyAny>,
     support: Option<&Bound<'_, PyAny>>,
-) -> PyResult<PyDataFrame> {
+) -> PyResult<crate::dataframe::NewDataFrame> {
     if !is_sequence(cols) {
         return Err(not_expected_type(cols, "cols", "list or tuple"));
     }
