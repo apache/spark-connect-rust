@@ -37,7 +37,7 @@ difference is intentional or tracked for a fix.
   unavailable modules detected by `pyarrow_available`, not an installed PyArrow module that
   fails during import.
 - **pandas DataFrames under customized or patched types, or rebound type names** (tracked for a
-  fix: SPARK-62231, SPARK-62236, SPARK-62251). With PyArrow, a frame converts with PySpark's
+  fix: SPARK-62236). With PyArrow, a frame converts with PySpark's
   conversion, in its order, of the conversions and the types that `pyspark.sql.connect.session`
   binds when it is imported, with the first session, as PySpark Connect's module of the session
   binds them (`prepare_pandas_table`, `prepare_inferred_pandas_table`), whose conversion of each
@@ -58,74 +58,50 @@ difference is intentional or tracked for a fix.
   (its `fields`, `names` or iteration, a field's `name`, `dataType`, `nullable` or `metadata`, or
   `__getattribute__` or `__class__`, which the fast paths decline), converts with PySpark's
   conversion too, which reads the patch or the override as PySpark's does, of its table, its
-  errors and its columns. What differs:
-  - Of a struct of a class that defines `names` or `fields` itself, whose `names` and `fields`, as
-    Python reads them, are not as many, the frame takes the native row path (see "pandas
-    DataFrames without PyArrow" above), of its rows and of a relation of its native fields
-    (SPARK-62231): PySpark's `__init__` assigns them through the class's setters, and the native
-    `__init__` does not, so a `names` or `fields` property of a setter reads none. Of a `fields`
-    property, the struct's `json()` and the relation of a frame of no rows are of the fields that
-    the native `__init__` was given too, also of one whose read raises, as the `AttributeError` of
-    the attribute that its setter sets, as PySpark's are of the fields that its `__init__` assigned
-    (see below). Where PySpark's conversion takes such a struct, the row path
-    names the columns by the native names (`a` where PySpark's are the `A` of a setter that
-    upper-cases them), raises `AXIS_LENGTH_MISMATCH` of a frame of fewer columns, where PySpark
-    raises the `ArrowInvalid` of its rename, and `PySparkRuntimeError: Type mismatch in row data`
-    of a column that does not convert, where PySpark raises the error of its conversion. Of
-    `names` that are not as many in PySpark either, it converts the rows where PySpark raises
-    `IndexError` (of fewer names) or the server's `ASSIGNMENT_ARITY_MISMATCH` (of more). A `fields`
-    or `names` list changed in place, of a class that defines neither, takes PySpark's conversion.
-  - A property of no setter patched over a struct's `fields` or `names`, which PySpark's
-    `__init__` assigns, makes PySpark's `_deduplicate_field_names` raise `AttributeError: property
-    of 'StructType' object has no setter`, as the `__init__` of the struct that it makes assigns
-    through it. The native `__init__` of a struct does not (SPARK-62231), so the conversion goes on
-    and reads the patch where PySpark's would, and so does the relation's schema, the struct's
-    `json()` (see below): a struct's `names` names the column of the table, of a relation of the
-    native names, and its `fields` of `[]` makes a table and a relation of no columns, which the
-    server raises `ASSIGNMENT_ARITY_MISMATCH` of, of the names of `toDF`. A field assigns its
-    `name`, `dataType`, `nullable` and `metadata` through such a property, as PySpark's, of its
-    `AttributeError: property of 'StructField' object has no setter` (SPARK-62251).
-  - The relation's schema is the `json()` of the struct, as PySpark's, which reads the attributes
-    of the types as Python reads them, the overrides and the patches too, as the conversion does:
-    of a field of a subclass whose `dataType` reads `StringType()` over a column of strs under
-    `a long`, the DataFrame is `struct<a:string>`, and of `StringType.isUTF8BinaryCollation`
-    patched to return False, the schema holds the collation of the field (`"string collate
-    UTF8_BINARY"`, and its `__COLLATIONS` metadata), as PySpark's, also of a frame of no rows and of
-    a pyarrow Table, which is cast to the struct. A field reads its attributes as PySpark's does
-    (SPARK-62251): its `__init__` assigns them through the setters of a property of a subclass,
-    whose getter reads the state that the setter wrote, and its own attributes shadow a class
-    attribute over one (`nullable = False`).
-
-  A Python subclass of `StructType` or `StructField` that overrides none of these takes PySpark's
-  conversion, as in PySpark, with the JSON of its core types, where PySpark sends its `json()`,
-  which names a struct of a subclass by its `typeName()` and which the server then fails to parse
-  (see the types of `docs/compatibility.md`); so does one that overrides only a struct's `names`,
-  `__getattribute__` or `__class__`, which `json()` does not read. So does a name that holds a
-  NUL, at any depth, whose table the importer reads of its IPC stream, as the C data interface
-  holds names as C strings.
-- **Local data under customized or patched types** (tracked for a fix: SPARK-62231,
-  SPARK-62251). As PySpark's createDataFrame, local data (tuples, lists, dicts, Rows, values that
-  are no rows and iterators) under a struct that holds a type of a Python subclass that overrides
-  what PySpark's conversion reads, at any level, or of a native class patched over one, converts
-  with PySpark's conversion (`LocalDataToArrowConversion`), which reads the fields of the struct,
-  their names, types and flags, and those of the types that they hold, as Python reads them, of
-  its errors, and the relation sends the `json()` of the struct: under a field whose `dataType`
-  reads `StringType()` over `a long`, `createDataFrame([(1,)], schema)` is `struct<a:string>` of
-  `Row(a='1')`, as PySpark's; and so is a NumPy array, whose table is of its columns, of the
-  `json()` of the struct. A field reads its attributes as PySpark's does (SPARK-62251): its
+  errors and its columns. A struct and a field assign their parameters through the attributes of
+  their classes, as PySpark's, of the setters of a subclass and of the `AttributeError` of a
+  property of no setter patched over one (`property of 'StructType' object has no setter`, of
+  `_deduplicate_field_names`), and read them as Python reads them (SPARK-62231, SPARK-62251).
+  The relation's schema is the `json()` of the struct, as PySpark's, which reads the attributes of
+  the types as Python reads them, the overrides and the patches too, as the conversion does: of a
+  field of a subclass whose `dataType` reads `StringType()` over a column of strs under `a long`,
+  the DataFrame is `struct<a:string>`, and of `StringType.isUTF8BinaryCollation` patched to return
+  False, the schema holds the collation of the field (`"string collate UTF8_BINARY"`, and its
+  `__COLLATIONS` metadata), as PySpark's, also of a frame of no rows and of a pyarrow Table, which
+  is cast to the struct. A struct and a field read their attributes as PySpark's do: their
   `__init__` assigns them through the setters of a property of a subclass, whose getter reads the
-  state that the setter wrote, and its own attributes shadow a class attribute over one; a
-  property of no setter patched over one makes its `__init__` raise PySpark's `AttributeError:
-  property of 'StructField' object has no setter`; and the `names` of a struct are those that the
-  `name` of each field reads, by which a dict is taken (`{"a": 1, "renamed": 2}` under a field `a`
-  whose `name` reads `renamed` is `Row(renamed=2)`, as PySpark's). What differs:
-  - a struct of a class that defines `names` or `fields`, whose `names` or `fields`, as Python
-    reads them, raise an `Exception` (as the `AttributeError` of the attribute that a setter
-    sets), or are not as many, converts by the native types, of the fields that it was given, and
-    of their JSON (SPARK-62231), as a pandas DataFrame of ones that are not as many (see above),
-    so of `names` that always raise, it converts where PySpark's conversion raises their error;
-  - without PyArrow, which PySpark's conversion needs, the native types convert the rows, of
-    their JSON (see "pandas DataFrames without PyArrow" above).
+  state that the setter wrote, and their own attributes shadow a class attribute over one
+  (`nullable = False`).
+
+  What differs: a Python subclass of `StructType` or `StructField` that overrides none of these
+  takes PySpark's conversion, as in PySpark, with the JSON of its core types, where PySpark sends
+  its `json()`, which names a struct of a subclass by its `typeName()` and which the server then
+  fails to parse (see the types of `docs/compatibility.md`); so does one that overrides only a
+  struct's `__getattribute__` or `__class__`, which `json()` does not read (one of a `names` of its
+  own sends the `json()`, as PySpark's, as the conversion reads them). So does a name
+  that holds a NUL, at any depth, whose table the importer reads of its IPC stream, as the C data
+  interface holds names as C strings.
+- **Local data under customized or patched types** (intentional optional-dependency fallback
+  of local data without PyArrow, as "pandas DataFrames without PyArrow" above). As PySpark's
+  createDataFrame, local data (tuples, lists, dicts, Rows, values that are no rows and iterators)
+  under a struct that holds a type of a Python subclass that overrides what PySpark's conversion
+  reads, at any level, or of a native class patched over one, converts with PySpark's conversion
+  (`LocalDataToArrowConversion`), which reads the fields of the struct, their names, types and
+  flags, and those of the types that they hold, as Python reads them, of its errors, and the
+  relation sends the `json()` of the struct: under a field whose `dataType` reads `StringType()`
+  over `a long`, `createDataFrame([(1,)], schema)` is `struct<a:string>` of `Row(a='1')`, as
+  PySpark's; and so is a NumPy array, whose table is of its columns, of the `json()` of the
+  struct. A struct and a field read their attributes as PySpark's do (SPARK-62231, SPARK-62251):
+  their `__init__` assigns them through the setters of a property of a subclass, whose getter
+  reads the state that the setter wrote, and their own attributes shadow a class attribute over
+  one; a property of no setter patched over one makes their `__init__` raise PySpark's
+  `AttributeError` (`property of 'StructField' object has no setter`, and of `'StructType'`); and
+  the `names` of a struct are those that the `name` of each field reads, by which a dict is taken
+  (`{"a": 1, "renamed": 2}` under a field `a` whose `name` reads `renamed` is `Row(renamed=2)`, as
+  PySpark's). So a struct of a class that defines `names` or `fields` converts with PySpark's
+  conversion too, of the errors of their reads. What differs: without PyArrow, which PySpark's
+  conversion needs, the native types convert the rows, of their JSON (see "pandas DataFrames
+  without PyArrow" above).
 - **Type names that PySpark Connect's other modules and PySpark's types read** (intentional). The
   other modules of PySpark Connect that its session imports bind the type names of
   `pyspark.sql.types` too, and PySpark's types read them when they are called, so a rebound name
@@ -254,8 +230,7 @@ difference is intentional or tracked for a fix.
   request, and the schema of `createDataFrame` of no rows is the server's of the JSON in which
   `json.dumps` escapes the surrogate (`a?b`), whose rows fail on the server (`Unpaired surrogate at
   index 1 of 3`). What differs:
-  - the `simpleString()` of such a name raises its `UnicodeEncodeError`, where PySpark's makes it,
-    and so do the repr, `str()` and hash of a struct of it;
+  - the `simpleString()` of such a name raises its `UnicodeEncodeError`, where PySpark's makes it;
   - the schema of `DataFrame.to` of such a name is requested of the server, which its plan raises
     the error of, where PySpark's is its cached schema, of no request;
   - a plan of a cast to a type of such metadata raises the `UnicodeEncodeError`, where PySpark's
@@ -617,10 +592,11 @@ requests of the unpickled object pickle as it is then. This case still differs:
   (`hash()` and `repr()`), 250 (`json()` and `simpleString()`) and 330 (`treeString()`), the drop-in
   raises its own past Python's recursion limit of the levels of its walks of the type objects, a
   level for each struct and each field (SPARK-62224, see below): from about 500 nested structs of
-  `==`, pickling, `treeString()`, `hash()` and `repr()`, and 1,000 of `simpleString()` and
-  `toNullable()`; of `json()` (of Python's `json` module) from about 330, and of `copy.deepcopy`
-  and unpickling, which convert the JSON of the type in Python, from about 250. Of nested arrays,
-  PySpark's from about 250 (`copy.deepcopy`) to 1,000 (`json()`, `simpleString()`), and the
+  `==`, `treeString()`, `hash()` and `repr()`, and 1,000 of `simpleString()` and `toNullable()`;
+  of `json()` (of Python's `json` module) from about 330; and of `copy.deepcopy` and pickling,
+  which copy and pickle the `__dict__`s of the types in Python, as PySpark's, from about 100 and
+  125, also on a thread of 256 KiB, as a thread of 128 KiB overflows from there in both. Of nested
+  arrays, PySpark's from about 250 (`copy.deepcopy`) to 1,000 (`json()`, `simpleString()`), and the
   drop-in's from about 250 (`copy.deepcopy`) and 330 (pickling), which copy and pickle the
   `__dict__`s of the arrays in Python, as PySpark's, to 1,000. A higher limit
   (`sys.setrecursionlimit`) takes more levels, in both.
@@ -1401,13 +1377,11 @@ requests of the unpickled object pickle as it is then. This case still differs:
   PySpark's methods of the class call them, also in the types that hold it and on the Python
   workers of the server, to which it pickles of its class and its `__dict__`, as PySpark's. A
   type of parameters, a decimal, a string, a char, a varchar, a time, an interval of fields or a
-  spatial type, and an array, a map and a field, keep them in their `__dict__`, as PySpark's, of
-  any value, which their methods read as PySpark's, also of a property of a subclass, and a
-  subclass of `__slots__` raises PySpark's `TypeError` of `__slots__` without `__getstate__` at the
-  protocols 0 and 1. What stays different (see `docs/compatibility.md`):
-  - the parameters of a struct are not entries of its `__dict__`, and a subclass of it whose
-    `__init__` does not call that of its class has the defaults of the class, where PySpark's has
-    no parameters (tracked: SPARK-62251);
+  spatial type, and an array, a map, a field and a struct, keep them in their `__dict__`, as
+  PySpark's, of any value, which their `__init__` assigns through `setattr` and their methods read
+  as PySpark's, also of a property of a subclass, and a subclass of `__slots__` raises PySpark's
+  `TypeError` of `__slots__` without `__getstate__` at the protocols 0 and 1. What stays different
+  (see `docs/compatibility.md`):
   - inherent, of the metaclass of a native class: the `__init__` of a subclass of a singleton type
     runs at each call of the class (of `class Counted(IntegerType)` whose `__init__` counts,
     `Counted() is Counted()`, and the count is 2, where PySpark's is 1), and copies and pickles of
@@ -1425,21 +1399,14 @@ requests of the unpickled object pickle as it is then. This case still differs:
     the class (`X()` is `StringType()`): an object of such a class would be of the native layout
     of one branch, which the native methods of the other read as theirs, as CPython raises of
     bases of conflicting layouts;
-  - the repr of a struct that holds a type whose repr has a lone surrogate raises its
-    `UnicodeEncodeError`;
   - `createDataFrame` of data under types that override none of the reads of `json()` sends the
     JSON of the core types of its schema, where PySpark sends the `json()` of the object, which
     the server may fail to parse; of a struct that holds a type that overrides one, it sends the
     `json()`, as PySpark (see `createDataFrame` above);
-  - the `simpleString()`, `repr()` and `treeString()` of a struct read the native values of its
-    `fields` that a subclass overrides with a property, where PySpark's read the property
-    (`struct<a:bigint,b:string>` of a `fields` property that reverses them, where PySpark's is
-    `struct<b:string,a:bigint>`), until SPARK-62251.
 
-  The class's own types of no parameters, and its structs, compare without the attributes that a
-  user set on them, and a struct without those of the fields and the types that it holds, where
-  PySpark's comparison of the `__dict__`s holds them (see `docs/compatibility.md`); their copies
-  and pickles keep them, as PySpark's.
+  The class's own types of no parameters compare without the attributes that a user set on them,
+  where PySpark's comparison of the `__dict__`s holds them (see `docs/compatibility.md`); their
+  copies and pickles keep them, as PySpark's.
 - **The functions of `pyspark.sql.connect.functions`** (intentional; the drop-in's, of the Rust
   core). `pyspark.sql.functions` is PySpark's package, as it is, whose functions run those of
   `pyspark.sql.connect.functions` of their names, as with `pyspark-client`. Those are the drop-in's,
