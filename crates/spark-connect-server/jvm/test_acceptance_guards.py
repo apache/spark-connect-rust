@@ -105,7 +105,12 @@ class ShutdownEvidenceTest(unittest.TestCase):
                          "embedded server reported failed resource cleanup")
 
     def test_successful_per_call_attachment_fallback_is_accepted(self):
-        content = ("JVM cleanup lane attachment failed; using per-call attachment: temporary failure\n"
+        content = ("JVM cleanup thread attachment failed; using per-call attachment: temporary failure\n"
+                   + SHUTDOWN_COMPLETE + "\n")
+        self.assertIsNone(shutdown_error(content, 128 + signal.SIGTERM))
+
+    def test_successful_cleanup_dispatch_retry_is_accepted(self):
+        content = ("JNI cleanup thread dispatch failed; automatic retry is pending: temporary failure\n"
                    + SHUTDOWN_COMPLETE + "\n")
         self.assertIsNone(shutdown_error(content, 128 + signal.SIGTERM))
 

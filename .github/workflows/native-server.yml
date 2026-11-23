@@ -263,12 +263,14 @@ jobs:
               destination.write_bytes(jar.read("META-INF/native/linux-x86_64/libspark_connect_jni.so"))
           PY
 
-      - name: Compile Java adapter and run real JNI smoke
+      - name: Compile Java adapter and verify JNI lifecycle and cleanup isolation
         timeout-minutes: 10
         run: |
           export SPARK_HOME="$PWD/spark-runtime"
           crates/spark-connect-server/jvm/test-jni-smoke.sh \
             "$PWD/native-library/libspark_connect_jni.so"
+          crates/spark-connect-server/jvm/test-jni-smoke.sh \
+            "$PWD/native-library/libspark_connect_jni.so" --cleanup-isolation
 
       - name: Upload real JNI smoke logs
         if: always()

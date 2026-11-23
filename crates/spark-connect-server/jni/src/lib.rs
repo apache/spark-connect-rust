@@ -149,6 +149,7 @@ fn start_host(address: &[u8], backend: Arc<engine::JvmEngine>) -> Result<i64, St
     let thread = std::thread::Builder::new()
         .name("spark-connect-jni-server".into())
         .spawn(move || {
+            runtime.spawn(worker_backend.clone().retry_dispatch_loop());
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 runtime.block_on(async {
                     let listener =
@@ -244,12 +245,15 @@ fn stop_server(id: i64) -> Result<(), String> {
     let result = loop {
         if let Some(error) = server.backend.cleanup_failure() {
             // The listener thread still owns the runtime and waits for the
-            // retained handles/permits. A later explicit close can retry them.
+            // retained handles/permits. Dispatch retries continue there; a later
+            // explicit close retries failures from native cleanup itself.
             return Err(error);
         }
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
         if remaining.is_zero() {
-            return Err("JNI stop is incomplete; active JVM calls retained safely, retry close after they finish".into());
+            return Err(server.backend.dispatch_failure().unwrap_or_else(|| {
+                "JNI stop is incomplete; active JVM calls retained safely, retry close after they finish".into()
+            }));
         }
         match completed.recv_timeout(remaining.min(Duration::from_millis(20))) {
             Ok(result) => {
@@ -487,11 +491,76 @@ mod tests {
         assert!(empty.data.is_null() && empty.len == 0);
     }
 
+    fn start_test_host(backend: &Arc<engine::JvmEngine>) -> i64 {
+        match start_host(b"127.0.0.1:0", backend.clone()) {
+            Ok(id) => id,
+            Err(error) => {
+                backend.finish_null_cleanup_for_test();
+                panic!("test host did not start: {error}");
+            }
+        }
+    }
+
+    #[test]
+    fn close_waits_for_pending_dispatch_retry() {
+        let backend = engine::JvmEngine::new(ptr::null_mut());
+        let id = start_test_host(&backend);
+        backend.fail_handle_dispatch_for_test();
+        let result = std::panic::catch_unwind(|| {
+            stop_server(id).unwrap();
+            assert!(find_server(id).is_err());
+        });
+        backend.finish_null_cleanup_for_test();
+        if find_server(id).is_ok() {
+            stop_server(id).unwrap();
+        }
+        result.unwrap();
+    }
+
+    #[test]
+    fn host_runtime_retries_dispatch_notified_before_start() {
+        let backend = engine::JvmEngine::new(ptr::null_mut());
+        backend.fail_handle_dispatch_for_test();
+        let before_start = backend.cleanup_state_for_test();
+        let id = start_test_host(&backend);
+        let result = std::panic::catch_unwind(|| {
+            assert_eq!(
+                before_start,
+                engine::CleanupTestState {
+                    handles: 1,
+                    native_failures: 0,
+                    pending_dispatch: 1,
+                }
+            );
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            while backend.cleanup_state_for_test() != engine::CleanupTestState::default()
+                && std::time::Instant::now() < deadline
+            {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            // Only start_host starts the retry loop; no explicit close has run.
+            assert_eq!(
+                backend.cleanup_state_for_test(),
+                engine::CleanupTestState::default()
+            );
+            assert!(backend.cleanup_failure().is_none());
+            assert!(listener_running(id));
+            assert!(!server_drained(id));
+        });
+        // Rescue synthetic pending work if the runtime wiring regresses, so a
+        // failed assertion cannot strand the listener in its subsequent drain.
+        backend.finish_null_cleanup_for_test();
+        let cleanup = stop_server(id);
+        result.unwrap();
+        cleanup.unwrap();
+        assert!(find_server(id).is_err());
+    }
+
     #[test]
     fn stopped_listener_reports_unhealthy_while_retained_cleanup_blocks_drain() {
         let backend = engine::JvmEngine::new(ptr::null_mut());
         backend.fail_handle_cleanup_for_test();
-        let id = start_host(b"127.0.0.1:0", backend).unwrap();
+        let id = start_test_host(&backend);
         let server = find_server(id).unwrap();
         let result = std::panic::catch_unwind(|| {
             assert!(listener_running(id));
@@ -516,9 +585,34 @@ mod tests {
                 Err(std_mpsc::TryRecvError::Empty)
             ));
             assert!(server.thread.lock().unwrap().is_some());
+            server.backend.fail_handle_dispatch_for_test();
+            let awaiting_native_cleanup = engine::CleanupTestState {
+                handles: 1,
+                native_failures: 1,
+                pending_dispatch: 0,
+            };
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            while server.backend.cleanup_state_for_test() != awaiting_native_cleanup
+                && std::time::Instant::now() < deadline
+            {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            // The real host runtime must keep retrying after listener shutdown,
+            // while the original native failure still prevents drain completion.
+            assert_eq!(
+                server.backend.cleanup_state_for_test(),
+                awaiting_native_cleanup
+            );
+            assert!(!listener_running(id));
+            assert!(!server_drained(id));
+            assert!(matches!(
+                server.done.lock().unwrap().try_recv(),
+                Err(std_mpsc::TryRecvError::Empty)
+            ));
         });
-        // Retry the synthetic null-handle cleanup even if an assertion failed,
-        // so this test never strands its listener thread in wait_drained.
+        // Release both classes of synthetic null-handle cleanup even if an
+        // assertion failed, so this test never strands wait_drained.
+        server.backend.finish_null_cleanup_for_test();
         let cleanup = stop_server(id);
         result.unwrap();
         cleanup.unwrap();

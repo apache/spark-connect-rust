@@ -39,7 +39,8 @@ use std::{
     time::Duration,
 };
 use tokio::sync::{
-    Mutex as AsyncMutex, OwnedSemaphorePermit, RwLock, RwLockReadGuard, RwLockWriteGuard, Semaphore,
+    Mutex as AsyncMutex, Notify, OwnedSemaphorePermit, RwLock, RwLockReadGuard, RwLockWriteGuard,
+    Semaphore,
 };
 use tokio::time::Instant;
 use tonic::Status;
@@ -128,6 +129,14 @@ struct Counts {
     handles: usize,
     tasks: HashMap<u64, Weak<Task>>,
     failed_cleanup: Vec<FailedCleanup>,
+    pending_dispatch: Vec<FailedCleanup>,
+}
+#[cfg(test)]
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(super) struct CleanupTestState {
+    pub(super) handles: usize,
+    pub(super) native_failures: usize,
+    pub(super) pending_dispatch: usize,
 }
 pub(super) struct JvmEngine {
     factory: AtomicPtr<c_void>,
@@ -137,6 +146,8 @@ pub(super) struct JvmEngine {
     permits: Arc<Semaphore>,
     session_permits: Arc<Semaphore>,
     worker_attachments: AtomicUsize,
+    cleanup_attach_failure_reported: AtomicBool,
+    dispatch_ready: Notify,
 }
 // C owns JavaVM/global references. JNI worker attachments remain thread-local.
 unsafe impl Send for JvmEngine {}
@@ -159,6 +170,8 @@ impl JvmEngine {
             permits: Arc::new(Semaphore::new(64)),
             session_permits: Arc::new(Semaphore::new(64)),
             worker_attachments: AtomicUsize::new(0),
+            cleanup_attach_failure_reported: AtomicBool::new(false),
+            dispatch_ready: Notify::new(),
         })
     }
     pub(super) fn attach_worker(self: &Arc<Self>) -> Result<WorkerAttachment, Status> {
@@ -210,6 +223,40 @@ impl JvmEngine {
             |_| Err(Status::internal("injected Java cleanup failure")),
         );
     }
+    #[cfg(test)]
+    pub(super) fn fail_handle_dispatch_for_test(self: &Arc<Self>) {
+        self.counts.lock().unwrap().handles += 1;
+        retain_dispatch_cleanup(
+            Cleanup::Free {
+                pointer: 0,
+                core: self.clone(),
+                permit: None,
+                kind: HandleKind::Session,
+                retained_task: None,
+            },
+            Status::unavailable("injected cleanup thread dispatch failure"),
+        );
+    }
+    #[cfg(test)]
+    pub(super) fn cleanup_state_for_test(&self) -> CleanupTestState {
+        let counts = self.counts.lock().unwrap();
+        CleanupTestState {
+            handles: counts.handles,
+            native_failures: counts.failed_cleanup.len(),
+            pending_dispatch: counts.pending_dispatch.len(),
+        }
+    }
+    #[cfg(test)]
+    pub(super) fn finish_null_cleanup_for_test(&self) {
+        // Host lifecycle fixtures create only null handles, which C frees without JNI.
+        for failure in self
+            .take_failed_cleanup()
+            .into_iter()
+            .chain(self.take_pending_dispatch())
+        {
+            cleanup(failure.item);
+        }
+    }
     pub(super) fn shutdown(&self) {
         let tasks = {
             let counts = self
@@ -248,9 +295,23 @@ impl JvmEngine {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         counts.failed_cleanup.first().map(|failure| {
             format!(
-                "JNI cleanup is incomplete; retained cleanup failed: {} ({} pending); retry close after the failure is resolved",
+                "JNI cleanup is incomplete; retained cleanup failed: {} ({} pending native cleanups, {} pending dispatch retries); retry close after the failure is resolved",
                 failure.error,
-                counts.failed_cleanup.len()
+                counts.failed_cleanup.len(),
+                counts.pending_dispatch.len()
+            )
+        })
+    }
+    pub(super) fn dispatch_failure(&self) -> Option<String> {
+        let counts = self
+            .counts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        counts.pending_dispatch.first().map(|failure| {
+            format!(
+                "JNI cleanup is incomplete; cleanup thread dispatch failed: {} ({} pending); automatic retry is pending",
+                failure.error,
+                counts.pending_dispatch.len()
             )
         })
     }
@@ -263,11 +324,59 @@ impl JvmEngine {
                 .failed_cleanup,
         )
     }
-    /// Only an explicit owner close retries failed cleanup. Preserve each item's
-    /// cleanup ownership, Java handles and admission until success.
+    /// Only an explicit owner close retries failed native cleanup. Dispatch
+    /// failures retry separately without replaying Java side effects.
     pub(super) fn retry_failed_cleanup(&self) {
         for failure in self.take_failed_cleanup() {
             queue(failure.item);
+        }
+    }
+    fn take_pending_dispatch(&self) -> Vec<FailedCleanup> {
+        std::mem::take(
+            &mut self
+                .counts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .pending_dispatch,
+        )
+    }
+    /// Keep this task running until drain, including during server shutdown.
+    /// Dispatch has not entered Java, so retrying it cannot replay partial close.
+    pub(super) async fn retry_dispatch_loop(self: Arc<Self>) {
+        self.retry_dispatch_loop_with(dispatch_cleanup).await;
+    }
+    async fn retry_dispatch_loop_with(
+        self: Arc<Self>,
+        mut dispatch: impl FnMut(Cleanup) -> Result<(), (Cleanup, Status)> + Send,
+    ) {
+        loop {
+            self.dispatch_ready.notified().await;
+            let mut delay = Duration::from_millis(10);
+            loop {
+                // A failed retry notifies too. Always wait here rather than
+                // letting that notification bypass the dispatch backoff.
+                tokio::time::sleep(delay).await;
+                let pending = self.take_pending_dispatch();
+                // A stale notification must not advance a fresh failure's backoff.
+                if pending.is_empty() {
+                    break;
+                }
+                for failure in pending {
+                    if let Err((item, error)) = dispatch(failure.item) {
+                        retain_dispatch_cleanup(item, error);
+                    }
+                }
+                if self
+                    .counts
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .pending_dispatch
+                    .is_empty()
+                {
+                    break;
+                }
+                delay = (delay * 2).min(Duration::from_millis(250));
+            }
         }
     }
     fn take_factory_after_drain(&self) -> Result<*mut c_void, String> {
@@ -570,25 +679,20 @@ impl<W> CleanupAttachment<W> {
     fn attach_or_fallback(
         core: &Arc<JvmEngine>,
         attach: impl FnOnce(&Arc<JvmEngine>) -> Result<W, Status>,
-        reported: &mut Option<Weak<JvmEngine>>,
         report: impl FnOnce(&Status),
     ) -> Option<Self> {
         match Self::attach_with(core, attach) {
             Ok(attachment) => {
-                *reported = None;
+                core.cleanup_attach_failure_reported
+                    .store(false, Ordering::SeqCst);
                 Some(attachment)
             }
             Err(error) if error.code() == tonic::Code::Unavailable => None,
             Err(error) => {
-                // Suppress consecutive reports for the same engine until an
-                // attachment succeeds. Alternating failing engines report once
-                // per switch. The weak identity does not retain the engine.
-                let identity = Arc::downgrade(core);
-                if reported
-                    .as_ref()
-                    .is_none_or(|previous| !Weak::ptr_eq(previous, &identity))
+                if !core
+                    .cleanup_attach_failure_reported
+                    .swap(true, Ordering::SeqCst)
                 {
-                    *reported = Some(identity);
                     report(&error);
                 }
                 None
@@ -619,7 +723,6 @@ fn cleanup_loop_with<W>(
     mut attach: impl FnMut(&Arc<JvmEngine>) -> Result<W, Status>,
 ) {
     let mut attachment: Option<CleanupAttachment<W>> = None;
-    let mut reported = None;
     loop {
         let item = if attachment.is_some() {
             match rx.recv_timeout(idle) {
@@ -648,10 +751,9 @@ fn cleanup_loop_with<W>(
                     attachment = CleanupAttachment::attach_or_fallback(
                         core,
                         &mut attach,
-                        &mut reported,
                         |error| {
                             log_diagnostic(format_args!(
-                                "JVM cleanup lane attachment failed; using per-call attachment: {error}"
+                                "JVM cleanup thread attachment failed; using per-call attachment: {error}"
                             ));
                         },
                     );
@@ -742,7 +844,25 @@ fn cleanup_with_actions(
         Cleanup::TestAction { action, .. } => action(),
     }
 }
+fn retain_dispatch_cleanup(item: Cleanup, error: Status) {
+    let core = item.core().expect("native cleanup has an engine").clone();
+    core.counts
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .pending_dispatch
+        .push(FailedCleanup { item, error });
+    core.dispatch_ready.notify_one();
+}
 fn queue(item: Cleanup) {
+    if let Err((item, error)) = dispatch_cleanup(item) {
+        let message = error.to_string();
+        retain_dispatch_cleanup(item, error);
+        log_diagnostic(format_args!(
+            "JNI cleanup thread dispatch failed; automatic retry is pending: {message}"
+        ));
+    }
+}
+fn dispatch_cleanup(item: Cleanup) -> Result<(), (Cleanup, Status)> {
     static TASK: Mutex<Option<mpsc::Sender<Cleanup>>> = Mutex::new(None);
     // A query/session close may wait indefinitely for Spark work. Give each
     // owner its own closer so it cannot retain unrelated owners' admission.
@@ -754,16 +874,12 @@ fn queue(item: Cleanup) {
         HandleKind::Query => (&owner, "spark-connect-engine-query-cleanup"),
         HandleKind::Session => (&owner, "spark-connect-engine-session-cleanup"),
     };
-    if let Err((item, error)) = enqueue_cleanup(item, sender, |rx| {
+    enqueue_cleanup(item, sender, |rx| {
         std::thread::Builder::new()
             .name(name.into())
             .spawn(move || cleanup_loop(rx))
             .map(|_| ())
-    }) {
-        // Never run potentially blocking JNI on an async worker when a cleanup
-        // thread cannot start. Keep ownership for an explicit close retry.
-        retain_failed_cleanup(item, error);
-    }
+    })
 }
 
 fn enqueue_cleanup(
@@ -789,7 +905,7 @@ fn enqueue_cleanup(
     if let Err(error) = spawn(rx) {
         return Err((
             item,
-            Status::unavailable(format!("cannot start JNI cleanup lane: {error}")),
+            Status::unavailable(format!("cannot start JNI cleanup thread: {error}")),
         ));
     }
     match tx.send(item) {
@@ -797,7 +913,7 @@ fn enqueue_cleanup(
             *sender = Some(tx);
             Ok(())
         }
-        Err(error) => Err((error.0, Status::unavailable("JNI cleanup lane stopped"))),
+        Err(error) => Err((error.0, Status::unavailable("JNI cleanup thread stopped"))),
     }
 }
 struct Task {
@@ -1518,7 +1634,6 @@ fn decode_pairs(bytes: &[u8]) -> Result<Vec<proto::KeyValue>, Status> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    static CLEANUP_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn ipc_destination_commits_the_same_allocation_after_copy() {
@@ -1919,19 +2034,14 @@ mod tests {
                 Err(Status::internal("injected attach failure"))
             }
         };
-        let mut reported = None;
         let mut reports = 0;
         for (failed, expected_reports) in [(true, 1), (false, 1), (true, 2)] {
             let attachment =
-                CleanupAttachment::attach_or_fallback(&core, &mut attach, &mut reported, |_| {
-                    reports += 1
-                });
+                CleanupAttachment::attach_or_fallback(&core, &mut attach, |_| reports += 1);
             assert_eq!(attachment.is_none(), failed);
             assert_eq!(reports, expected_reports);
             assert_eq!(
-                reported
-                    .as_ref()
-                    .is_some_and(|reported| Weak::ptr_eq(reported, &Arc::downgrade(&core))),
+                core.cleanup_attach_failure_reported.load(Ordering::SeqCst),
                 failed
             );
             drop(attachment);
@@ -1942,40 +2052,32 @@ mod tests {
     }
 
     #[test]
-    fn cleanup_attachment_failure_reporting_tracks_engines_without_retaining_them() {
+    fn cleanup_attachment_failure_reporting_deduplicates_successive_owners_per_engine() {
         let first = JvmEngine::new(std::ptr::null_mut());
         let second = JvmEngine::new(std::ptr::null_mut());
-        let mut reported = None;
         let mut reports = 0;
         for (core, expected_reports) in [
             (&first, 1),
             (&first, 1),
             (&second, 2),
             (&second, 2),
-            (&first, 3),
+            (&first, 2),
         ] {
             let attachment = CleanupAttachment::attach_or_fallback(
                 core,
                 |_| -> Result<TestCleanupWorker, Status> {
                     Err(Status::internal("injected attach failure"))
                 },
-                &mut reported,
                 |_| reports += 1,
             );
             assert!(attachment.is_none());
             assert_eq!(reports, expected_reports);
-            assert!(Weak::ptr_eq(
-                reported.as_ref().unwrap(),
-                &Arc::downgrade(core)
-            ));
+            assert!(core.cleanup_attach_failure_reported.load(Ordering::SeqCst));
             assert_eq!(Arc::strong_count(core), 1);
             assert_eq!(core.counts.lock().unwrap().workers, 0);
         }
-        cleanup_drained(first.clone());
-        cleanup_drained(second.clone());
-        drop(first);
-        drop(second);
-        assert!(reported.unwrap().upgrade().is_none());
+        cleanup_drained(first);
+        cleanup_drained(second);
     }
 
     #[test]
@@ -2081,9 +2183,6 @@ mod tests {
     }
     #[test]
     fn failed_cancel_retains_task_admission_until_delivery_is_retried() {
-        let _serial = CLEANUP_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let core = JvmEngine::new(std::ptr::null_mut());
         let permit = core.permits.clone().try_acquire_many_owned(64).unwrap();
         let task = empty_handle(&core, HandleKind::Task, Some(permit), None);
@@ -2116,8 +2215,9 @@ mod tests {
         .unwrap();
         assert!(sender.lock().unwrap().is_none());
         assert_eq!(core.counts.lock().unwrap().handles, 1);
-        retain_failed_cleanup(item, error);
-        let failure = core.take_failed_cleanup().pop().unwrap();
+        retain_dispatch_cleanup(item, error);
+        let failure = core.take_pending_dispatch().pop().unwrap();
+        assert!(core.counts.lock().unwrap().failed_cleanup.is_empty());
         let mut receiver = None;
         assert!(enqueue_cleanup(failure.item, &sender, |rx| {
             receiver = Some(rx);
@@ -2150,19 +2250,21 @@ mod tests {
         cleanup_with(item, |_| Ok(()));
         assert_eq!(core.counts.lock().unwrap().handles, 0);
     }
-    #[test]
-    fn owner_cleanup_dispatch_failure_retains_admission_for_retry() {
-        let _serial = CLEANUP_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+    #[tokio::test(start_paused = true)]
+    async fn owner_dispatch_failure_recovers_all_admission_without_explicit_close() {
         for kind in [HandleKind::Query, HandleKind::Session] {
-            for spawn_fails in [true, false] {
-                let core = JvmEngine::new(std::ptr::null_mut());
-                let (item, admission, expected_handles) = owner_cleanup(&core, kind, 64);
+            let core = JvmEngine::new(std::ptr::null_mut());
+            let admission = match kind {
+                HandleKind::Query => core.permits.clone(),
+                HandleKind::Session => core.session_permits.clone(),
+                HandleKind::Task => unreachable!(),
+            };
+            for index in 0..64 {
+                let (item, _, _) = owner_cleanup(&core, kind, 1);
                 let sender = Mutex::new(None);
                 let (item, error) = enqueue_cleanup(item, &sender, |rx| {
                     drop(rx);
-                    if spawn_fails {
+                    if index % 2 == 0 {
                         Err(std::io::Error::other("injected spawn failure"))
                     } else {
                         Ok(())
@@ -2171,16 +2273,179 @@ mod tests {
                 .err()
                 .unwrap();
                 assert!(sender.lock().unwrap().is_none());
-                retain_failed_cleanup(item, error);
-                assert_eq!(admission.available_permits(), 0);
-                assert_eq!(core.counts.lock().unwrap().handles, expected_handles);
-                core.retry_failed_cleanup();
-                cleanup_drained(core.clone());
-                assert_eq!(admission.available_permits(), 64);
-                assert!(core.cleanup_failure().is_none());
+                retain_dispatch_cleanup(item, error);
             }
+            assert_eq!(admission.available_permits(), 0);
+            assert_eq!(core.counts.lock().unwrap().pending_dispatch.len(), 64);
+            assert!(core.counts.lock().unwrap().failed_cleanup.is_empty());
+            let attempts = Arc::new(AtomicUsize::new(0));
+            let observed = attempts.clone();
+            let retry = tokio::spawn(core.clone().retry_dispatch_loop_with(move |item| {
+                observed.fetch_add(1, Ordering::SeqCst);
+                cleanup(item);
+                Ok(())
+            }));
+            tokio::task::yield_now().await;
+            tokio::time::advance(Duration::from_millis(9)).await;
+            tokio::task::yield_now().await;
+            assert_eq!(attempts.load(Ordering::SeqCst), 0);
+            assert_eq!(admission.available_permits(), 0);
+            tokio::time::advance(Duration::from_millis(1)).await;
+            tokio::task::yield_now().await;
+            cleanup_drained(core.clone());
+            assert_eq!(attempts.load(Ordering::SeqCst), 64);
+            assert_eq!(admission.available_permits(), 64);
+            assert!(core.cleanup_failure().is_none());
+            assert!(!core.closed.load(Ordering::SeqCst));
+            retry.abort();
+            assert!(retry.await.unwrap_err().is_cancelled());
         }
     }
+
+    #[tokio::test(start_paused = true)]
+    async fn dispatch_retry_backs_off_and_preserves_pending_ownership_during_shutdown() {
+        let core = JvmEngine::new(std::ptr::null_mut());
+        let (item, admission, _) = owner_cleanup(&core, HandleKind::Session, 64);
+        retain_dispatch_cleanup(item, Status::unavailable("injected spawn failure"));
+        let attempts = Arc::new(Mutex::new(Vec::new()));
+        let observed = attempts.clone();
+        let started = Instant::now();
+        let retry = tokio::spawn(core.clone().retry_dispatch_loop_with(move |item| {
+            observed.lock().unwrap().push(Instant::now() - started);
+            Err((
+                item,
+                Status::unavailable("still cannot start cleanup thread"),
+            ))
+        }));
+        tokio::task::yield_now().await;
+        for (index, delay) in [10, 20, 40, 80, 160, 250, 250].into_iter().enumerate() {
+            tokio::time::advance(Duration::from_millis(delay)).await;
+            tokio::task::yield_now().await;
+            assert_eq!(attempts.lock().unwrap().len(), index + 1);
+            assert_eq!(admission.available_permits(), 0);
+            assert_eq!(core.counts.lock().unwrap().pending_dispatch.len(), 1);
+        }
+        assert_eq!(
+            *attempts.lock().unwrap(),
+            [10, 30, 70, 150, 310, 560, 810]
+                .map(Duration::from_millis)
+                .to_vec()
+        );
+        core.shutdown();
+        assert!(core.cleanup_failure().is_none());
+        assert!(core.dispatch_failure().unwrap().contains("automatic retry"));
+        assert!(core
+            .take_factory_after_drain()
+            .unwrap_err()
+            .contains("drained work"));
+        retry.abort();
+        assert!(retry.await.unwrap_err().is_cancelled());
+        for pending in core.take_pending_dispatch() {
+            cleanup(pending.item);
+        }
+        cleanup_drained(core.clone());
+        assert_eq!(admission.available_permits(), 64);
+        core.release_factory().unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dispatch_retry_does_not_replay_java_cleanup_failures() {
+        let core = JvmEngine::new(std::ptr::null_mut());
+        let (item, admission, _) = owner_cleanup(&core, HandleKind::Session, 64);
+        let mut java_closes = 0;
+        cleanup_with(item, |_| {
+            java_closes += 1;
+            Err(Status::internal("injected partial Java close failure"))
+        });
+        retain_dispatch_cleanup(
+            empty_cleanup(&core),
+            Status::unavailable("injected dispatch failure"),
+        );
+        let dispatched = Arc::new(AtomicUsize::new(0));
+        let observed = dispatched.clone();
+        let retry = tokio::spawn(core.clone().retry_dispatch_loop_with(move |item| {
+            observed.fetch_add(1, Ordering::SeqCst);
+            cleanup(item);
+            Ok(())
+        }));
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(10)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(dispatched.load(Ordering::SeqCst), 1);
+        assert_eq!(java_closes, 1);
+        assert_eq!(admission.available_permits(), 0);
+        assert_eq!(core.counts.lock().unwrap().handles, 1);
+        assert_eq!(core.counts.lock().unwrap().failed_cleanup.len(), 1);
+        assert!(core
+            .cleanup_failure()
+            .unwrap()
+            .contains("partial Java close"));
+        core.retry_failed_cleanup();
+        cleanup_drained(core.clone());
+        assert_eq!(admission.available_permits(), 64);
+        retry.abort();
+        assert!(retry.await.unwrap_err().is_cancelled());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dispatch_retry_and_explicit_close_can_interleave_during_shutdown() {
+        let core = JvmEngine::new(std::ptr::null_mut());
+        cleanup_with(empty_cleanup(&core), |_| {
+            Err(Status::internal("injected Java cleanup failure"))
+        });
+        let (item, admission, _) = owner_cleanup(&core, HandleKind::Session, 64);
+        retain_dispatch_cleanup(item, Status::unavailable("injected spawn failure"));
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let observed = attempts.clone();
+        let closing = core.clone();
+        let retry = tokio::spawn(core.clone().retry_dispatch_loop_with(move |item| {
+            // The pending batch was moved out of Counts before dispatch; an
+            // explicit close can retry native failures and stop admission here.
+            closing.retry_failed_cleanup();
+            closing.shutdown();
+            observed.fetch_add(1, Ordering::SeqCst);
+            cleanup(item);
+            Ok(())
+        }));
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(10)).await;
+        tokio::task::yield_now().await;
+        cleanup_drained(core.clone());
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(admission.available_permits(), 64);
+        assert!(core.cleanup_failure().is_none());
+        assert_eq!(
+            core.task(Instant::now() + Duration::from_millis(1))
+                .await
+                .err()
+                .unwrap()
+                .code(),
+            tonic::Code::Unavailable
+        );
+        core.release_factory().unwrap();
+        retry.abort();
+        assert!(retry.await.unwrap_err().is_cancelled());
+    }
+
+    #[test]
+    fn owner_cleanup_sender_disconnect_ends_its_cleanup_loop() {
+        for kind in [HandleKind::Query, HandleKind::Session] {
+            let core = JvmEngine::new(std::ptr::null_mut());
+            let (item, admission, _) = owner_cleanup(&core, kind, 64);
+            let sender = Mutex::new(None);
+            let mut lane = None;
+            assert!(enqueue_cleanup(item, &sender, |rx| {
+                lane = Some(CleanupTestLane::spawn(move || cleanup_loop(rx)));
+                Ok(())
+            })
+            .is_ok());
+            drop(sender);
+            lane.unwrap().join();
+            cleanup_drained(core.clone());
+            assert_eq!(admission.available_permits(), 64);
+        }
+    }
+
     #[test]
     fn detach_retries_only_on_the_owning_thread_and_reports_persistent_failure() {
         let owner = std::thread::current().id();
@@ -2220,9 +2485,6 @@ mod tests {
     }
     #[test]
     fn failed_query_cleanup_retains_its_task_and_retries_independently() {
-        let _serial = CLEANUP_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let core = JvmEngine::new(std::ptr::null_mut());
         let permit = core.permits.clone().try_acquire_many_owned(64).unwrap();
         let task = empty_handle(&core, HandleKind::Task, Some(permit), None);
@@ -2346,9 +2608,6 @@ mod tests {
     }
     #[test]
     fn slow_session_close_does_not_block_task_admission_reclamation() {
-        let _serial = CLEANUP_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let core = JvmEngine::new(std::ptr::null_mut());
         let session_permit = core
             .session_permits
@@ -2378,9 +2637,6 @@ mod tests {
     }
     #[test]
     fn query_close_retains_task_admission_until_query_cleanup_finishes() {
-        let _serial = CLEANUP_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let core = JvmEngine::new(std::ptr::null_mut());
         let permit = core.permits.clone().try_acquire_many_owned(64).unwrap();
         let task = empty_handle(&core, HandleKind::Task, Some(permit), None);
@@ -2399,9 +2655,6 @@ mod tests {
     }
     #[test]
     fn slow_session_close_does_not_block_query_task_reclamation() {
-        let _serial = CLEANUP_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let blocked_core = JvmEngine::new(std::ptr::null_mut());
         let blocked = block_owner_cleanup(empty_cleanup_with(
             &blocked_core,
@@ -2421,9 +2674,6 @@ mod tests {
     }
     #[test]
     fn blocked_owner_retains_only_its_own_admission_across_engines() {
-        let _serial = CLEANUP_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         for kind in [HandleKind::Query, HandleKind::Session] {
             let core = JvmEngine::new(std::ptr::null_mut());
             let other = JvmEngine::new(std::ptr::null_mut());
@@ -2472,13 +2722,8 @@ mod tests {
             .unwrap();
         assert_eq!(status.code(), tonic::Code::ResourceExhausted, "{status}");
         assert_eq!(core.permits.available_permits(), 64);
-        {
-            let _serial = CLEANUP_TEST_LOCK
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            drop(empty_handle(&core, HandleKind::Session, Some(held), None));
-            cleanup_drained(core.clone());
-        }
+        drop(empty_handle(&core, HandleKind::Session, Some(held), None));
+        cleanup_drained(core.clone());
         let restored = core
             .admit_session(Instant::now() + Duration::from_millis(2))
             .await
