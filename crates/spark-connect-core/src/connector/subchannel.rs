@@ -30,9 +30,11 @@
 //! at each call that needs a connection.
 //!
 //! The connection is of a channel of tonic of the subchannel's own, whose connector hands over the
-//! connection that the subchannel made ([`Subchannel::connection`]), so that the calls of every
-//! channel that picked the subchannel go on the one connection. The end of the connection, as hyper
-//! drops it, leaves the subchannel idle and wakes the channels that watch it.
+//! connection that the subchannel made ([`connection`]), so that the calls of every channel that
+//! picked the subchannel go on the one connection. The end of the connection, as hyper drops it,
+//! leaves the subchannel idle and wakes the channels that watch it. A call that tonic sends as the
+//! connection ends makes its connector ask for one again, which makes one attempt at most, as a
+//! call of the transport made one before (see [`connection`]).
 
 use super::*;
 
@@ -192,10 +194,16 @@ pub(crate) struct Subchannel {
 }
 
 impl Drop for Subchannel {
+    /// Ends its attempt, and the waits of the connectors of its channel of tonic, which fail then
+    /// (see [`connection`]).
     fn drop(&mut self) {
         let inner = self.inner.get_mut().unwrap_or_else(|e| e.into_inner());
         if let Some(task) = inner.task.take() {
             task.abort();
+        }
+        let watchers = self.watchers.get_mut().unwrap_or_else(|e| e.into_inner());
+        for watcher in watchers.drain(..).filter_map(|watcher| watcher.upgrade()) {
+            watcher.notify_one();
         }
     }
 }
@@ -426,50 +434,156 @@ impl Subchannel {
         self.changed();
     }
 
-    /// The connection of the subchannel, of its number, for its channel of tonic, which asks for
-    /// one at its first call and once the one it had ended: the connection that the subchannel
-    /// made, if it is still open; else, as of a connection that ended before the channels saw it,
-    /// the next one that it makes, or the failure of its attempt.
-    async fn connection(self: &Arc<Self>) -> Result<(Ready, u64), Failure> {
-        let wake = Arc::new(tokio::sync::Notify::new());
-        self.watch(&wake);
-        let result = loop {
-            let woken = wake.notified();
-            let changed = {
-                let mut inner = self.inner();
-                let connection = inner.connections;
-                match &mut inner.state {
-                    SubchannelState::Ready(held) => {
-                        if let Some(mut ready) = held.take() {
-                            if ready.alive() {
-                                break Ok((ready, connection));
-                            }
-                        }
-                        // The connection that tonic had ended, or the one held ended before a
-                        // call took it: connect again, of a backoff that starts again.
-                        inner.state = SubchannelState::Idle;
-                        inner.backoff = Backoff::new();
-                        self.start_attempt(&mut inner);
-                        true
-                    }
-                    SubchannelState::Idle => {
-                        self.start_attempt(&mut inner);
-                        true
-                    }
-                    SubchannelState::Connecting => false,
-                    SubchannelState::TransientFailure => match &inner.last_failure {
-                        Some((_, failure)) => break Err(failure.clone()),
-                        None => false,
-                    },
-                }
+    /// A step of [`connection`], of `awaited`, the attempt that it waits for, if any: the
+    /// connection that the channel of tonic takes, of its number, or the failure of the call, once
+    /// there is one.
+    fn connection_step(
+        self: &Arc<Self>,
+        awaited: &mut Option<Awaited>,
+    ) -> Option<Result<(Ready, u64), ConnectError>> {
+        {
+            let mut inner = self.inner();
+            let counts = Awaited {
+                failures: inner.failures,
+                connections: inner.connections,
             };
-            if changed {
-                self.changed();
+            let (failed, connected) = match *awaited {
+                Some(at) => (
+                    counts.failures > at.failures,
+                    counts.connections > at.connections,
+                ),
+                None => (false, false),
+            };
+            match &mut inner.state {
+                SubchannelState::Ready(held) => {
+                    if let Some(mut ready) = held.take() {
+                        // A connection that the subchannel made since the connector asked is
+                        // hyper's as it is, of an end that came since too, which then fails the
+                        // call of its end; one made before, while it is still open.
+                        if connected || ready.alive() {
+                            return Some(Ok((ready, counts.connections)));
+                        }
+                    }
+                    if awaited.is_some() {
+                        return Some(Err(self.closed()));
+                    }
+                    // The connection that tonic had ended, or the one held ended before a call
+                    // took it: one attempt, of a backoff that starts again.
+                    inner.state = SubchannelState::Idle;
+                    inner.backoff = Backoff::new();
+                    self.start_attempt(&mut inner);
+                    *awaited = Some(counts);
+                }
+                // The attempt failed, and the subchannel is idle again: of a Rust client, or of an
+                // attempt that took longer than its backoff.
+                SubchannelState::Idle if failed => return Some(Err(self.failed(&inner))),
+                SubchannelState::Idle if awaited.is_some() => return Some(Err(self.closed())),
+                SubchannelState::Idle => {
+                    self.start_attempt(&mut inner);
+                    *awaited = Some(counts);
+                }
+                SubchannelState::Connecting => {
+                    awaited.get_or_insert(counts);
+                    return None;
+                }
+                SubchannelState::TransientFailure => return Some(Err(self.failed(&inner))),
             }
-            woken.await;
+        }
+        self.changed();
+        None
+    }
+
+    /// The error of a call of the last failure of the subchannel, of `inner`, its state.
+    fn failed(&self, inner: &Inner) -> ConnectError {
+        match &inner.last_failure {
+            Some((_, failure)) => ConnectError::of(
+                &ChannelFailure::Addresses {
+                    address: self.address.clone(),
+                    failure: failure.clone(),
+                },
+                self.target.grpcio,
+            ),
+            None => self.closed(),
+        }
+    }
+
+    /// The error of a call of the end of the connection of the subchannel (see
+    /// [`connection_closed`]).
+    fn closed(&self) -> ConnectError {
+        connection_closed(self.target.grpcio)
+    }
+}
+
+/// The counts of the failures and of the connections of a subchannel as the attempt that a
+/// connector of its channel of tonic waits for started, or was found in progress (see
+/// [`connection`]): a failure or a connection that came after them is of that attempt.
+#[derive(Clone, Copy)]
+struct Awaited {
+    failures: u64,
+    connections: u64,
+}
+
+/// The connection of the subchannel of `weak`, of its number, for its channel of tonic, which asks
+/// for one at its first call and once the one that it had ended (as at a GOAWAY, or of a call that
+/// tonic sent as it ended): the connection that the subchannel holds, if it is still open; else the
+/// connection of one attempt, which the connector makes, or waits for while one is in progress, as
+/// hyper's even if it ended since, so that the call fails of its end, or the failure of that
+/// attempt; in transient failure, the last failure at once. So a call makes one attempt at most,
+/// as a call of the transport made one before SPARK-62257, and fails of the failure of the
+/// attempt, in transient failure too, as gRPC's calls fail once the channel's attempts failed. The
+/// connector holds the subchannel only while it reads its state, so that a subchannel that no
+/// channel holds any more is freed as its connector waits, which then fails.
+async fn connection(weak: Weak<Subchannel>) -> Result<(Ready, u64), ConnectError> {
+    let Some(subchannel) = weak.upgrade() else {
+        return Err(connection_closed(grpcio_dialect()));
+    };
+    let grpcio = subchannel.target.grpcio;
+    let wake = Arc::new(tokio::sync::Notify::new());
+    subchannel.watch(&wake);
+    let _watching = Watching {
+        subchannel: weak.clone(),
+        wake: Arc::clone(&wake),
+    };
+    drop(subchannel);
+    let mut awaited = None;
+    loop {
+        let woken = wake.notified();
+        let Some(subchannel) = weak.upgrade() else {
+            return Err(connection_closed(grpcio));
         };
-        self.unwatch(&wake);
-        result
+        if let Some(result) = subchannel.connection_step(&mut awaited) {
+            return result;
+        }
+        drop(subchannel);
+        woken.await;
+    }
+}
+
+/// A watch of a subchannel by a connector of its channel of tonic, which ends with it (see
+/// [`connection`]).
+struct Watching {
+    subchannel: Weak<Subchannel>,
+    wake: Arc<tokio::sync::Notify>,
+}
+
+impl Drop for Watching {
+    fn drop(&mut self) {
+        if let Some(subchannel) = self.subchannel.upgrade() {
+            subchannel.unwatch(&self.wake);
+        }
+    }
+}
+
+/// The error of a call of a connection whose subchannel no channel holds any more, or that ended
+/// before the call took it: of the end of a connection, in the dialect of grpcio if `grpcio`.
+fn connection_closed(grpcio: bool) -> ConnectError {
+    ConnectError {
+        text: if grpcio {
+            SUBCHANNEL_GONE_GRPCIO
+        } else {
+            SUBCHANNEL_GONE_RUST
+        }
+        .into(),
     }
 }
 
@@ -484,8 +598,8 @@ impl Subchannel {
         }
     }
 
-    /// The connection that its channel of tonic takes, of the tests (see
-    /// [`Subchannel::connection`]): the handover to hyper, or the text of the failure.
+    /// The connection that its channel of tonic takes, of the tests (see [`connection`]): the
+    /// handover to hyper, or the text of the failure.
     pub(super) async fn hand_over(self: &Arc<Self>) -> Result<Handover, String> {
         use tonic::codegen::Service;
         let uri = tonic::codegen::http::Uri::from_static("http://localhost");
@@ -534,7 +648,7 @@ impl Drop for ConnectionEnd {
 const SUBCHANNEL_GONE_GRPCIO: &str = SOCKET_CLOSED;
 const SUBCHANNEL_GONE_RUST: &str = "the connection was closed";
 
-/// The connector of the channel of tonic of a subchannel (see [`Subchannel::connection`]).
+/// The connector of the channel of tonic of a subchannel (see [`connection`]).
 #[derive(Clone)]
 struct SubchannelConnector(Weak<Subchannel>);
 
@@ -550,32 +664,11 @@ impl tonic::codegen::Service<tonic::codegen::http::Uri> for SubchannelConnector 
     fn call(&mut self, _: tonic::codegen::http::Uri) -> Self::Future {
         let weak = self.0.clone();
         Box::pin(async move {
-            let Some(subchannel) = weak.upgrade() else {
-                let grpcio = grpcio_dialect();
-                return Err(ConnectError {
-                    text: if grpcio {
-                        SUBCHANNEL_GONE_GRPCIO
-                    } else {
-                        SUBCHANNEL_GONE_RUST
-                    }
-                    .into(),
-                });
-            };
-            match subchannel.connection().await {
-                Ok((ready, connection)) => {
-                    Ok(TokioIo::new(Handover::new(ready).ending(ConnectionEnd {
-                        subchannel: weak,
-                        connection,
-                    })))
-                }
-                Err(failure) => Err(ConnectError::of(
-                    &ChannelFailure::Addresses {
-                        address: subchannel.address.clone(),
-                        failure,
-                    },
-                    subchannel.target.grpcio,
-                )),
-            }
+            let (ready, connection) = connection(weak.clone()).await?;
+            Ok(TokioIo::new(Handover::new(ready).ending(ConnectionEnd {
+                subchannel: weak,
+                connection,
+            })))
         })
     }
 }

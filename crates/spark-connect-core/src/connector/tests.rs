@@ -2421,3 +2421,338 @@ async fn a_channel_takes_the_connection_that_its_subchannel_made_for_a_call_as_i
     assert_eq!(accepted.load(Ordering::SeqCst), 2);
     drop((first, second));
 }
+
+/// How the server of [`unix_server`] serves the connections that it accepts from then on.
+#[cfg(unix)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Serving {
+    /// Its settings at once, and it holds the connection.
+    Settings,
+    /// Nothing: it holds the connection, and never answers.
+    Silent,
+    /// Its settings, and it closes the connection once it read the preface and the settings of the
+    /// connector.
+    Closing,
+}
+
+/// A server of the Unix socket of `path`, which serves each connection as `serving` says as it
+/// accepts it, and the counts of the connections that it accepted and that it closed. A connection
+/// to a Unix socket is made as `connect` returns, so that a test of a paused clock, which advances
+/// it once nothing runs, does not advance it while an attempt waits for its socket.
+#[cfg(unix)]
+fn unix_server(
+    path: &std::path::Path,
+    serving: Arc<Mutex<Serving>>,
+) -> (Arc<AtomicUsize>, Arc<AtomicUsize>) {
+    let listener = tokio::net::UnixListener::bind(path).unwrap();
+    let (accepted, closed) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+    let (accepts, closes) = (Arc::clone(&accepted), Arc::clone(&closed));
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            accepts.fetch_add(1, Ordering::SeqCst);
+            let serving = *serving.lock().unwrap();
+            let closes = Arc::clone(&closes);
+            tokio::spawn(async move {
+                if serving != Serving::Silent {
+                    let _ = stream.write_all(&EMPTY_SETTINGS).await;
+                }
+                if serving == Serving::Closing {
+                    let mut preface = [0u8; PREFACE.len() + EMPTY_SETTINGS.len()];
+                    let _ = stream.read_exact(&mut preface).await;
+                    drop(stream);
+                    closes.fetch_add(1, Ordering::SeqCst);
+                    return;
+                }
+                let mut buffer = [0u8; 1024];
+                while matches!(stream.read(&mut buffer).await, Ok(read) if read > 0) {}
+            });
+        }
+    });
+    (accepted, closed)
+}
+
+/// A server of gRPC of the Unix socket of `path`, which answers each call `grpc-status: 0` of no
+/// message, and the abort handles of its connections.
+#[cfg(unix)]
+fn grpc_unix_server(path: &std::path::Path) -> Arc<Mutex<Vec<tokio::task::AbortHandle>>> {
+    let listener = tokio::net::UnixListener::bind(path).unwrap();
+    let connections: Arc<Mutex<Vec<tokio::task::AbortHandle>>> = Default::default();
+    let held = Arc::clone(&connections);
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let connection = tokio::spawn(async move {
+                let Ok(mut connection) = h2::server::handshake(stream).await else {
+                    return;
+                };
+                while let Some(Ok((_, mut respond))) = connection.accept().await {
+                    let response = tonic::codegen::http::Response::builder()
+                        .status(200)
+                        .header("content-type", "application/grpc")
+                        .header("grpc-status", "0")
+                        .body(())
+                        .unwrap();
+                    let _ = respond.send_response(response, true);
+                }
+            });
+            held.lock().unwrap().push(connection.abort_handle());
+        }
+    });
+    connections
+}
+
+/// A target of the Unix socket of `path`, in the dialect of grpcio if `grpcio`.
+#[cfg(unix)]
+fn unix_target(path: &std::path::Path, grpcio: bool) -> Target {
+    form_target(
+        ChannelTarget::Unix {
+            paths: vec![path.to_str().unwrap().as_bytes().to_vec()],
+            abstract_names: false,
+        },
+        grpcio,
+    )
+}
+
+/// The status of a `Config` call of tonic on `channel`, of the deadline `timeout` (its
+/// `grpc-timeout`).
+async fn config_call(
+    channel: tonic::transport::Channel,
+    timeout: Duration,
+) -> Result<(), tonic::Status> {
+    let mut grpc = tonic::client::Grpc::new(channel);
+    grpc.ready()
+        .await
+        .map_err(|error| tonic::Status::unknown(error.to_string()))?;
+    let mut request = tonic::Request::new(spark_connect_proto::ConfigRequest::default());
+    request.set_timeout(timeout);
+    grpc.unary::<spark_connect_proto::ConfigRequest, spark_connect_proto::ConfigResponse, _>(
+        request,
+        tonic::codegen::http::uri::PathAndQuery::from_static(
+            "/spark.connect.SparkConnectService/Config",
+        ),
+        tonic_prost::ProstCodec::default(),
+    )
+    .await
+    .map(|_| ())
+}
+
+/// The failure of the attempt to the Unix socket of no file `path` of a subchannel, in the dialect
+/// of grpcio if `grpcio`.
+#[cfg(unix)]
+fn no_socket_failure(path: &std::path::Path, grpcio: bool) -> String {
+    let path = path.to_str().unwrap();
+    if grpcio {
+        format!(
+            "failed to connect to all addresses; last error: FAILED_PRECONDITION: unix:{path}: \
+             connect failed: addr: unix:{path} error: No such file or directory"
+        )
+    } else {
+        format!(
+            "failed to connect to all addresses; last error: unix:{path}: unix connect error: No \
+             such file or directory (os error 2)"
+        )
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn the_connector_of_a_subchannel_makes_one_attempt_once_its_connection_ended() {
+    // tonic asks the connector of the channel of a subchannel for a connection again once the one
+    // that it had ended, for a call that it sends then (as one that picked the subchannel just
+    // before the end): of a server that is gone, the connector fails of the failure of the one
+    // attempt that it makes, as a call of the transport failed of its attempt before SPARK-62257,
+    // where a Rust client's subchannel, idle at once after its failure, made attempts until the
+    // deadline of the client; in the dialect of grpcio, the subchannel is in transient failure
+    // then, of which the next call fails at once, of no attempt.
+    for grpcio in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("spark.sock");
+        let serving = Arc::new(Mutex::new(Serving::Settings));
+        let (accepted, _) = unix_server(&path, serving);
+        let channel = channel_of(unix_target(&path, grpcio));
+        assert!(picked(&channel).await.is_ok());
+        let subchannel = channel.picked_subchannel().unwrap();
+        let taken = subchannel.hand_over().await.unwrap();
+        // The server goes away, and the connection ends, as hyper drops it.
+        std::fs::remove_file(&path).unwrap();
+        drop(taken);
+        until(Duration::from_secs(5), || channel.is_idle()).await;
+        assert_eq!(subchannel.counts(), (0, 1));
+        let start = Instant::now();
+        for (call, failures) in [(1, 1), (2, if grpcio { 1 } else { 2 })] {
+            let failure = tokio::time::timeout(Duration::from_secs(5), subchannel.hand_over())
+                .await
+                .expect("the connector ends")
+                .err()
+                .expect("no connection");
+            assert_eq!(failure, no_socket_failure(&path, grpcio), "{call}");
+            assert_eq!(subchannel.counts(), (failures, 1), "{grpcio} {call}");
+            // The connector that ended watches the subchannel no more, nor does the idle channel.
+            assert_eq!(subchannel.watches(), 0);
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "{:?}",
+            start.elapsed()
+        );
+        assert_eq!(accepted.load(Ordering::SeqCst), 1);
+        channel.shutdown();
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test(start_paused = true)]
+async fn the_connector_of_a_subchannel_fails_of_an_attempt_that_timed_out_past_its_backoff() {
+    // In the dialect of grpcio, an attempt that times out at its deadline, the longer of 20 s and
+    // its backoff, leaves the subchannel idle rather than in transient failure, as its backoff is
+    // over: the connector that waited for it fails of its failure all the same, at the deadline,
+    // as gRPC's call fails once the attempt of its channel failed, where it connected again.
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("spark.sock");
+    let serving = Arc::new(Mutex::new(Serving::Settings));
+    let (accepted, _) = unix_server(&path, Arc::clone(&serving));
+    let channel = channel_of(unix_target(&path, true));
+    assert!(picked(&channel).await.is_ok());
+    let subchannel = channel.picked_subchannel().unwrap();
+    let taken = subchannel.hand_over().await.unwrap();
+    *serving.lock().unwrap() = Serving::Silent;
+    drop(taken);
+    until(Duration::from_secs(5), || channel.is_idle()).await;
+    let start = Instant::now();
+    let failure = tokio::time::timeout(Duration::from_secs(300), subchannel.hand_over())
+        .await
+        .expect("the connector ends")
+        .err()
+        .expect("no connection");
+    assert_eq!(start.elapsed(), CONNECT_TIMEOUT);
+    assert_eq!(
+        failure,
+        format!(
+            "failed to connect to all addresses; last error: UNKNOWN: unix:{}: connection attempt \
+             timed out before receiving SETTINGS frame",
+            path.to_str().unwrap()
+        )
+    );
+    assert_eq!(subchannel.counts(), (1, 1));
+    assert!(subchannel.snapshot().idle);
+    assert_eq!(accepted.load(Ordering::SeqCst), 2);
+    channel.shutdown();
+}
+
+#[cfg(unix)]
+#[tokio::test(start_paused = true)]
+async fn the_connector_of_a_subchannel_gives_the_connection_of_its_attempt_as_it_is() {
+    // Of a server that closes each connection once it read the preface: the connector gives hyper
+    // the connection of the one attempt that it makes, also as it ended since, which then fails the
+    // call of its end, rather than connecting again; and it makes one attempt only of a connection
+    // that the subchannel held and that ended before a call took it.
+    for grpcio in [true, false] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("spark.sock");
+        let serving = Arc::new(Mutex::new(Serving::Settings));
+        let (accepted, closed) = unix_server(&path, Arc::clone(&serving));
+        let channel = channel_of(unix_target(&path, grpcio));
+        assert!(picked(&channel).await.is_ok());
+        let subchannel = channel.picked_subchannel().unwrap();
+        let taken = subchannel.hand_over().await.unwrap();
+        *serving.lock().unwrap() = Serving::Closing;
+        drop(taken);
+        until(Duration::from_secs(5), || channel.is_idle()).await;
+        // Its connection is hyper's, which reads the server's settings and then its end.
+        let mut handover = tokio::time::timeout(Duration::from_secs(60), subchannel.hand_over())
+            .await
+            .expect("the connector ends")
+            .expect("the connection");
+        assert_eq!(accepted.load(Ordering::SeqCst), 2);
+        let mut buffer = [0u8; 64];
+        let read = handover.read(&mut buffer).await.unwrap();
+        assert_eq!((read, buffer[3]), (FRAME_HEADER_LEN, SETTINGS));
+        let end = handover.read(&mut buffer).await.unwrap_err();
+        assert_eq!(end.to_string(), SOCKET_CLOSED);
+        drop(handover);
+        until(Duration::from_secs(5), || subchannel.snapshot().idle).await;
+        // The next call's channel connects again, of a connection that ends before a call takes
+        // it: the connector connects again once, and gives that connection as it is.
+        assert!(picked(&channel).await.is_ok());
+        until(Duration::from_secs(5), || {
+            closed.load(Ordering::SeqCst) == 2
+        })
+        .await;
+        let handover = tokio::time::timeout(Duration::from_secs(60), subchannel.hand_over())
+            .await
+            .expect("the connector ends")
+            .expect("the connection");
+        assert_eq!(accepted.load(Ordering::SeqCst), 4);
+        assert_eq!(subchannel.counts(), (0, 4));
+        drop(handover);
+        channel.shutdown();
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test(start_paused = true)]
+async fn a_subchannel_is_freed_as_the_connector_of_a_dropped_call_waits_for_its_attempt() {
+    // The connector of the channel of tonic of a subchannel holds the subchannel only while it reads
+    // its state: once a call that waits for its attempt is dropped and the channels let go of the
+    // subchannel, it is freed, and its attempt ends, where the connector, in the worker of that
+    // channel of tonic, held it for good.
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("spark.sock");
+    let serving = Arc::new(Mutex::new(Serving::Settings));
+    let (accepted, _) = unix_server(&path, Arc::clone(&serving));
+    let pool: Arc<Pool> = Arc::default();
+    let channel = channel_in(unix_target(&path, true), Arc::clone(&pool));
+    let stale = channel.pick().await.ok().expect("a connection");
+    let subchannel = channel.picked_subchannel().unwrap();
+    *serving.lock().unwrap() = Serving::Silent;
+    drop(subchannel.hand_over().await.unwrap());
+    until(Duration::from_secs(5), || channel.is_idle()).await;
+    let freed = Arc::downgrade(&subchannel);
+    drop(subchannel);
+    // A call that picked the subchannel as its connection ended: tonic's connector waits for the
+    // attempt to the silent server, until the call is dropped.
+    let call = config_call(stale.clone(), Duration::from_secs(60));
+    assert!(tokio::time::timeout(Duration::from_secs(1), call)
+        .await
+        .is_err());
+    assert_eq!(accepted.load(Ordering::SeqCst), 2);
+    channel.shutdown();
+    drop((channel, stale));
+    until(Duration::from_secs(5), || freed.upgrade().is_none()).await;
+    assert_eq!(pool.len(), 0);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_call_on_the_connection_of_a_subchannel_whose_server_went_away_fails_of_one_attempt() {
+    // A call of tonic that picked the subchannel of a channel just before its connection ended, of
+    // a server that is gone: it fails of `UNAVAILABLE`, of the failure of the one attempt that its
+    // connector made, within its deadline, as a call of the transport failed before SPARK-62257,
+    // and as gRPC's call fails once the attempts of its channel failed, where a Rust client's call
+    // waited for the deadline of the client, as its connector connected again and again.
+    for grpcio in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("spark.sock");
+        let connections = grpc_unix_server(&path);
+        let channel = channel_of(unix_target(&path, grpcio));
+        let stale = channel.pick().await.ok().expect("a connection");
+        let _ = config_call(stale.clone(), Duration::from_secs(5)).await;
+        let subchannel = channel.picked_subchannel().unwrap();
+        std::fs::remove_file(&path).unwrap();
+        for connection in connections.lock().unwrap().drain(..) {
+            connection.abort();
+        }
+        until(Duration::from_secs(5), || channel.is_idle()).await;
+        let (failures, connections) = subchannel.counts();
+        let status = tokio::time::timeout(
+            Duration::from_secs(5),
+            config_call(stale, Duration::from_secs(1)),
+        )
+        .await
+        .expect("the call ends")
+        .unwrap_err();
+        assert_eq!(status.code(), tonic::Code::Unavailable, "{status:?}");
+        assert_eq!(status.message(), no_socket_failure(&path, grpcio));
+        assert_eq!(subchannel.counts(), (failures + 1, connections));
+        channel.shutdown();
+    }
+}

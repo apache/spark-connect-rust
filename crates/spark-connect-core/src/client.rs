@@ -9399,6 +9399,50 @@ mod request_fields_tests {
         assert_eq!(accepted(), 2);
     }
 
+    /// Of a server that sends its settings on each connection and closes it at once (P10 of the
+    /// review of SPARK-62257): a call of the Rust API fails of the end of the connection, of no
+    /// retry, of the connection of its channel's pass and one more at most, which tonic's
+    /// connector makes once the one held ended before the call took it, where the connector made
+    /// connections until one was open as it looked, and the client makes no connection more of
+    /// itself once the call failed.
+    #[tokio::test]
+    async fn a_call_of_a_server_that_closes_each_connection_at_once_makes_two_connections_at_most()
+    {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let accepted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = std::sync::Arc::clone(&accepted);
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let _ = stream.write_all(&[0, 0, 0, 4, 0, 0, 0, 0, 0]).await;
+                    let _ = stream.shutdown().await;
+                    let mut buffer = [0u8; 4096];
+                    while matches!(stream.read(&mut buffer).await, Ok(read) if read > 0) {}
+                });
+            }
+        });
+        let env = crate::channel::set_env(&[("SPARK_CONNECT_AUTHENTICATE_TOKEN", None)]);
+        let builder = ChannelBuilder::parse(&format!("sc://127.0.0.1:{port}/")).unwrap();
+        let mut client = SparkConnectClient::connect(&builder).await.unwrap();
+        drop(env);
+        client.set_retry_policy(crate::retries::RetryPolicy::no_retries());
+        client.set_rpc_deadlines(RpcDeadlines {
+            config: Some(Duration::from_secs(10)),
+            ..RpcDeadlines::default()
+        });
+        let accepted = || accepted.load(std::sync::atomic::Ordering::SeqCst);
+        let call = tokio::time::timeout(Duration::from_secs(5), client.get_configs(&["k"])).await;
+        assert!(matches!(call, Ok(Err(_))), "{call:?}");
+        let made = accepted();
+        assert!((1..=2).contains(&made), "{made}");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(accepted(), made);
+        client.close();
+    }
+
     /// As PySpark's executions, which send the request that the hooks return as it is: a plan that
     /// a hook puts in is sent as it is, over the threshold too, and the plan of the execution,
     /// compressed once, before the hook, as `to_proto` compresses it, is kept so by a hook that
