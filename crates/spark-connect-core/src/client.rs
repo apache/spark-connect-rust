@@ -369,14 +369,22 @@ static CHANNELS: crate::fork::PerGeneration<
 struct ChannelLease {
     pooled: crate::fork::ForkLocal<std::sync::Arc<PooledChannel>>,
     open: std::sync::atomic::AtomicBool,
+    /// The resolution of the name of the target of the client's own channel, as each channel of
+    /// grpcio resolves its name before its first call, of the connection of the process that it
+    /// shares (see [`crate::connector::ChannelResolution`]).
+    resolution: std::sync::Arc<crate::connector::ChannelResolution>,
 }
 
 impl ChannelLease {
     fn new(pooled: std::sync::Arc<PooledChannel>) -> Self {
         pooled.connector.acquire();
+        let resolution = std::sync::Arc::new(crate::connector::ChannelResolution::new(
+            pooled.connector.grpcio(),
+        ));
         Self {
             pooled: crate::fork::ForkLocal::new(pooled),
             open: std::sync::atomic::AtomicBool::new(true),
+            resolution,
         }
     }
 
@@ -2226,22 +2234,28 @@ impl SparkConnectClient {
         }
     }
 
-    /// The channel of the client, of the generation of the process (see [`Transport`]).
+    /// The channel of the client, of the generation of the process (see [`Transport`]), of the
+    /// tests, which call it without [`crate::metadata::Checked`].
+    #[cfg(test)]
     fn channel(&self) -> Channel {
         self.transport.lease().pooled.channel.clone()
     }
 
-    /// The channel of the client for its calls, whose metadata is checked as gRPC's core checks it,
-    /// and which the close of the client ends while they are in flight (see
-    /// [`crate::metadata::Checked`]).
+    /// The channel of the client for its calls, of the generation of the process (see
+    /// [`Transport`]), whose metadata is checked as gRPC's core checks it, whose name its own
+    /// resolution resolves before its first call, and which the close of the client ends while they
+    /// are in flight (see [`crate::metadata::Checked`]).
     fn checked_channel(&self) -> crate::metadata::Checked {
+        let lease = self.transport.lease();
         crate::metadata::Checked {
-            channel: self.channel(),
+            channel: lease.pooled.channel.clone(),
             closed: std::sync::Arc::clone(&self.channel_closed),
             refused: matches!(
                 self.builder.target(),
                 Some(crate::channel::ChannelTarget::Refused { .. })
             ),
+            connector: lease.pooled.connector.clone(),
+            resolution: std::sync::Arc::clone(&lease.resolution),
         }
     }
 

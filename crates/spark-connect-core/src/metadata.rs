@@ -529,6 +529,11 @@ pub(crate) struct Checked {
     /// Whether the channel is of a target that gRPC refuses, whose status the transport makes
     /// itself, as gRPC's channel fails its calls of no response, of no limit of the metadata.
     pub(crate) refused: bool,
+    /// The connector of the channel, which the client shares with the other channels of the
+    /// process, and the resolution of the name of its target of the client's own channel, before
+    /// its first call (see `crate::connector::ChannelResolution`).
+    pub(crate) connector: crate::connector::Connector,
+    pub(crate) resolution: Arc<crate::connector::ChannelResolution>,
 }
 
 impl Service<http::Request<tonic::body::Body>> for Checked {
@@ -542,9 +547,11 @@ impl Service<http::Request<tonic::body::Body>> for Checked {
 
     fn call(&mut self, mut request: http::Request<tonic::body::Body>) -> Self::Future {
         let closed = Arc::clone(&self.closed);
-        let Some(PendingMetadata { source, after }) =
-            request.extensions_mut().remove::<PendingMetadata>()
-        else {
+        let refused = self.refused;
+        let pending = request.extensions_mut().remove::<PendingMetadata>();
+        let resolution = (!self.resolution.is_ready())
+            .then(|| (Arc::clone(&self.resolution), self.connector.clone()));
+        if pending.is_none() && resolution.is_none() {
             if let Some(status) =
                 of_connection_fields(request.headers(), crate::connector::grpcio_dialect())
             {
@@ -553,31 +560,47 @@ impl Service<http::Request<tonic::body::Body>> for Checked {
             return Box::pin(checked_response(
                 self.channel.call(request),
                 closed,
-                self.refused,
+                refused,
             ));
-        };
-        let refused = self.refused;
+        }
         // The channel that `poll_ready` made ready, which takes the request once its metadata is
-        // read, as tower's services are called once ready.
+        // read and its name resolved, as tower's services are called once ready.
         let fresh = self.channel.clone();
         let mut channel = std::mem::replace(&mut self.channel, fresh);
         Box::pin(async move {
-            let pairs = match source.metadata().await {
-                Ok(pairs) => pairs,
-                Err(error) => {
-                    let mut status = tonic::Status::unknown(error.to_string());
-                    status.set_source(std::sync::Arc::new(MetadataFailed(error)));
-                    return Err(Box::new(status) as StdError);
+            if let Some(PendingMetadata { source, after }) = pending {
+                let pairs = match source.metadata().await {
+                    Ok(pairs) => pairs,
+                    Err(error) => {
+                        let mut status = tonic::Status::unknown(error.to_string());
+                        status.set_source(std::sync::Arc::new(MetadataFailed(error)));
+                        return Err(Box::new(status) as StdError);
+                    }
+                };
+                match call_metadata(&pairs) {
+                    Ok(metadata) => append_metadata(request.headers_mut(), metadata, &after),
+                    Err(status) => return Err(Box::new(status) as StdError),
                 }
-            };
-            match call_metadata(&pairs) {
-                Ok(metadata) => append_metadata(request.headers_mut(), metadata, &after),
-                Err(status) => return Err(Box::new(status) as StdError),
             }
             if let Some(status) =
                 of_connection_fields(request.headers(), crate::connector::grpcio_dialect())
             {
                 return Err(Box::new(status) as StdError);
+            }
+            // Of a channel that did not resolve its name yet, its own resolution first, which the
+            // close of the client ends, as the call that waits for it.
+            if let Some((resolution, connector)) = resolution {
+                let resolved = tokio::select! {
+                    biased;
+                    resolved = resolution.ready(&connector) => resolved,
+                    () = closed.closed() => {
+                        return Err(Box::new(tonic::Status::cancelled(crate::client::CLOSED_CHANNEL))
+                            as StdError);
+                    }
+                };
+                if let Err(error) = resolved {
+                    return Err(Box::new(tonic::Status::unavailable(error.to_string())) as StdError);
+                }
             }
             checked_response(channel.call(request), closed, refused).await
         })

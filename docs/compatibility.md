@@ -4353,7 +4353,10 @@ jitter of 20 %, each attempt with the longer of its backoff and 20 s as its dead
 addresses of the last resolution of its name for 30 s from the start of that resolution, as
 gRPC's resolver resolves a name again no sooner (`grpc.dns_min_time_between_resolutions_ms`), and
 of a resolution that failed, a backoff after its end, as gRPC's resolver tries it again, until a
-connection succeeds, which the next call takes; once no call came for 30 min, or once every session
+connection succeeds, which the next call takes; the channel of each client, of a new session or a
+clone too, resolves the name of its target of its own before its first call, as the resolver of
+each channel of grpcio does, whose calls fail of the error of it until it resolves, and then
+shares the connection of the process; once no call came for 30 min, or once every session
 of the connection is stopped, it stops, and the next call connects, as grpcio's channel goes idle,
 or shuts down. A connection that ends is made again by the next call. The Python client logs the
 failures of the connections that gRPC's core logs, on stderr (see [Errors on

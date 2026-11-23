@@ -751,6 +751,37 @@ impl Target {
         Ok(addresses)
     }
 
+    /// The resolution of the target that a new channel makes, as the resolver of a new channel of
+    /// grpcio resolves its name, whatever another channel resolved before (see
+    /// [`ChannelResolution`]): of a name, a lookup now, whose addresses the connections of the
+    /// target take then (see [`Target::resolve_host`]); of another target, as [`Target::resolve`].
+    async fn resolve_for_a_new_channel(&self) -> Result<(), ResolveFailure> {
+        if self.tunnel.is_none() && matches!(&self.form, Some(ChannelTarget::Refused { .. })) {
+            return Ok(());
+        }
+        if self.form_resolves_itself() || self.host.parse::<std::net::IpAddr>().is_ok() {
+            return self.resolve().await.map(drop);
+        }
+        let started = Instant::now();
+        let addresses = self.look_up_host().await?;
+        *self.resolved.lock().unwrap_or_else(|e| e.into_inner()) = Some((started, addresses));
+        Ok(())
+    }
+
+    /// Whether the target of gRPC resolves of itself, of no lookup of a name: its addresses, its
+    /// Unix sockets, or a name that gRPC's resolver does not resolve.
+    fn form_resolves_itself(&self) -> bool {
+        self.tunnel.is_none()
+            && matches!(
+                &self.form,
+                Some(
+                    ChannelTarget::Addresses { .. }
+                        | ChannelTarget::Unresolvable { .. }
+                        | ChannelTarget::Unix { .. }
+                )
+            )
+    }
+
     /// The addresses of the host, of a lookup now (see [`Target::resolve_host`]).
     async fn look_up_host(&self) -> Result<Vec<SocketAddr>, ResolveFailure> {
         #[cfg(test)]
@@ -2308,6 +2339,11 @@ impl Connector {
         }))
     }
 
+    /// Whether the channel speaks as grpcio (see [`set_grpcio_dialect`]).
+    pub(crate) fn grpcio(&self) -> bool {
+        self.0.target.grpcio
+    }
+
     /// An open client uses the channel, until it releases it ([`Connector::release`]).
     pub(crate) fn acquire(&self) {
         self.0.users.fetch_add(1, Ordering::SeqCst);
@@ -2321,6 +2357,94 @@ impl Connector {
         if self.0.users.fetch_sub(1, Ordering::SeqCst) == 1 {
             self.0.stop();
             self.0.shutdown.notify_waiters();
+        }
+    }
+}
+
+/// The resolution of the name of the target of a channel of a client, which shares the connections
+/// of its connector with the other channels of the process (see `crate::client`), as each channel
+/// of grpcio resolves its name with a resolver of its own before its first call, of the
+/// subchannels of gRPC's global pool that it then shares: in the dialect of grpcio, before its
+/// first call, a channel resolves the name of its target once, of a lookup of its own, whatever
+/// another channel resolved before, of whose addresses the connections of the target take then
+/// ([`MIN_TIME_BETWEEN_RESOLUTIONS`]); of a failure, its calls fail of the error of it, at once,
+/// until it is tried again a backoff after its end, as gRPC's resolver tries it again.
+pub(crate) struct ChannelResolution {
+    /// Whether the calls go on of no resolution: of a channel that resolved, or of a Rust client.
+    ready: std::sync::atomic::AtomicBool,
+    state: tokio::sync::Mutex<Resolving>,
+}
+
+/// The state of a [`ChannelResolution`].
+enum Resolving {
+    /// Not resolved yet.
+    Unresolved,
+    /// Resolved: the calls go on.
+    Resolved,
+    /// The last resolution failed, of the error of the calls, which is tried again at `next`, of
+    /// the backoff `backoff`.
+    Failed {
+        error: ConnectError,
+        next: Instant,
+        backoff: Backoff,
+    },
+}
+
+impl ChannelResolution {
+    /// The resolution of a channel of a connector in the dialect of grpcio if `grpcio`: of a Rust
+    /// client, none.
+    pub(crate) fn new(grpcio: bool) -> Self {
+        Self {
+            ready: std::sync::atomic::AtomicBool::new(!grpcio),
+            state: tokio::sync::Mutex::new(Resolving::Unresolved),
+        }
+    }
+
+    /// Whether the calls of the channel go on, of no resolution (see [`ChannelResolution::ready`]).
+    pub(crate) fn is_ready(&self) -> bool {
+        self.ready.load(Ordering::SeqCst)
+    }
+
+    /// Whether the calls of the channel of `connector` go on, its name resolved, or the error of
+    /// its resolution, which fails them (see [`ChannelResolution`]). A Rust client resolves the
+    /// name as it connects, as tonic's channel does.
+    pub(crate) async fn ready(&self, connector: &Connector) -> Result<(), ConnectError> {
+        let target = &connector.0.target;
+        if !target.grpcio {
+            return Ok(());
+        }
+        let mut state = self.state.lock().await;
+        match &*state {
+            Resolving::Resolved => return Ok(()),
+            Resolving::Failed { error, next, .. } if Instant::now() < *next => {
+                return Err(error.clone());
+            }
+            _ => {}
+        }
+        match target.resolve_for_a_new_channel().await {
+            Ok(()) => {
+                *state = Resolving::Resolved;
+                self.ready.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+            Err(failure) => {
+                let failure = ChannelFailure::Resolve {
+                    name: target.name(),
+                    failure,
+                };
+                let error = ConnectError::of(&failure, true);
+                let mut backoff = match std::mem::replace(&mut *state, Resolving::Unresolved) {
+                    Resolving::Failed { backoff, .. } => backoff,
+                    _ => Backoff::new(),
+                };
+                let next = Instant::now() + backoff.next();
+                *state = Resolving::Failed {
+                    error: error.clone(),
+                    next,
+                    backoff,
+                };
+                Err(error)
+            }
         }
     }
 }
