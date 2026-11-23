@@ -565,9 +565,9 @@ requests of the unpickled object pickle as it is then. This case still differs:
     it builds its plan. So, from before a call releases the GIL until after it takes it back, no
     `SharedPart` of a part that it may clone or drop reports a reference:
     - a call that builds a request of the plans of the objects that it is given, a DataFrame and
-      what it holds, grouped data, a writer and the copy of its state, an Observation, a model, a
-      dataset or the arguments of a call of an ML object, such as the actions, the analyses, the
-      views, `cache` and `checkpoint`, the writes of `write`, `writeTo`, `mergeInto` and
+      what it holds, grouped data, a stream or merge writer and the copy of its state, an
+      Observation, a model, a dataset or the arguments of a call of an ML object, such as the
+      actions, the analyses, the views, `cache` and `checkpoint`, the writes of `mergeInto` and
       `writeStream`, `DataFrame.stat`, `spark.sql` of arguments, `observe`, the flows of a
       declarative pipeline, and the fits, transforms, evaluations and fetches of
       `pyspark.ml.connect`, may clone and drop only the parts of those plans: theirs are the busy
@@ -575,7 +575,8 @@ requests of the unpickled object pickle as it is then. This case still differs:
     - any other call clones and drops no part, and makes none busy, such as the waits and the calls
       of streaming queries, of `spark.streams` and of the listener bus, the calls of the
       configuration, the catalog and the session, the events of a declarative pipeline, and the
-      commands, plans and analyses that the Python client builds (`SparkSession.client`), whose
+      commands, plans and analyses that the Python client builds (`SparkSession.client`), as the
+      writes of `write` and `writeTo`, PySpark's writers, whose
       placeholders of DataFrames the binding replaces with the relations of the DataFrames before
       the call, with the GIL held, as PySpark builds their relations before its requests;
     - the events that a listener of the Rust API of the session gets, whose code the binding does
@@ -596,8 +597,9 @@ requests of the unpickled object pickle as it is then. This case still differs:
     `SharedPart`, and the counts and the marks of the calls without the GIL need it too.
   - `gc.get_referents` of a DataFrame, a Column or another object that holds a plan gives the
     `SharedPart`s of its parts that are seen (whose every reference is of a holder that reports it,
-    and that no call that runs without the GIL may clone or drop), and that of a writer the
-    `WriterParts` of its state, which its shallow copies share and which gives those of the state,
+    and that no call that runs without the GIL may clone or drop), and that of a stream or merge
+    writer the `WriterParts` of its state, which its shallow copies share and which gives those of
+    the state,
     where PySpark's objects give their plan objects through their `__dict__`; the `SharedPart` of
     the pickler of a UDF gives the tuple of its function and its return type.
   - The attributes of the clients of a session, their `thread_local` and their lists, are kept by
@@ -1211,11 +1213,17 @@ requests of the unpickled object pickle as it is then. This case still differs:
   readers, writers and the other objects of a session or a DataFrame hold their
   state in the Rust core: their `__dict__` holds the attributes that a user sets on them,
   which their copies and pickles keep as PySpark's do, but not their state, which PySpark's
-  holds there (`vars(df.write)` is empty, where PySpark's has `_df`, `_spark`, `_write` and
-  `_callback`). These are not of them, and hold their state in their `__dict__`, as PySpark's: the
-  `DataFrameReader` and the `DataStreamReader` of `spark.read` and `spark.readStream`, PySpark
+  holds there (`vars(df.writeStream)` is empty, where PySpark's has `_session`, `_write_stream` and
+  `_write_proto`). These are not of them, and hold their state in their `__dict__`, as PySpark's:
+  the `DataFrameReader` and the `DataStreamReader` of `spark.read` and `spark.readStream`, PySpark
   Connect's classes, of their `_client`, `_format`, `_schema` and `_options` (and `_source_name`),
-  whose code is PySpark's, adapted to the plans of the Rust core (see `docs/compatibility.md`); an
+  whose code is PySpark's, adapted to the plans of the Rust core; the `DataFrameWriter` and the
+  `DataFrameWriterV2` of `df.write` and `df.writeTo`, PySpark Connect's classes, of their `_df`,
+  `_spark`, `_write` (PySpark's `WriteOperation` and `WriteOperationV2`, whose fields their setters
+  set), `_callback` (and `_table_name`), whose writes send PySpark's command, over the relation of
+  the DataFrame, which the client executes, and whose `_df` is the plan object that `df._plan` gave
+  at `write`, of which the drop-in's DataFrame makes a new one at each read, where PySpark's is one
+  object (see `docs/compatibility.md`); an
   `Observation`, of its `_name`, `_result` and `_error`; the `Catalog`, the `TableValuedFunction`,
   the `DataSourceRegistration` and the `RuntimeConf` of a session, of the session of their
   `_sparkSession` (`sparkSession` of a registration) and of the client of their `_client`; the
@@ -1271,8 +1279,9 @@ requests of the unpickled object pickle as it is then. This case still differs:
   subclasses. The drop-in's DataFrame, `Observation`, the `SparkSession`, `Catalog`,
   `TableValuedFunction`, `DataSourceRegistration`, `RuntimeConf`, `StreamingQuery`,
   `StreamingQueryManager`, `StreamingQueryListenerBus`, `DataFrameReader`, `DataStreamReader`,
-  `GroupedData`, `PandasCogroupedOps`, `DataFrameNaFunctions` and `DataFrameStatFunctions` of
-  `pyspark.sql.connect`, `SparkSession.Builder`, `SparkSession.Hook`, `StorageLevel`,
+  `GroupedData`, `PandasCogroupedOps`, `DataFrameNaFunctions`, `DataFrameStatFunctions`,
+  `DataFrameWriter` and `DataFrameWriterV2` of `pyspark.sql.connect`, `SparkSession.Builder`,
+  `SparkSession.Hook`, `StorageLevel`,
   `PythonEvalType` and the data types are subclassed as PySpark's: a subclass constructs of the
   arguments of its `__init__`, and its copies and pickles are of the subclass (but those of a
   session, which are the active session of its ID, as PySpark's), and PySpark's pickle of a reader,
@@ -1289,15 +1298,14 @@ requests of the unpickled object pickle as it is then. This case still differs:
   of a session, of which its `__init__` makes its client as PySpark's does, and one whose `__init__`
   never ran raises the `AttributeError` of the first attribute that PySpark's method reads
   (`_sparkSession`, `sparkSession`, `_client`, `_query_id`, `_session`, `_lock`, `_df`, `_gd1`,
-  `df`), and so do the readers, PySpark's classes. The other native
-  classes are not subclassable (`TypeError: type '...' is not an acceptable base type`), and do not
-  construct (`cannot create '...' instances`): their objects are of the native state of a plan, an
-  expression or a query, which the arguments of PySpark's constructors, the Python objects of its
-  client, do not give, as the drop-in's native state replaces those objects, so a subclass would
-  have no `__init__` to call (see `docs/compatibility.md`):
+  `df`), and so do the readers and the writers, PySpark's classes. The other native classes are not
+  subclassable (`TypeError: type '...' is not an acceptable base type`), and do not construct
+  (`cannot create '...' instances`): their objects are of the native state of a plan, an expression
+  or a query, which the arguments of PySpark's constructors, the Python objects of its client, do
+  not give, as the drop-in's native state replaces those objects, so a subclass would have no
+  `__init__` to call (see `docs/compatibility.md`):
   - `Column`: an `Expression` of `pyspark.sql.connect.expressions`;
-  - `DataFrameWriter`, `DataFrameWriterV2`, `DataStreamWriter`, `MergeIntoWriter`: the
-    `LogicalPlan` of a DataFrame;
+  - `DataStreamWriter`, `MergeIntoWriter`: the `LogicalPlan` of a DataFrame;
   - `WindowSpec`, `TableArg`: expressions and a `WindowFrame`, a `SubqueryExpression`.
 
   A Python subclass of a data type (`StringType`, `DecimalType`, `ArrayType`, `StructField`,
@@ -1419,8 +1427,8 @@ mypy and pyright type an application as with `pyspark-client` (see `docs/compati
   does not have, with their reasons: the classic-only `DataFrame.rdd`, as type checkers of
   `pyspark-client` see it, and the type variables of the annotations of `pyspark.sql.types`.
 - **The internals of PySpark Connect** (intentional). The private attributes of the Connect
-  classes that PySpark annotates with its plans and expressions (`DataFrameWriter._write`, ...)
-  are `Any`, as the drop-in builds them in Rust (`UNRESOLVED_IMPORTS` of the generator).
+  classes that PySpark annotates with its plans and expressions (`DataStreamWriter._write_stream`,
+  ...) are `Any`, as the drop-in builds them in Rust (`UNRESOLVED_IMPORTS` of the generator).
 - **The modules of `pyspark.ml.connect`** (intentional; the drop-in's ML API, see
   `docs/compatibility.md`). Their classes are typed as the drop-in's, subclasses of PySpark's
   classes of `pyspark.ml`, as at run time, where those of `pyspark-client` are its ML API on

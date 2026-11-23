@@ -10,8 +10,7 @@
 use std::collections::HashMap;
 
 use pyo3::prelude::*;
-use pyo3::types::{PyBool, PyBytes, PyDict, PyList, PyString, PyTuple};
-use spark_connect::readwriter::{DataFrameWriter, DataFrameWriterV2};
+use pyo3::types::{PyBool, PyBytes, PyDict, PyString};
 use spark_connect_core::error::SparkError;
 
 /// Coerce a Python option value the way reference pyspark's `to_str` does:
@@ -109,11 +108,6 @@ pub(crate) fn utf32le_of(text: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
     Ok(encoded.cast::<PyBytes>()?.as_bytes().to_vec())
 }
 
-/// The str of UTF-32LE bytes of a str, as Python makes it, which keeps its lone surrogates.
-pub(crate) fn utf32le_text<'py>(py: Python<'py>, utf32le: &[u8]) -> PyResult<Bound<'py, PyAny>> {
-    PyBytes::new(py, utf32le).call_method1("decode", ("utf-32-le", "surrogatepass"))
-}
-
 /// The text of an option or of its key: its UTF-32LE bytes, and the text that the core takes,
 /// which is None for a str that UTF-8 cannot encode.
 #[derive(Clone)]
@@ -140,11 +134,6 @@ impl OptionText {
                 .collect(),
             text: Some(name.to_string()),
         }
-    }
-
-    /// The text of the value, as a Python str.
-    fn to_object<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        utf32le_text(py, &self.utf32le)
     }
 }
 
@@ -251,14 +240,6 @@ impl OptionKey {
                 pyo3::types::PyAnyMethods::eq(a.bind(py), b.bind(py)).unwrap_or(false)
             }
             _ => false,
-        }
-    }
-
-    /// The key as the object that PySpark keeps.
-    fn to_object<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        match self {
-            OptionKey::Text(text) => text.to_object(py),
-            OptionKey::Object { object, .. } => Ok(object.bind(py).clone()),
         }
     }
 }
@@ -455,15 +436,6 @@ impl UnencodableOptions {
             .find_map(|(key, value)| entry_error(key, value.as_ref()))
     }
 
-    /// The entries as a list of pairs of Python objects, which a reduce gives back.
-    pub(crate) fn to_list<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
-        let entries = PyList::empty(py);
-        for (key, value) in self.to_objects(py)? {
-            entries.append(PyTuple::new(py, [key, value])?)?;
-        }
-        Ok(entries)
-    }
-
     /// Report the Python objects of the entries, the keys that are not strs and the values that
     /// are objects, to Python's garbage collector, as PySpark's dict of its options holds them:
     /// those that only these options hold, so that a copy of them, which a request makes of the
@@ -484,25 +456,6 @@ impl UnencodableOptions {
             }
         }
         Ok(())
-    }
-
-    /// The entries as Python objects, which a reduce gives back: the key, and the value, if any.
-    /// Of a copy of the options, as Python objects are made, which may run Python code.
-    pub(crate) fn to_objects<'py>(
-        &self,
-        py: Python<'py>,
-    ) -> PyResult<Vec<(Bound<'py, PyAny>, Bound<'py, PyAny>)>> {
-        crate::gc::check_no_lock_held("the Python objects of options made");
-        self.0
-            .iter()
-            .map(|(key, value)| {
-                let value = match value {
-                    Some(value) => value.to_object(py)?,
-                    None => py.None().into_bound(py),
-                };
-                Ok((key.to_object(py)?, value))
-            })
-            .collect()
     }
 }
 
@@ -586,64 +539,6 @@ pub(crate) fn change_options<T, R>(
     }
 }
 
-/// The entry of the option `key` of a writer, set to `value`, as a writer's `option` sets it:
-/// `unencodable` keeps the entries that the core writer does not take, and the option that the
-/// core writer takes is returned, of a key that is a str, or bytes that are UTF-8, with a value
-/// that encodes.
-pub(crate) fn writer_entry(
-    py: Python<'_>,
-    unencodable: &mut UnencodableOptions,
-    key: &OptionKey,
-    value: &OptionText,
-) -> Option<(String, String)> {
-    match (
-        key.core_text().and_then(|name| name.text.clone()),
-        value.text.clone(),
-    ) {
-        (Some(name), Some(value)) => {
-            unencodable.remove(py, key);
-            Some((name, value))
-        }
-        _ => {
-            unencodable.set(py, key, Some(OptionKey::Text(value.clone())));
-            None
-        }
-    }
-}
-
-/// The entry of the table property `key` of a V2 writer, set to `value`, or unset when it is
-/// None, as its `tableProperty` sets it: `unencodable` keeps the entries that the core writer does
-/// not take, and the change of its table properties is returned, of a key that is a str, or bytes
-/// that are UTF-8: its value, None for a value that is None or does not encode, which unsets it;
-/// and None of another key.
-pub(crate) fn property_entry(
-    py: Python<'_>,
-    unencodable: &mut UnencodableOptions,
-    key: &OptionKey,
-    value: Option<&OptionKey>,
-) -> Option<(String, Option<String>)> {
-    let Some(name) = key.core_text().and_then(|name| name.text.clone()) else {
-        unencodable.set(py, key, value.map(|value| value.clone_ref(py)));
-        return None;
-    };
-    match value {
-        Some(value) => match value.core_text().and_then(|text| text.text.clone()) {
-            Some(text) => {
-                unencodable.remove(py, key);
-                Some((name, Some(text)))
-            }
-            None => {
-                unencodable.set(py, key, Some(value.clone_ref(py)));
-                Some((name, None))
-            }
-        },
-        None => {
-            unencodable.remove(py, key);
-            Some((name, None))
-        }
-    }
-}
-
 /// The Python object that holds a state that the shallow copies of an object share, for Python's
 /// garbage collector (see [`SharedObjects`]): each copy holds it and reports it in its
 /// `__traverse__`, and it reports the objects of the state.
@@ -696,50 +591,6 @@ pub(crate) fn stream_option_text(value: &Bound<'_, PyAny>) -> PyResult<Option<Op
     Ok(Some(OptionText::of(value.str()?.as_any())?))
 }
 
-/// A reader or writer that takes string options one at a time.
-pub(crate) trait OptionBuilder: Sized {
-    fn with_option(self, key: &str, value: &str) -> Self;
-}
-
-impl OptionBuilder for DataFrameWriter {
-    fn with_option(self, key: &str, value: &str) -> Self {
-        self.option(key, value)
-    }
-}
-
-impl OptionBuilder for DataFrameWriterV2 {
-    fn with_option(self, key: &str, value: &str) -> Self {
-        self.option(key, value)
-    }
-}
-
-/// `builder` with the option `name` of `value`, **skipping** a `value` that is absent or None.
-pub(crate) fn set_option_skip_none<B: OptionBuilder>(
-    builder: B,
-    name: &str,
-    value: Option<&Bound<'_, PyAny>>,
-) -> PyResult<B> {
-    match value {
-        Some(value) => match coerce_option_value(value)? {
-            Some(value) => Ok(builder.with_option(name, &value)),
-            None => Ok(builder),
-        },
-        None => Ok(builder),
-    }
-}
-
-/// `builder` with each of `options` in order, **skipping** those that are absent or None, as
-/// [`set_option_skip_none`] one after the other: the first value that fails to convert raises.
-pub(crate) fn set_options_skip_none<B: OptionBuilder>(
-    mut builder: B,
-    options: &[(&str, Option<&Bound<'_, PyAny>>)],
-) -> PyResult<B> {
-    for (name, value) in options {
-        builder = set_option_skip_none(builder, name, *value)?;
-    }
-    Ok(builder)
-}
-
 /// The `**options` of a call as a map of strings, **skipping** those that are None.
 pub(crate) fn kwargs_skip_none(
     options: Option<&Bound<'_, PyDict>>,
@@ -776,28 +627,6 @@ pub(crate) fn str_kwargs_skip_none(
     Ok(map)
 }
 
-/// The `_set_opts` of the readers and writers, as PySpark's `OptionUtils._set_opts`: the schema of
-/// `slf`, if any, and its options of `options`, **skipping** those that are None, through its own
-/// Python `schema` and `option`, which convert them and raise their errors.
-pub(crate) fn set_opts(
-    slf: &Bound<'_, PyAny>,
-    schema: Option<&Bound<'_, PyAny>>,
-    options: Option<&Bound<'_, PyDict>>,
-) -> PyResult<()> {
-    check_keyword_keys(options)?;
-    if let Some(schema) = schema.filter(|schema| !schema.is_none()) {
-        slf.call_method1("schema", (schema,))?;
-    }
-    if let Some(options) = options {
-        for (key, value) in options.iter() {
-            if !value.is_none() {
-                slf.call_method1("option", (key, value))?;
-            }
-        }
-    }
-    Ok(())
-}
-
 /// An option argument of a format method whose Python default is not None, which PySpark's
 /// `_set_opts` then sets on every call, over an earlier option of the same name: `text`'s
 /// `wholetext=False`. An omitted argument is that default, and None is skipped, as PySpark
@@ -828,6 +657,7 @@ impl DefaultedOption {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pyo3::types::PyList;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
 
@@ -847,15 +677,39 @@ mod tests {
             .any(|referent| referent.is(object))
     }
 
-    /// Set the entry of `key` to the text `value` in the options of `state`, as an option of a
-    /// writer is set.
+    /// The entry of the option `key` set to `value`, as the session builder's `config` sets one:
+    /// `unencodable` keeps the entries that the core does not take, and the option that it takes
+    /// is returned.
+    fn entry(
+        py: Python<'_>,
+        unencodable: &mut UnencodableOptions,
+        key: &OptionKey,
+        value: &OptionText,
+    ) -> Option<(String, String)> {
+        match (
+            key.core_text().and_then(|name| name.text.clone()),
+            value.text.clone(),
+        ) {
+            (Some(name), Some(value)) => {
+                unencodable.remove(py, key);
+                Some((name, value))
+            }
+            _ => {
+                unencodable.set(py, key, Some(OptionKey::Text(value.clone())));
+                None
+            }
+        }
+    }
+
+    /// Set the entry of `key` to the text `value` in the options of `state`, as an option of the
+    /// session builder is set.
     fn put(py: Python<'_>, state: &GilMutex<UnencodableOptions>, key: &OptionKey, value: &str) {
         let value = OptionText::literal(value);
         change_options(
             py,
             state,
             |options| options,
-            |options| writer_entry(py, options, key, &value),
+            |options| entry(py, options, key, &value),
             |_, _| {},
         );
     }
@@ -933,15 +787,21 @@ mod tests {
             put(py, &state, &option_key(&outer).unwrap(), "3");
             assert!(!COMPARED_WITH_A_LOCK.load(Ordering::SeqCst));
             assert_eq!(REENTERED.load(Ordering::SeqCst), 1);
-            // Of a copy, as Python objects are made apart from the lock.
+            // Of a copy, as Python objects are read apart from the lock.
             let options = state.lock(py).clone_ref(py);
             let tags: Vec<String> = options
-                .to_objects(py)
-                .unwrap()
-                .into_iter()
+                .0
+                .iter()
                 .map(|(key, value)| {
-                    let tag: String = key.getattr("tag").unwrap().extract().unwrap();
-                    let value: String = value.extract().unwrap();
+                    let OptionKey::Object { object, .. } = key else {
+                        panic!("an object key");
+                    };
+                    let tag: String = object.bind(py).getattr("tag").unwrap().extract().unwrap();
+                    let value = value
+                        .as_ref()
+                        .and_then(|value| value.core_text())
+                        .and_then(|text| text.text.clone())
+                        .unwrap();
                     format!("{tag}={value}")
                 })
                 .collect();
@@ -971,7 +831,7 @@ mod tests {
                 py,
                 &state,
                 |options| options,
-                |options| writer_entry(py, options, &key, &unencodable),
+                |options| entry(py, options, &key, &unencodable),
                 |_, _| {},
             );
             assert_eq!(change, None);
@@ -989,7 +849,7 @@ mod tests {
                 py,
                 &state,
                 |options| options,
-                |options| writer_entry(py, options, &key, &encodable),
+                |options| entry(py, options, &key, &encodable),
                 |_, _| {},
             );
             assert_eq!(change, Some(("a".to_string(), "x".to_string())));

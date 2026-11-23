@@ -375,13 +375,6 @@ impl<T> GilMutex<T> {
             _held: LockHeld::new(),
         })
     }
-
-    /// Replace the state with `state`, and return the one that it replaces, which the caller
-    /// drops once the lock is released, as the drop of its Python objects may run Python code.
-    #[must_use = "the replaced state must be dropped once the lock is released"]
-    pub(crate) fn replace(&self, py: Python<'_>, state: T) -> T {
-        std::mem::replace(&mut *self.lock(py), state)
-    }
 }
 
 /// Log a violation of the check of the clones of the tests, of `what`, with its backtrace (see
@@ -2464,7 +2457,7 @@ mod tests {
                         check_no_lock_held("the Python code of the test");
                     }
                     assert_eq!(held(), 0);
-                    let replaced = state.replace(py, vec![2]);
+                    let replaced = std::mem::replace(&mut *state.lock(py), vec![2]);
                     assert_eq!((replaced, held()), (vec![1], 0));
                     assert_eq!(state.try_lock(py).as_deref(), Some(&vec![2]));
                 })

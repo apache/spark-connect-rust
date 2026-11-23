@@ -204,17 +204,6 @@ pub(crate) fn str_dict<'py>(
     Ok(dict)
 }
 
-/// The name of a save mode, which `DataFrameWriter.mode` takes back.
-pub(crate) fn save_mode_name(mode: spark_connect::readwriter::SaveMode) -> &'static str {
-    use spark_connect::readwriter::SaveMode;
-    match mode {
-        SaveMode::Append => "append",
-        SaveMode::Overwrite => "overwrite",
-        SaveMode::ErrorIfExists => "error",
-        SaveMode::Ignore => "ignore",
-    }
-}
-
 /// The Python object of an optional Python object, None if there is none.
 pub(crate) fn optional_object<'py>(
     py: Python<'py>,

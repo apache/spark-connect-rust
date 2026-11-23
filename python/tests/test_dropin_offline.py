@@ -45683,13 +45683,18 @@ def test_worker_reconstructors_rebuild_the_readers_writers_and_streams_as_pyspar
     stream_reader = spark.readStream.format("rate").option("b", "2").name("rate_src")
     stream_writer = df.writeStream.format("memory").outputMode("append").queryName("q")
     # Each reduce of a native object gives a reconstructor of its state, not the drop-in's
-    # `_of_state` by name; the readers, PySpark's classes, pickle as PySpark's plain objects.
+    # `_of_state` by name; the readers and the writers, PySpark's classes, pickle as PySpark's
+    # plain objects.
     import copyreg
 
-    for obj in (writer, stream_writer):
-        assert obj.__reduce__()[0].__name__ == "creator"
-    for obj in (reader, stream_reader):
+    assert stream_writer.__reduce__()[0].__name__ == "creator"
+    for obj in (reader, writer, stream_reader):
         assert obj.__reduce_ex__(2)[0] is copyreg.__newobj__
+    # The modules of the DataFrame of a writer's callback, which its pickle holds as PySpark's
+    # does, and of its client, which the worker's PySpark has.
+    import pyspark.sql.connect.client.core  # noqa: F401
+    import pyspark.sql.connect.dataframe  # noqa: F401
+
     monkeypatch.delattr(pyspark, "_pyspark")
     monkeypatch.setitem(sys.modules, "pyspark._pyspark", None)
     rebuilt = cloudpickle.loads(cloudpickle.dumps(reader))

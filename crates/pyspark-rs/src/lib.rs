@@ -66,9 +66,8 @@ use catalog::PyCatalog;
 use column::PyColumn;
 use conf::PyRuntimeConf;
 use dataframe::{
-    PyDataFrame, PyDataFrameNaFunctions, PyDataFrameWriter, PyDataFrameWriterV2,
-    PyLocalRowIterator, PyMergeIntoWriter, PyWhenMatched, PyWhenNotMatched,
-    PyWhenNotMatchedBySource,
+    PyDataFrame, PyDataFrameNaFunctions, PyLocalRowIterator, PyMergeIntoWriter, PyWhenMatched,
+    PyWhenNotMatched, PyWhenNotMatchedBySource,
 };
 use datasource::PyDataSourceRegistration;
 use group::{PyCoGroupedData, PyGroupedData};
@@ -188,8 +187,6 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
             .setattr("__qualname__", format!("SparkSession.{name}"))?;
     }
     m.add_class::<PyDataFrame>()?;
-    m.add_class::<PyDataFrameWriter>()?;
-    m.add_class::<PyDataFrameWriterV2>()?;
     m.add_class::<PyDataFrameNaFunctions>()?;
     m.add_class::<PyMergeIntoWriter>()?;
     m.add_class::<PyWhenMatched>()?;
