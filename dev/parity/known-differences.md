@@ -620,7 +620,8 @@ requests of the unpickled object pickle as it is then. This case still differs:
   `toNullable()`; of `json()` (of Python's `json` module) from about 330, and of `copy.deepcopy`
   and unpickling, which convert the JSON of the type in Python, from about 250. Of nested arrays,
   PySpark's from about 250 (`copy.deepcopy`) to 1,000 (`json()`, `simpleString()`), and the
-  drop-in's from about 500 (`copy.deepcopy`, unpickling) to 1,000. A higher limit
+  drop-in's from about 250 (`copy.deepcopy`) and 330 (pickling), which copy and pickle the
+  `__dict__`s of the arrays in Python, as PySpark's, to 1,000. A higher limit
   (`sys.setrecursionlimit`) takes more levels, in both.
 
 - **The message of the `RecursionError` of a type that holds itself** (inherent of `json()`,
