@@ -1695,6 +1695,16 @@ pub(crate) fn wait_for_no_counted_call(py: Python<'_>) {
     }
 }
 
+/// The lock of the tests of the state of this module, of the binding's tests in any module: the
+/// counts and marks of the calls without the GIL, the parts reported, the log of the check of the
+/// clones and the forks are of the whole process, so one such test changes what another sees, as
+/// in parallel threads of `cargo test`. Each takes it first, before it takes the GIL.
+#[cfg(test)]
+pub(crate) fn tests_of_the_state_alone() -> std::sync::MutexGuard<'static, ()> {
+    static ALONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    ALONE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1762,6 +1772,7 @@ mod tests {
 
     #[test]
     fn a_part_that_a_holder_that_the_collector_does_not_see_holds_is_not_reported() {
+        let _alone = super::tests_of_the_state_alone();
         Python::initialize();
         Python::attach(|py| {
             let object = PyTuple::new(py, [py.None(), py.None()]).unwrap().into_any();
@@ -1824,6 +1835,7 @@ mod tests {
 
     #[test]
     fn a_plan_of_no_python_object_has_no_shared_part_and_is_known_while_it_is_held() {
+        let _alone = super::tests_of_the_state_alone();
         Python::initialize();
         Python::attach(|py| {
             let plain = Expression::function("upper", vec![Expression::column("y")]);
@@ -1845,6 +1857,7 @@ mod tests {
 
     #[test]
     fn shared_parts_of_a_deep_plan_are_made_and_dropped_without_recursing() {
+        let _alone = super::tests_of_the_state_alone();
         Python::initialize();
         Python::attach(|py| {
             let object = PyTuple::new(py, [py.None(), py.None()]).unwrap().into_any();
@@ -1901,6 +1914,7 @@ mod tests {
 
     #[test]
     fn a_clone_that_a_finalizer_keeps_while_the_collector_runs_keeps_what_it_reaches() {
+        let _alone = super::tests_of_the_state_alone();
         Python::initialize();
         Python::attach(|py| {
             let namespace = PyDict::new(py);
@@ -1978,6 +1992,7 @@ mod tests {
 
     #[test]
     fn a_holder_that_the_deallocation_of_a_shared_part_makes_before_its_drop_gets_one_of_its_own() {
+        let _alone = super::tests_of_the_state_alone();
         // The holder that a finalizer made, and whether the SharedPart was being deallocated then.
         static MADE: Mutex<Option<(Parts, bool)>> = Mutex::new(None);
         Python::initialize();
@@ -2050,6 +2065,7 @@ mod tests {
 
     #[test]
     fn the_counts_and_the_marks_of_calls_that_panic_are_restored_as_they_unwind() {
+        let _alone = super::tests_of_the_state_alone();
         Python::initialize();
         Python::attach(|py| {
             // A counted call without the GIL that panics: its count is restored as it unwinds,
@@ -2093,6 +2109,7 @@ mod tests {
 
     #[test]
     fn a_call_of_the_parts_of_named_holders_makes_those_parts_alone_busy() {
+        let _alone = super::tests_of_the_state_alone();
         Python::initialize();
         Python::attach(|py| {
             let object = PyTuple::new(py, [py.None(), py.None()]).unwrap().into_any();
@@ -2139,6 +2156,7 @@ mod tests {
 
     #[test]
     fn a_call_of_values_makes_busy_what_they_reach_and_what_is_made_of_them_while_it_runs() {
+        let _alone = super::tests_of_the_state_alone();
         Python::initialize();
         Python::attach(|py| {
             let object = PyTuple::new(py, [py.None(), py.None()]).unwrap().into_any();
@@ -2178,7 +2196,7 @@ mod tests {
 
     #[test]
     fn the_child_of_a_fork_counts_the_calls_of_the_forking_thread_alone() {
-        let _alone = of_the_check_alone();
+        let _alone = super::tests_of_the_state_alone();
         Python::initialize();
         Python::attach(|py| {
             let os = py.import("os").unwrap();
@@ -2248,14 +2266,6 @@ mod tests {
         });
     }
 
-    /// The lock of the tests of the check of the clones and of a fork, which stops the checks of
-    /// the other tests while it runs (see `_hold_checks_for_fork`).
-    static OF_THE_CHECK: Mutex<()> = Mutex::new(());
-
-    fn of_the_check_alone() -> MutexGuard<'static, ()> {
-        OF_THE_CHECK.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
     /// The violations of the check of the clones on the thread of the name `name`, which are
     /// taken.
     fn violations_of(name: &str) -> Vec<String> {
@@ -2268,7 +2278,7 @@ mod tests {
 
     #[test]
     fn the_check_of_the_clones_logs_one_without_the_gil_of_a_part_that_no_call_marks_busy() {
-        let _alone = of_the_check_alone();
+        let _alone = super::tests_of_the_state_alone();
         Python::initialize();
         Python::attach(|py| {
             assert!(_check_part_clones(py).unwrap());
@@ -2316,7 +2326,7 @@ mod tests {
 
     #[test]
     fn a_fork_waits_for_the_checks_that_run_and_starts_none_until_every_fork_is_over() {
-        let _alone = of_the_check_alone();
+        let _alone = super::tests_of_the_state_alone();
         Python::initialize();
         Python::attach(|py| {
             assert!(_check_part_clones(py).unwrap());
@@ -2384,6 +2394,7 @@ mod tests {
 
     #[test]
     fn no_reference_is_reported_while_a_call_of_the_binding_runs_without_the_gil() {
+        let _alone = super::tests_of_the_state_alone();
         Python::initialize();
         Python::attach(|py| {
             let object = PyTuple::new(py, [py.None(), py.None()]).unwrap().into_any();
@@ -2428,7 +2439,7 @@ mod tests {
 
     #[test]
     fn the_check_logs_a_release_of_the_gil_and_python_code_while_a_gil_mutex_is_held() {
-        let _alone = of_the_check_alone();
+        let _alone = super::tests_of_the_state_alone();
         Python::initialize();
         Python::attach(|py| assert!(_check_part_clones(py).unwrap()));
         let name = "gil-mutex-held";
@@ -2472,7 +2483,7 @@ mod tests {
 
     #[test]
     fn a_gil_mutex_found_held_is_logged_and_waited_for_with_the_gil_released() {
-        let _alone = of_the_check_alone();
+        let _alone = super::tests_of_the_state_alone();
         Python::initialize();
         Python::attach(|py| {
             assert!(_check_part_clones(py).unwrap());

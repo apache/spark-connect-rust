@@ -1064,6 +1064,7 @@ mod tests {
 
     #[test]
     fn the_objects_of_options_are_reported_while_the_options_of_a_state_alone_hold_them() {
+        let _alone = crate::gc::tests_of_the_state_alone();
         Python::initialize();
         Python::attach(|py| {
             let object = py.eval(c"object()", None, None).unwrap();
@@ -1099,6 +1100,7 @@ mod tests {
 
     #[test]
     fn keys_are_compared_with_no_lock_held_and_again_once_the_options_changed() {
+        let _alone = crate::gc::tests_of_the_state_alone();
         Python::initialize();
         Python::attach(|py| {
             let namespace = pyo3::types::PyDict::new(py);
@@ -1151,6 +1153,7 @@ mod tests {
 
     #[test]
     fn a_key_that_is_a_str_is_set_with_no_comparison_of_python_code() {
+        let _alone = crate::gc::tests_of_the_state_alone();
         Python::initialize();
         Python::attach(|py| {
             let namespace = pyo3::types::PyDict::new(py);
