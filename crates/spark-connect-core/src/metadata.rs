@@ -423,6 +423,52 @@ pub(crate) struct PendingMetadata {
     )>,
 }
 
+/// The keys of the metadata of an application that gRPC's core does not send, as it sends its
+/// own: of HTTP/2 and of gRPC (`te`, `content-type`, `content-length`, `grpc-timeout`), and those
+/// that tonic drops too (`grpc-message`, `grpc-message-type`, `grpc-status`), as grpcio's calls of
+/// them succeed (but `grpc-status`, of which a call of grpcio hangs).
+const NOT_SENT: [&str; 7] = [
+    "te",
+    "content-type",
+    "content-length",
+    "grpc-timeout",
+    "grpc-message",
+    "grpc-message-type",
+    "grpc-status",
+];
+
+/// The fields of a connection that HTTP/2 forbids in a request (RFC 9113, 8.2.2), which gRPC's core
+/// sends of the metadata of an application, so that its server resets the stream as malformed
+/// (`RST_STREAM` of `PROTOCOL_ERROR`), where hyper drops them.
+const CONNECTION_FIELDS: [&str; 5] = [
+    "connection",
+    "keep-alive",
+    "proxy-connection",
+    "transfer-encoding",
+    "upgrade",
+];
+
+/// Whether gRPC's core sends `key` of the metadata of an application (see [`NOT_SENT`]).
+pub(crate) fn sent_of_an_application(key: &str) -> bool {
+    !NOT_SENT.contains(&key)
+}
+
+/// The status of a call of a field of a connection in its headers (see [`CONNECTION_FIELDS`]), in
+/// the dialect of grpcio (`grpcio`), as grpcio's call fails once its server resets its stream:
+/// `INTERNAL`, `Stream removed (RST_STREAM (Received RST_STREAM with error code 1))`.
+fn of_connection_fields(headers: &http::HeaderMap, grpcio: bool) -> Option<tonic::Status> {
+    if !grpcio
+        || !CONNECTION_FIELDS
+            .iter()
+            .any(|name| headers.contains_key(*name))
+    {
+        return None;
+    }
+    Some(tonic::Status::internal(
+        "Stream removed (RST_STREAM (Received RST_STREAM with error code 1))",
+    ))
+}
+
 /// Append `metadata`, the metadata of a call, of its order, to `headers`, and then `after`, as
 /// gRPC sends the metadata of a call and then that of its call credentials. A key of several values
 /// keeps them all, in their order.
@@ -480,6 +526,9 @@ pub(crate) struct Checked {
     pub(crate) channel: Channel,
     /// Whether the client of the calls closed its channel (see `SparkConnectClient::close`).
     pub(crate) closed: Arc<crate::client::ChannelClosed>,
+    /// Whether the channel is of a target that gRPC refuses, whose status the transport makes
+    /// itself, as gRPC's channel fails its calls of no response, of no limit of the metadata.
+    pub(crate) refused: bool,
 }
 
 impl Service<http::Request<tonic::body::Body>> for Checked {
@@ -496,8 +545,18 @@ impl Service<http::Request<tonic::body::Body>> for Checked {
         let Some(PendingMetadata { source, after }) =
             request.extensions_mut().remove::<PendingMetadata>()
         else {
-            return Box::pin(checked_response(self.channel.call(request), closed));
+            if let Some(status) =
+                of_connection_fields(request.headers(), crate::connector::grpcio_dialect())
+            {
+                return Box::pin(async move { Err(Box::new(status) as StdError) });
+            }
+            return Box::pin(checked_response(
+                self.channel.call(request),
+                closed,
+                self.refused,
+            ));
         };
+        let refused = self.refused;
         // The channel that `poll_ready` made ready, which takes the request once its metadata is
         // read, as tower's services are called once ready.
         let fresh = self.channel.clone();
@@ -515,7 +574,12 @@ impl Service<http::Request<tonic::body::Body>> for Checked {
                 Ok(metadata) => append_metadata(request.headers_mut(), metadata, &after),
                 Err(status) => return Err(Box::new(status) as StdError),
             }
-            checked_response(channel.call(request), closed).await
+            if let Some(status) =
+                of_connection_fields(request.headers(), crate::connector::grpcio_dialect())
+            {
+                return Err(Box::new(status) as StdError);
+            }
+            checked_response(channel.call(request), closed, refused).await
         })
     }
 }
@@ -523,8 +587,9 @@ impl Service<http::Request<tonic::body::Body>> for Checked {
 /// The metadata of a call of `pairs`, the keys and the values of a source of the metadata (see
 /// `crate::channel::MetadataSource`), as gRPC's core validates them: a key of `[0-9a-z_.-]`, a
 /// value of printable ASCII and the space, or of any bytes, sent in base64, of a key of `-bin`; a
-/// `user-agent`, which grpcio replaces with its own, is not sent. Of another, gRPC's `INTERNAL`
-/// (`Invalid metadata`), which fails the call.
+/// `user-agent`, which grpcio replaces with its own, and the keys that gRPC's core sets itself
+/// (see [`NOT_SENT`]) are not sent. Of another, gRPC's `INTERNAL` (`Invalid metadata`), which
+/// fails the call.
 pub(crate) fn call_metadata(
     pairs: &[(Vec<u8>, Vec<u8>)],
 ) -> Result<tonic::metadata::MetadataMap, tonic::Status> {
@@ -540,7 +605,10 @@ pub(crate) fn call_metadata(
             metadata.append_bin(key, tonic::metadata::BinaryMetadataValue::from_bytes(value));
             continue;
         }
-        if key == b"user-agent" {
+        if key == b"user-agent" || NOT_SENT.iter().any(|name| key == name.as_bytes()) {
+            if !value.iter().all(|b| (0x20..=0x7e).contains(b)) {
+                return Err(invalid());
+            }
             continue;
         }
         if !value.iter().all(|b| (0x20..=0x7e).contains(b)) {
@@ -561,6 +629,7 @@ pub(crate) fn call_metadata(
 async fn checked_response(
     response: <Channel as Service<http::Request<tonic::body::Body>>>::Future,
     closed: Arc<crate::client::ChannelClosed>,
+    refused: bool,
 ) -> Result<http::Response<CheckedBody>, StdError> {
     let mut response = tokio::select! {
         biased;
@@ -569,7 +638,9 @@ async fn checked_response(
             return Err(Box::new(tonic::Status::cancelled(crate::client::CLOSED_CHANNEL)) as StdError);
         }
     };
-    if let Some(status) = refusal(Some(response.status().as_str()), response.headers()) {
+    if let Some(status) =
+        refusal(Some(response.status().as_str()), response.headers()).filter(|_| !refused)
+    {
         return Err(Box::new(status) as StdError);
     }
     if let Some(status) = read_details(response.headers_mut()) {
@@ -1152,6 +1223,51 @@ mod tests {
             ["Bearer FROM-METADATA", "Bearer TOKEN"]
         );
         assert_eq!(values("te"), ["trailers"]);
+    }
+
+    #[test]
+    fn the_keys_that_grpc_sets_itself_are_not_sent_of_a_source() {
+        // Of the probes of grpcio 1.85.1: a call of `te`, `content-type`, `content-length` or
+        // `grpc-timeout` of the metadata of a builder succeeds, of gRPC's own.
+        let pair = |key: &str, value: &str| (key.as_bytes().to_vec(), value.as_bytes().to_vec());
+        let metadata = call_metadata(&[
+            pair("te", "foo"),
+            pair("content-type", "text/plain"),
+            pair("content-length", "5"),
+            pair("grpc-timeout", "1n"),
+            pair("grpc-status", "5"),
+            pair("grpc-message", "injected"),
+            pair("x-kept", "v"),
+        ])
+        .unwrap();
+        let keys: Vec<&str> = metadata
+            .keys()
+            .map(|key| match key {
+                tonic::metadata::KeyRef::Ascii(key) => key.as_str(),
+                tonic::metadata::KeyRef::Binary(key) => key.as_str(),
+            })
+            .collect();
+        assert_eq!(keys, ["x-kept"]);
+        // A value that gRPC does not send fails the call all the same.
+        let status = call_metadata(&[pair("te", "a\nb")]).unwrap_err();
+        assert_eq!(status.message(), "Invalid metadata");
+        assert!(sent_of_an_application("x-kept") && !sent_of_an_application("grpc-timeout"));
+    }
+
+    #[test]
+    fn a_field_of_a_connection_fails_its_call_as_grpcs_server_resets_it() {
+        // Of the probes: grpcio sends `connection`, `keep-alive`, `transfer-encoding` and
+        // `upgrade`, of which the server resets the stream (RFC 9113, 8.2.2).
+        let mut headers = http::HeaderMap::new();
+        headers.insert("connection", http::HeaderValue::from_static("close"));
+        assert!(of_connection_fields(&headers, false).is_none());
+        let status = of_connection_fields(&headers, true).unwrap();
+        assert_eq!(status.code(), tonic::Code::Internal);
+        assert_eq!(
+            status.message(),
+            "Stream removed (RST_STREAM (Received RST_STREAM with error code 1))"
+        );
+        assert!(of_connection_fields(&http::HeaderMap::new(), true).is_none());
     }
 
     #[test]

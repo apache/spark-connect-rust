@@ -4101,8 +4101,8 @@ for it. As PySpark's, `getOrCreate` sets the options of a session that it create
 
 The client honors the HTTP proxy of the environment (`grpc_proxy`, `https_proxy`, `http_proxy`,
 `no_grpc_proxy`, `no_proxy`) with grpcio's rules, see [HTTP Proxies](configuration.md#http-proxies),
-with two differences: a loopback host is never proxied, where grpcio proxies `localhost` unless
-`no_proxy` lists it, and a proxy address with an invalid host or port is the error of the creation
+of a loopback host too, unless `no_proxy` lists it, with one difference: a proxy address with an
+invalid host or port is the error of the creation
 of a session of a host that the proxy applies to, where grpcio makes the session and fails its
 requests, but for a port past 65535, which it takes modulo 65536 and connects to (a proxy of port
 99999 is reached at 34463): the error names the variable at once, rather than requests that fail
@@ -4112,40 +4112,52 @@ As grpcio, the client logs a proxy variable that is not a proxy, and a roots fil
 read, as errors on stderr (see [Errors on stderr](configuration.md#errors-on-stderr)).
 
 The `endpoint` of a channel builder is read as grpcio's channel of PySpark's `toChannel` reads its
-target: bytes as they are, else the `encode("utf8")` of the object; a URI of the scheme of a
-resolver of gRPC, `dns`, `ipv4`, `ipv6`, `unix` or `unix-abstract`, of any case, else `dns:///` and
-the endpoint; of its authority and its path percent-decoded (`loc%61lhost:15002` is
-`localhost:15002`, and `[fe80::1%25eth0]:15002` of the zone `eth0`), and of its query and its
-fragment dropped, of the characters that gRPC takes there (`127.0.0.1:15002?x=1#y` is
-`127.0.0.1:15002`). The name of `dns:` is the path, a host and a port as gRPC's resolver splits
-them, of the port 443 without one, 80 and 443 of `http` and `https`, of a sign and of spaces around
-it, and of 16 bits (`localhost:99999` is the port 34463), resolved as c-ares resolves it, of the
-name of each error of the resolver (`errors resolving localhost:abc: [field:hostname lookup
-error:Failed to parse port in name: localhost:abc]`, `Unparsable name`, `host must not be empty in
-name`, `Misformatted domain name`); of an authority that is not an IP address and a port, each call
-fails of gRPC's `INTERNAL` (`Illegal status code from resolver; original status: INVALID_ARGUMENT:
-Cannot parse authority: ...`). The addresses of `ipv4:` and `ipv6:`, separated by `,`, each an IP
-address of the family, of a zone of IPv6, and a port of 0 to 65535, are tried in turn as those of a
-host are, and the Unix sockets of `unix:` and `unix-abstract:`, of their paths or of their abstract
-names; of none, each call fails of `UNAVAILABLE` (`empty address list`). Of each target, the
-channel takes gRPC's names, and not the host of its connection string, which stands for the target
-only: gRPC's default authority of the target, its path of no first `/`, percent-encoded as an
-authority (`127.0.0.1:1,127.0.0.1:2`, `tmp%2Fa.sock`), is the `:authority` of the calls where HTTP
-can carry it, and of its host up to a `%` the name that TLS verifies (`::1` of `[::1%25lo]`, `tmp`
-of `tmp%2Fa.sock`): an IP address of the addresses of the certificate, a name of DNS of its names,
-and another name (`x*y.localhost`, a list of addresses) of none, which fails each attempt of gRPC's
-`Custom verification check failed with error: UNAUTHENTICATED: Hostname Verification Check
-failed.`; whether a token goes in plaintext is of the host of the authority (`localhost`) too. The
-proxy of the environment is chosen of the host of the path, of any target but one of `unix:`, which
-gRPC does not proxy, and its `CONNECT` names the `host:port` of the path, of the port 443 without
-one (`[127.0.0.1:1,127.0.0.1:2]:443`, `name:443` of `unix-abstract:name`). A Unix socket is not of
-gRPC's local credentials of TCP, so a channel of them fails each call to it of `Endpoint is neither
-UDS or TCP loopback address.`; a socket of no file fails of gRPC's text of it
-(`FAILED_PRECONDITION: unix:/tmp/a.sock: connect failed: addr: unix:/tmp/a.sock error: No such file
-or directory`). A target that gRPC does not take fails each call of its `UNKNOWN` (`Failed to create
-channel to '127.0.0.1:15002?':the target uri is not valid: dns:///127.0.0.1:15002?`), which
-PySpark's retry policies do not retry, as they retry `UNAVAILABLE`. The connection string of the
-channel takes the host and the port of the target, and nothing else of the endpoint.
+target: bytes as they are, up to a NUL, as gRPC's core reads a C string, else the `encode("utf8")`
+of the object; a URI of the scheme of a resolver of gRPC, `dns`, `ipv4`, `ipv6`, `unix`,
+`unix-abstract`, `xds` or `google-c2p`, of any case, else `dns:///` and the endpoint; of its
+authority and its path percent-decoded, of their bytes (`loc%61lhost:15002` is `localhost:15002`,
+and `[fe80::1%25eth0]:15002` of the zone `eth0`), and of its query and its fragment dropped, of the
+characters that gRPC takes there (`127.0.0.1:15002?x=1#y` is `127.0.0.1:15002`). The name of `dns:`
+is the path, a host and a port as gRPC's resolver splits them, of the port 443 without one, 80 and
+443 of `http` and `https`, of a sign and of spaces around it, and of 16 bits (`localhost:99999` is
+the port 34463), resolved as c-ares resolves it, of the name of each error of the resolver (`errors
+resolving localhost:abc: [field:hostname lookup error:Failed to parse port in name: localhost:abc]`,
+`Unparsable name`, `host must not be empty in name`, `Misformatted domain name`); of an authority
+that is not an IP address and a port, each call fails of gRPC's `INTERNAL` (`Illegal status code
+from resolver; original status: INVALID_ARGUMENT: Cannot parse authority: ...`). The addresses of
+`ipv4:` and `ipv6:`, separated by `,`, each an IP address of the family, of a zone of IPv6, and a
+port of 0 to 65535, are tried in turn as those of a host are, and the Unix sockets of `unix:` and
+`unix-abstract:`, of their paths or of their abstract names, of the bytes that their paths decode to
+(`unix:/tmp/%FF.sock`); of none, each call fails of `UNAVAILABLE` (`empty address list`). A target
+of `google-c2p` is its name of DNS, as gRPC's resolver of it on a machine that is not of Google's
+cloud, and each call of a target of `xds` fails of `UNAVAILABLE`, of no bootstrap of xDS in the
+environment of grpcio's text (`Failed to create XdsClient: Environment variables GRPC_XDS_BOOTSTRAP
+or GRPC_XDS_BOOTSTRAP_CONFIG not defined`). Of each target, the channel takes gRPC's names, and not
+the host of its connection string, which stands for the target only: gRPC's default authority of the
+target, its path of no first `/`, percent-encoded as an authority (`127.0.0.1:1,127.0.0.1:2`,
+`tmp%2Fa.sock`), is the `:authority` of the calls where HTTP can carry it, and of its host up to a
+`%` the name that TLS verifies (`::1` of `[::1%25lo]`, `tmp` of `tmp%2Fa.sock`), as gRPC checks it
+twice. Once the handshake is done, as its `HostNameCertificateVerifier`: a name of DNS of the
+certificate matches it of either case and of a wildcard of its first label alone (`*.localhost` of
+`xyz.localhost`, of `x*y.localhost` too), an IP address of the certificate as its text (`::1`, which
+`0:0:0:0:0:0:0:1` is not), and of a certificate of neither, its common name; of none, each attempt
+fails of gRPC's `Custom verification check failed with error: UNAUTHENTICATED: Hostname Verification
+Check failed.`, and nothing is sent. Then of the host of each call, as its `SslCheckCallHost`, of a
+wildcard of a rest of two labels at least (`*.spark.example`): of a certificate that is of the name
+but not of the host of the calls (`*.localhost` of `xyz.localhost`), each call fails of
+`UNAUTHENTICATED` (`call host does not match SSL server name`), which is not retried. Whether a
+token goes in plaintext is of the host of the authority (`localhost`) too. The proxy of the
+environment is chosen of the host of the path, of any target but one of `unix:`, which gRPC does not
+proxy, and its `CONNECT` names the `host:port` of the path, of the port 443 without one
+(`[127.0.0.1:1,127.0.0.1:2]:443`, `name:443` of `unix-abstract:name`), up to a NUL, as gRPC's
+argument of it is a C string (`localhost` of `localhost%00:15002`). A Unix socket is not of gRPC's
+local credentials of TCP, so a channel of them fails each call to it of `Endpoint is neither UDS or
+TCP loopback address.`; a socket of no file fails of gRPC's text of it (`FAILED_PRECONDITION:
+unix:/tmp/a.sock: connect failed: addr: unix:/tmp/a.sock error: No such file or directory`). A
+target that gRPC does not take fails each call of its `UNKNOWN` (`Failed to create channel to
+'127.0.0.1:15002?':the target uri is not valid: dns:///127.0.0.1:15002?`), which PySpark's retry
+policies do not retry, as they retry `UNAVAILABLE`. The connection string of the channel takes the
+host and the port of the target, and nothing else of the endpoint.
 
 As grpcio's, a channel connects to the addresses of its host, or of its proxy, as the system's
 resolver gives them, within the connect deadline, but those of `localhost` and of the names under

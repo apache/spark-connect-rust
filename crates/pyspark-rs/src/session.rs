@@ -825,16 +825,17 @@ pub(crate) fn url_of_channel_builder(
                 Err(_) => format!("{host}:15002"),
             },
         };
-        spark_connect_core::grpc_target::parse(&endpoint)
+        spark_connect_core::grpc_target::parse(endpoint.as_bytes())
     };
     // As PySpark's client, whose requests carry the `metadata()` of the builder, which it reads
-    // once it has made its channel, for its ArtifactManager: of `ChannelBuilder`'s, of the
-    // parameters, the metadata of the requests; of a method of its own, which the client calls
-    // again for each call, the calls read it then, and the artifacts encode this one then, as
-    // grpcio checks the metadata of each call (see `crate::client::BuilderMetadata`).
+    // once it has made its channel, for its ArtifactManager, and again for each call: of a builder
+    // that the program gave, or of a method of its own, the calls read it then, and the artifacts
+    // encode this one then, as grpcio checks the metadata of each call (see
+    // `crate::client::BuilderMetadata`); of the builder that the client made of a connection
+    // string, whose parameters no program holds, this one is the metadata of the requests.
     let read = channel_builder.call_method0("metadata")?;
     let (metadata, sources) = if core
-        .getattr("_metadata_of_its_own")?
+        .getattr("_metadata_per_call")?
         .call1((&channel_builder,))?
         .is_truthy()?
     {
@@ -887,8 +888,8 @@ fn endpoint_of_target(
             .call_method1("encode", ("utf8",))?
             .cast_into::<pyo3::types::PyBytes>()?,
     };
-    let target = String::from_utf8_lossy(encoded.as_bytes()).into_owned();
-    Ok(spark_connect_core::grpc_target::parse(&target))
+    // Of the bytes as they are, as gRPC's core reads them of its C string, up to a NUL.
+    Ok(spark_connect_core::grpc_target::parse(encoded.as_bytes()))
 }
 
 /// `value`, percent-encoded outside the unreserved characters, so that it is one value of a

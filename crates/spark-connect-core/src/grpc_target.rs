@@ -40,7 +40,9 @@
 //! A target that is not valid fails each call of `UNKNOWN`, as grpcio's channel of it does
 //! (`Failed to create channel to '...':the target uri is not valid: ...`).
 //!
-//! Of each target, the channel takes gRPC's names of it besides what it connects to (see
+//! The target is of bytes, up to its first NUL, as grpcio gives gRPC's core a C string, and so are
+//! its decoded authority and path: a path of a Unix socket is the bytes that it decodes to. Of each
+//! target, the channel takes gRPC's names of it besides what it connects to (see
 //! [`TargetNames`]): its default authority, of its calls and of the name that its TLS verifies,
 //! and the server of the tunnel of a proxy, as gRPC's proxy mapper takes it.
 
@@ -55,8 +57,19 @@ const UNKNOWN: i32 = 2;
 /// give (`Illegal status code from resolver`).
 const INTERNAL: i32 = 13;
 
-/// The schemes of gRPC's resolvers.
-const SCHEMES: [&str; 5] = ["dns", "ipv4", "ipv6", "unix", "unix-abstract"];
+/// The schemes of gRPC's resolvers, of grpcio 1.85.
+const SCHEMES: [&str; 7] = [
+    "dns",
+    "ipv4",
+    "ipv6",
+    "unix",
+    "unix-abstract",
+    "xds",
+    "google-c2p",
+];
+
+/// The code of gRPC's `UNAVAILABLE`, of a resolver that fails.
+const UNAVAILABLE: i32 = 14;
 
 /// The prefix that gRPC's registry of resolvers gives a target of no scheme of a resolver.
 const DEFAULT_PREFIX: &str = "dns:///";
@@ -85,32 +98,39 @@ pub struct Parsed {
     pub port: u16,
 }
 
-/// What a channel connects to of the target `target`, as grpcio's channel reads it (see the
-/// module).
-pub fn parse(target: &str) -> Parsed {
+/// What a channel connects to of the target `target`, of its bytes up to its first NUL, as
+/// grpcio's channel reads it (see the module).
+pub fn parse(target: impl AsRef<[u8]>) -> Parsed {
+    let target = target.as_ref();
+    // As grpcio gives the target to gRPC's core, a C string.
+    let target = &target[..target.iter().position(|&b| b == 0).unwrap_or(target.len())];
+    let text = String::from_utf8_lossy(target);
     let not_valid = |canonical: &str| {
         refused(
             UNKNOWN,
             format!(
-                "Failed to create channel to '{target}':the target uri is not valid: {canonical}"
+                "Failed to create channel to '{text}':the target uri is not valid: {canonical}"
             ),
         )
     };
     let (uri, canonical) = match Uri::parse(target) {
-        Ok(uri) if SCHEMES.contains(&uri.scheme.as_str()) => (uri, target.to_string()),
+        Ok(uri) if SCHEMES.contains(&uri.scheme.as_str()) => (uri, text.to_string()),
         _ => {
-            let canonical = format!("{DEFAULT_PREFIX}{target}");
+            let canonical = [DEFAULT_PREFIX.as_bytes(), target].concat();
+            let canonical_text = String::from_utf8_lossy(&canonical).into_owned();
             match Uri::parse(&canonical) {
-                Ok(uri) => (uri, canonical),
-                Err(()) => return not_valid(&canonical),
+                Ok(uri) => (uri, canonical_text),
+                Err(()) => return not_valid(&canonical_text),
             }
         }
     };
     let parsed = match uri.scheme.as_str() {
-        "dns" => dns(&uri),
+        // Of a machine that is not of Google's cloud, gRPC's resolver of `google-c2p` is its DNS.
+        "dns" | "google-c2p" => dns(&uri),
         "ipv4" => addresses(&uri, false),
         "ipv6" => addresses(&uri, true),
         "unix" => sockets(&uri, false),
+        "xds" => xds(&uri),
         _ => sockets(&uri, true),
     };
     match parsed {
@@ -130,21 +150,30 @@ pub fn parse(target: &str) -> Parsed {
 /// (`SplitHostPort`), of the exclusions of the proxy, and the `host:port` of it, of the port 443
 /// without one, as the server of the tunnel.
 fn names_of(uri: &Uri) -> TargetNames {
-    let path = uri.path.strip_prefix('/').unwrap_or(&uri.path);
-    let proxied = (uri.scheme != "unix").then(|| match split_host_port(path) {
-        Some((host, port)) => {
-            let port = port.filter(|port| !port.is_empty()).unwrap_or("443");
-            let tunnel = if host.contains(':') {
-                format!("[{host}]:{port}")
-            } else {
-                format!("{host}:{port}")
-            };
-            (host.to_string(), tunnel)
+    let path = uri.path.strip_prefix(b"/").unwrap_or(&uri.path);
+    let proxied = (uri.scheme != "unix").then(|| {
+        let path = String::from_utf8_lossy(path).into_owned();
+        match split_host_port(&path) {
+            Some((host, port)) => {
+                let port = port.filter(|port| !port.is_empty()).unwrap_or("443");
+                let tunnel = if host.contains(':') {
+                    format!("[{host}]:{port}")
+                } else {
+                    format!("{host}:{port}")
+                };
+                // Of a C string, the argument of the server of gRPC's `CONNECT`, which ends at a
+                // NUL of the path (`localhost` of `localhost%00:15002`).
+                let tunnel = tunnel.split('\0').next().unwrap_or_default().to_string();
+                (host.to_string(), tunnel)
+            }
+            None => {
+                let tunnel = path.split('\0').next().unwrap_or_default().to_string();
+                (path.clone(), tunnel)
+            }
         }
-        None => (path.to_string(), path.to_string()),
     });
     TargetNames {
-        authority: percent_encode_authority(path.as_bytes()),
+        authority: percent_encode_authority(path),
         proxied,
     }
 }
@@ -153,9 +182,22 @@ fn names_of(uri: &Uri) -> TargetNames {
 /// unreserved characters, its sub-delims, `:`, `[`, `]` and `@` as they are, and of any other
 /// byte as `%` and two upper-case hexadecimal digits.
 pub(crate) fn percent_encode_authority(bytes: &[u8]) -> String {
+    percent_encode(bytes, b":[]@")
+}
+
+/// `bytes` percent-encoded as gRPC's `URI::ToString` encodes a path, as of the URI of the address
+/// of a Unix socket in its errors: of its unreserved characters, its sub-delims, `:`, `@` and `/`
+/// as they are, and of any other byte as `%` and two upper-case hexadecimal digits.
+pub(crate) fn percent_encode_path(bytes: &[u8]) -> String {
+    percent_encode(bytes, b":@/")
+}
+
+/// `bytes` of their unreserved characters, their sub-delims and the bytes of `kept` as they are,
+/// and of any other byte as `%` and two upper-case hexadecimal digits, as gRPC's `PercentEncode`.
+fn percent_encode(bytes: &[u8], kept: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len());
     for &b in bytes {
-        if b.is_ascii_alphanumeric() || b"-._~!$&'()*+,;=:[]@".contains(&b) {
+        if b.is_ascii_alphanumeric() || b"-._~!$&'()*+,;=".contains(&b) || kept.contains(&b) {
             out.push(char::from(b));
         } else {
             out.push_str(&format!("%{b:02X}"));
@@ -182,17 +224,18 @@ fn of_localhost(target: ChannelTarget) -> Parsed {
 /// A target of `dns:`, of its name (see the module), or None of one of no name, which is not
 /// valid.
 fn dns(uri: &Uri) -> Option<Parsed> {
-    let name = uri.path.strip_prefix('/').unwrap_or(&uri.path);
+    let path = String::from_utf8_lossy(&uri.path);
+    let name = path.strip_prefix('/').unwrap_or(&path);
     if name.is_empty() {
         return None;
     }
-    if !uri.authority.is_empty() && parse_host_port(&uri.authority, None).is_none() {
+    let authority = String::from_utf8_lossy(&uri.authority);
+    if !authority.is_empty() && parse_host_port(&authority, None).is_none() {
         return Some(refused(
             INTERNAL,
             format!(
                 "Illegal status code from resolver; original status: INVALID_ARGUMENT: Cannot \
-                 parse authority: {}",
-                uri.authority
+                 parse authority: {authority}"
             ),
         ));
     }
@@ -229,14 +272,34 @@ fn dns(uri: &Uri) -> Option<Parsed> {
     })
 }
 
+/// A target of `xds:`, whose calls fail of `UNAVAILABLE`, as grpcio's resolver fails to create its
+/// client of xDS: of no bootstrap of the environment, of its text; of one, of the transport's, which
+/// has no client of xDS. None of one of no path, which is not valid.
+fn xds(uri: &Uri) -> Option<Parsed> {
+    if uri.path.strip_prefix(b"/").unwrap_or(&uri.path).is_empty() {
+        return None;
+    }
+    let bootstrap = ["GRPC_XDS_BOOTSTRAP", "GRPC_XDS_BOOTSTRAP_CONFIG"]
+        .iter()
+        .any(|name| std::env::var_os(name).is_some());
+    let message = if bootstrap {
+        "Failed to create XdsClient: the transport has no client of xDS"
+    } else {
+        "Failed to create XdsClient: Environment variables GRPC_XDS_BOOTSTRAP or \
+         GRPC_XDS_BOOTSTRAP_CONFIG not defined"
+    };
+    Some(refused(UNAVAILABLE, message.to_string()))
+}
+
 /// A target of `ipv4:` or of `ipv6:` (of `v6`), of its addresses, or None of one that is not
 /// valid: of an authority, or of an address that is not one of the family and a port.
 fn addresses(uri: &Uri, v6: bool) -> Option<Parsed> {
     if !uri.authority.is_empty() {
         return None;
     }
+    let path = std::str::from_utf8(&uri.path).ok()?;
     let mut addresses = Vec::new();
-    for entry in uri.path.split(',').filter(|entry| !entry.is_empty()) {
+    for entry in path.split(',').filter(|entry| !entry.is_empty()) {
         let entry = entry.strip_prefix('/').unwrap_or(entry);
         addresses.push(parse_host_port(entry, Some(v6))?);
     }
@@ -248,7 +311,7 @@ fn addresses(uri: &Uri, v6: bool) -> Option<Parsed> {
     Some(Parsed {
         target: ChannelTarget::Addresses {
             addresses,
-            authority: uri.path.strip_prefix('/').unwrap_or(&uri.path).to_string(),
+            authority: path.strip_prefix('/').unwrap_or(path).to_string(),
         },
         names: TargetNames::default(),
         host,
@@ -263,11 +326,15 @@ fn sockets(uri: &Uri, abstract_names: bool) -> Option<Parsed> {
         return None;
     }
     let mut paths = Vec::new();
-    for entry in uri.path.split(',').filter(|entry| !entry.is_empty()) {
+    for entry in uri
+        .path
+        .split(|&b| b == b',')
+        .filter(|entry| !entry.is_empty())
+    {
         if entry.len() > MAX_UNIX_PATH {
             return None;
         }
-        paths.push(entry.as_bytes().to_vec());
+        paths.push(entry.to_vec());
     }
     Some(of_localhost(ChannelTarget::Unix {
         paths,
@@ -290,50 +357,49 @@ fn url_host(host: &str) -> String {
 }
 
 /// A URI as gRPC's parser reads it (`URI::Parse`): its scheme, in lower case, its authority and
-/// its path, percent-decoded. The query and the fragment are dropped, once checked.
+/// its path, percent-decoded, of their bytes. The query and the fragment are dropped, once checked.
 #[derive(Debug)]
 struct Uri {
     scheme: String,
-    authority: String,
-    path: String,
+    authority: Vec<u8>,
+    path: Vec<u8>,
 }
 
 impl Uri {
-    fn parse(text: &str) -> Result<Self, ()> {
-        let colon = text.find(':').ok_or(())?;
+    fn parse(text: &[u8]) -> Result<Self, ()> {
+        let colon = text.iter().position(|&b| b == b':').ok_or(())?;
         let scheme = &text[..colon];
-        let scheme_char = |c: char| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.');
-        if scheme.is_empty()
-            || !scheme.chars().all(scheme_char)
-            || !scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+        let scheme_char = |b: &u8| b.is_ascii_alphanumeric() || b"+-.".contains(b);
+        if scheme.is_empty() || !scheme.iter().all(scheme_char) || !scheme[0].is_ascii_alphabetic()
         {
             return Err(());
         }
+        let find = |text: &[u8], of: &[u8]| text.iter().position(|b| of.contains(b));
         let mut rest = &text[colon + 1..];
-        let mut authority = String::new();
-        if let Some(after) = rest.strip_prefix("//") {
-            let end = after.find(['/', '?', '#']).unwrap_or(after.len());
+        let mut authority = Vec::new();
+        if let Some(after) = rest.strip_prefix(b"//") {
+            let end = find(after, b"/?#").unwrap_or(after.len());
             authority = percent_decode(&after[..end]);
             rest = &after[end..];
         }
-        let end = rest.find(['?', '#']).unwrap_or(rest.len());
+        let end = find(rest, b"?#").unwrap_or(rest.len());
         let path = percent_decode(&rest[..end]);
         rest = &rest[end..];
-        if let Some(after) = rest.strip_prefix('?') {
-            let end = after.find('#').unwrap_or(after.len());
+        if let Some(after) = rest.strip_prefix(b"?") {
+            let end = find(after, b"#").unwrap_or(after.len());
             let query = &after[..end];
             if query.is_empty() || !is_query_or_fragment(query) {
                 return Err(());
             }
             rest = &after[end..];
         }
-        if let Some(fragment) = rest.strip_prefix('#') {
+        if let Some(fragment) = rest.strip_prefix(b"#") {
             if !is_query_or_fragment(fragment) {
                 return Err(());
             }
         }
         Ok(Self {
-            scheme: scheme.to_ascii_lowercase(),
+            scheme: String::from_utf8_lossy(scheme).to_ascii_lowercase(),
             authority,
             path,
         })
@@ -342,46 +408,19 @@ impl Uri {
 
 /// Whether `text` is of the characters of a query or a fragment of RFC 3986 and `%`, as gRPC's
 /// parser takes them: unreserved, sub-delims, `:`, `@`, `/` and `?`.
-fn is_query_or_fragment(text: &str) -> bool {
-    text.chars().all(|c| {
-        c.is_ascii_alphanumeric()
-            || matches!(
-                c,
-                '-' | '.'
-                    | '_'
-                    | '~'
-                    | '!'
-                    | '$'
-                    | '&'
-                    | '\''
-                    | '('
-                    | ')'
-                    | '*'
-                    | '+'
-                    | ','
-                    | ';'
-                    | '='
-                    | ':'
-                    | '@'
-                    | '/'
-                    | '?'
-                    | '%'
-            )
-    })
+fn is_query_or_fragment(text: &[u8]) -> bool {
+    text.iter()
+        .all(|&b| b.is_ascii_alphanumeric() || b"-._~!$&'()*+,;=:@/?%".contains(&b))
 }
 
 /// `text` percent-decoded as gRPC's parser decodes it: a `%` of two hexadecimal digits is their
-/// byte, and any other `%` stays. A decoded byte that is not of UTF-8 is its replacement.
-fn percent_decode(text: &str) -> String {
-    if !text.contains('%') {
-        return text.to_string();
-    }
-    let bytes = text.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
+/// byte, and any other `%` stays.
+fn percent_decode(text: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(text.len());
     let mut i = 0;
-    while i < bytes.len() {
-        let hex = |at: usize| bytes.get(at).and_then(|&b| (b as char).to_digit(16));
-        match (bytes[i], hex(i + 1), hex(i + 2)) {
+    while i < text.len() {
+        let hex = |at: usize| text.get(at).and_then(|&b| (b as char).to_digit(16));
+        match (text[i], hex(i + 1), hex(i + 2)) {
             (b'%', Some(high), Some(low)) => {
                 out.push((high * 16 + low) as u8);
                 i += 3;
@@ -392,7 +431,7 @@ fn percent_decode(text: &str) -> String {
             }
         }
     }
-    String::from_utf8_lossy(&out).into_owned()
+    out
 }
 
 /// `name` split into its host and its port, as gRPC's `SplitHostPort` splits it: a host in
@@ -1074,7 +1113,7 @@ mod tests {
             (
                 "127.0.0.1%00:18620",
                 "127.0.0.1%00:18620",
-                proxied("127.0.0.1\0", "127.0.0.1\0:18620"),
+                proxied("127.0.0.1\0", "127.0.0.1"),
             ),
             (
                 "ipv4:127.0.0.1:1,127.0.0.1:18611",
@@ -1127,6 +1166,84 @@ mod tests {
     }
 
     #[test]
+    fn the_targets_of_xds_and_google_c2p_are_read_as_grpcio_reads_them() {
+        // Of the probes of grpcio 1.85.1, of no bootstrap of xDS in the environment.
+        if std::env::var_os("GRPC_XDS_BOOTSTRAP").is_none()
+            && std::env::var_os("GRPC_XDS_BOOTSTRAP_CONFIG").is_none()
+        {
+            for target in [
+                "xds:///localhost:15002",
+                "XDS:///a",
+                "xds://x/localhost:15002",
+            ] {
+                assert_eq!(
+                    parse(target).target,
+                    ChannelTarget::Refused {
+                        code: UNAVAILABLE,
+                        message: "Failed to create XdsClient: Environment variables \
+                                  GRPC_XDS_BOOTSTRAP or GRPC_XDS_BOOTSTRAP_CONFIG not defined"
+                            .to_string(),
+                    },
+                    "{target}"
+                );
+            }
+        }
+        assert_eq!(parse("xds:").target, not_valid("xds:", "xds:"));
+        assert_eq!(
+            parse("google-c2p:///localhost:15002").target,
+            name("localhost", 15002, "localhost:15002")
+        );
+    }
+
+    #[test]
+    fn a_target_is_of_bytes_up_to_its_first_nul() {
+        // Of the probes: grpcio's target is a C string, and the path of a Unix socket is the
+        // bytes that it decodes to.
+        for (target, expected) in [
+            (
+                &b"localhost\0garbage:17843"[..],
+                name("localhost", 443, "localhost"),
+            ),
+            (
+                b"localhost:17843\0garbage",
+                name("localhost", 17843, "localhost:17843"),
+            ),
+            (b"127.0.0.1\0:17843", name("127.0.0.1", 443, "127.0.0.1")),
+            (
+                b"ipv4:127.0.0.1:17843\0junk",
+                addresses(&["127.0.0.1:17843"], "127.0.0.1:17843"),
+            ),
+        ] {
+            assert_eq!(parse(target).target, expected, "{target:?}");
+        }
+        let unix = |path: &[u8], abstract_names: bool| ChannelTarget::Unix {
+            paths: vec![path.to_vec()],
+            abstract_names,
+        };
+        assert_eq!(
+            parse(b"unix:/tmp/rv62220/\xff.sock").target,
+            unix(b"/tmp/rv62220/\xff.sock", false)
+        );
+        assert_eq!(
+            parse("unix:/tmp/rv62220/%FF.sock").target,
+            unix(b"/tmp/rv62220/\xff.sock", false)
+        );
+        assert_eq!(
+            parse("unix:/tmp/rv62220/%EF%BF%BD.sock").target,
+            unix("/tmp/rv62220/\u{fffd}.sock".as_bytes(), false)
+        );
+        assert_eq!(
+            parse("unix-abstract:rv62220%FF").target,
+            unix(b"rv62220\xff", true)
+        );
+        assert_eq!(
+            parse(b"unix:/tmp/a.sock\0junk").target,
+            unix(b"/tmp/a.sock", false)
+        );
+        assert_eq!(parse(b"a?\0b").target, not_valid("a?", "dns:///a?"));
+    }
+
+    #[test]
     fn the_numbers_are_read_as_grpc_reads_them() {
         assert_eq!(simple_atoi(" +17 "), Some(17));
         assert_eq!(simple_atoi("-0"), Some(0));
@@ -1152,7 +1269,8 @@ mod tests {
         );
         assert_eq!(ares_numeric_v4("127.1"), None);
         assert_eq!(ares_numeric_v4("256.0.0.1"), None);
-        assert_eq!(percent_decode("%41%4%%zz%4h%3F"), "A%4%%zz%4h?");
+        assert_eq!(percent_decode(b"%41%4%%zz%4h%3F"), b"A%4%%zz%4h?");
+        assert_eq!(percent_decode(b"%FF%00"), [0xff, 0]);
         assert_eq!(
             percent_encode_authority(b"a/b %\x00\xff:[]@*,"),
             "a%2Fb%20%25%00%FF:[]@*,"

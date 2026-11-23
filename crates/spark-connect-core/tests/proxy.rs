@@ -432,9 +432,11 @@ async fn proxy_credentials_are_sent_as_basic_authorization() {
 }
 
 #[tokio::test]
-async fn a_loopback_host_is_never_proxied() {
+async fn a_loopback_host_is_proxied_but_of_a_token_in_plaintext() {
+    // As gRPC's proxy mapper, a loopback host is proxied as any other; but a channel that sends its
+    // token to `localhost` in plaintext, of no local credentials that would check the address of
+    // its connection, connects directly, so that a proxy never carries the token.
     let env = EnvTurn::take().await;
-    // A token goes to localhost in plaintext, so a proxy must not carry it.
     let server = spark_server().await;
     let proxy = Proxy::start(Behavior::Tunnel(server.address)).await;
     let port = server.address.port();
@@ -445,6 +447,7 @@ async fn a_loopback_host_is_never_proxied() {
                 let client = client(&format!("sc://{host}:{port}/;session_id={SESSION}")).await;
                 bounded(client.config(config())).await.unwrap();
             }
+            assert_eq!(proxy.accepted(), 2);
             let client = client(&format!(
                 "sc://localhost:{port}/;token={TOKEN};session_id={SESSION}"
             ))
@@ -453,7 +456,7 @@ async fn a_loopback_host_is_never_proxied() {
         },
     )
     .await;
-    assert_eq!(proxy.accepted(), 0);
+    assert_eq!(proxy.accepted(), 2);
 }
 
 #[tokio::test]
@@ -686,7 +689,11 @@ async fn a_server_that_never_sends_its_settings_is_unavailable_at_the_connect_de
     let (address, accepted) = silent_server().await;
     let proxy = Proxy::start(Behavior::Stall).await;
     let proxy_url = proxy.url();
-    let vars = [("https_proxy", proxy_url.as_str())];
+    // The silent server is a host of `no_proxy`, which connects directly.
+    let vars = [
+        ("https_proxy", proxy_url.as_str()),
+        ("no_proxy", "127.0.0.1"),
+    ];
     let start = Instant::now();
     let (failures, (accepted, connects)) = tokio::join!(
         env.with(&vars, async {
@@ -702,7 +709,7 @@ async fn a_server_that_never_sends_its_settings_is_unavailable_at_the_connect_de
                     .unwrap_err();
                 (error, start.elapsed())
             };
-            // A loopback host is never proxied, and `spark.invalid` is reached only by the proxy.
+            // The silent server directly, and `spark.invalid`, which only the proxy reaches.
             tokio::join!(
                 call(format!("sc://{address}/;session_id={SESSION}")),
                 call(format!("sc://spark.invalid:15002/;session_id={SESSION}")),

@@ -38,6 +38,8 @@ struct Certs {
     ca: rustls::pki_types::CertificateDer<'static>,
     localhost: Issued,
     other: Issued,
+    /// Of `*.localhost`.
+    wildcard: Issued,
     self_signed: Issued,
     expired: Issued,
 }
@@ -92,6 +94,7 @@ fn certs() -> &'static Certs {
             ca: ca_cert.der().clone(),
             localhost: signed(server(&["localhost", "127.0.0.1"])),
             other: signed(server(&["other.test"])),
+            wildcard: signed(server(&["*.localhost"])),
             self_signed,
             expired: signed(expired),
         }
@@ -1419,6 +1422,20 @@ fn a_connect_that_fails_as_it_starts_has_grpc_core_s_text() {
         abstract_name: true,
     };
     assert_eq!(grpc_address(&abstract_name), "unix-abstract:name");
+    // Of the bytes of a path that are not of a URI's path, as gRPC's `URI::ToString` gives them.
+    let path = Address::Unix {
+        path: b"/tmp/a b%\xff\xef\xbf\xbd:@!~.sock".to_vec(),
+        abstract_name: false,
+    };
+    assert_eq!(
+        grpc_address(&path),
+        "unix:/tmp/a%20b%25%FF%EF%BF%BD:@!~.sock"
+    );
+    let abstract_name = Address::Unix {
+        path: b"a\0b/c".to_vec(),
+        abstract_name: true,
+    };
+    assert_eq!(grpc_address(&abstract_name), "unix-abstract:a%00b/c");
 }
 
 #[cfg(unix)]
@@ -1558,7 +1575,7 @@ async fn the_tls_of_a_target_of_grpc_verifies_grpcs_name_of_it() {
     // list of addresses, none) fails the check of the name once the chain is verified, as gRPC's
     // (`Hostname Verification Check failed`), and so does a name of another certificate.
     let address = tls_server(&certs().localhost, true, true).await;
-    for name in ["localhost", "LOCALHOST", "127.0.0.1", "[127.0.0.1]"] {
+    for name in ["localhost", "LOCALHOST", "localhost.", "127.0.0.1"] {
         let target = tls_target_of_name(address, Some(name), &certs().ca);
         assert!(
             attempt(&target, Duration::from_secs(5)).await.is_ok(),
@@ -1576,6 +1593,8 @@ async fn the_tls_of_a_target_of_grpc_verifies_grpcs_name_of_it() {
         Some("127.0.0.1:1,127.0.0.1:2"),
         Some("other.test"),
         Some("::1"),
+        Some("127.000.000.001"),
+        Some("[127.0.0.1]"),
         None,
     ] {
         let target = tls_target_of_name(address, name, &certs().ca);
@@ -1589,6 +1608,53 @@ async fn the_tls_of_a_target_of_grpc_verifies_grpcs_name_of_it() {
             .contains("CERTIFICATE_VERIFY_FAILED"),
         "{}",
         failure_of(&target).await
+    );
+}
+
+#[tokio::test]
+async fn a_call_host_that_the_certificate_is_not_of_fails_each_call_of_unauthenticated() {
+    // Of the probes of grpcio 1.85.1 (`p_tls_edges.py` of the review of SPARK-62220): a
+    // certificate of `*.localhost` is of `xyz.localhost` once the handshake is done, as gRPC's
+    // verifier takes a wildcard of one label, but not of the host of the calls, as its check of
+    // the host of each call does not, of which each call fails of `UNAUTHENTICATED`, which a
+    // retry policy does not retry as it retries a failure of a connection.
+    let address = tls_server(&certs().wildcard, true, true).await;
+    let channel = tonic::transport::Endpoint::from_static("http://localhost")
+        .connect_with_connector_lazy(Connector::new(tls_target_of_name(
+            address,
+            Some("xyz.localhost"),
+            &certs().ca,
+        )));
+    let mut grpc = tonic::client::Grpc::new(channel);
+    for _ in 0..2 {
+        grpc.ready().await.unwrap();
+        let status = grpc
+            .unary::<spark_connect_proto::ConfigRequest, spark_connect_proto::ConfigResponse, _>(
+                tonic::Request::new(spark_connect_proto::ConfigRequest::default()),
+                tonic::codegen::http::uri::PathAndQuery::from_static(
+                    "/spark.connect.SparkConnectService/Config",
+                ),
+                tonic_prost::ProstCodec::default(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), tonic::Code::Unauthenticated);
+        assert_eq!(status.message(), "call host does not match SSL server name");
+    }
+    // A name of two labels below the wildcard is not of the certificate at all: its handshake
+    // fails, as gRPC's verifier fails it.
+    assert_eq!(
+        failure_of(&tls_target_of_name(
+            address,
+            Some("a.b.localhost"),
+            &certs().ca
+        ))
+        .await,
+        format!(
+            "failed to connect to all addresses; last error: UNKNOWN: ipv4:{address}: Custom \
+             verification check failed with error: UNAUTHENTICATED: Hostname Verification Check \
+             failed."
+        )
     );
 }
 

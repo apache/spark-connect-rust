@@ -108,18 +108,26 @@ grpcio:
 - The user and password of the proxy URI, percent-decoded, are sent as
   `Proxy-Authorization: Basic`. A proxy without a port is on port 443.
 - A `no_proxy` entry matches the host itself or its subdomains (`example.com` and
-  `.example.com` both match `spark.example.com`, not `notexample.com`), and an IP host in a CIDR
-  range such as `10.0.0.0/8`. There is no `*` wildcard, and an entry with a port does not match.
+  `.example.com` both match `spark.example.com`, not `notexample.com`), and an IP host, an IPv6
+  one of a zone too (`[::1%25lo]`), in a CIDR range such as `10.0.0.0/8`. There is no `*`
+  wildcard, and an entry with a port does not match.
+- A loopback host (`localhost`, `127.0.0.1`) is proxied as any other unless `no_proxy` lists it
+  (`no_proxy=localhost,127.0.0.0/8,::1`). Of the Python client's local credentials, a token goes
+  to `localhost` without TLS only over a connection whose local address is a loopback one, so
+  that a proxy on another machine gets none.
 
-Unlike grpcio, a loopback host (`localhost` and the names under `.localhost`, `127.0.0.0/8`,
-`[::1]`, and IPv4-mapped loopback addresses) is never proxied: its traffic need not leave the
-machine, and a token is sent to `localhost` without TLS. A proxy address with an invalid host or
+Unlike grpcio, a session of the Rust API whose token goes to `localhost` without TLS, of a
+connection string that is not `use_ssl` (see `ChannelBuilder::secure`), connects to a loopback
+host (`localhost` and the names under `.localhost`, `127.0.0.0/8`, `[::1]`, and IPv4-mapped
+loopback addresses) directly, never through a proxy, which would get the token in the clear: the
+Rust API has no local credentials that check the address of the connection. The sessions of the
+Python client are proxied as grpcio's are. A proxy address with an invalid host or
 port is an error when a session of a host that the proxy applies to is created, where grpcio makes
 the session and fails its requests, as it cannot resolve the address, or takes a port past 65535
 modulo 65536 and connects to that port: the error names the variable at once, rather than requests
 that fail later or a connection to a port that was not given. As in grpcio, which resolves the
-address of the proxy only for a host that it proxies, a host that `no_proxy` lists, as a loopback
-host, connects directly whatever that address. A value that is not UTF-8 is not used, and the
+address of the proxy only for a host that it proxies, a host that `no_proxy` lists, or a loopback
+host of such a session of the Rust API, connects directly whatever that address. A value that is not UTF-8 is not used, and the
 client connects directly, where grpcio reads its bytes.
 
 ## TLS Root Certificates
