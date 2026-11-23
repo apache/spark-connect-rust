@@ -632,20 +632,25 @@ requests of the unpickled object pickle as it is then. This case still differs:
   drop-in's from about 500 (`copy.deepcopy`, unpickling) to 1,000. A higher limit
   (`sys.setrecursionlimit`) takes more levels, in both.
 
-- **The message of the `RecursionError` of a type that holds itself** (inherent; the walks of the
-  types are native). A struct whose fields hold a field of it (an append to its `fields`, or
-  `add`), an array or a map that is its own element or value, or a field of the type of the struct
-  that holds it, has levels that no walk ends. As PySpark's methods, which walk them in Python,
-  each use of the drop-in that reads them raises `RecursionError` (SPARK-62224), and the uses that
-  do not read them work as PySpark's do (see the types of `docs/compatibility.md`). Its message is
-  `maximum recursion depth exceeded`, of the bound of the native walk, or of Python's own check
-  when a call of Python code in the walk crosses the limit first (` while calling a Python
-  object`, ` while getting the str of an object`), where PySpark's is that of the operation of
-  its Python code that crosses it: ` in comparison` of `treeString()` and of the JSON of a map,
-  ` in __instancecheck__` of `udf()`, `pandas_udf()` and `mapInPandas`, ` while calling a Python
-  object` of `jsonValue()`, and none of `json()` and `simpleString()`. CPython's check
-  (`_Py_CheckRecursiveCall`) adds the `where` of the C call that enters the frame past the limit,
-  of which the native walks enter none. The levels at which a type of many levels, which does not
+- **The message of the `RecursionError` of a type that holds itself** (inherent of `json()`,
+  `jsonValue()`, `repr()`, `hash()` and `treeString()`, whose text PySpark varies with the depth of
+  its caller). A struct whose fields hold a field of it (an append to its `fields`, or `add`), an
+  array or a map that is its own element or value, or a field of the type of the struct that holds
+  it, has levels that no walk ends. As PySpark's methods, which walk them in Python, each use of the
+  drop-in that reads them raises `RecursionError` (SPARK-62224), and the uses that do not read them
+  work as PySpark's do (see the types of `docs/compatibility.md`). Of `json()`, `jsonValue()`,
+  `repr()`, `hash()` and `treeString()`, PySpark's text is that of the operation of its Python code
+  that crosses the limit, which depends on the depth of the stack of its caller: none, or `
+  while calling a Python object`, or ` in comparison`. CPython's check (`_Py_CheckRecursiveCall`)
+  adds the `where` of the C call that enters the frame past the limit, of which the native walks
+  enter none, so the drop-in's text is of the bound of its walk, `maximum recursion depth
+  exceeded`, or of Python's own check when a call of Python code in the walk crosses the limit
+  first: ` while calling a Python object`, ` while getting the str of an object`, ` while getting
+  the repr of an object`, ` in __instancecheck__` (of the type checks of the UDFs and the pandas
+  conversions), and ` while decoding a JSON object from a unicode string` (of Python's `json`
+  module, of the JSON of a pandas conversion). Of the uses of a fixed text in PySpark, the drop-in
+  gives it: none of `simpleString()` of a struct, an array, a map or a field, and ` while calling a
+  Python object` of `json()` of an array. The levels at which a type of many levels, which does not
   hold itself, raises it differ too (see above).
 
 - **The groups of a response, of protobuf's pure-Python implementation** (intentional; one count of
