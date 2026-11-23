@@ -12,6 +12,7 @@ import base64
 import copy
 import copyreg
 import datetime
+import gc
 import inspect
 import json
 import pickle
@@ -117,6 +118,9 @@ PARAMETER_TYPES = (
     T.DecimalType, T.StringType, T.CharType, T.VarcharType, T.TimeType, T.DayTimeIntervalType,
     T.YearMonthIntervalType, T.GeometryType, T.GeographyType,
 )
+# The types whose `__dict__` holds their parameters, as PySpark's: the types of parameters, and
+# arrays, maps and fields (SPARK-62251).
+DICT_TYPES = PARAMETER_TYPES + (T.ArrayType, T.MapType, T.StructField)
 
 
 def _dict_of(t):
@@ -129,8 +133,8 @@ def test_types_that_pyspark_pickled_load_as_its_types(protocol):
     # PySpark's types are plain classes, which pickle as `copyreg.__newobj__(cls)` and their
     # `__dict__`: the drop-in's class makes a type of `cls.__new__(cls)`, without arguments, and
     # sets the attributes of the `__dict__`, of which the type then is, also in a struct, an
-    # array or a map. A type of parameters keeps them in its `__dict__`, as PySpark's; an array,
-    # a map, a field and a struct keep theirs as their parameters. A type of PySpark's
+    # array or a map. A type of parameters, an array, a map and a field keep their parameters in
+    # their `__dict__`, as PySpark's; a struct keeps its as its parameters. A type of PySpark's
     # `DataTypeSingleton` is the one instance, which `cls.__new__(cls)` gives, where PySpark's own
     # unpickling gives another object.
     from pyspark.ml.linalg import VectorUDT
@@ -153,7 +157,7 @@ def test_types_that_pyspark_pickled_load_as_its_types(protocol):
         )
         got, expected = _attributes(t, case)
         assert got == expected, case["type"]
-        if isinstance(t, PARAMETER_TYPES):
+        if isinstance(t, DICT_TYPES):
             assert _dict_of(t) == list(case["attributes"].items()), case["type"]
         else:
             assert vars(t) == {}, case["type"]
@@ -651,9 +655,10 @@ PYSPARKS_PICKLES_OF_ABSTRACT_TYPES = [
 )
 def test_types_of_the_abstract_types_pickle_as_pysparks(made, pickled):
     # PySpark's pickle of the `__dict__` of a struct, array or map of a type of its class only
-    # loads as the same type. The drop-in's own pickles it of the types it is made of, as of a
-    # user-defined type, since PySpark's `_parse_datatype_json_string` does not parse the JSON
-    # of an abstract type (`"integral"`): both clients load it at every protocol.
+    # loads as the same type. The drop-in's array and map pickle as PySpark's, of
+    # `copyreg.__newobj__` of the class and the `__dict__`, and its struct of the types it is made
+    # of, as of a user-defined type, since PySpark's `_parse_datatype_json_string` does not parse
+    # the JSON of an abstract type (`"integral"`): both clients load them at every protocol.
     made = eval(made, vars(T))
     loaded = pickle.loads(pickled)
     assert type(loaded) is type(made) and loaded == made
@@ -662,8 +667,12 @@ def test_types_of_the_abstract_types_pickle_as_pysparks(made, pickled):
         copied = pickle.loads(pickle.dumps(made, protocol=protocol))
         assert type(copied) is type(made) and copied == made, protocol
         assert (repr(copied), copied.json()) == (repr(made), made.json()), protocol
-    reduced, _ = made.__reduce__()
-    assert reduced is type(made)
+    if isinstance(made, (T.ArrayType, T.MapType)):
+        reduced = made.__reduce_ex__(2)
+        assert reduced[:3] == (copyreg.__newobj__, (type(made),), vars(made))
+    else:
+        reduced, _ = made.__reduce__()
+        assert reduced is type(made)
 
 
 def test_pyspark_types_to_proto_types_refuses_values_that_are_not_types_as_pysparks():
@@ -1815,9 +1824,8 @@ def test_the_dicts_of_the_types_of_parameters_are_their_state_as_pysparks():
 def test_python_subclasses_that_do_not_initialize_their_class_raise_pysparks_errors():
     # PySpark's subclass whose `__init__` does not call the `__init__` of its class has none of
     # its parameters, and raises the AttributeError of each where it reads it; so does the
-    # drop-in's type of parameters, which keeps them in its `__dict__` (SPARK-62251). An array,
-    # whose parameters are of its native state, has those of the class's `cls.__new__(cls)`.
-    # Singletons have no parameters.
+    # drop-in's type of parameters, array, map and field, which keep them in their `__dict__`
+    # (SPARK-62251). Singletons have no parameters.
     class Unset(T.StringType):
         def __init__(self, x):
             self.x = x
@@ -1826,12 +1834,29 @@ def test_python_subclasses_that_do_not_initialize_their_class_raise_pysparks_err
         def __init__(self):
             self.elementType = T.LongType()
 
+    class Field(T.StructField):
+        def __init__(self):
+            pass
+
     assert vars(Unset(1)) == {"x": 1}
     for use in (repr, lambda t: t.collation, lambda t: t.simpleString(), lambda t: t.json()):
         with pytest.raises(AttributeError, match="^'Unset' object has no attribute 'collation'$"):
             use(Unset(1))
     assert Unset(1) == Unset(1) and Unset(1) != Unset(2)
-    assert Array() == Array() and repr(Array()) == "ArrayType(LongType(), True)"
+    assert Array() == Array() and vars(Array()) == {"elementType": T.LongType()}
+    for use in (repr, lambda t: t.containsNull, lambda t: t.json()):
+        with pytest.raises(AttributeError, match="^'Array' object has no attribute 'containsNull'$"):
+            use(Array())
+    assert Array().simpleString() == "array<bigint>" and not Array().needConversion()
+    for use, missing in [
+        (repr, "name"),
+        (lambda t: t.simpleString(), "name"),
+        (lambda t: t.json(), "dataType"),
+        (lambda t: t.needConversion(), "dataType"),
+        (lambda t: T.StructType([t]), "name"),
+    ]:
+        with pytest.raises(AttributeError, match=f"^'Field' object has no attribute '{missing}'$"):
+            use(Field())
 
     class Counted(T.IntegerType):
         made = 0
@@ -1842,6 +1867,153 @@ def test_python_subclasses_that_do_not_initialize_their_class_raise_pysparks_err
     # The instance is the class's one, and Python calls its `__init__` at each call, where
     # PySpark's metaclass calls it on the first one.
     assert Counted() is Counted() and Counted.made == 2
+
+
+def _cast_type_proto(t):
+    """The proto of the type `t` of a cast, as a plan sends it."""
+    return F.lit(None).cast(t)._expr.to_plan(None).cast.type
+
+
+def test_arrays_maps_and_fields_keep_their_parameters_in_their_dict_as_pysparks():
+    # PySpark's array, map and field are plain classes whose parameters are entries of their
+    # `__dict__`, of any value, which their methods read: `vars()` holds them, an assignment of
+    # any value is kept and the uses fail later as PySpark's do, and `==` compares the `__dict__`s.
+    array = T.ArrayType(T.IntegerType())
+    assert vars(array) == {"elementType": T.IntegerType(), "containsNull": True}
+    field = T.StructField("a", T.LongType(), False, {"k": 1})
+    assert list(vars(field)) == ["name", "dataType", "nullable", "metadata"]
+    assert vars(T.MapType(T.StringType(), T.DateType(), 0)) == {
+        "keyType": T.StringType(), "valueType": T.DateType(), "valueContainsNull": 0,
+    }
+    # A value that is not a type, kept as it is: each method reads it, of its own error.
+    array.elementType = "x"
+    assert repr(array) == "ArrayType(x, True)"
+    with pytest.raises(AttributeError, match="^'str' object has no attribute 'simpleString'$"):
+        array.simpleString()
+    with pytest.raises(AttributeError, match="^'str' object has no attribute 'jsonValue'$"):
+        array.json()
+    with pytest.raises(AttributeError, match="^'str' object has no attribute 'needConversion'$"):
+        T.StructType([T.StructField("f", array)])
+    array.elementType = T.LongType()
+    assert array == T.ArrayType(T.LongType()) and array.simpleString() == "array<bigint>"
+    # A flag of another value: its JSON and repr are of the value, and the proto of a plan of it,
+    # of protobuf's bool field, which takes an int and raises of another value.
+    flagged = T.ArrayType(T.StringType(), None)
+    assert repr(flagged) == "ArrayType(StringType(), None)"
+    assert flagged.json() == '{"containsNull":null,"elementType":"string","type":"array"}'
+    with pytest.raises(TypeError, match="^'NoneType' object cannot be interpreted as an integer$"):
+        _cast_type_proto(flagged)
+    assert _cast_type_proto(T.ArrayType(T.StringType(), 0)).array.contains_null is False
+    # A name that is not a str: the struct's `names` hold it, `treeString` raises the error of its
+    # `replace`, and the proto of a plan the TypeError of protobuf's string field, as PySpark's.
+    renamed = T.StructField("a", T.IntegerType())
+    renamed.name = 5
+    struct = T.StructType([renamed])
+    assert struct.names == [5] and struct.simpleString() == "struct<5:int>"
+    assert struct.json() == (
+        '{"fields":[{"metadata":{},"name":5,"nullable":true,"type":"integer"}],"type":"struct"}'
+    )
+    with pytest.raises(AttributeError, match="^'int' object has no attribute 'replace'$"):
+        struct.treeString()
+    with pytest.raises(TypeError, match="^bad argument type for built-in operation$"):
+        _cast_type_proto(struct)
+    # A raw write of the `__dict__` counts, as PySpark's methods read the attribute.
+    field.__dict__["dataType"] = T.ArrayType(T.DateType())
+    assert field.simpleString() == "a:array<date>"
+    assert repr(field) == "StructField('a', ArrayType(DateType(), True), False)"
+    del field.__dict__["nullable"]
+    with pytest.raises(AttributeError, match="^'StructField' object has no attribute 'nullable'$"):
+        repr(field)
+
+
+def test_arrays_maps_and_fields_pickle_and_copy_of_their_dict_as_pysparks():
+    # They pickle as PySpark's plain classes do, `copyreg.__newobj__` of the class and the
+    # `__dict__`, also of values that the core types do not hold, and a copy shares the values.
+    udt_like = T.MapType(T.StringType(), T.ArrayType(T.IntegerType(), 1))
+    for t in [
+        T.ArrayType(T.IntegerType()),
+        udt_like,
+        T.StructField("a", T.LongType(), "yes", []),
+    ]:
+        reduced = t.__reduce_ex__(2)
+        assert reduced[:3] == (copyreg.__newobj__, (type(t),), vars(t))
+        for protocol in range(6):
+            loaded = pickle.loads(pickle.dumps(t, protocol))
+            assert type(loaded) is type(t) and vars(loaded) == vars(t) and loaded == t
+        copied = copy.copy(t)
+        assert all(a is b for a, b in zip(vars(copied).values(), vars(t).values()))
+    held = T.ArrayType(T.LongType())
+    held.tag = [1]
+    assert held != T.ArrayType(T.LongType()) and copy.copy(held).tag is held.tag
+
+
+def test_subclasses_of_arrays_maps_and_fields_read_their_own_attributes_as_pysparks():
+    # A subclass reads its parameters of its own attributes, as PySpark's methods read `self.<name>`,
+    # also in the types that hold it: a property, and a class attribute that PySpark's `__init__`
+    # shadows with the instance's own.
+    class LongElement(T.ArrayType):
+        @property
+        def elementType(self):
+            return T.LongType()
+
+        @elementType.setter
+        def elementType(self, value):
+            self.__dict__["given"] = value
+
+    class NotNullable(T.StructField):
+        nullable = False
+
+    array = LongElement(T.StringType())
+    assert vars(array) == {"given": T.StringType(), "containsNull": True}
+    assert repr(array) == "ArrayType(LongType(), True)" and array.simpleString() == "array<bigint>"
+    assert T.StructType([T.StructField("a", array)]).simpleString() == "struct<a:array<bigint>>"
+    assert _cast_type_proto(array).array.element_type.HasField("long")
+    field = NotNullable("a", T.LongType())
+    assert vars(field)["nullable"] is True and repr(field) == "StructField('a', LongType(), True)"
+    assert T.StructType([field]).json() == (
+        '{"fields":[{"metadata":{},"name":"a","nullable":true,"type":"long"}],"type":"struct"}'
+    )
+
+
+def test_the_lowering_of_fields_reads_each_entry_of_their_dict_as_pysparks():
+    # A plan reads `field.name`, `dataType`, `nullable` and `metadata` as Python reads them, of any
+    # key of the `__dict__` that equals the name of the attribute: of a key that is another str
+    # object, of a key of a str subclass, and of a field of a key that is not a str too.
+    class Key(str):
+        pass
+
+    field = T.StructField("a", T.LongType())
+    struct = T.StructType([field])
+    assert _cast_type_proto(struct).struct.fields[0].name == "a"
+    # An equal key keeps the key of the dict and replaces its value.
+    field.__dict__["".join(["na", "me"])] = "x"
+    assert _cast_type_proto(struct).struct.fields[0].name == "x"
+    # A key of another object, of the dict anew.
+    for key in ("".join(["na", "me"]), Key("name")):
+        del field.__dict__["name"]
+        field.__dict__[key] = "y" + type(key).__name__
+        assert _cast_type_proto(struct).struct.fields[0].name == "y" + type(key).__name__
+    del field.__dict__["nullable"]
+    field.__dict__["".join(["null", "able"])] = False
+    lowered = _cast_type_proto(struct).struct.fields[0]
+    assert lowered.name == "yKey" and lowered.nullable is False
+    field.__dict__[1] = "not a str"
+    del field.__dict__["dataType"]
+    field.__dict__[Key("dataType")] = T.StringType()
+    assert _cast_type_proto(struct).struct.fields[0].data_type.HasField("string")
+    assert struct.simpleString() == "struct<yKey:string>"
+
+
+def test_the_lowering_of_fields_reads_each_new_name_as_pysparks():
+    # A name rebound to new strs many times, whose objects take the addresses of the freed ones,
+    # lowers of each, as PySpark's plan reads `field.name`.
+    field = T.StructField("a", T.LongType())
+    struct = T.StructType([field])
+    for i in range(2000):
+        field.name = "".join(["n", str(i % 7), "x" * (i % 3)])
+        if i % 97 == 0:
+            gc.collect()
+        assert _cast_type_proto(struct).struct.fields[0].name == field.name
 
 
 def test_python_subclasses_of_two_branches_of_the_type_classes_raise():
