@@ -11,7 +11,7 @@ use spark_connect::udf::eval_type;
 use crate::column::PyColumn;
 use crate::dataframe::{
     build_map_udf, check_return_type_argument, infer_group_map_eval_type, map_result_of,
-    map_udf_of, resolve_datatype, validate_map_function, PyDataFrame,
+    map_udf_of, return_type_of, validate_map_function, PyDataFrame,
 };
 use crate::interrupt::interruptible_of_values;
 use crate::options::DefaultedOption;
@@ -100,13 +100,23 @@ fn frame_of(value: Bound<'_, PyAny>) -> PyResult<Bound<'_, PyDataFrame>> {
 }
 
 /// The grouped data of the core of `dataframe` and of `grouping_cols`, the `_grouping_cols` of
-/// grouped data, as PySpark's plans of a map of the groups, which read no other state, take them.
+/// grouped data, as PySpark's plans of a map of the groups, which read no other state, take them:
+/// of the plan of `dataframe`, as PySpark's read `self._df._plan` (see
+/// [`crate::dataframe::PlanFrame::plan`]), in `session` when it is given, the session of the plan
+/// of the other grouped data of a plan of both, which gives the plan of both its plan IDs there.
 fn grouping_of(
     dataframe: &Bound<'_, PyDataFrame>,
     grouping_cols: &Bound<'_, PyAny>,
+    session: Option<&spark_connect::session::SparkSession>,
 ) -> PyResult<RustGroupedData> {
+    let mut plan = crate::dataframe::PlanFrame::of(dataframe)?.plan().clone();
+    if let Some(session) = session {
+        if !plan.is_numbered_in(session) {
+            plan = plan.of_plan_in(session.clone());
+        }
+    }
     Ok(RustGroupedData::from_parts(
-        crate::dataframe::Frame::of(dataframe)?.dataframe.clone(),
+        plan,
         columns_of(grouping_cols, true)?,
         AggregateGroupType::GroupBy,
         None,
@@ -188,7 +198,7 @@ fn check_same_session(this: &Bound<'_, PyAny>, other: &Bound<'_, PyAny>) -> PyRe
     match frame.cast::<PyDataFrame>() {
         Ok(frame) => {
             let other = attr(other, pyo3::intern!(py, "_df"))?;
-            crate::dataframe::Frame::of(frame)?.same_session(&other)?;
+            crate::dataframe::PlanFrame::of(frame)?.same_session(&other)?;
         }
         Err(_) => {
             let check = frame.getattr(pyo3::intern!(py, "_check_same_session"))?;
@@ -279,10 +289,13 @@ impl PyGroupedData {
         // of the server, such as the `TypeError` of a user-defined type whose `__init__` takes
         // arguments.
         let frame = frame_of(attr(slf.as_any(), pyo3::intern!(py, "_df"))?)?;
-        let dataframe = {
-            let frame = crate::dataframe::Frame::of(&frame)?;
+        let (dataframe, frame_session) = {
+            let frame = crate::dataframe::PlanFrame::of(&frame)?;
             let schema = frame.schema_read(py)?;
-            frame.dataframe.with_known_schema(Some(schema))
+            (
+                frame.plan().with_known_schema(Some(schema)),
+                frame.session_object().clone().unbind(),
+            )
         };
         let grouped = aggregation_of(slf.as_any(), dataframe)?;
         let session = grouped.spark_session();
@@ -333,7 +346,8 @@ impl PyGroupedData {
                 vec![column.expression().clone()],
             ));
         }
-        Ok(PyDataFrame::new(grouped.agg(expressions)))
+        // As PySpark's `DataFrame(plan.Aggregate(...), session=self._df._session)`.
+        Ok(PyDataFrame::new(grouped.agg(expressions)).with_session(frame_session))
     }
 }
 
@@ -546,9 +560,16 @@ impl PyGroupedData {
         }
         let py = slf.py();
         let frame = frame_of(attr(slf.as_any(), pyo3::intern!(py, "_df"))?)?;
-        let dataframe = crate::dataframe::Frame::of(&frame)?.dataframe.clone();
+        let (dataframe, session) = {
+            let frame = crate::dataframe::PlanFrame::of(&frame)?;
+            (
+                frame.plan().clone(),
+                frame.session_object().clone().unbind(),
+            )
+        };
         let grouped = aggregation_of(slf.as_any(), dataframe)?;
-        Ok(PyDataFrame::new(grouped.agg(agg_exprs)))
+        // As PySpark's `DataFrame(plan.Aggregate(...), session=self._df._session)`.
+        Ok(PyDataFrame::new(grouped.agg(agg_exprs)).with_session(session))
     }
 
     // Count rows in each group, as PySpark's `self.agg(F._invoke_function("count", F.lit(1))
@@ -709,17 +730,16 @@ impl PyGroupedData {
         validate_map_function(py, &func, eval_type_id)?;
         // As PySpark's: a DDL string is parsed before the columns of the input are read.
         let frame = frame_of(attr(slf.as_any(), pyo3::intern!(py, "_df"))?)?;
-        let session = crate::dataframe::Frame::of(&frame)?
-            .dataframe
-            .spark_session();
-        let return_type = resolve_datatype(py, &session, &schema)?;
+        let session = attr(frame.as_any(), pyo3::intern!(py, "_session"))?;
+        let return_type = return_type_of(py, &session, &schema)?;
         let grouped = grouping_of(
             &frame,
             &attr(slf.as_any(), pyo3::intern!(py, "_grouping_cols"))?,
+            None,
         )?;
-        let cols = crate::dataframe::Frame::of(&frame)?.column_names(py)?;
+        let cols = crate::dataframe::column_names_of(&frame, py)?;
         let udf = map_udf_of(py, &func, &schema, return_type, eval_type_id, &cols)?;
-        map_result_of(&schema, grouped.apply_in_pandas(udf))
+        map_result_of(&schema, &session, grouped.apply_in_pandas(udf))
     }
 
     // Deprecated grouped-map apply: `apply(udf)` where `udf` is a
@@ -781,17 +801,16 @@ impl PyGroupedData {
         validate_map_function(py, &func, eval_type_id)?;
         // As PySpark's: a DDL string is parsed before the columns of the input are read.
         let frame = frame_of(attr(slf.as_any(), pyo3::intern!(py, "_df"))?)?;
-        let session = crate::dataframe::Frame::of(&frame)?
-            .dataframe
-            .spark_session();
-        let return_type = resolve_datatype(py, &session, &schema)?;
+        let session = attr(frame.as_any(), pyo3::intern!(py, "_session"))?;
+        let return_type = return_type_of(py, &session, &schema)?;
         let grouped = grouping_of(
             &frame,
             &attr(slf.as_any(), pyo3::intern!(py, "_grouping_cols"))?,
+            None,
         )?;
-        let cols = crate::dataframe::Frame::of(&frame)?.column_names(py)?;
+        let cols = crate::dataframe::column_names_of(&frame, py)?;
         let udf = map_udf_of(py, &func, &schema, return_type, eval_type_id, &cols)?;
-        map_result_of(&schema, grouped.apply_in_arrow(udf))
+        map_result_of(&schema, &session, grouped.apply_in_arrow(udf))
     }
 
     // `GroupedData.cogroup`, as PySpark's `PandasCogroupedOps(self, other)`, which checks
@@ -837,9 +856,10 @@ impl PyGroupedData {
         let grouped = grouping_of(
             &frame,
             &attr(slf.as_any(), pyo3::intern!(py, "_grouping_cols"))?,
+            None,
         )?;
         let session = grouped.spark_session();
-        let cols = crate::dataframe::Frame::of(&frame)?.column_names(py)?;
+        let cols = crate::dataframe::column_names_of(&frame, py)?;
         let udf = build_map_udf(
             py,
             &session,
@@ -867,7 +887,9 @@ impl PyGroupedData {
             &output_mode,
             &timeout_conf,
         );
-        Ok(PyDataFrame::new(args.plan(df)))
+        // As PySpark's `DataFrame(plan, session=self._df._session)`.
+        let session = attr(frame.as_any(), pyo3::intern!(py, "_session"))?;
+        Ok(PyDataFrame::new(args.plan(df)).with_session(session.unbind()))
     }
 
     // `GroupedData.transformWithStateInPandas` — arbitrary stateful processing with a
@@ -967,16 +989,24 @@ fn transform_with_state_of(
     let initial_state = initial_state
         .map(|state| {
             let frame = frame_of(attr(state, pyo3::intern!(py, "_df"))?)?;
-            grouping_of(&frame, &attr(state, pyo3::intern!(py, "_grouping_cols"))?)
+            grouping_of(
+                &frame,
+                &attr(state, pyo3::intern!(py, "_grouping_cols"))?,
+                None,
+            )
         })
         .transpose()?;
     let frame = frame_of(attr(this.as_any(), pyo3::intern!(py, "_df"))?)?;
     let grouped = grouping_of(
         &frame,
         &attr(this.as_any(), pyo3::intern!(py, "_grouping_cols"))?,
+        initial_state
+            .as_ref()
+            .map(RustGroupedData::spark_session)
+            .as_ref(),
     )?;
     let session = grouped.spark_session();
-    let cols = crate::dataframe::Frame::of(&frame)?.column_names(py)?;
+    let cols = crate::dataframe::column_names_of(&frame, py)?;
     let udf = build_map_udf(py, &session, &func, output_struct_type, et, &cols)?;
     // As PySpark's, which sends a DDL string as an `UnparsedDataType`, for the server to parse. A
     // struct whose fields hold an element that is not a `StructField` stands as the types that
@@ -1038,7 +1068,9 @@ fn transform_with_state_of(
             initial_state.as_ref(),
         ),
     };
-    Ok(PyDataFrame::new(df))
+    // As PySpark's `DataFrame(plan, session=self._df._session)`.
+    let session = attr(frame.as_any(), pyo3::intern!(py, "_session"))?;
+    Ok(PyDataFrame::new(df).with_session(session.unbind()))
 }
 
 /// `grouped`, whose plan raises the error of `args`, if any, once it builds the grouping
@@ -1147,22 +1179,22 @@ impl PyCoGroupedData {
         validate_map_function(py, func, eval_type_id)?;
         let left = attr(slf.as_any(), pyo3::intern!(py, "_gd1"))?;
         let left_frame = frame_of(attr(&left, pyo3::intern!(py, "_df"))?)?;
-        let session = crate::dataframe::Frame::of(&left_frame)?
-            .dataframe
-            .spark_session();
-        let return_type = resolve_datatype(py, &session, schema)?;
+        let session = attr(left_frame.as_any(), pyo3::intern!(py, "_session"))?;
+        let return_type = return_type_of(py, &session, schema)?;
         let udf = map_udf_of(py, func, schema, return_type, eval_type_id, &[])?;
         let left = grouping_of(
             &left_frame,
             &attr(&left, pyo3::intern!(py, "_grouping_cols"))?,
+            None,
         )?;
         let right = attr(slf.as_any(), pyo3::intern!(py, "_gd2"))?;
         let right_frame = frame_of(attr(&right, pyo3::intern!(py, "_df"))?)?;
         let right = grouping_of(
             &right_frame,
             &attr(&right, pyo3::intern!(py, "_grouping_cols"))?,
+            Some(&left.spark_session()),
         )?;
-        map_result_of(schema, apply(&left.cogroup(&right), udf))
+        map_result_of(schema, &session, apply(&left.cogroup(&right), udf))
     }
 }
 

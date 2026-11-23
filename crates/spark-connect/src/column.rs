@@ -39,6 +39,35 @@ impl Column {
         &mut self.expr
     }
 
+    /// The reference to the column `name` of the DataFrame whose plan has the plan ID `plan_id`,
+    /// of the name `*` too, a metadata column of `metadata`, as PySpark Connect's
+    /// `DataFrame._col(name, is_metadata_column)` makes it of `self._plan._plan_id`, of no
+    /// DataFrame. Not a stable API.
+    #[doc(hidden)]
+    pub fn reference_of_plan(name: &str, plan_id: i64, metadata: bool) -> Column {
+        let reference = crate::expression::ColumnReference::new(name).with_plan_id(plan_id);
+        let reference = match metadata {
+            true => reference.metadata(),
+            false => reference,
+        };
+        Column::new(ExpressionNode::ColumnReference(reference).into())
+    }
+
+    /// The star of the columns of the DataFrame whose plan has the plan ID `plan_id`, as PySpark
+    /// Connect's `df["*"]` makes it of `self._plan._plan_id`. Not a stable API.
+    #[doc(hidden)]
+    pub fn star_of_plan(plan_id: i64) -> Column {
+        Column::new(ExpressionNode::UnresolvedStar(None, Some(plan_id)).into())
+    }
+
+    /// The columns of the DataFrame whose plan has the plan ID `plan_id` whose names match the
+    /// regex `pattern`, as PySpark Connect's `colRegex` makes them of `self._plan._plan_id`. Not
+    /// a stable API.
+    #[doc(hidden)]
+    pub fn regex_of_plan(pattern: &str, plan_id: i64) -> Column {
+        Column::new(ExpressionNode::UnresolvedRegex(pattern.to_string(), Some(plan_id)).into())
+    }
+
     /// Mirrors `pyspark.sql.column.Column.alias`.
     pub fn alias(self, name: &str) -> Column {
         Column {

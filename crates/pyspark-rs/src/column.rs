@@ -1944,10 +1944,8 @@ impl PyColumn {
         // As pyspark's, a single DataFrame makes an IN subquery of it.
         if let [only] = cols.as_slice() {
             if let Ok(df) = only.bind(py).cast::<crate::dataframe::PyDataFrame>() {
-                let df = crate::dataframe::Frame::of(df)?;
-                return Ok(ColumnOut::new(
-                    this.get()?.clone().isin_subquery(&df.dataframe),
-                ));
+                let df = crate::dataframe::PlanFrame::of(df)?;
+                return Ok(ColumnOut::new(this.get()?.clone().isin_subquery(df.plan())));
             }
         }
         // pyspark's Column.isin unpacks a single list or set argument, but not a tuple, which
