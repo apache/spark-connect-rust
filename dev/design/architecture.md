@@ -117,8 +117,12 @@ checks do not establish support for older pandas versions.
 
 The generic explicit-schema and inferred-schema routes are PySpark's conversion of each column
 to Arrow, which takes every pandas DataFrame, of any class, labels and arrays, as PySpark's
-`createDataFrame` does; they check only the schema and the type names that the conversion
-resolves (`accepts_pandas_schema`). The specialized Arrow-string route's eligibility checks both
+`createDataFrame` does, of the conversions and the types that `pyspark.sql.connect.session` binds
+when it is imported, as PySpark Connect's module of the session binds them: a frame under a struct
+whose classes keep their own reads takes the route of the relation that the core lowers
+(`accepts_pandas_schema`), and the row path takes the others with the same conversion, also of a
+patched class and of a rebound type name. The fast paths decline a frame whose type names or
+converters, as the conversion resolves them, are not the native ones (`_converter_namespaces_intact`). The specialized Arrow-string route's eligibility checks both
 array instances and canonical classes' conversion methods and label casting, including
 inherited methods, and declines a frame whose hooks it does not authenticate, which then takes
 PySpark's conversion. It identifies Arrow-string classes through their loaded defining module

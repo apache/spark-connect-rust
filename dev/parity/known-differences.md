@@ -35,33 +35,105 @@ difference is intentional or tracked for a fix.
   where this path raises `AXIS_LENGTH_MISMATCH` under `a long` and makes a `Row()` under
   `StructType([])`. This fallback covers
   unavailable modules detected by `pyarrow_available`, not an installed PyArrow module that
-  fails during import. With PyArrow, a frame whose struct of the schema, or one of its fields, is of
-  a Python subclass that overrides how the conversion reads it: its `fields`, `names` or iteration,
-  a field's `name`, `dataType`, `nullable` or `metadata`, or `__getattribute__` or `__class__`
-  (`accepts_pandas_schema`), which the fast path declines, converts with PySpark's conversion too,
-  which reads the override as PySpark's does, of its table, its errors and its columns
-  (`converts_row_path_frames`), when its `names` and `fields`, as Python reads them, are as many; of
-  a subclass whose `names` the native `__init__` does not set through its setter, the frame takes
-  the row path below, of the native types (SPARK-62231). The relation's schema is of the native
-  types of the fields, where PySpark's is the `json()` of the struct, which reads the overrides too:
-  of a field of a subclass whose `dataType` reads `StringType()` over a column of strs under `a
-  long`, PySpark's DataFrame is `struct<a:string>`, and the drop-in's table follows the override and
-  its schema does not, so its `schema` raises the server's `INVALID_COLUMN_OR_FIELD_DATA_TYPE`
-  ("Column or field col_0 is of type "STRING" while it's required to be "BIGINT""); the drop-in's
-  own `json()` does not read such a `dataType` either (SPARK-62236). When the native `StructType` or
-  `StructField` classes themselves are patched to read otherwise, or the type names that PySpark's
-  conversion resolves are rebound, the drop-in converts the frame of its rows, of the native types,
-  where PySpark's conversion reads the patch: it mostly raises
-  (`[UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION] LongType() is not supported`,
-  `ArrowNotImplementedError: Unsupported cast from timestamp[ns] to bool`, or the `AttributeError`
-  of a property of `StructField` that has no setter), or converts by the patched type (a public
-  `BooleanType` rebound over a column of ints `[1, 0, 2]` is `[1, 0, 1]` there and `[1, 0, 2]` here)
-  (SPARK-62237). A Python subclass of `StructType` or `StructField` that overrides none of these
-  takes PySpark's conversion, as in PySpark, with the JSON of its core types, where PySpark sends
-  its `json()`, which names a struct of a subclass by its `typeName()` and which the server then
-  fails to parse (see the types of
-  `docs/compatibility.md`). So does a name that holds a NUL, at any depth, whose table the
-  importer reads of its IPC stream, as the C data interface holds names as C strings.
+  fails during import.
+- **pandas DataFrames under customized or patched types, or rebound type names** (tracked for a
+  fix: SPARK-62231, SPARK-62236, SPARK-62251). With PyArrow, a frame converts with PySpark's
+  conversion, in its order, of the conversions and the types that `pyspark.sql.connect.session`
+  binds when it is imported, with the first session, as PySpark Connect's module of the session
+  binds them (`prepare_pandas_table`, `prepare_inferred_pandas_table`), whose conversion of each
+  column imports `to_arrow_type` of the converter module of `sys.modules` when it is called, as
+  PySpark's does: so a type name rebound in `pyspark.sql.types` or `pyspark.sql.pandas.types`
+  changes the conversion as it changes PySpark's, of its errors
+  (`[UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION] LongType() is not supported in conversion to
+  Arrow.`, `ArrowNotImplementedError: Unsupported cast from timestamp[ns] to bool using function
+  cast_boolean`), also of a name rebound after the session: a public `BooleanType` rebound to
+  `LongType`, with the converter module removed, makes `[1, 0, 2]` under `a long` `[1, 0, 1]`. As
+  PySpark's createDataFrame, of any data, the session checks the schema, of a DDL string as the
+  server parses it, against the `AtomicType` and the `StructType` of that module, which it reads
+  when it is called (`_check_schema`), before it reads any setting: an `AtomicType` rebound to None
+  before the session raises `TypeError: isinstance() arg 2 must be a type, a tuple of types, or a
+  union`, and a struct that the module's `StructType` does not take raises `[NOT_EXPECTED_TYPE]
+  Argument `schema` should be list, None or StructType, got StructType.`. A struct whose classes,
+  or a field's, are patched, or of a Python subclass that overrides how the conversion reads it
+  (its `fields`, `names` or iteration, a field's `name`, `dataType`, `nullable` or `metadata`, or
+  `__getattribute__` or `__class__`, which the fast paths decline), converts with PySpark's
+  conversion too, which reads the patch or the override as PySpark's does, of its table, its
+  errors and its columns. What differs:
+  - Of a struct of a class that defines `names` or `fields` itself, whose `names` and `fields`, as
+    Python reads them, are not as many, the frame takes the native row path (see "pandas
+    DataFrames without PyArrow" above), of its rows (SPARK-62231): PySpark's `__init__` assigns
+    them through the class's setters, and the native `__init__` does not, so a `names` or `fields`
+    property of a setter reads none. Where PySpark's conversion takes such a struct, the row path
+    names the columns by the native names (`a` where PySpark's are the `A` of a setter that
+    upper-cases them), raises `AXIS_LENGTH_MISMATCH` of a frame of fewer columns, where PySpark
+    raises the `ArrowInvalid` of its rename, and `PySparkRuntimeError: Type mismatch in row data`
+    of a column that does not convert, where PySpark raises the error of its conversion. Of
+    `names` that are not as many in PySpark either, it converts the rows where PySpark raises
+    `IndexError` (of fewer names) or the server's `ASSIGNMENT_ARITY_MISMATCH` (of more). A `fields`
+    or `names` list changed in place, of a class that defines neither, takes PySpark's conversion.
+  - A property of no setter patched over an attribute that PySpark's `__init__` assigns, a
+    field's `name`, `dataType`, `nullable` or `metadata`, or a struct's `fields` or `names`,
+    makes PySpark's `_deduplicate_field_names` raise `AttributeError: property of 'StructField'
+    object has no setter` (of `'StructType'`, of a struct's), as the `__init__` of the field or the
+    struct that it makes assigns through it. The native `__init__` does not (SPARK-62231), nor has
+    a native type a `__dict__` that a setter could write (SPARK-62251), so the conversion goes on
+    and reads the patch where PySpark's would: a `dataType` of `BooleanType()` converts a column of
+    ints to bools, which the relation's schema of the native types holds as longs (the server's
+    `INVALID_COLUMN_OR_FIELD_DATA_TYPE`), a `name` raises the `ValueError` of the cast of the table
+    (`Target schema's field names are not matching the table's field names: ['renamed'],
+    ['changed']`), a `nullable` of False raises `Casting field 'x' with null values to
+    non-nullable` of a column of nulls, a `metadata` is the Arrow metadata of the column, a
+    struct's `names` names the column of the table, of a relation of the native names, and its
+    `fields` of `[]` makes a table of no columns, which the server raises
+    `ASSIGNMENT_ARITY_MISMATCH` of.
+  - The relation's schema is of the native types of the fields, where PySpark's is the `json()` of
+    the struct, which reads the overrides and the patches too: of a field of a subclass whose
+    `dataType` reads `StringType()` over a column of strs under `a long`, PySpark's DataFrame is
+    `struct<a:string>`, and the drop-in's table follows the override and its schema does not, so
+    its `schema` raises the server's `INVALID_COLUMN_OR_FIELD_DATA_TYPE` (``Column or field
+    `col_0` is of type "STRING" while it's required to be "BIGINT"``); of
+    `StringType.isUTF8BinaryCollation` patched to return False, PySpark's schema holds the
+    collation of the field (`"string collate UTF8_BINARY"`, and its `__COLLATIONS` metadata). The
+    drop-in's own `json()` reads neither (SPARK-62236).
+
+  A Python subclass of `StructType` or `StructField` that overrides none of these takes PySpark's
+  conversion, as in PySpark, with the JSON of its core types, where PySpark sends its `json()`,
+  which names a struct of a subclass by its `typeName()` and which the server then fails to parse
+  (see the types of `docs/compatibility.md`). So does a name that holds a NUL, at any depth, whose
+  table the importer reads of its IPC stream, as the C data interface holds names as C strings.
+- **Type names that PySpark Connect's other modules and PySpark's types read** (intentional). The
+  other modules of PySpark Connect that its session imports bind the type names of
+  `pyspark.sql.types` too, and PySpark's types read them when they are called, so a rebound name
+  changes PySpark's client and types, where the drop-in's, which are native, keep their behavior:
+  - its client converts the results of executions by the names that it bound with the session
+    (`pyspark.sql.connect.client.core`, `pyspark.sql.connect.conversion`): of a `StructType`
+    rebound to `object` before the session, it takes every response for a schema
+    (`_execute_and_fetch`), so `toArrow` and `collect` raise `AssertionError`, as `collect` does of
+    a `TimestampType` rebound to `LongType`; and of `from_arrow_type` rebound to None in the
+    converter module, `collect` raises `TypeError: 'NoneType' object is not callable`;
+  - it parses the types of the server by those names (`pyspark.sql.connect.types`): of a
+    `LongType` rebound to `StringType`, the schema of a DataFrame of longs is `struct<i:string>`,
+    and of a `StructType` rebound to `object`, a DDL schema and the schema of every DataFrame
+    raise `TypeError: object() takes no arguments`; its conversion of local rows
+    (`pyspark.sql.conversion`) reads them too (`AttributeError: 'LongType' object has no
+    attribute 'fieldNames'`);
+  - its types read the names of `pyspark.sql.types` in their methods: `DayTimeIntervalType()`
+    reads `DayTimeIntervalType.DAY`, so of a `DayTimeIntervalType` rebound to `StringType`, the
+    conversion of a column of timedeltas raises `AttributeError: type object 'StringType' has no
+    attribute 'DAY'`; and its functions of schemas, as `_infer_schema`, make the rebound classes,
+    of a subclass of whose struct the server fails to parse the JSON;
+  - of an `AtomicType` or a `StructType` rebound to a class that takes other objects than types,
+    such as `object`, its createDataFrame takes them as its schema, where the drop-in's takes a
+    list as names, None as no schema, and raises `NOT_EXPECTED_TYPE` of another object: of an
+    `AtomicType` of `object`, the names `["a"]` raise `AssertionError: dataType ['a'] should be an
+    instance of <class 'pyspark.sql.types.DataType'>`; and of a `StructType` rebound to a
+    subclass, it makes the struct of the `value` of an atomic schema of local rows of that
+    subclass, whose `json()` names it by its `typeName()`, which the server fails to parse (see the
+    types of `docs/compatibility.md`), where the drop-in's struct is native.
+
+  Matching these would make the native client and each use of a native type look up the names of
+  `pyspark.sql.types` in Python on its hot paths, at a cost to every user, only to reproduce the
+  failures that such a rebinding causes in PySpark's own client.
 - **Nested pandas Decimal inference and failures** (intentional; related change:
   SPARK-60696; of the row path without PyArrow, which PySpark Connect does not have, see above).
 

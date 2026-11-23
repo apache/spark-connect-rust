@@ -3050,6 +3050,70 @@ def test_create_dataframe_of_a_struct_of_another_width(session):
             f"Target schema's field names are not matching the table's field names: ['a', 'b'], "
             f"{names}")
 
+    # As PySpark's conversion of a struct whose `fields` or `names` list was changed in place, also
+    # of a class of an iteration of its own: of a field removed or a name appended, the names of
+    # `toDF` are not as many as the columns, which the server raises ASSIGNMENT_ARITY_MISMATCH of;
+    # of a field appended or a name removed, `_deduplicate_field_names` raises IndexError.
+    class Iterated(StructType):
+        def __iter__(self):
+            return iter(self.fields)
+
+    for cls in (StructType, Iterated):
+        for change, error in (("fields.pop", AnalysisException), ("names.append", AnalysisException),
+                              ("fields.append", IndexError), ("names.pop", IndexError)):
+            schema = cls([StructField("a", LongType()), StructField("b", LongType())])
+            if change == "fields.pop":
+                schema.fields.pop()
+            elif change == "names.append":
+                schema.names.append("x")
+            elif change == "fields.append":
+                schema.fields.append(StructField("c", LongType()))
+            else:
+                schema.names.pop()
+            for frame in (pd.DataFrame({"a": [1], "b": [2]}),
+                          pd.DataFrame({"a": [1], "b": [2], "c": [3]})):
+                with pytest.raises(error) as raised:
+                    session.createDataFrame(frame, schema).schema
+                if error is AnalysisException:
+                    assert raised.value.getCondition() == "ASSIGNMENT_ARITY_MISMATCH", change
+                else:
+                    assert str(raised.value) == "list index out of range", change
+
+
+def test_create_dataframe_of_a_pandas_frame_under_a_rebound_type_name():
+    # As PySpark's createDataFrame, whose module of the session binds the converters of its
+    # conversion when it is imported, with the session, while its conversion of a column imports
+    # `to_arrow_type` of the converter module when it is called: of a public `BooleanType` rebound
+    # to `LongType` after the session, with the converter module removed, the conversion of the
+    # column is imported anew and takes the ints as bools, which the cast to the schema of the
+    # session's module takes back to longs. In a process of its own, as it rebinds the name.
+    import subprocess
+    import sys
+
+    remote = os.environ.get("SPARK_REMOTE")
+    if not remote:
+        pytest.skip("SPARK_REMOTE is required for live-server tests")
+
+    script = r'''
+import os
+import sys
+import numpy as np
+import pandas as pd
+from pyspark.sql import SparkSession
+from pyspark.sql import types as T
+
+spark = SparkSession.builder.remote(os.environ["SPARK_REMOTE"]).getOrCreate()
+sys.modules.pop("pyspark.sql.pandas.types", None)
+T.BooleanType = T.LongType
+schema = T.StructType([T.StructField("renamed", T.LongType())])
+df = spark.createDataFrame(pd.DataFrame({"renamed": np.asarray([1, 0, 2], dtype="int64")}), schema)
+print(df.schema.simpleString(), [row.renamed for row in df.collect()])
+'''
+    result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True,
+                            timeout=120)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.strip().splitlines()[-1] == "struct<renamed:bigint> [1, 0, 1]"
+
 
 @pytest.mark.parametrize(
     "frame, schema, columns",

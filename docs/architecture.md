@@ -178,7 +178,8 @@ no rows, they send the schema alone and read none, as PySpark's empty data does,
 Every pandas DataFrame, of any class, labels and arrays, converts with PySpark's conversion of
 each column to Arrow, in the session time zone (`prepare_pandas_table` and
 `prepare_inferred_pandas_table` of `pyspark/sql/_pandas_input.py`, of the vendored
-`create_arrow_table_from_pandas`), whose table this importer sends, as PySpark's
+`create_arrow_table_from_pandas`, as `pyspark.sql.connect.session` binds the conversions as
+PySpark Connect's module of the session binds them), whose table this importer sends, as PySpark's
 `createDataFrame` does. Fast paths take plain frames of some columns, of which they make the
 values of that conversion without its per-column work; the frames that they decline, such as a
 subclass or a frame of customized hooks, take PySpark's conversion. Without PyArrow, which that

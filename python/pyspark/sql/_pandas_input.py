@@ -20,11 +20,14 @@
 
 As PySpark's createDataFrame, every pandas DataFrame, of any class, labels and arrays, converts
 with PySpark's conversion of each column to Arrow (`prepare_pandas_table` and
-`prepare_inferred_pandas_table`). The fast paths of this module take only plain frames of common
-columns, of which they make the tables that the conversion makes, faster; they decline the others,
-which take the conversion. The native row path of the session converts a frame only where the
-conversion does not run: without PyArrow, and when the type names that it resolves are rebound,
-or the classes of a struct schema customized (see `accepts_pandas_schema`).
+`prepare_inferred_pandas_table`), of the conversions and the types that the module of the session
+binds as PySpark Connect's module binds them (`_session_module`), so of a patched class or a
+rebound type name too. The fast paths of this module take only plain frames of common columns, of
+intact names and classes, of which they make the tables that the conversion makes, faster; they
+decline the others, which take the conversion. The native row path of the session converts the
+rows of a frame only where the conversion does not run: without PyArrow, and of a struct of a
+class of its own `names` or `fields` that are not as many, which the native `__init__` does not
+set through its setters (SPARK-62231).
 """
 
 
@@ -562,7 +565,6 @@ def prepare_int64_table(frame, schema):
     are left to PySpark's conversion.
     ``verifySchema`` is ignored for pandas Arrow input, as in Spark Connect.
     """
-    import sys
     from types import GetSetDescriptorType, WrapperDescriptorType
 
     import numpy as np
@@ -578,16 +580,10 @@ def prepare_int64_table(frame, schema):
         return None
 
     from pyspark._pyspark import (
-        AtomicType,
-        BooleanType,
-        ByteType,
-        IntegerType,
         LongType,
-        ShortType,
         StructField,
         StructType,
     )
-    from pyspark.sql import types as sql_types
 
     # A subclass or custom extension array can change the values exposed to Arrow.
     # Check concrete identities before consulting dtype equality or conversion hooks.
@@ -616,41 +612,10 @@ def prepare_int64_table(frame, schema):
     if len(frame) < 1000 and not any(type(dtype) is Int64Dtype for dtype in dtypes):
         return None
 
-    # The native row path reads native schema fields directly. The Arrow converter
-    # instead uses Python descriptors and imported class aliases, including aliases
-    # captured before this helper was loaded. Customized schemas retain the row path.
-    if sys.modules.get("pyspark.sql.types") is not sql_types:
+    # The table holds the values of the native fields, which PySpark's conversion reads through
+    # the classes, of the type names and the converters that it resolves, which must be intact.
+    if not _converter_namespaces_intact():
         return None
-    importer = sys.modules.get("pyspark.sql._arrow_input")
-    if vars(sql_types).get("AtomicType") is not AtomicType:
-        return None
-    if importer is not None:
-        if getattr(importer, "StructType", None) is not StructType:
-            return None
-        # The importer uses this alias while validating schema widths.
-        if vars(importer).get("AtomicType") is not AtomicType:
-            return None
-    converter = sys.modules.get("pyspark.sql.pandas.types")
-    namespaces = [vars(sql_types)]
-    if converter is not None:
-        namespaces.append(vars(converter))
-    if importer is not None:
-        # An importer may still hold functions from a removed converter module.
-        for name in ("from_arrow_schema", "to_arrow_schema"):
-            # Later importers resolve these converters locally inside prepare_table.
-            if name not in vars(importer):
-                continue
-            namespace = getattr(getattr(importer, name, None), "__globals__", None)
-            if type(namespace) is not dict:
-                return None
-            namespaces.append(namespace)
-    for name, cls in (
-        ("BooleanType", BooleanType), ("ByteType", ByteType), ("ShortType", ShortType),
-        ("IntegerType", IntegerType), ("LongType", LongType),
-        ("StructField", StructField), ("StructType", StructType),
-    ):
-        if any(namespace.get(name) is not cls for namespace in namespaces):
-            return None
     for cls in (LongType, StructField, StructType):
         if (cls.__getattribute__ is not object.__getattribute__
                 or any("__class__" in vars(base) for base in cls.__mro__ if base is not object)):
@@ -716,7 +681,6 @@ def timestamp_columns(frame, schema):
     units and submicrosecond truncation are left to PySpark's conversion. Check the
     integer buffers separately so NaT's sentinel never participates in alignment tests.
     """
-    import sys
     from types import FunctionType, GetSetDescriptorType, WrapperDescriptorType
 
     import numpy as np
@@ -731,25 +695,12 @@ def timestamp_columns(frame, schema):
     except ImportError:
         return None
     from pyspark._pyspark import (
-        AtomicType,
-        BinaryType,
-        BooleanType,
-        ByteType,
-        DateType,
-        DecimalType,
-        DoubleType,
-        FloatType,
-        IntegerType,
-        LongType,
-        ShortType,
-        StringType,
         StructField,
         TimestampType,
     )
     from pyspark._pyspark import (
         StructType as NativeStructType,
     )
-    from pyspark.sql import types as sql_types
 
     if (pd.DataFrame is not DataFrame or type(frame) is not DataFrame
             or type(schema) is not NativeStructType or not len(frame)
@@ -772,41 +723,10 @@ def timestamp_columns(frame, schema):
         return None
     if not _has_canonical_columns(frame.columns):
         return None
-    # The Arrow importer consults Python descriptors and public or captured converter
-    # aliases, which must hold the native classes.
-    if sys.modules.get("pyspark.sql.types") is not sql_types:
+    # PySpark's conversion and the Arrow importer resolve the type names and the converters,
+    # which must be intact.
+    if not _converter_namespaces_intact():
         return None
-    importer = sys.modules.get("pyspark.sql._arrow_input")
-    if vars(sql_types).get("AtomicType") is not AtomicType:
-        return None
-    if importer is not None:
-        if getattr(importer, "StructType", None) is not NativeStructType:
-            return None
-        if vars(importer).get("AtomicType") is not AtomicType:
-            return None
-    converter = sys.modules.get("pyspark.sql.pandas.types")
-    namespaces = [vars(sql_types)]
-    if converter is not None:
-        namespaces.append(vars(converter))
-    if importer is not None:
-        for name in ("from_arrow_schema", "to_arrow_schema",
-                     "_check_arrow_table_timestamps_localize"):
-            # Newer importers resolve converters locally within prepare_table.
-            if name not in vars(importer):
-                continue
-            namespace = getattr(getattr(importer, name, None), "__globals__", None)
-            if type(namespace) is not dict:
-                return None
-            namespaces.append(namespace)
-    for name, cls in (
-        ("BooleanType", BooleanType), ("ByteType", ByteType), ("ShortType", ShortType),
-        ("IntegerType", IntegerType), ("LongType", LongType), ("FloatType", FloatType),
-        ("DoubleType", DoubleType), ("DecimalType", DecimalType), ("StringType", StringType),
-        ("BinaryType", BinaryType), ("DateType", DateType), ("TimestampType", TimestampType),
-        ("StructField", StructField), ("StructType", NativeStructType),
-    ):
-        if any(namespace.get(name) is not cls for namespace in namespaces):
-            return None
     for cls in (TimestampType, StructField, NativeStructType):
         if (cls.__getattribute__ is not object.__getattribute__
                 or any("__class__" in vars(base) for base in cls.__mro__ if base is not object)):
@@ -980,6 +900,9 @@ def prepare_float64_table(frame, schema):
             if (type(descriptor) is not descriptor_type
                     or descriptor.__objclass__ is not cls or descriptor.__name__ != name):
                 return None
+    # The type names and the converters that PySpark's conversion resolves must be intact.
+    if not _converter_namespaces_intact():
+        return None
     fields = schema.fields
     if len(fields) != width or not all(
         type(field) is native.StructField and type(field.dataType) is native.DoubleType
@@ -1080,6 +1003,9 @@ def prepare_string_input(frame, schema):
                     or descriptor.__objclass__ is not cls or descriptor.__name__ != name):
                 return None
     if not _has_canonical_columns(frame.columns):
+        return None
+    # The type names and the converters that PySpark's conversion resolves must be intact.
+    if not _converter_namespaces_intact():
         return None
     width = len(frame.columns)
     if not width or len(schema.fields) != width or not frame.columns.is_unique:
@@ -1199,7 +1125,6 @@ def prepare_date_table(frame, schema):
     conversion hooks, and pandas treats several other objects as missing values.
     Those cases are left to PySpark's conversion, with its values and errors.
     """
-    import sys
     from datetime import date
     from types import FunctionType, GetSetDescriptorType, WrapperDescriptorType
 
@@ -1211,18 +1136,7 @@ def prepare_date_table(frame, schema):
     from pandas.core.series import Series
 
     from pyspark._pyspark import (
-        AtomicType,
-        BinaryType,
-        BooleanType,
-        ByteType,
         DateType,
-        DecimalType,
-        DoubleType,
-        FloatType,
-        IntegerType,
-        LongType,
-        ShortType,
-        StringType,
         StructField,
     )
     from pyspark._pyspark import (
@@ -1254,40 +1168,10 @@ def prepare_date_table(frame, schema):
     if (DataFrame.astype is not generic_module.NDFrame.astype
             or DataFrame.where is not generic_module.NDFrame.where):
         return None
-    # Earlier converter branches must not recognize a date as another type.
-    # Check loaded converters and globals captured by older importer functions.
-    if sys.modules.get("pyspark.sql.types") is not sql_types:
+    # Earlier converter branches must not recognize a date as another type: the type names and
+    # the converters that PySpark's conversion and the importer resolve must be intact.
+    if not _converter_namespaces_intact():
         return None
-    importer = sys.modules.get("pyspark.sql._arrow_input")
-    if vars(sql_types).get("AtomicType") is not AtomicType:
-        return None
-    if importer is not None:
-        if getattr(importer, "StructType", None) is not NativeStructType:
-            return None
-        if vars(importer).get("AtomicType") is not AtomicType:
-            return None
-    converter = sys.modules.get("pyspark.sql.pandas.types")
-    namespaces = [vars(sql_types)]
-    if converter is not None:
-        namespaces.append(vars(converter))
-    if importer is not None:
-        for name in ("from_arrow_schema", "to_arrow_schema"):
-            # Newer importers resolve these functions locally in prepare_table.
-            if name not in vars(importer):
-                continue
-            namespace = getattr(getattr(importer, name, None), "__globals__", None)
-            if type(namespace) is not dict:
-                return None
-            namespaces.append(namespace)
-    for name, cls in (
-        ("BooleanType", BooleanType), ("ByteType", ByteType), ("ShortType", ShortType),
-        ("IntegerType", IntegerType), ("LongType", LongType), ("FloatType", FloatType),
-        ("DoubleType", DoubleType), ("DecimalType", DecimalType), ("StringType", StringType),
-        ("BinaryType", BinaryType), ("DateType", DateType), ("StructField", StructField),
-        ("StructType", NativeStructType),
-    ):
-        if any(namespace.get(name) is not cls for namespace in namespaces):
-            return None
     # The table reads native fields directly. Class attributes are mutable, so
     # customized Python schema access is left to the general conversion.
     for name, cls in (("DateType", DateType), ("StructField", StructField),
@@ -1360,18 +1244,88 @@ def prepare_date_table(frame, schema):
 
 
 def _native_names_intact(namespace):
-    """Whether each public native class name in `namespace` is still the native class."""
+    """Whether each public name of a native type class in `namespace` (of `DataType` and its
+    subclasses, `StructField` too), which the conversions resolve, is still the native class. A
+    name of another native class, such as the classic `SparkSession` of a module, is not checked."""
     from pyspark import _pyspark as native
 
     return all(
         namespace[name] is value
         for name, value in vars(native).items()
-        if not name.startswith("_") and isinstance(value, type) and name in namespace
+        if not name.startswith("_") and isinstance(value, type)
+        and issubclass(value, native.DataType) and name in namespace
     )
 
 
+# The functions of `pyspark.sql.pandas.types` that PySpark's conversion of a pandas DataFrame calls
+# by their names, and those of `pyspark.sql.pandas.conversion` that it calls so.
+_CONVERTER_FUNCTIONS = ("_deduplicate_field_names", "_dedup_names", "to_arrow_schema",
+                        "to_arrow_type", "to_arrow_metadata", "from_arrow_type",
+                        "_create_converter_from_pandas",
+                        "_check_series_convert_timestamps_internal")
+_CONVERSION_FUNCTIONS = ("create_arrow_table_from_pandas", "create_arrow_array_from_pandas")
+
+
+def _own_functions_intact(namespace, names):
+    """Whether the module namespace `namespace` holds the native classes, and, as each of `names`,
+    a function of its own of that name, which no rebinding replaced, or the cache of one
+    (`functools.lru_cache`, as of `_create_converter_from_pandas`)."""
+    from functools import _lru_cache_wrapper
+    from types import FunctionType
+
+    def own(name, function):
+        if type(function) is _lru_cache_wrapper:
+            function = function.__wrapped__
+        return (type(function) is FunctionType and function.__name__ == name
+                and function.__globals__ is namespace)
+
+    return _native_names_intact(namespace) and all(
+        own(name, namespace.get(name)) for name in names
+    )
+
+
+def _session_module():
+    """The module of the session, `pyspark.sql.connect.session`, which binds the conversions of
+    createDataFrame and the types that they make as PySpark Connect's module binds them, when it
+    is imported (see it): PySpark's createDataFrame calls them by their names there."""
+    import sys
+
+    module = sys.modules.get("pyspark.sql.connect.session")
+    if module is None:
+        import pyspark.sql.connect.session as module
+    return module
+
+
+def _session_conversions_intact():
+    """Whether the conversions and the types that the module of the session binds, which PySpark's
+    conversion of a pandas DataFrame calls and makes, are the native classes and the converters'
+    own functions, of modules that hold the native classes too."""
+    from types import FunctionType
+
+    namespace = vars(_session_module())
+    if not _native_names_intact(namespace):
+        return False
+    for name in ("to_arrow_schema", "_deduplicate_field_names", "from_arrow_type",
+                 "create_arrow_table_from_pandas"):
+        function = namespace.get(name)
+        if type(function) is not FunctionType or function.__name__ != name:
+            return False
+        names = (_CONVERSION_FUNCTIONS if name == "create_arrow_table_from_pandas"
+                 else _CONVERTER_FUNCTIONS)
+        if not _own_functions_intact(function.__globals__, names):
+            return False
+    return True
+
+
 def _converter_namespaces_intact():
-    """Whether loaded schema converters/importers still resolve native type names."""
+    """Whether the type names and the converters that PySpark's conversion of a pandas DataFrame
+    resolves, and the importer of the fast paths' tables, are the native classes and the
+    converters' own functions: in `pyspark.sql.types`, of which a converter module imported anew
+    binds them; in the converter module of `sys.modules`, whose converters the conversion of a
+    column imports when it is called; in the module of the session and the modules of the
+    conversions that it bound when it was imported (`_session_conversions_intact`); and in the
+    importer. A fast path declines a frame otherwise, which then takes PySpark's conversion, of
+    the names as they are."""
     import sys
 
     from pyspark.sql import types as sql_types
@@ -1380,26 +1334,28 @@ def _converter_namespaces_intact():
         vars(sql_types)
     ):
         return False
-    for name in ("pyspark.sql.pandas.types", "pyspark.sql._arrow_input"):
-        module = sys.modules.get(name)
-        if module is not None and not _native_names_intact(vars(module)):
-            return False
+    converter = sys.modules.get("pyspark.sql.pandas.types")
+    if converter is not None and not _own_functions_intact(vars(converter), _CONVERTER_FUNCTIONS):
+        return False
+    if not _session_conversions_intact():
+        return False
     # The importer resolves its schema classes by name, and its conversion functions may
     # keep the globals of an older type module.
     importer = sys.modules.get("pyspark.sql._arrow_input")
     if importer is not None:
         from pyspark._pyspark import AtomicType, StructType
 
-        if any(vars(importer).get(name) is not cls
-               for name, cls in (("StructType", StructType), ("AtomicType", AtomicType))):
+        if not _native_names_intact(vars(importer)) or any(
+            vars(importer).get(name) is not cls
+            for name, cls in (("StructType", StructType), ("AtomicType", AtomicType))
+        ):
             return False
         for function in list(vars(importer).values()):
             namespace = getattr(function, "__globals__", None)
             if type(namespace) is dict and not _native_names_intact(namespace):
                 return False
         # The importer calls its converters by these names, which must still be functions.
-        converter = sys.modules.get("pyspark.sql.pandas.types")
-        for name in ("to_arrow_schema", "from_arrow_schema"):
+        for name in ("to_arrow_schema", "from_arrow_schema", "_check_arrow_table_timestamps_localize"):
             if name in vars(importer) and (
                 getattr(vars(importer)[name], "__globals__", None) is None
                 or (converter is not None
@@ -1451,25 +1407,15 @@ def _native_struct_classes_intact():
     return True
 
 
-def converts_row_path_frames():
-    """Whether the row path converts a pandas frame of rows under a struct with PySpark's conversion
-    (`prepare_pandas_table`), as PySpark's createDataFrame does: where PyArrow is, of the native
-    classes and type names as they are (`_native_struct_classes_intact`,
-    `_converter_namespaces_intact`). The conversion then reads a struct of a class of a Python
-    subclass that reads its fields of its own, which the fast path declines (`_canonical_struct`),
-    as PySpark's does. Of a patched native class or a rebound type name, which the conversion would
-    read and the relation's schema of the native types would not, the row path converts the frame
-    of its rows."""
-    return pyarrow_available() and _native_struct_classes_intact() and _converter_namespaces_intact()
-
-
 def _canonical_struct(schema):
     """Whether a native struct schema and its fields keep their own classes' behavior.
 
-    The conversion reads the fields, names and data types through the classes, and the importer
-    the native types that they hold, so a class that overrides one of these reads keeps the row
-    path. As PySpark's createDataFrame, which converts a frame under any StructType of
-    StructFields with its conversion, a Python subclass that overrides none takes it too.
+    The conversion reads the fields, names and data types through the classes, and the relation
+    of the core the native types that they hold, so a frame under a class that overrides one of
+    these reads takes the row path, which converts it with PySpark's conversion too, of the
+    relation of the native fields (`create_from_pandas_table` of the session). As PySpark's
+    createDataFrame, which converts a frame under any StructType of StructFields with its
+    conversion, a Python subclass that overrides none takes this route too.
     """
     from pyspark._pyspark import StructField, StructType
 
@@ -1486,66 +1432,61 @@ def _canonical_struct(schema):
 
 
 def accepts_pandas_schema(schema=None):
-    """Whether PySpark's conversion converts a pandas frame under this schema: a DDL string or a
-    struct type, which `prepare_pandas_table` takes, or None, of no schema or of names, which
-    `prepare_inferred_pandas_table` takes.
-
-    As PySpark's createDataFrame, it converts every pandas DataFrame, of any class, labels and
-    arrays: only the schema and the type names are checked. The conversion and the importer
-    resolve the type classes by their names, so each namespace must still hold the native
-    classes (`_converter_namespaces_intact`), and they read a struct through its classes, which
-    must keep their own behavior (`_canonical_struct`); otherwise the row path converts the frame,
-    of PySpark's conversion where PyArrow is and the native classes and names are intact
-    (`converts_row_path_frames`), and else of its rows of the native types.
+    """Whether the session converts a pandas frame of rows under this schema, a DDL string or a
+    struct type, with PySpark's conversion (`prepare_pandas_table`), of the relation of the struct
+    that the core lowers: of a struct whose classes, and its fields', keep their own reads
+    (`_canonical_struct`). The row path converts a frame under another struct with PySpark's
+    conversion too, where PyArrow is, of the relation of its native fields, but of a struct whose
+    `names` and `fields`, as Python reads them of a class that defines either, are not as many,
+    whose rows it converts (SPARK-62231).
     """
-    if schema is not None and type(schema) is not str and not _canonical_struct(schema):
-        return False
-    return _converter_namespaces_intact()
+    return schema is None or type(schema) is str or _canonical_struct(schema)
 
 
 def prepare_pandas_table(frame, schema, timezone, safecheck, prefers_large_types):
-    """Convert a pandas frame under an explicit struct schema as PySpark Connect does.
+    """Convert a pandas frame under an explicit struct schema as PySpark Connect does: the table,
+    and the names that its `toDF` applies, `schema.fieldNames()`, of strs.
 
-    Each column goes through PySpark's own Arrow conversion, with the session time zone
-    and the safe-cast setting, and the table is then renamed and cast to the schema's
-    Arrow types. The values and errors therefore match PySpark, including the nullability
-    and overflow messages. As PySpark's, the columns are zipped with the fields: the columns
-    past the fields are not converted and are dropped, of no fields the table has no column and
-    no row, and of fewer columns than the fields the rename raises PyArrow's `ArrowInvalid`. A
-    frame of no columns is the table of `pa.RecordBatch.from_pandas`, which keeps its number of
-    rows, with a column of each level of its index unless it is a RangeIndex; the caller checks
-    the number of columns of a struct of no fields, as PySpark does. The caller checks the
-    schema with `accepts_pandas_schema` first.
+    As PySpark's createDataFrame, in its order, of the conversions and the types that its module
+    of the session binds (`_session_module`), so a rebound name or a patched class changes what it
+    changes in PySpark, of its errors too. Each column goes through PySpark's own Arrow
+    conversion, with the session time zone and the safe-cast setting, and the table is then
+    renamed and cast to the schema's Arrow types. The values and errors therefore match PySpark,
+    including the nullability and overflow messages. As PySpark's, the columns are zipped with the
+    fields: the columns past the fields are not converted and are dropped, of no fields the table
+    has no column and no row, and of fewer columns than the fields the rename raises PyArrow's
+    `ArrowInvalid`. A frame of no columns is the table of `pa.RecordBatch.from_pandas`, which
+    keeps its number of rows, with a column of each level of its index unless it is a
+    RangeIndex; the caller checks the number of columns of the table against the number of
+    fields, as PySpark does.
     """
     import pyarrow as pa
 
-    from pyspark.sql.pandas.conversion import create_arrow_table_from_pandas
-    from pyspark.sql.pandas.types import _deduplicate_field_names, to_arrow_schema
-
+    session = _session_module()
     # As PySpark's, the table is of the names of `_deduplicate_field_names`, of the top level too
     # (`a_0`, `a_1`), which the relation's schema has as given, and `toDF` applies.
-    deduplicated = _deduplicate_field_names(schema)
-    arrow_schema = to_arrow_schema(
-        deduplicated, timezone="UTC", prefers_large_types=prefers_large_types
+    deduped_schema = session._deduplicate_field_names(schema)
+    spark_types = [field.dataType for field in deduped_schema.fields]
+    arrow_schema = session.to_arrow_schema(
+        deduped_schema, timezone="UTC", prefers_large_types=prefers_large_types
     )
+    names = [str(x) if not isinstance(x, str) else x for x in schema.fieldNames()]
     if len(frame.columns) == 0:
         table = pa.Table.from_batches([pa.RecordBatch.from_pandas(frame)])
     else:
-        series_with_types = [
-            (column, field.dataType)
-            for (_, column), field in zip(frame.items(), deduplicated.fields)
-        ]
-        table = create_arrow_table_from_pandas(
-            series_with_types,
+        table = session.create_arrow_table_from_pandas(
+            [(c, st) for (_, c), st in zip(frame.items(), spark_types)],
             timezone=timezone,
             safecheck=safecheck,
             prefers_large_types=prefers_large_types,
         )
-    if len(schema.fields) == 0:
-        return table
-    # The names of `_deduplicate_field_names`, of a `fields` list changed in place of its cached
-    # `names`, as many as the fields, of which fewer raise its `IndexError`.
-    return table.rename_columns(deduplicated.names).cast(arrow_schema)
+    # The names of `_deduplicate_field_names`, made again, of a `fields` list changed in place of
+    # its cached `names`, as many as the fields, of which fewer raise its `IndexError`.
+    if len(schema.fields) > 0:
+        table = table.rename_columns(session._deduplicate_field_names(schema).names).cast(
+            arrow_schema
+        )
+    return table, names
 
 
 def arrow_decimal_column(values, dtype, name):
@@ -1609,36 +1550,25 @@ def prepare_inferred_pandas_table(frame, timezone, safecheck, prefers_large_type
                                   infer_dict_as_map, prefer_timestamp_ntz):
     """Convert a pandas frame without a schema, or of names, as PySpark Connect does.
 
-    Each column goes through PySpark's own Arrow conversion, of the type that Arrow infers,
-    except that datetimes are timestamps, of the session time zone, and timedeltas day-time
-    intervals, for the server to infer the types of the table. With `inferPandasDictAsMap`
-    (`infer_dict_as_map`), the frame converts under the struct of the types that Arrow infers,
-    where a column of dicts is a map, and the table takes the names and the Arrow types of the
-    struct. Returns the table and the names of that struct, or None. The caller checks
-    `accepts_pandas_schema` first.
+    As PySpark's createDataFrame, in its order, of the conversions and the types that its module
+    of the session binds (`_session_module`). Each column goes through PySpark's own Arrow
+    conversion, of the type that Arrow infers, except that datetimes are timestamps, of the
+    session time zone, and timedeltas day-time intervals, for the server to infer the types of the
+    table. With `inferPandasDictAsMap` (`infer_dict_as_map`), the frame converts under the struct
+    of the types that Arrow infers, where a column of dicts is a map, and the table takes the
+    names and the Arrow types of the struct. Returns the table and the names of that struct, of
+    strs, or None.
     """
     import pandas as pd
     import pyarrow as pa
     from pandas.api.types import is_datetime64_dtype, is_timedelta64_dtype
 
     from pyspark.errors import PySparkValueError
-    from pyspark.sql.pandas.conversion import create_arrow_table_from_pandas
-    from pyspark.sql.pandas.types import (
-        _deduplicate_field_names,
-        from_arrow_type,
-        to_arrow_schema,
-    )
-    from pyspark.sql.types import (
-        DayTimeIntervalType,
-        MapType,
-        StringType,
-        StructType,
-        TimestampType,
-    )
 
+    session = _session_module()
     struct = None
     if infer_dict_as_map:
-        struct = StructType()
+        struct = session.StructType()
         for field in pa.Schema.from_pandas(frame):
             field_type = field.type
             if isinstance(field_type, pa.StructType):
@@ -1647,20 +1577,28 @@ def prepare_inferred_pandas_table(frame, timezone, safecheck, prefers_large_type
                         errorClass="CANNOT_INFER_EMPTY_SCHEMA",
                         messageParameters={},
                     )
-                spark_type = MapType(
-                    StringType(), from_arrow_type(field_type.field(0).type, prefer_timestamp_ntz)
+                arrow_type = field_type.field(0).type
+                spark_type = session.MapType(
+                    session.StringType(),
+                    session.from_arrow_type(arrow_type, prefer_timestamp_ntz),
                 )
             else:
-                spark_type = from_arrow_type(field_type, prefer_timestamp_ntz)
-            struct = struct.add(field.name, spark_type, nullable=field.nullable)
-        deduplicated = _deduplicate_field_names(struct)
-        spark_types = [field.dataType for field in deduplicated.fields]
+                spark_type = session.from_arrow_type(field_type, prefer_timestamp_ntz)
+            struct.add(field.name, spark_type, nullable=field.nullable)
+    names = None
+    if struct is not None:
+        deduped_schema = session._deduplicate_field_names(struct)
+        spark_types = [field.dataType for field in deduped_schema.fields]
+        arrow_schema = session.to_arrow_schema(
+            deduped_schema, timezone="UTC", prefers_large_types=prefers_large_types
+        )
+        names = [str(x) if not isinstance(x, str) else x for x in struct.fieldNames()]
     else:
         spark_types = [
             (
-                TimestampType()
+                session.TimestampType()
                 if is_datetime64_dtype(t) or isinstance(t, pd.DatetimeTZDtype)
-                else DayTimeIntervalType()
+                else session.DayTimeIntervalType()
                 if is_timedelta64_dtype(t)
                 else None
             )
@@ -1670,17 +1608,14 @@ def prepare_inferred_pandas_table(frame, timezone, safecheck, prefers_large_type
         # pa.RecordBatch.from_pandas keeps the number of rows of a frame of no columns.
         table = pa.Table.from_batches([pa.RecordBatch.from_pandas(frame)])
     else:
-        table = create_arrow_table_from_pandas(
+        table = session.create_arrow_table_from_pandas(
             [(c, st) for (_, c), st in zip(frame.items(), spark_types)],
             timezone=timezone,
             safecheck=safecheck,
             prefers_large_types=prefers_large_types,
         )
-    if struct is None:
-        return table, None
-    if len(struct.fields) > 0:
-        arrow_schema = to_arrow_schema(
-            deduplicated, timezone="UTC", prefers_large_types=prefers_large_types
+    if struct is not None and len(struct.fields) > 0:
+        table = table.rename_columns(session._deduplicate_field_names(struct).names).cast(
+            arrow_schema
         )
-        table = table.rename_columns(deduplicated.names).cast(arrow_schema)
-    return table, [str(name) for name in struct.fieldNames()]
+    return table, names

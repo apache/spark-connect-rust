@@ -21,8 +21,32 @@
 from typing import Callable
 
 from pyspark._pyspark import SparkSession, _install_builder
+from pyspark.errors import PySparkTypeError as _PySparkTypeError
+
+# As PySpark Connect's module of the session, which binds the conversions of `createDataFrame` and
+# the types that they make when it is imported, with the first session: its `createDataFrame`
+# calls these by their names here, so a name rebound in `pyspark.sql.types` or
+# `pyspark.sql.pandas.types` after this import is not seen here, and one rebound before it, or
+# here, is. The conversions of a pandas DataFrame read them here at each call
+# (`pyspark.sql._pandas_input`), as PySpark's do; the converters that the conversion of a column
+# imports when it is called (`create_arrow_array_from_pandas`) are those of the module of
+# `sys.modules` then, in both.
+from pyspark.sql.pandas.conversion import create_arrow_table_from_pandas  # noqa: F401
+from pyspark.sql.pandas.types import (  # noqa: F401
+    _deduplicate_field_names,
+    from_arrow_type,
+    to_arrow_schema,
+)
 from pyspark.sql.session import SparkSession as _PySparkSession
 from pyspark.sql.session import classproperty as _classproperty
+from pyspark.sql.types import (  # noqa: F401
+    AtomicType,
+    DayTimeIntervalType,
+    MapType,
+    StringType,
+    StructType,
+    TimestampType,
+)
 
 __all__ = ["SparkSession"]
 
@@ -34,6 +58,27 @@ _builder = _classproperty(lambda cls: cls.Builder())
 _builder.__doc__ = _PySparkSession.builder.__doc__
 _install_builder(_builder)
 del _builder
+
+
+def _check_schema(schema: object) -> None:
+    """PySpark Connect's check of the schema of ``createDataFrame``, of a DDL string as the server
+    parsed it, against the ``AtomicType`` and the ``StructType`` of this module, which it reads
+    when it is called, as PySpark's reads the names of its module: a struct reads its ``fields``,
+    and an object that neither takes, nor a list, a tuple or None, raises ``NOT_EXPECTED_TYPE``.
+    The session calls it before it reads any setting, when the names are not the native classes,
+    of which its own checks are the same, also of an ``isinstance`` that raises."""
+    if isinstance(schema, (AtomicType, StructType)):
+        if isinstance(schema, StructType):
+            len(schema.fields)  # type: ignore[attr-defined]
+    elif not isinstance(schema, (list, tuple)) and schema is not None:
+        raise _PySparkTypeError(
+            errorClass="NOT_EXPECTED_TYPE",
+            messageParameters={
+                "arg_name": "schema",
+                "expected_type": "list, None or StructType",
+                "arg_type": type(schema).__name__,
+            },
+        )
 
 
 def _reduce_session(session_id: str) -> tuple[Callable[[str], "SparkSession"], tuple[str]]:
