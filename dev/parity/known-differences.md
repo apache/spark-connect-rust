@@ -602,8 +602,10 @@ requests of the unpickled object pickle as it is then. This case still differs:
   level for each struct and each field (SPARK-62224, see below): from about 500 nested structs of
   `==`, `treeString()`, `hash()` and `repr()`, and 1,000 of `simpleString()` and `toNullable()`;
   of `json()` (of Python's `json` module) from about 330; and of `copy.deepcopy` and pickling,
-  which copy and pickle the `__dict__`s of the types in Python, as PySpark's, from about 100 and
-  125, also on a thread of 256 KiB, as a thread of 128 KiB overflows from there in both. Of nested
+  which copy and pickle the `__dict__`s of the types as PySpark's, of the levels of Python's
+  frames, from about 100 and 125, also on a thread of 256 KiB. A thread of 128 KiB overflows from
+  there in both of pickling; of `copy.deepcopy`, whose copier of the native classes grows its stack
+  (SPARK-62287), the drop-in raises its `RecursionError` where PySpark's overflows. Of nested
   arrays, PySpark's from about 250 (`copy.deepcopy`) to 1,000 (`json()`, `simpleString()`), and the
   drop-in's from about 250 (`copy.deepcopy`) and 330 (pickling), which copy and pickle the
   `__dict__`s of the arrays in Python, as PySpark's, to 1,000. A higher limit
@@ -1412,7 +1414,9 @@ requests of the unpickled object pickle as it is then. This case still differs:
   - inherent, of the metaclass of a native class: the `__init__` of a subclass of a singleton type
     runs at each call of the class (of `class Counted(IntegerType)` whose `__init__` counts,
     `Counted() is Counted()`, and the count is 2, where PySpark's is 1), and copies and pickles of
-    its one instance are that instance, where PySpark's `copyreg.__newobj__` makes another object;
+    its one instance are that instance, where PySpark's `copyreg.__newobj__` makes another object
+    (so the memo of a `copy.deepcopy` holds the instance as its own copy, which its list of
+    `_keep_alive` does not hold, where PySpark's holds the other object and keeps the instance);
     a subclass of another metaclass is made, where PySpark's raises `TypeError: metaclass
     conflict`. PySpark's `DataTypeSingleton.__call__` returns the one instance without calling
     `__init__`; a native class is of the metaclass `type`, whose `__call__` calls the `__init__`

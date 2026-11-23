@@ -3062,9 +3062,12 @@ and the types of as many levels that the user makes: they are made, compared, wr
 lowered for the requests on stacks that grow with their levels, so that their `==`, `repr()`,
 `json()`, `jsonValue()`, `fromJson`, `simpleString()`, `treeString()`, `toNullable()`,
 `needConversion()` and `hash()` give on a thread of 128 KiB what they give on the main thread.
-`copy.deepcopy` and pickling copy and pickle the `__dict__`s of the types in Python, as PySpark's,
-of its frames: they raise their `RecursionError` from about 100 and 125 nested structs on the main
-thread and on a thread of 256 KiB, and overflow a thread of 128 KiB from there, as PySpark's do. On
+`copy.deepcopy` and pickling copy and pickle the `__dict__`s of the types as PySpark's do, of the
+levels of the frames of Python's `copy` and `pickle`: they raise their `RecursionError` from about
+100 and 125 nested structs on the main thread and on a thread of 256 KiB, as PySpark's do. On a
+thread of 128 KiB, pickling overflows from there, as PySpark's does, and `copy.deepcopy`, whose
+copier of the native classes grows its stack (SPARK-62287, see below), raises its `RecursionError`
+where PySpark's overflows. On
 the main thread, `json()`, `jsonValue()` and `fromJson` raise the `RecursionError` of Python's
 `json` module of a JSON of more than about 1,000 levels (of about 330 nested structs), and the
 walks of the type objects raise theirs past Python's recursion limit of their levels, a level for
@@ -3207,6 +3210,25 @@ set pickles and copies as its class and PySpark's `__dict__` of it, as a type of
 does (see below), also in the types that hold it. A shallow copy (`copy.copy`) of a struct, an
 array, a map or a field is of its class and the same attribute objects, as PySpark's copy of the
 `__dict__`, at any depth: a struct's copy shares its `fields`, `names` and `_needConversion` lists.
+`copy.deepcopy` of an object of a native class of the types itself is made by a copier of the
+extension, of no Python code of each object (SPARK-62287). `pyspark.sql.types` registers it in
+`copy._deepcopy_dispatch`, the dict of the copiers of `copy.deepcopy` by exact class, for the
+native classes themselves only: the 13 singletons, the types of parameters, `StructField`,
+`ArrayType`, `MapType` and `StructType`. No attribute of the classes is added, so their `vars()`
+and `dir()` are PySpark's, and an object of a subclass, which the dispatch does not hold, is
+copied of Python's protocol. The copier makes the copies that Python's `copy.deepcopy` makes of
+PySpark's plain classes, of `copyreg.__newobj__` and `_reconstruct`, and the same entries of the
+memo and of its list of `_keep_alive`, in the same order, also of a memo that is not a dict and of
+one that holds an object already. It falls back to Python's protocol, as `copy.deepcopy` runs it
+past its dispatch, of an object of a native class patched over a method of the protocol, or of a
+class of its MRO patched so (`__deepcopy__`, `__reduce_ex__`, `__reduce__`, `__getstate__`,
+`__setstate__`, `__new__`, `__getattribute__`, `__getattr__`, `__slotnames__`, or the `json` and
+`jsonValue` that a singleton's reduce reads), of an entry of `copyreg.dispatch_table` for its
+class, of a `pyspark.sql.types._parse_datatype_json_string` rebound, of which a singleton's reduce
+is, or of such a hook in its own `__dict__`. It counts the frames of Python's `copy` as the levels
+of its recursion, of Python's limit up to Python 3.11, which takes the levels of C calls with
+Python's frames; from Python 3.12, which counts them apart, of the limit of C calls, so a type of
+more levels than Python's limit copies where Python's protocol raises its `RecursionError`.
 The class's own types of no parameters compare without the attributes that a user set, where
 PySpark's comparison of the `__dict__`s holds them: a `VariantType()` of an attribute equals
 `VariantType()`, where a type of parameters, an array, a map, a field, a struct and a type of a
