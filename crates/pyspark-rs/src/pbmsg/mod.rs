@@ -300,8 +300,10 @@ fn _proto_unknown_field_pairs<'py>(
     message: &Bound<'py, message::PyMessage>,
 ) -> PyResult<Bound<'py, pyo3::types::PyList>> {
     let py = message.py();
-    let m = message.borrow();
-    let pairs = codec::unknown_field_pairs(&m.unknown)?;
+    // A copy of the bytes, of no borrow of the message held while the list is made, whose
+    // allocations may run the Python code of a collection of the garbage collector.
+    let unknown = message.borrow().unknown.clone();
+    let pairs = codec::unknown_field_pairs(&unknown)?;
     let list = pyo3::types::PyList::empty(py);
     for (tag, value) in pairs {
         list.append((

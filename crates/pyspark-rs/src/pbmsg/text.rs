@@ -7,11 +7,12 @@ use pyo3::prelude::*;
 use pyo3::types::PyFloat;
 
 use super::containers::Entries;
-use super::message::{new_instance, EntryRef, Fields, PyMessage, Slot};
-use super::native::Value;
+use super::message::{generation, new_instance, EntryRef, Fields, PyMessage, Slot};
+use super::native::{self, CopyError, Value};
 use super::pool::{pool, FieldDesc, Kind, MapDesc};
 use super::scalar::{key_order, Scalar};
 use super::{codec, grow};
+use crate::interrupt::ConversionBudget;
 
 /// Which of protobuf's writers of the text format to follow.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -39,7 +40,27 @@ pub(crate) fn to_text(
         style,
         one_line,
     };
-    w.message(&message.borrow(), 0, &mut out)?;
+    match style {
+        // protobuf's writer expands an `Any` of a known type to a message that it parses of its
+        // bytes, of objects, whose allocation may start a collection of the garbage collector, of
+        // the Python code of its callbacks, which may read the message or give the GIL to a thread
+        // that does: so it writes a native copy of the message, of which it holds no borrow, taken
+        // with no checkpoint, as the writer held the GIL. upb's writes the message as it is,
+        // which runs no Python code.
+        Style::TextFormat => {
+            let at = native::At::top(None);
+            let budget = ConversionBudget::never();
+            let copy = match native::copy_message(py, message, at, generation(), &budget) {
+                Ok(copy) => copy,
+                Err(CopyError::Python(err)) => return Err(err),
+                Err(CopyError::TooDeep | CopyError::Holds) => {
+                    unreachable!("a copy of any depth, watching no message, stops for neither")
+                }
+            };
+            w.message(&copy.fields, 0, &mut out)?;
+        }
+        Style::Upb => w.message(&message.borrow(), 0, &mut out)?,
+    }
     if one_line {
         while out.ends_with(' ') {
             out.pop();

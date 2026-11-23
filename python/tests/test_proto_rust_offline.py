@@ -8252,3 +8252,134 @@ def test_a_second_init_keeps_what_upbs_keeps_of_a_failure(upb):
     # ValueError of a value of None too, and keyword arguments (even none) set an unset child in its
     # parent first, as upb's `__init__` does.
     assert _partial_cases(_alias_classes("ours")) == _partial_cases(_alias_classes("upb"))
+
+
+
+def _plan_of_an_any(count):
+    """Plans of a relation of an `Any` of a known type (which protobuf's text format expands to its
+    message), each the copy of a constructor, whose `root` is native until it is read."""
+    inner = proto.Relation(range={"end": 1})
+    rel = proto.Relation()
+    rel.extension.Pack(inner)
+    rel.common.plan_id = 3
+    return rel, [proto.Plan(root=rel) for _ in range(count)]
+
+
+def test_a_first_read_of_a_collection_of_the_text_format_finds_the_message():
+    # The drop-in's writer of protobuf's text format (`_proto_message_to_string`, of the client's
+    # plan logging) writes a native copy of the message, so a collection that its expansion of an
+    # Any starts, whose callback reads the native field of the message for the first time, finds it
+    # free, as it does of protobuf's `text_format` and of `str()`: the writer held the message
+    # borrowed, of the runtime's PanicException ("Already borrowed"). (Without protobuf, of the
+    # drop-in's writer and of `str()` only.)
+    try:
+        from google.protobuf import text_format
+    except ImportError:
+        text_format = None
+    writers = [("_proto_message_to_string", _pyspark._proto_message_to_string), ("str", str)]
+    if text_format is not None:
+        writers.append(("text_format", text_format.MessageToString))
+    out = {}
+    for name, write in writers:
+        _, (plan,) = _plan_of_an_any(1)
+        state = {"ran": False}
+
+        def callback(phase, info, plan=plan, state=state):
+            if phase == "start" and not state["ran"]:
+                state["ran"] = True
+                try:
+                    root = plan.root
+                    state["same"] = root is plan.root
+                except BaseException as e:  # noqa: BLE001 (a PanicException too)
+                    state["error"] = f"{type(e).__name__}: {e}"
+
+        gc.collect()
+        gc.callbacks.append(callback)
+        threshold = gc.get_threshold()
+        gc.set_threshold(1)
+        try:
+            text = write(plan)
+        finally:
+            gc.set_threshold(*threshold)
+            gc.callbacks.remove(callback)
+        out[name] = [state.get("error"), state.get("same"), "plan_id: 3" in text, plan.root.common.plan_id]
+    assert out["_proto_message_to_string"] == [None, True, True, 3], out
+    assert out.get("text_format", out["_proto_message_to_string"]) == out["_proto_message_to_string"], out
+    assert out["str"][0] is None and out["str"][2:] == [True, 3], out
+
+
+def test_a_first_read_of_another_thread_during_the_text_format_finds_the_message():
+    # The cross-thread form: a callback of the collections of the writer gives the GIL to another
+    # thread, which reads the native field of each plan for the first time while the writer
+    # writes it. Each read is whole, and the field gives one object from then on.
+    rel, plans = _plan_of_an_any(100)
+    state = {"current": None, "done": False}
+    seen = {"ok": 0, "errors": {}}
+
+    def callback(phase, info):
+        if phase == "start":
+            time.sleep(0.0002)
+
+    def reader():
+        last = None
+        while not state["done"]:
+            i = state["current"]
+            if i is None or i == last:
+                time.sleep(0)
+                continue
+            last = i
+            try:
+                plans[i].root
+                seen["ok"] += 1
+            except BaseException as e:  # noqa: BLE001 (a PanicException too)
+                key = f"{type(e).__name__}: {e}"
+                seen["errors"][key] = seen["errors"].get(key, 0) + 1
+
+    thread = threading.Thread(target=reader)
+    thread.start()
+    gc.callbacks.append(callback)
+    threshold = gc.get_threshold()
+    gc.set_threshold(1)
+    try:
+        for i in range(len(plans)):
+            state["current"] = i
+            _pyspark._proto_message_to_string(plans[i], as_one_line=True)
+    finally:
+        gc.set_threshold(*threshold)
+        gc.callbacks.remove(callback)
+        state["done"] = True
+        thread.join()
+    assert seen["errors"] == {} and seen["ok"] > 0, seen
+    expected = proto.Plan(root=rel).SerializeToString()
+    assert all(p.root is p.root and p.root.common.plan_id == 3 for p in plans)
+    assert all(p.SerializeToString() == expected for p in plans)
+
+
+def test_unknown_field_pairs_of_a_collection_find_the_message():
+    # The unknown field pairs (protobuf's `_unknown_fields` of its pure-Python messages) are made of
+    # a copy of the bytes, so a collection that the list starts, whose callback reads the message,
+    # finds it free.
+    unknown = b"".join(_tag(900 + i, 0) + _varint(i) for i in range(200))
+    plan = proto.Plan.FromString(proto.Plan(root=proto.Relation(range={"end": 1})).SerializeToString() + unknown)
+    message = proto.Plan(root=plan.root)
+    message.MergeFromString(unknown)
+    state = {"errors": []}
+
+    def callback(phase, info):
+        if phase == "start":
+            try:
+                message.root
+                message.SerializeToString()
+            except BaseException as e:  # noqa: BLE001 (a PanicException too)
+                state["errors"].append(type(e).__name__)
+
+    gc.callbacks.append(callback)
+    threshold = gc.get_threshold()
+    gc.set_threshold(1)
+    try:
+        pairs = _pyspark._proto_unknown_field_pairs(message)
+    finally:
+        gc.set_threshold(*threshold)
+        gc.callbacks.remove(callback)
+    assert state["errors"] == [] and len(pairs) == 200
+    assert b"".join(tag + value for tag, value in pairs) == unknown

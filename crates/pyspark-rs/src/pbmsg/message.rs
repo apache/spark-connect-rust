@@ -1647,12 +1647,14 @@ impl PyMessage {
     /// The object is made with no borrow of the message held, as making it may run Python code (a
     /// collection of the garbage collector, a checkpoint of its budget, which another thread may
     /// take the GIL at), and set only if the field still holds the value then: else the field is
-    /// read again.
+    /// read again. A message that Rust code borrows meanwhile (the code of a collection that an
+    /// allocation of such code started, or another thread that it gave the GIL to) is Python's
+    /// `RuntimeError` ("Already borrowed"), never a panic.
     pub(crate) fn materialize(message: &Bound<'_, PyMessage>, index: usize) -> PyResult<()> {
         let py = message.py();
         loop {
             let (value, desc) = {
-                let m = message.borrow();
+                let m = message.try_borrow()?;
                 match m.slots.get(index) {
                     Some(Slot::Native(value)) => (value.clone(), m.desc.clone()),
                     _ => return Ok(()),
@@ -1661,7 +1663,7 @@ impl PyMessage {
             let budget = ConversionBudget::full();
             let made = native::made_of(py, &desc.fields[index], &value, Some(&budget))?;
             let taken = {
-                let mut m = message.borrow_mut();
+                let mut m = message.try_borrow_mut()?;
                 match m.slots.get_mut(index) {
                     Some(slot) if matches!(&*slot, Slot::Native(held) if held.same(&value)) => {
                         let slot = std::mem::replace(slot, made.slot.clone_slot(py));
