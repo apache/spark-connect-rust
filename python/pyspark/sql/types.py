@@ -1968,3 +1968,19 @@ def _create_row_inbound_converter(dataType: DataType) -> Callable:
     return lambda *a: dataType.fromInternal(a)
 
 
+
+
+def _register_type_deepcopy():
+    # `copy.deepcopy` of an object of a native class of the types, of the copier of the extension,
+    # which `copy`'s dispatch of exact classes calls: it makes what `copy.deepcopy` makes of
+    # PySpark's plain classes, of the reduce and `_reconstruct`, of no Python code of each object,
+    # and a subclass or a class of a hook of the protocol keeps Python's (see `type_copy`).
+    try:
+        from pyspark._pyspark import _register_type_deepcopy as register, _type_deepcopy
+    except ImportError:  # pragma: no cover - defensive fallback when the extension is absent
+        return
+    register(_type_deepcopy, _parse_datatype_json_string)
+
+
+_register_type_deepcopy()
+del _register_type_deepcopy

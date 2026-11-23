@@ -57,6 +57,7 @@ mod streaming;
 mod tablearg;
 mod transport;
 mod tvf;
+mod type_copy;
 mod types;
 mod udf_command;
 mod values;
@@ -295,6 +296,10 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     // The attributes that PySpark's `jsonValue` reads of the native classes, as they are made,
     // before any patch of them.
     types::keep_native_json_reads(_py)?;
+    // The copier of `copy.deepcopy` of the objects of the native classes of the types, which
+    // `pyspark.sql.types` registers once it is made (see `type_copy`).
+    m.add_function(wrap_pyfunction!(type_copy::_type_deepcopy, m)?)?;
+    m.add_function(wrap_pyfunction!(type_copy::_register_type_deepcopy, m)?)?;
     values::register(m)?;
 
     // Register Window classes

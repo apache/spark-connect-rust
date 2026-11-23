@@ -2040,6 +2040,175 @@ def test_structs_keep_their_fields_and_names_in_their_dict_as_pysparks():
         len(struct)
 
 
+def _deepcopy_description(x, memo):
+    """What `copy.deepcopy(x, memo)` makes, of no address of an object: the classes of the objects
+    of the graph of `x` and of its copy, in the order of a walk, the originals that the copy holds,
+    the entries of the memo, of their keys and values as indices of the walks (`detached:` of a
+    value of neither graph, as the copy of a `__dict__` that `__dict__.update` sets), and its list
+    of `_keep_alive`."""
+
+    def walk(root):
+        index, order = {}, []
+
+        def visit(o):
+            if isinstance(o, (str, int, float, bool, type(None), bytes, type)) or id(o) in index:
+                return
+            index[id(o)] = len(order)
+            order.append(o)
+            if isinstance(o, dict):
+                for k, v in list(o.items()):
+                    visit(k)
+                    visit(v)
+            elif isinstance(o, (list, tuple)):
+                for v in list(o):
+                    visit(v)
+            elif hasattr(o, "__dict__"):
+                visit(vars(o))
+
+        visit(root)
+        return index, order
+
+    y = copy.deepcopy(x, memo)
+    index, order = walk(x)
+    copied, copied_order = walk(y)
+    keep_alive = memo.pop(id(memo), None)
+    entries = []
+    for key, value in memo.items():
+        if id(value) in copied:
+            shown = f"copy{copied[id(value)]}"
+        elif id(value) in index:
+            shown = f"orig{index[id(value)]}"
+        else:
+            shown = f"detached:{type(value).__name__}"
+        entries.append((index.get(key, "?"), shown))
+    return {
+        "classes": [type(o).__name__ for o in order],
+        "copy classes": [type(o).__name__ for o in copied_order],
+        "originals in copy": [i for i, o in enumerate(order) if id(o) in copied],
+        "memo": sorted(entries, key=lambda entry: (str(entry[0]), entry[1])),
+        "keep_alive": None if keep_alive is None else [index.get(id(o), "?") for o in keep_alive],
+    }
+
+
+def _deepcopy_cases():
+    meta = {"k": [1, {"n": "v"}]}
+    shared = T.StructField("s", T.DecimalType(10, 2), True, meta)
+    nested = T.StructType([
+        T.StructField("a", T.ArrayType(T.MapType(T.StringType(), T.DecimalType(5, 1)))),
+        T.StructField("b", T.StringType("UTF8_LCASE")),
+    ])
+    tagged = T.StructType([T.StructField("t", T.DayTimeIntervalType(0, 3))])
+    tagged.tag = [tagged.fields]
+    holder = T.StructField("h", T.YearMonthIntervalType(0, 1))
+    holder.metadata = {"self": holder}
+    return {
+        "decimal": T.DecimalType(10, 2),
+        "array": T.ArrayType(T.DecimalType(3, 1), False),
+        "map": T.MapType(T.StringType(), T.ArrayType(T.CharType(3))),
+        "field": T.StructField("f", T.VarcharType(5), False, {"a": 1}),
+        "struct of a shared field": T.StructType([shared, shared]),
+        "struct of a shared metadata": T.StructType([
+            T.StructField("x", T.TimeType(3), True, meta),
+            T.StructField("y", T.StringType(), True, meta),
+        ]),
+        "list of the same struct": [nested, nested, nested.fields[0]],
+        "dict of types": {"s": nested, "f": nested.fields[1], "t": (nested, 1)},
+        "struct of a user attribute": tagged,
+        "field that holds itself": holder,
+        "geometry": T.ArrayType(T.GeometryType(4326)),
+        "struct of singletons": T.StructType([
+            T.StructField("l", T.LongType()), T.StructField("n", T.NullType()),
+        ]),
+    }
+
+
+class _DeepcopyMemo(dict):
+    """A memo of a subclass of dict, which `copy.deepcopy` reads of its methods."""
+
+
+def test_deepcopy_of_the_types_makes_what_pythons_protocol_makes():
+    # SPARK-62287: `copy.deepcopy` of an object of a native class of the types, of the copier of
+    # the extension that `copy`'s dispatch of exact classes holds, makes what Python's protocol,
+    # the reduce and `_reconstruct`, makes of it: the copies, the originals that they share, the
+    # entries of the memo and its list of `_keep_alive`, also of a memo of a dict subclass, and of
+    # the types in lists, dicts and tuples, which Python's `copy` copies.
+    copiers = {cls: copier for cls, copier in copy._deepcopy_dispatch.items()
+               if getattr(copier, "__name__", "") == "_type_deepcopy"}
+    for label, case in _deepcopy_cases().items():
+        for make_memo in (dict, _DeepcopyMemo):
+            native = _deepcopy_description(case, make_memo())
+            for cls in copiers:
+                del copy._deepcopy_dispatch[cls]
+            try:
+                generic = _deepcopy_description(case, make_memo())
+            finally:
+                copy._deepcopy_dispatch.update(copiers)
+            assert native == generic, (label, make_memo)
+
+
+def test_deepcopy_of_the_types_keeps_pysparks_memo():
+    # SPARK-62287: of the copies and the memo of PySpark 4.3.0's `copy.deepcopy`: a field that a
+    # struct holds twice is copied once, a field that holds itself is its copy's, and the memo has
+    # PySpark's entries, the copies and the copies of the `__dict__`s, and its list of
+    # `_keep_alive`, of the objects in the order in which their copies are made. A type that the
+    # memo holds already is the memo's.
+    cases = _deepcopy_cases()
+    assert _deepcopy_description(cases["struct of a shared field"], {}) == {
+        "classes": ["StructType", "dict", "list", "StructField", "dict", "DecimalType", "dict",
+                    "dict", "list", "dict", "list", "list"],
+        "copy classes": ["StructType", "dict", "list", "StructField", "dict", "DecimalType",
+                         "dict", "dict", "list", "dict", "list", "list"],
+        "originals in copy": [],
+        "memo": [(0, "copy0"), (1, "detached:dict"), (10, "copy10"), (11, "copy11"),
+                 (2, "copy2"), (3, "copy3"), (4, "detached:dict"), (5, "copy5"),
+                 (6, "detached:dict"), (7, "copy7"), (8, "copy8"), (9, "copy9")],
+        "keep_alive": [6, 5, 9, 8, 7, 4, 3, 2, 10, 11, 1, 0],
+    }
+    assert _deepcopy_description(cases["field that holds itself"], {}) == {
+        "classes": ["StructField", "dict", "YearMonthIntervalType", "dict", "dict"],
+        "copy classes": ["StructField", "dict", "YearMonthIntervalType", "dict", "dict"],
+        "originals in copy": [],
+        "memo": [(0, "copy0"), (1, "detached:dict"), (2, "copy2"), (3, "detached:dict"),
+                 (4, "copy4")],
+        "keep_alive": [3, 2, 4, 1, 0],
+    }
+    copied = copy.deepcopy(cases["field that holds itself"])
+    assert copied.metadata["self"] is copied
+    assert _deepcopy_description(cases["list of the same struct"], {})["keep_alive"] == [
+        11, 10, 13, 12, 9, 8, 7, 6, 14, 5, 4, 18, 17, 19, 16, 15, 3, 20, 21, 2, 1, 0]
+    decimal = T.DecimalType(4, 2)
+    struct = T.StructType([T.StructField("d", decimal)])
+    memo = {id(decimal): "kept"}
+    assert copy.deepcopy(struct, memo).fields[0].dataType == "kept"
+
+
+def test_deepcopy_of_the_types_of_hooks_keeps_pythons_protocol():
+    # SPARK-62287: a subclass, a native class patched over a method of the protocol, an entry of
+    # `copyreg.dispatch_table` and an object of a hook of its own are copied of those hooks, as
+    # Python's `copy.deepcopy` copies them.
+    class Sub(T.DecimalType):
+        def __reduce_ex__(self, protocol):
+            return (T.DecimalType, (1, 0))
+
+    assert copy.deepcopy(Sub(5, 2)) == T.DecimalType(1, 0)
+    field = T.StructField("a", T.LongType())
+    field.__deepcopy__ = lambda memo: "own"
+    assert copy.deepcopy(field) == "own"
+    copyreg.dispatch_table[T.ArrayType] = lambda t: (T.ArrayType, (T.StringType(),))
+    try:
+        assert copy.deepcopy(T.ArrayType(T.LongType())) == T.ArrayType(T.StringType())
+    finally:
+        del copyreg.dispatch_table[T.ArrayType]
+    T.MapType.__deepcopy__ = lambda self, memo: "patched"
+    try:
+        assert copy.deepcopy(T.StructType([T.StructField("m", T.MapType(
+            T.StringType(), T.LongType()))])).fields[0].dataType == "patched"
+    finally:
+        del T.MapType.__deepcopy__
+    assert copy.deepcopy(T.MapType(T.StringType(), T.LongType())) == T.MapType(
+        T.StringType(), T.LongType())
+
+
 def test_structs_copy_and_pickle_of_their_dict_as_pysparks():
     # SPARK-62229: as PySpark's plain class, a copy shares the lists of the struct, and its
     # pickles are of `copyreg.__newobj__` and the `__dict__`, which keep the names and the
