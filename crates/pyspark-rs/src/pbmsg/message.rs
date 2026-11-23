@@ -23,8 +23,8 @@ use pyo3::exceptions::{
 use pyo3::prelude::*;
 use pyo3::pyclass_init::PyClassInitializer;
 use pyo3::types::{
-    PyByteArray, PyBytes, PyDict, PyMemoryView, PyString, PyTuple, PyType, PyWeakrefMethods,
-    PyWeakrefReference,
+    PyByteArray, PyBytes, PyDict, PyList, PyMemoryView, PyString, PyTuple, PyType,
+    PyWeakrefMethods, PyWeakrefReference,
 };
 use pyo3::IntoPyObjectExt;
 
@@ -431,6 +431,15 @@ impl MessageClass {
         }
     }
 
+    /// Whether `self` and `other` make the messages of one class (of one message type, of no class).
+    pub(crate) fn is_same(&self, other: &MessageClass) -> bool {
+        match (&self.class, &other.class) {
+            (Some(a), Some(b)) => a.as_ptr() == b.as_ptr(),
+            (None, None) => Arc::ptr_eq(&self.desc, &other.desc),
+            _ => false,
+        }
+    }
+
     pub(crate) fn of(py: Python<'_>, full_name: &str) -> PyResult<MessageClass> {
         if let Some(r) = classes()
             .lock()
@@ -721,19 +730,10 @@ fn is_protobufs_message_of(value: &Bound<'_, PyAny>, full_name: &str) -> bool {
 /// runtime or of protobuf's, or a message whose fields are the items of a mapping, each message
 /// that it copies or builds a step of `budget`. A message of protobuf's of the type is taken as a
 /// message before any mapping but a dict, as it can have a field named `keys`
-/// (`Expression.Literal.Map` has one), which made it a mapping without `items`.
-pub(crate) fn message_from_value<'py>(
-    py: Python<'py>,
-    full_name: &str,
-    value: &Bound<'py, PyAny>,
-    budget: &ConversionBudget,
-) -> PyResult<Bound<'py, PyMessage>> {
-    message_from_value_of(py, full_name, value, budget, false)
-}
-
-/// [`message_from_value`], whose copy of a message of protobuf's of the type is of its bytes of
-/// any depth when `unlimited`, as upb's `==` compares messages of any depth, else of upb's limit
-/// of a parse, as upb merges a message into a field.
+/// (`Expression.Literal.Map` has one), which made it a mapping without `items`. Its copy of a
+/// message of protobuf's of the type is of its bytes of any depth when `unlimited`, as upb's `==`
+/// compares messages of any depth, else of upb's limit of a parse, as upb merges a message into a
+/// field.
 fn message_from_value_of<'py>(
     py: Python<'py>,
     full_name: &str,
@@ -749,9 +749,7 @@ fn message_from_value_of<'py>(
     }
     let from_mapping = || -> PyResult<Bound<'py, PyMessage>> {
         let child = new_instance(py, full_name)?;
-        child
-            .borrow_mut()
-            .init_from_mapping_with(py, value, budget)?;
+        PyMessage::init_fields(&child, value, budget)?;
         Ok(child)
     };
     if value.cast::<PyDict>().is_ok() {
@@ -777,7 +775,7 @@ fn message_from_value_of<'py>(
 /// `other`, an object that `==` compares a message of the runtime with, as a message of the
 /// runtime of the type of `message`, when it is a message of protobuf's of that type that
 /// protobuf's default pool describes, the pool whose files the runtime holds: as a message field
-/// of the runtime takes it (see [`message_from_value`]), of its bytes, each message that it
+/// of the runtime takes it (see [`message_from_value_of`]), of its bytes, each message that it
 /// builds a step of a full budget, as for a parse. None of any other object, such as a class, or a
 /// message of a type of another pool, which upb's `==` gives `NotImplemented` of, as a message of
 /// another class: upb has one class of each type of a pool, so its messages of a type compare by
@@ -797,66 +795,66 @@ fn as_message_of_type<'py>(
     message_from_value_of(py, &full_name, other, &ConversionBudget::full(), true).map(Some)
 }
 
-/// The message of a message field (or of a repeated message field) of a constructor: an object, or
-/// the native copy of a message of the runtime of the type (see [`native`]), which the field holds
-/// until Python reads it.
-pub(crate) enum FieldMessage<'py> {
-    Object(Bound<'py, PyMessage>),
-    Native(Arc<Native>),
+/// What a value given to a message field (or to a repeated message field) of the message type
+/// `full_name` of a constructor is, of the checks that the runtime made of it, in their order (see
+/// [`Given::of`]).
+enum Given<'py> {
+    /// A message of the runtime of the type.
+    Message(Bound<'py, PyMessage>),
+    /// A dict of a `Struct` whose class assigns values: of its `_internal_assign`, as upb's.
+    StructDict,
+    /// A dict, or an object of `keys` (a mapping), whose items are the fields of the message.
+    Mapping,
+    /// A message of protobuf's of the type, of its bytes.
+    Protobufs(Vec<u8>),
+    /// A value that the class of the well-known type assigns, as upb's `_internal_assign` of it
+    /// (a Timestamp of a `datetime`).
+    Assigned,
+    /// Anything else: upb's `TypeError` (see [`not_initializing`]).
+    Other,
 }
 
-/// A new message of the type `full_name` of `value`, as a message field of a constructor takes
-/// it: as [`message_from_value`] does, and, as upb's, through the `_internal_assign` of a new
-/// message of a well-known type whose class assigns values (a `Timestamp`, of a `datetime`), of a
-/// value that is neither a mapping nor a message of the type. A message of the runtime of the
-/// type is copied at once, natively, as upb copies a message, without the lookup of a `keys` of
-/// it, which raised and dropped an `AttributeError` for each message of a list of many.
-fn message_for_field<'py>(
-    py: Python<'py>,
-    full_name: &str,
-    value: &Bound<'py, PyAny>,
-    budget: &ConversionBudget,
-) -> PyResult<FieldMessage<'py>> {
-    let runtime_message = value.cast::<PyMessage>().ok();
-    if let Some(m) = runtime_message {
-        if m.borrow().desc.full_name == full_name {
-            // As upb's, which copies the message of a field of a constructor by its bytes, so of
-            // the error of its parse of a message of more levels than its limit: the copy stops at
-            // the first message past the limit, and that message is copied of its bytes.
-            let at = native::At::top(Some(codec::depth_limit()));
-            return match native::copy_message(py, m, at, generation(), budget) {
-                Ok(copy) => Ok(FieldMessage::Native(Arc::new(copy))),
-                Err(CopyError::TooDeep) => {
-                    copy_of_bytes(py, full_name, m, budget).map(FieldMessage::Object)
-                }
-                Err(CopyError::Python(err)) => Err(err),
-            };
-        }
-    }
-    let is_dict = value.cast::<PyDict>().is_ok();
-    // As upb's: a dict of a Struct is its items, of `_internal_assign`, else, of a dict of only
-    // the key `fields` that it refuses, the fields of the message.
-    if is_dict && full_name == STRUCT && assigns_values(py, full_name) {
-        let child = new_instance(py, full_name)?;
-        match child.call_method1("_internal_assign", (value,)) {
-            Ok(_) => return Ok(FieldMessage::Object(child)),
-            Err(err) => {
-                let dict = value.cast::<PyDict>()?;
-                if !(dict.len() == 1 && dict.contains("fields")?) {
-                    return Err(err);
-                }
+impl<'py> Given<'py> {
+    /// What `value` is to a message field of the type `full_name`: a message of the runtime of the
+    /// type, at once, without the lookup of a `keys` of it, which raised and dropped an
+    /// `AttributeError` for each message of a list of many; as upb's, a dict of a `Struct` of its
+    /// `_internal_assign`, and a value that is neither a mapping nor a message of the type of the
+    /// `_internal_assign` of a well-known type whose class assigns values (a Timestamp of a
+    /// `datetime`); else a dict, a message of protobuf's of the type (taken before a mapping but a
+    /// dict, as it can have a field named `keys`, as `Expression.Literal.Map` has, which made it
+    /// a mapping without `items`), or another mapping.
+    fn of(py: Python<'py>, full_name: &str, value: &Bound<'py, PyAny>) -> Given<'py> {
+        let runtime_message = value.cast::<PyMessage>().ok();
+        if let Some(m) = runtime_message {
+            if m.borrow().desc.full_name == full_name {
+                return Given::Message(m.clone());
             }
         }
-        return message_from_value(py, full_name, value, budget).map(FieldMessage::Object);
+        let is_dict = value.cast::<PyDict>().is_ok();
+        if is_dict && full_name == STRUCT && assigns_values(py, full_name) {
+            return Given::StructDict;
+        }
+        let is_mapping = is_dict || value.hasattr("keys").unwrap_or(false);
+        let is_of_type = runtime_message.is_none() && is_protobufs_message_of(value, full_name);
+        if !is_mapping && !is_of_type && assigns_values(py, full_name) {
+            return Given::Assigned;
+        }
+        if runtime_message.is_some() {
+            return Given::Other;
+        }
+        if is_dict {
+            return Given::Mapping;
+        }
+        if is_protobufs_message_of(value, full_name) {
+            if let Ok((_, bytes)) = name_and_bytes(value) {
+                return Given::Protobufs(bytes);
+            }
+        }
+        if value.hasattr("keys").unwrap_or(false) {
+            return Given::Mapping;
+        }
+        Given::Other
     }
-    let is_mapping = is_dict || value.hasattr("keys").unwrap_or(false);
-    let is_of_type = runtime_message.is_none() && is_protobufs_message_of(value, full_name);
-    if !is_mapping && !is_of_type && assigns_values(py, full_name) {
-        let child = new_instance(py, full_name)?;
-        child.call_method1("_internal_assign", (value,))?;
-        return Ok(FieldMessage::Object(child));
-    }
-    message_from_value(py, full_name, value, budget).map(FieldMessage::Object)
 }
 
 /// The full names of the well-known types of which upb's messages compare with, and find a
@@ -864,47 +862,43 @@ fn message_for_field<'py>(
 const STRUCT: &str = "google.protobuf.Struct";
 const LIST_VALUE: &str = "google.protobuf.ListValue";
 
-/// Whether `message` nests more than `levels` levels of messages below it, as upb's parse counts
-/// them: a message of a field or of a repeated field, a map entry, and the message of the value of
-/// a map entry each a level. The walk stops past `levels`; a native value tells its levels at once.
-pub(crate) fn deeper_than(py: Python<'_>, message: &Fields, levels: u32) -> bool {
-    // A level of the walk on a stack with room for it, as the limit of upb's
-    // `SetAllowOversizeProtos(True)` is of 65535 levels.
-    grow(|| {
-        let below = |child: &Py<PyMessage>, levels: u32| -> bool {
-            levels == 0 || deeper_than(py, &child.bind(py).borrow(), levels - 1)
-        };
-        message.slots.iter().any(|(_, slot)| match slot {
-            Slot::Message(child) => below(child, levels),
-            Slot::Composite(c) => c.bind(py).borrow().items.iter().any(|m| below(m, levels)),
-            Slot::Map(map) => {
-                let map = map.bind(py).borrow();
-                !map.entries.is_empty()
-                    && (levels == 0
-                        || map.entries.iter().any(|(_, value)| match value {
-                            MapValue::Message(child) => below(child, levels - 1),
-                            MapValue::Scalar(_) => false,
-                        }))
-            }
-            Slot::Native(value) => value.depth() > levels,
-            Slot::Scalar(_) | Slot::Repeated(_) => false,
-        })
-    })
+/// What a merge of a message reads, taken before the merge changes anything, as upb's `MergeFrom`
+/// serializes its argument first: a native copy of the message, or, of a message of more levels
+/// below it than upb's limit of a parse ([`codec::depth_limit`]), its bytes, which the merge
+/// parses, of upb's `DecodeError` and of what that parse keeps.
+pub(crate) enum Snapshot {
+    Native(Native),
+    Bytes(Vec<u8>),
 }
 
-/// A copy of `message` of the type `full_name` of its bytes, as upb copies a message by a parse
-/// of its bytes, so of upb's error of a message of more levels than its limit
-/// ([`codec::depth_limit`]).
-fn copy_of_bytes<'py>(
-    py: Python<'py>,
-    full_name: &str,
-    message: &Bound<'py, PyMessage>,
-    budget: &ConversionBudget,
-) -> PyResult<Bound<'py, PyMessage>> {
-    let bytes = codec::encode(py, &message.borrow())?;
-    let child = new_instance(py, full_name)?;
-    codec::merge_in(py, &child, &bytes, budget)?;
-    Ok(child)
+impl Snapshot {
+    /// The snapshot of `message`, a step of `budget` for each message that it copies.
+    pub(crate) fn of(
+        py: Python<'_>,
+        message: &Bound<'_, PyMessage>,
+        budget: &ConversionBudget,
+    ) -> PyResult<Snapshot> {
+        let at = native::At::top(Some(codec::depth_limit()));
+        match native::copy_message(py, message, at, generation(), budget) {
+            Ok(copy) => Ok(Snapshot::Native(copy)),
+            Err(CopyError::TooDeep) => Ok(Snapshot::Bytes(codec::encode(py, &message.borrow())?)),
+            Err(CopyError::Python(err)) => Err(err),
+            Err(CopyError::Holds) => unreachable!("a snapshot watches no message"),
+        }
+    }
+
+    /// Merge the snapshot into `target`, as upb's `MergeFrom` parses the bytes of its argument.
+    pub(crate) fn merge_into(
+        self,
+        py: Python<'_>,
+        target: &Bound<'_, PyMessage>,
+        budget: &ConversionBudget,
+    ) -> PyResult<()> {
+        match self {
+            Snapshot::Native(source) => merge_native(py, target, Arc::new(source), budget),
+            Snapshot::Bytes(bytes) => codec::merge_in(py, target, &bytes, budget),
+        }
+    }
 }
 
 /// upb's error of a value of a message field of a constructor that is neither a dict nor a
@@ -999,138 +993,120 @@ pub(crate) fn mark_present(message: &Bound<'_, PyMessage>) -> PyResult<()> {
     }
 }
 
-/// The message that a merge reads: an object of a message, which it reads a field of at a time,
-/// under a short borrow, or a native message.
-#[derive(Clone, Copy)]
-enum Source<'a, 'py> {
-    Object(&'a Bound<'py, PyMessage>),
-    Native(&'a Native),
-}
-
-/// Merge `source` into `target`, as protobuf's `MergeFrom` does: a set scalar replaces the value,
-/// a message merges into the target's, and repeated fields and maps add their values. Each
-/// message merged or copied is a step of `budget`, with no borrow held between the fields.
-fn merge_into_with(
+/// Merge `source`, a native message (see [`Snapshot`]), into `target`, as protobuf's `MergeFrom`
+/// does: a set scalar replaces the value, a message merges into the target's, and repeated fields
+/// and maps add their values. A field that the target does not hold, of no unset child that it gave
+/// out, takes the value of the source as it is, as a merge into a new message makes it, so a merge
+/// into an empty message (`append`, a constructor) makes no object. The values that no other value
+/// holds (of a snapshot) are moved, not copied. Each message merged or copied is a step of
+/// `budget`, with no borrow of the target held but while a field is set; the source is immutable,
+/// so what the target becomes meanwhile changes nothing of what is merged.
+fn merge_native(
     py: Python<'_>,
     target: &Bound<'_, PyMessage>,
-    source: Source<'_, '_>,
+    source: Arc<Native>,
     budget: &ConversionBudget,
 ) -> PyResult<()> {
-    if let Source::Object(source) = source {
-        if target.is(source) {
-            let copy = duplicate_with(py, source, budget)?;
-            return merge_into_with(py, target, Source::Object(&copy), budget);
-        }
-    }
-    enum Merge {
-        Scalar(Scalar),
-        Message(Py<PyMessage>),
-        NativeMessage(Arc<Native>),
-        Repeated(Vec<Scalar>),
-        Composite(Vec<Py<PyMessage>>),
-        NativeComposite(Arc<NativeMessages>),
-        Map(MapEntries),
-    }
-    // The merge of the slot `slot` of the field `index`, if it merges anything.
-    let merge_of = |desc: &MessageDesc, index: usize, slot: &Slot| -> Option<Merge> {
-        Some(match slot {
-            Slot::Scalar(v) => {
-                if !desc.fields[index].has_presence() && v.is_default() {
-                    return None;
-                }
-                Merge::Scalar(v.clone())
-            }
-            Slot::Message(c) => Merge::Message(c.clone_ref(py)),
-            Slot::Repeated(c) => Merge::Repeated(c.bind(py).borrow().items.clone()),
-            Slot::Composite(c) => Merge::Composite(
-                c.bind(py)
-                    .borrow()
-                    .items
-                    .iter()
-                    .map(|m| m.clone_ref(py))
-                    .collect(),
-            ),
-            Slot::Map(c) => Merge::Map(c.bind(py).borrow().entries_for_copy(py)),
-            Slot::Native(Value::Message(m)) => Merge::NativeMessage(m.clone()),
-            Slot::Native(Value::Scalars(items)) => Merge::Repeated(items.as_ref().clone()),
-            Slot::Native(Value::Messages(m)) => Merge::NativeComposite(m.clone()),
-            Slot::Native(Value::Map(m)) => Merge::Map(MapEntries::of_native(m)),
-        })
-    };
     grow(|| {
         budget.step(py)?;
-        let (desc, indices): (Arc<MessageDesc>, Vec<usize>) = {
-            let read = |fields: &Fields| {
-                (
-                    fields.desc.clone(),
-                    fields.slots.iter().map(|(index, _)| index).collect(),
-                )
-            };
-            match source {
-                Source::Object(s) => read(&s.borrow()),
-                Source::Native(n) => read(&n.fields),
-            }
-        };
-        for index in indices {
-            let merge = match source {
-                Source::Object(s) => {
-                    let s = s.borrow();
-                    s.slots
-                        .get(index)
-                        .and_then(|slot| merge_of(&desc, index, slot))
-                }
-                Source::Native(n) => n
-                    .fields
-                    .slots
-                    .get(index)
-                    .and_then(|slot| merge_of(&desc, index, slot)),
-            };
-            let Some(merge) = merge else {
-                continue;
-            };
-            match merge {
-                Merge::Scalar(v) => target.borrow_mut().set_scalar(py, index, v),
-                Merge::Message(child) => {
-                    let into = PyMessage::child_for_merge_of(target, index)?;
-                    merge_into_with(py, &into, Source::Object(child.bind(py)), budget)?;
-                }
-                Merge::NativeMessage(child) => {
-                    let into = PyMessage::child_for_merge_of(target, index)?;
-                    merge_into_with(py, &into, Source::Native(&child), budget)?;
-                }
-                Merge::Repeated(items) => {
-                    let container = PyMessage::repeated_scalar_of(target, index)?;
-                    container.bind(py).borrow_mut().items.extend(items);
-                }
-                Merge::Composite(items) => {
-                    let container = PyMessage::composite_of(target, index)?;
-                    let class = container.bind(py).borrow().class.clone_ref(py);
-                    for item in items {
-                        let copy = copy_as(py, item.bind(py), Some(&class), budget)?;
-                        container.bind(py).borrow_mut().items.push(copy.unbind());
+        let fields = native::fields_at(py, source, generation());
+        for (index, slot) in fields.slots.into_vec() {
+            match slot {
+                Slot::Scalar(v) => {
+                    if !fields.desc.fields[index].has_presence() && v.is_default() {
+                        continue;
                     }
+                    target.borrow_mut().set_scalar(py, index, v);
                 }
-                Merge::NativeComposite(items) => {
-                    let container = PyMessage::composite_of(target, index)?;
-                    let class = container.bind(py).borrow().class.clone_ref(py);
-                    for item in &items.items {
-                        let copy = native::duplicate_native(py, item, Some(&class), budget)?;
-                        container.bind(py).borrow_mut().items.push(copy.unbind());
-                    }
-                }
-                Merge::Map(entries) => {
-                    let container = PyMessage::map_of_field(target, index)?;
-                    MapContainer::merge_entries(py, container.bind(py), entries, budget)?;
-                }
+                Slot::Native(value) => merge_value(py, target, index, value, budget)?,
+                _ => unreachable!("a native message holds no object"),
             }
         }
-        let unknown = match source {
-            Source::Object(s) => s.borrow().unknown.clone(),
-            Source::Native(n) => n.fields.unknown.clone(),
-        };
-        target.borrow_mut().unknown.extend(unknown);
+        if !fields.unknown.is_empty() {
+            target.borrow_mut().unknown.extend(fields.unknown);
+        }
         Ok(())
     })
+}
+
+/// Merge `value`, the native value of the field `index` of a source, into the field of `target`
+/// (see [`merge_native`]).
+fn merge_value(
+    py: Python<'_>,
+    target: &Bound<'_, PyMessage>,
+    index: usize,
+    value: Value,
+    budget: &ConversionBudget,
+) -> PyResult<()> {
+    let Some(value) = share_into_absent(py, target, index, value)? else {
+        return Ok(());
+    };
+    match value {
+        Value::Message(child) => {
+            let into = PyMessage::child_for_merge_of(target, index)?;
+            merge_native(py, &into, child, budget)
+        }
+        Value::Scalars(items) => {
+            let items = Arc::try_unwrap(items).unwrap_or_else(|items| (*items).clone());
+            let container = PyMessage::repeated_scalar_of(target, index)?;
+            container.bind(py).borrow_mut().items.extend(items);
+            Ok(())
+        }
+        Value::Messages(items) => {
+            let container = PyMessage::composite_of(target, index)?;
+            let class = container.bind(py).borrow().class.clone_ref(py);
+            let items =
+                Arc::try_unwrap(items).map_or_else(|items| items.items.clone(), |m| m.items);
+            for item in items {
+                let copy = native::duplicate_owned(py, item, Some(&class), budget)?;
+                container.bind(py).borrow_mut().items.push(copy.unbind());
+            }
+            Ok(())
+        }
+        Value::Map(map) => {
+            let container = PyMessage::map_of_field(target, index)?;
+            MapContainer::merge_entries(py, container.bind(py), MapEntries::of_native(&map), budget)
+        }
+    }
+}
+
+/// Set `value` in the field `index` of `target` as it is, if the target does not hold the field
+/// nor gave out an unset child of it, and the value is of the classes registered now (see
+/// [`Native::generation`]): what a merge of the value into the empty field makes, of the class of
+/// the container of the field of a repeated message field. The value back, if it is not set.
+fn share_into_absent(
+    py: Python<'_>,
+    target: &Bound<'_, PyMessage>,
+    index: usize,
+    value: Value,
+) -> PyResult<Option<Value>> {
+    let now = generation();
+    let class = match &value {
+        Value::Message(m) if m.generation != now => return Ok(Some(value)),
+        Value::Messages(m) if m.generation != now => return Ok(Some(value)),
+        Value::Map(m) if m.generation != now => return Ok(Some(value)),
+        Value::Messages(_) => {
+            let desc = target.borrow().desc.clone();
+            Some(MessageClass::of(py, &desc.fields[index].type_name)?)
+        }
+        _ => None,
+    };
+    let mut t = target.borrow_mut();
+    if t.slots.contains(index) || t.lazy_child(index).is_some() {
+        return Ok(Some(value));
+    }
+    let value = match (value, class) {
+        (Value::Messages(m), Some(class)) if !class.is_same(&m.class) => Value::Messages(Arc::new(
+            NativeMessages::new(class, m.items.clone(), m.generation),
+        )),
+        (value, _) => value,
+    };
+    if matches!(value, Value::Message(_)) {
+        t.set_child(py, index, Slot::Native(value));
+    } else {
+        t.set_slot(index, Slot::Native(value));
+    }
+    Ok(None)
 }
 
 /// Whether `a` and `b` hold the same fields, as protobuf's `==` compares two messages: of the
@@ -1496,12 +1472,8 @@ impl PyMessage {
         self.set_slot(index, Slot::Scalar(value));
     }
 
-    pub(crate) fn set_message(&mut self, py: Python<'_>, index: usize, child: Py<PyMessage>) {
-        self.set_child(py, index, Slot::Message(child));
-    }
-
-    /// Set the message field `index` to `child`, an object or a native message, as
-    /// [`PyMessage::set_message`] sets an object.
+    /// Set the message field `index` to `child`, an object or a native message: the other members
+    /// of its oneof cleared, and an unset child of the field that the message gave out detached.
     fn set_child(&mut self, py: Python<'_>, index: usize, child: Slot) {
         self.clear_oneof_siblings(py, index);
         self.sever(py, index);
@@ -1789,140 +1761,271 @@ impl PyMessage {
         message.borrow_mut().map(py, index, Some(owner))
     }
 
-    /// Set the fields of the items of `mapping`, as the constructor and a mapping for a message
-    /// field do. None leaves a field unset. A mapping of a message field sets the fields of its
-    /// message through here too, one level of a recursion as deep as the mappings nest, on a stack
-    /// with room for it.
+    /// Set the fields of the items of `mapping` in `message`, in their order, as upb's
+    /// `InitAttributes` sets those of the keyword arguments of `__init__` and `add`, and of a
+    /// mapping of a message field: a name of no field is upb's `ValueError`, also of a value of
+    /// None, which leaves the field as it is. A scalar is set. A message of a message field merges
+    /// into the message that the field has, as `MergeFrom` (of a snapshot of the value first), and a
+    /// mapping sets the fields of that message, set in its parent first; a field that the message
+    /// does not hold (of no unset child that it gave out) takes the copy of a message as it is. The
+    /// values of a repeated message field are appended in turn, each to the messages of those
+    /// before it (see [`PyMessage::init_messages`]); those of a repeated scalar field as the
+    /// container's `extend` takes them; a map takes its items as [`MapContainer::update_from`]
+    /// does. A mapping of a message field is one level of a recursion as deep as the mappings
+    /// nest, on a stack with room for it.
+    ///
+    /// No borrow of `message` is held while Python code runs (the conversion of a value, an
+    /// iteration, a checkpoint), so that code that reaches the message (of the garbage collector's
+    /// `get_objects`, or as a value of its own fields) finds it as upb's is then, of the fields
+    /// before set, and a value that holds the message is read as upb reads it.
     ///
     /// One interrupt budget counts a step for each message that the fields copy or build, and for
     /// each value of a repeated field and each key of a map of messages, of every level, so that a
     /// constructor of many values (`Literal.Array(elements=[...])`, of a million messages) lets
     /// another thread take the GIL, and a signal interrupt it, as the copies of the runtime do. A
     /// map of scalars takes its value in Python, as upb's does (see [`MapContainer::update_from`]).
-    pub(crate) fn init_from_mapping(
-        &mut self,
-        py: Python<'_>,
-        mapping: &Bound<'_, PyAny>,
-    ) -> PyResult<()> {
-        self.init_from_mapping_with(py, mapping, &ConversionBudget::full())
-    }
-
-    /// Set the fields of the items of `mapping`, as [`PyMessage::init_from_mapping`] does, of
-    /// the steps of `budget`.
-    pub(crate) fn init_from_mapping_with(
-        &mut self,
-        py: Python<'_>,
+    pub(crate) fn init_fields(
+        message: &Bound<'_, Self>,
         mapping: &Bound<'_, PyAny>,
         budget: &ConversionBudget,
     ) -> PyResult<()> {
-        grow(|| self.set_fields_of(py, mapping, budget))
-    }
-
-    fn set_fields_of(
-        &mut self,
-        py: Python<'_>,
-        mapping: &Bound<'_, PyAny>,
-        budget: &ConversionBudget,
-    ) -> PyResult<()> {
-        budget.step(py)?;
-        let desc = self.desc.clone();
-        let items = mapping.call_method0(pyo3::intern!(py, "items"))?;
-        for item in items.try_iter()? {
-            let (key, value): (String, Bound<'_, PyAny>) = item?.extract()?;
-            if value.is_none() {
-                continue;
+        let py = message.py();
+        grow(|| {
+            budget.step(py)?;
+            let desc = message.borrow().desc.clone();
+            let items = mapping.call_method0(pyo3::intern!(py, "items"))?;
+            for item in items.try_iter()? {
+                let (key, value): (String, Bound<'_, PyAny>) = item?.extract()?;
+                let Some(&index) = desc.by_name.get(&key) else {
+                    return Err(PyValueError::new_err(format!(
+                        "Protocol message {} has no \"{key}\" field.",
+                        desc.name
+                    )));
+                };
+                if value.is_none() {
+                    continue;
+                }
+                let field = &desc.fields[index];
+                if field.map.is_some() {
+                    Self::materialize(message, index)?;
+                    let container = message.borrow_mut().map(py, index, None)?.into_bound(py);
+                    MapContainer::update_from(py, &container, &value, &field.full_name, budget)?;
+                } else if field.repeated && field.kind == Kind::Message {
+                    Self::init_messages(message, index, field, &value, budget)?;
+                } else if field.repeated {
+                    Self::materialize(message, index)?;
+                    let container = message.borrow_mut().repeated_scalar(py, index, None)?;
+                    RepeatedScalar::extend_with(container.bind(py), &value, Some(budget))?;
+                } else if field.kind == Kind::Message {
+                    Self::init_message(message, index, field, &value, budget)?;
+                } else {
+                    let scalar =
+                        Scalar::from_py(field.kind, &field.full_name, &field.type_name, &value)?;
+                    message.borrow_mut().set_scalar(py, index, scalar);
+                }
             }
-            let Some(&index) = desc.by_name.get(&key) else {
-                return Err(PyValueError::new_err(format!(
-                    "Protocol message {} has no \"{key}\" field.",
-                    desc.name
-                )));
-            };
-            let field = &desc.fields[index];
-            let not_iterable = || {
-                PyTypeError::new_err(format!(
-                    "Argument for field {} is not iterable",
-                    field.full_name
-                ))
-            };
-            if field.map.is_some() {
-                let container = self.map(py, index, None)?.into_bound(py);
-                MapContainer::update_from(py, &container, &value, &field.full_name, budget)?;
-            } else if field.repeated && field.kind == Kind::Message {
-                let mut items = Vec::new();
-                for element in value.try_iter().map_err(|_| not_iterable())? {
-                    let element = element?;
-                    budget.step(py)?;
-                    items.push(message_for_field(py, &field.type_name, &element, budget)?);
+            Ok(())
+        })
+    }
+
+    /// Set `value` in the message field `index` of `message` (see [`PyMessage::init_fields`]), as
+    /// upb's `InitMessageAttribute`: the message that the field has (or an unset child of it)
+    /// merges a message, of a snapshot of it taken first, takes the fields of a mapping, set in
+    /// its parent first, or of the `_internal_assign` of a well-known type whose class assigns
+    /// values.
+    fn init_message(
+        message: &Bound<'_, Self>,
+        index: usize,
+        field: &FieldDesc,
+        value: &Bound<'_, PyAny>,
+        budget: &ConversionBudget,
+    ) -> PyResult<()> {
+        let py = message.py();
+        match Given::of(py, &field.type_name, value) {
+            Given::Message(m) => match Snapshot::of(py, &m, budget)? {
+                Snapshot::Native(copy) => {
+                    let copy = Value::Message(Arc::new(copy));
+                    let Some(Value::Message(copy)) = share_into_absent(py, message, index, copy)?
+                    else {
+                        return Ok(());
+                    };
+                    let into = Self::child_for_merge_of(message, index)?;
+                    merge_native(py, &into, copy, budget)
                 }
-                self.set_messages(py, index, items)?;
-            } else if field.repeated {
-                let mut items = Vec::new();
-                for element in value.try_iter().map_err(|_| not_iterable())? {
-                    let element = element?;
-                    budget.step(py)?;
-                    items.push(Scalar::from_py(
-                        field.kind,
-                        &field.full_name,
-                        &field.type_name,
-                        &element,
-                    )?);
+                bytes => {
+                    let into = Self::child_for_merge_of(message, index)?;
+                    bytes.merge_into(py, &into, budget)
                 }
-                let container = self.repeated_scalar(py, index, None)?;
-                container.bind(py).borrow_mut().items.extend(items);
-            } else if field.kind == Kind::Message {
-                match message_for_field(py, &field.type_name, &value, budget)? {
-                    FieldMessage::Object(child) => self.set_message(py, index, child.unbind()),
-                    FieldMessage::Native(child) => {
-                        self.set_child(py, index, Slot::Native(Value::Message(child)))
+            },
+            Given::Mapping => {
+                let into = Self::child_for_merge_of(message, index)?;
+                Self::init_fields(&into, value, budget)
+            }
+            Given::StructDict => {
+                let child = Self::field_value(message, index)?.into_bound(py);
+                Self::assign_struct(child.cast::<PyMessage>()?, value, budget)
+            }
+            Given::Protobufs(bytes) => {
+                let into = Self::child_for_merge_of(message, index)?;
+                codec::merge_in(py, &into, &bytes, budget)
+            }
+            Given::Assigned => {
+                let child = Self::field_value(message, index)?;
+                child.bind(py).call_method1("_internal_assign", (value,))?;
+                Ok(())
+            }
+            Given::Other => Err(not_initializing(py, &field.type_name, value)),
+        }
+    }
+
+    /// Append the values of `value` to the repeated message field `index` of `message` (see
+    /// [`PyMessage::init_fields`]), each in turn, as upb's constructor does: a new message
+    /// appended, then a message merged into it or the fields of a mapping set in it (removed if
+    /// they fail, as upb's `add` removes it), so the values before a failure stay, and a value that
+    /// holds the message is read with the messages before it and the new one in the field. The
+    /// copies of the messages of the runtime of a list or a tuple, whose iteration runs no Python
+    /// code, are made at once, natively, and the field takes them when a value is not one, at a
+    /// failure and at the end (as its native value, if it holds none yet): a value that holds the
+    /// message (the copy watches for it) is taken in turn.
+    fn init_messages(
+        message: &Bound<'_, Self>,
+        index: usize,
+        field: &FieldDesc,
+        value: &Bound<'_, PyAny>,
+        budget: &ConversionBudget,
+    ) -> PyResult<()> {
+        let py = message.py();
+        let values = value.try_iter().map_err(|_| {
+            PyTypeError::new_err(format!(
+                "Argument for field {} is not iterable",
+                field.full_name
+            ))
+        })?;
+        let fixed =
+            value.is_exact_instance_of::<PyList>() || value.is_exact_instance_of::<PyTuple>();
+        let mut copies: Vec<Arc<Native>> = Vec::new();
+        let appended = (|| -> PyResult<()> {
+            for element in values {
+                let element = element?;
+                budget.step(py)?;
+                if fixed {
+                    if let Ok(m) = element.cast::<PyMessage>() {
+                        if m.borrow().desc.full_name == field.type_name {
+                            let at = native::At::top(Some(codec::depth_limit())).watching(message);
+                            match native::copy_message(py, m, at, generation(), budget) {
+                                Ok(copy) => {
+                                    copies.push(Arc::new(copy));
+                                    continue;
+                                }
+                                Err(CopyError::Python(err)) => return Err(err),
+                                // In turn: of its bytes, or with the messages before it.
+                                Err(CopyError::TooDeep | CopyError::Holds) => {}
+                            }
+                        }
                     }
                 }
-            } else {
-                let scalar =
-                    Scalar::from_py(field.kind, &field.full_name, &field.type_name, &value)?;
-                self.set_scalar(py, index, scalar);
+                Self::append_copies(message, index, field, &mut copies)?;
+                Self::append_value(message, index, field, &element, budget)?;
             }
-        }
-        Ok(())
+            Ok(())
+        })();
+        let taken = Self::append_copies(message, index, field, &mut copies);
+        appended.and(taken)
     }
 
-    /// Add `items`, the messages of a repeated message field `index` of a constructor, to the
-    /// field: of a field that the message does not hold, as its native value when they are all
-    /// native copies (of the class of the field's container then, of which they were made), else
-    /// to the container of the field, of the objects of the native copies.
-    fn set_messages(
-        &mut self,
-        py: Python<'_>,
+    /// Append `copies`, native copies of messages of the repeated message field `index` of
+    /// `message`, to the field, taking them: a field that the message does not hold takes them as
+    /// its native value (of the class of the field's container, which the objects of them are
+    /// made of), when they are of the classes registered now, else the field's container takes
+    /// their objects, made with no borrow held.
+    fn append_copies(
+        message: &Bound<'_, Self>,
         index: usize,
-        items: Vec<FieldMessage<'_>>,
+        field: &FieldDesc,
+        copies: &mut Vec<Arc<Native>>,
     ) -> PyResult<()> {
-        let field = &self.desc.fields[index];
-        if !self.slots.contains(index) {
-            let now = generation();
-            let natives: Option<Vec<Arc<Native>>> = items
-                .iter()
-                .map(|item| match item {
-                    FieldMessage::Native(m) if m.generation == now => Some(m.clone()),
-                    _ => None,
-                })
-                .collect();
-            if let Some(natives) = natives {
-                let class = MessageClass::of(py, &field.type_name)?;
-                let value = Value::Messages(Arc::new(NativeMessages::new(class, natives, now)));
-                self.set_slot(index, Slot::Native(value));
+        if copies.is_empty() {
+            return Ok(());
+        }
+        let py = message.py();
+        let copies = std::mem::take(copies);
+        let now = generation();
+        if copies.iter().all(|m| m.generation == now) {
+            let class = MessageClass::of(py, &field.type_name)?;
+            let mut m = message.borrow_mut();
+            if !m.slots.contains(index) {
+                let value = Value::Messages(Arc::new(NativeMessages::new(class, copies, now)));
+                m.set_slot(index, Slot::Native(value));
                 return Ok(());
             }
         }
-        let mut objects = Vec::with_capacity(items.len());
-        for item in items {
-            objects.push(match item {
-                FieldMessage::Object(m) => m.unbind(),
-                FieldMessage::Native(m) => native::message_object(py, &m)?.unbind(),
-            });
+        let mut objects = Vec::with_capacity(copies.len());
+        for copy in &copies {
+            objects.push(native::message_object(py, copy)?.unbind());
         }
-        let container = self.composite(py, index, None)?;
+        Self::materialize(message, index)?;
+        let container = message.borrow_mut().composite(py, index, None)?;
         container.bind(py).borrow_mut().items.extend(objects);
         Ok(())
+    }
+
+    /// Append `element` to the repeated message field `index` of `message` as upb's constructor
+    /// appends a value (see [`PyMessage::init_messages`]): a new message appended to the field's
+    /// container, then the value merged into it (left empty, of the error of a value of another
+    /// type), or the fields of a mapping set in it, which a failure removes, as upb's `add`
+    /// removes the last message.
+    fn append_value(
+        message: &Bound<'_, Self>,
+        index: usize,
+        field: &FieldDesc,
+        element: &Bound<'_, PyAny>,
+        budget: &ConversionBudget,
+    ) -> PyResult<()> {
+        let py = message.py();
+        Self::materialize(message, index)?;
+        let container = message
+            .borrow_mut()
+            .composite(py, index, None)?
+            .into_bound(py);
+        let class = container.borrow().class.clone_ref(py);
+        let item = class.new_message(py)?;
+        container.borrow_mut().items.push(item.clone().unbind());
+        let remove_on_failure = |result: PyResult<()>| {
+            if result.is_err() {
+                // The message removed is dropped once the container is no longer borrowed.
+                let _removed = container.borrow_mut().items.pop();
+            }
+            result
+        };
+        match Given::of(py, &field.type_name, element) {
+            Given::Message(m) => Self::merge_from_with(&item, m.as_any(), budget),
+            Given::Mapping => remove_on_failure(Self::init_fields(&item, element, budget)),
+            Given::StructDict => remove_on_failure(Self::assign_struct(&item, element, budget)),
+            Given::Protobufs(bytes) => codec::merge_in(py, &item, &bytes, budget),
+            Given::Assigned => item.call_method1("_internal_assign", (element,)).map(drop),
+            Given::Other => Err(not_initializing(py, &field.type_name, element)),
+        }
+    }
+
+    /// Set the fields of the dict `value` in `message`, a `Struct` of a class that assigns values,
+    /// as upb's constructor does: of its `_internal_assign`, else, of a dict of the key `fields`
+    /// only, which that refuses, of the fields of the dict, the message cleared first.
+    fn assign_struct(
+        message: &Bound<'_, Self>,
+        value: &Bound<'_, PyAny>,
+        budget: &ConversionBudget,
+    ) -> PyResult<()> {
+        match message.call_method1("_internal_assign", (value,)) {
+            Ok(_) => Ok(()),
+            Err(err) => {
+                let dict = value.cast::<PyDict>()?;
+                if !(dict.len() == 1 && dict.contains("fields")?) {
+                    return Err(err);
+                }
+                Self::clear(message)?;
+                Self::init_fields(message, value, budget)
+            }
+        }
     }
 
     /// Discard the unknown fields of the message and of its messages, as upb's
@@ -1971,14 +2074,13 @@ impl PyMessage {
             if other.borrow().desc.full_name != full_name {
                 return Err(not_same_class("MergeFrom", slf.as_any(), other_msg));
             }
+            // As upb's, which serializes the message first and parses its bytes into this one:
+            // the merge reads a snapshot of it, taken before this message is set in its parent,
+            // so a message below it (an unset child of it too) merges what it was, and one of
+            // more than 100 levels fails, of what the parse of its bytes keeps.
+            let snapshot = Snapshot::of(py, other, budget)?;
             mark_present(slf)?;
-            // As upb's, which merges a message by a parse of its bytes: one of more than 100
-            // levels fails, of what the parse of its bytes keeps.
-            if deeper_than(py, &other.borrow(), codec::depth_limit()) {
-                let bytes = codec::encode(py, &other.borrow())?;
-                return codec::merge_in(py, slf, &bytes, budget);
-            }
-            merge_into_with(py, slf, Source::Object(other), budget)
+            snapshot.merge_into(py, slf, budget)
         } else {
             // As upb's, which takes a message of its class of the type only: protobuf's message
             // of the type of its default pool, of its bytes.
@@ -2213,8 +2315,10 @@ impl PyMessage {
         Ok(PyMessage::empty(message_type_of(cls)?))
     }
 
-    /// As upb's: set the fields of the keyword arguments, over those that the message has (so
-    /// `message.__init__(**fields)` merges them, as a constructor sets them of a new message).
+    /// As upb's: set the fields of the keyword arguments, over those that the message has, in
+    /// their order (see [`PyMessage::init_fields`]): so `message.__init__(**fields)` merges them,
+    /// as a constructor sets them of a new message. Of keyword arguments (even of none, of
+    /// `**{}`), an unset child is set in its parent first, as upb's `EnsureReified`.
     #[pyo3(signature = (*args, **kwargs))]
     fn __init__(
         slf: &Bound<'_, Self>,
@@ -2224,13 +2328,14 @@ impl PyMessage {
         if !args.is_empty() {
             return Err(PyTypeError::new_err("No positional arguments allowed"));
         }
-        match kwargs {
-            Some(kwargs) if !kwargs.is_empty() => {
-                let py = slf.py();
-                slf.borrow_mut().init_from_mapping(py, kwargs.as_any())
-            }
-            _ => Ok(()),
+        let Some(kwargs) = kwargs else {
+            return Ok(());
+        };
+        mark_present(slf)?;
+        if kwargs.is_empty() {
+            return Ok(());
         }
+        Self::init_fields(slf, kwargs.as_any(), &ConversionBudget::full())
     }
 
     /// As upb's: whether the caller is a generated module, which no caller of the runtime is.
@@ -2802,6 +2907,7 @@ impl PyMessage {
                 Ok(copied)
             }
             Err(CopyError::Python(err)) => Err(err),
+            Err(CopyError::Holds) => unreachable!("a copy that watches no message"),
         }
     }
 

@@ -32,6 +32,7 @@ import collections
 import collections.abc as abc
 import copy
 import datetime
+import gc
 import importlib
 import io
 import json
@@ -7256,13 +7257,11 @@ def test_constructors_raise_the_errors_of_upbs_beside_the_copies(upb):
     # The values of the message fields of a constructor that are not messages of the runtime of
     # the type take the paths that they took, of upb's errors, in the order of the keyword
     # arguments, and of the Timestamp of a datetime of `_internal_assign`.
+    # A second constructor merges a mapping into the message of a field that the message holds,
+    # as upb's (see test_merges_into_a_message_that_the_value_holds_are_upbs).
     mine, theirs = _error_cases(ours), _error_cases(upb)
     differ = {label for label in theirs if mine[label] != theirs[label]}
-    # (As before: upb's constructor merges a mapping into the message of a field that the message
-    # holds, where the runtime's sets the field anew; the copies change neither.)
-    assert differ <= {"the constructor of a message of a field set"}, {
-        label: (mine[label], theirs[label]) for label in differ
-    }
+    assert differ == set(), {label: (mine[label], theirs[label]) for label in differ}
 
 
 def _shared_cases(cls):
@@ -7602,3 +7601,654 @@ def test_copies_of_messages_of_proto2_and_editions_are_upbs(kinds):
     # groups and delimited messages, their closed enums and maps of messages, their text and JSON.
     *_, upb = kinds
     assert _kind_copy_cases(ours) == _kind_copy_cases(upb)
+
+
+# The merges and copies of a message into a message that the value holds (SPARK-62270): a message
+# below the value (an unset child of it too), the value itself, or one above it. upb serializes the
+# value first (`MergeFrom`), or reads it as it is when it reads it (a constructor, `add`, `append`,
+# `extend`), so the merge reads what the value was then; upb's `CopyFrom` into a message below the
+# value, and the copies into a map entry below it, end its process (of a recursion of its copy).
+
+_ALIAS_NODE_FILE = "tests/alias/node.proto"
+
+
+def _alias_node_file():
+    """The serialized file of `tests.alias.Node`, a message of a plugin's file (which imports Spark
+    Connect's relations.proto) that holds itself in each kind of field: a map, a repeated field, a
+    message field, a oneof member, and its repeated scalars."""
+    from google.protobuf import descriptor_pb2
+
+    field = descriptor_pb2.FieldDescriptorProto
+    file = descriptor_pb2.FileDescriptorProto(
+        name=_ALIAS_NODE_FILE, package="tests.alias", dependency=["spark/connect/relations.proto"], syntax="proto3"
+    )
+    node = file.message_type.add(name="Node")
+    entry = node.nested_type.add(name="ChildrenEntry")
+    entry.options.map_entry = True
+    entry.field.add(name="key", number=1, type=field.TYPE_STRING, label=field.LABEL_OPTIONAL)
+    entry.field.add(
+        name="value", number=2, type=field.TYPE_MESSAGE, label=field.LABEL_OPTIONAL, type_name=".tests.alias.Node"
+    )
+    message, repeated, optional = field.TYPE_MESSAGE, field.LABEL_REPEATED, field.LABEL_OPTIONAL
+    node.field.add(name="children", number=1, type=message, label=repeated, type_name=".tests.alias.Node.ChildrenEntry")
+    node.field.add(name="items", number=2, type=message, label=repeated, type_name=".tests.alias.Node")
+    node.field.add(name="next", number=3, type=message, label=optional, type_name=".tests.alias.Node")
+    node.field.add(name="v", number=4, type=field.TYPE_INT32, label=optional)
+    node.field.add(name="input", number=5, type=message, label=optional, type_name=".spark.connect.Relation")
+    node.oneof_decl.add(name="kind")
+    node.field.add(name="left", number=6, type=message, label=optional, type_name=".tests.alias.Node", oneof_index=0)
+    node.field.add(name="w", number=7, type=field.TYPE_INT32, label=optional, oneof_index=0)
+    node.field.add(name="vs", number=8, type=field.TYPE_INT32, label=repeated)
+    return file.SerializeToString()
+
+
+def _alias_classes(which):
+    """The lookup of the classes by full name of `which` ("ours" or "upb"), of `tests.alias.Node`
+    too: the runtime's class of the module that protoc generates of its file, upb's of a pool of its
+    own."""
+    from google.protobuf import descriptor_pool
+
+    serialized = _alias_node_file()
+    if which == "upb":
+        node = _upb_classes_of([(serialized, "tests.alias.node_pb2")])["tests.alias.Node"]
+        classes = _upb_classes()
+    else:
+        pool = descriptor_pool.Default()
+        try:
+            added = pool.FindFileByName(_ALIAS_NODE_FILE)
+        except KeyError:
+            added = pool.AddSerializedFile(serialized)
+        node = _build_generated_module(added)["Node"]
+        classes = ours
+    return lambda full_name: node if full_name == "tests.alias.Node" else classes(full_name)
+
+
+def _hex(message):
+    return message.SerializeToString(deterministic=True).hex()
+
+
+def _alias_cases():
+    """The cases of the merges and copies into a message that the value holds, each a function of
+    the lookup of the classes of a runtime, of what it gives of the messages after (their bytes and
+    the identity of the messages that Python holds)."""
+
+    def deep(R, levels):
+        r = R()
+        m = r
+        for _ in range(levels):
+            m = m.limit.input
+        m.range.end = 1
+        return r, m
+
+    def merge_into_stub_below(C):
+        r = C("spark.connect.Relation")()
+        r.limit.limit = 1
+        t = r.limit.input
+        t.MergeFrom(r)
+        return [_hex(r), r.limit.input is t, _hex(t)]
+
+    def merge_into_set_below(C):
+        r = C("spark.connect.Relation")(limit={"limit": 1, "input": {"range": {"end": 2}}})
+        t = r.limit.input
+        t.MergeFrom(r)
+        return [_hex(r), r.limit.input is t]
+
+    def merge_into_stub_of_oneof_sibling(C):
+        # Setting the unset child in its parent clears the member of the oneof that the value holds.
+        r = C("spark.connect.Relation")(limit={"limit": 1})
+        t = r.project.input
+        t.MergeFrom(r)
+        return [_hex(r), r.project.input is t, r.HasField("limit")]
+
+    def merge_into_stub_of_stub(C):
+        r = C("spark.connect.Relation")(limit={"limit": 1})
+        t = r.limit.input.limit.input
+        t.MergeFrom(r)
+        return [_hex(r), r.limit.input.limit.input is t]
+
+    def merge_into_below_repeated(C):
+        d = C("spark.connect.DataType")(struct={"fields": [{"name": "a", "data_type": {"string": {}}}]})
+        t = d.struct.fields[0].data_type
+        t.MergeFrom(d)
+        return [_hex(d), d.struct.fields[0].data_type is t]
+
+    def merge_into_below_map(C):
+        n = C("tests.alias.Node")(v=1)
+        n.children["a"].v = 2
+        child = n.children["a"]
+        t = child.next
+        t.MergeFrom(n)
+        return [_hex(n), n.children["a"] is child, child.next is t]
+
+    def merge_into_map_value_and_item(C):
+        n = C("tests.alias.Node")(v=1, items=[{"v": 2}])
+        child, item = n.children["a"], n.items[0]
+        child.MergeFrom(n)
+        item.MergeFrom(n)
+        return [_hex(n), n.children["a"] is child, n.items[0] is item]
+
+    def merge_into_oneof_member_of_value(C):
+        n = C("tests.alias.Node")(left={"v": 1})
+        t = n.left
+        t.MergeFrom(n)
+        return [_hex(n), n.left is t]
+
+    def merge_into_stub_below_at_the_limit(C):
+        # A value of the levels that a parse takes, whose unset child is one level below its
+        # deepest message: upb reads the value before the child is set, so it takes it.
+        out = []
+        for levels in (48, 49, 50):
+            r, m = deep(C("spark.connect.Relation"), levels)
+            t = m.limit.input
+            out.append([levels, _outcome(lambda: t.MergeFrom(r)), _hex(r)])
+        return out
+
+    def merge_from_below(C):
+        r = C("spark.connect.Relation")(
+            limit={"limit": 1, "input": {"limit": {"limit": 2, "input": {"range": {"end": 3}}}}}
+        )
+        r.MergeFrom(r.limit.input)
+        n = C("tests.alias.Node")(v=1, items=[{"v": 2, "items": [{"v": 3}]}], next={"vs": [4], "next": {"v": 5}})
+        n.children["k"].next.v = 6
+        n.MergeFrom(n.items[0])
+        n.MergeFrom(n.next)
+        n.MergeFrom(n.children["k"])
+        return [_hex(r), _hex(n)]
+
+    def merge_from_itself(C):
+        n = C("tests.alias.Node")(v=1, items=[{"v": 2}], vs=[3], next={"items": [{"v": 4}]})
+        n.children["a"].v = 5
+        n.MergeFrom(n)
+        return _hex(n)
+
+    def copy_from_below(C):
+        r = C("spark.connect.Relation")(
+            limit={"limit": 1, "input": {"limit": {"limit": 2, "input": {"range": {"end": 3}}}}}
+        )
+        inner = r.limit.input
+        r.CopyFrom(inner)
+        n = C("tests.alias.Node")(v=1, items=[{"v": 2, "items": [{"v": 3}]}])
+        item = n.items[0]
+        n.CopyFrom(item)
+        return [_hex(r), _hex(inner), _hex(n), _hex(item)]
+
+    def init_message_field_of_holder(C):
+        r = C("spark.connect.Relation")(limit={"limit": 1})
+        limit = r.limit
+        limit.__init__(input=r)
+        return [_hex(r), r.limit is limit]
+
+    def init_stub_of_holder(C):
+        # The unset child is set in its parent first, so the value holds it.
+        r = C("spark.connect.Relation")(limit={"limit": 1})
+        t = r.limit.input
+        t.__init__(limit=r.limit)
+        return [_hex(r), r.limit.input is t]
+
+    def init_merges_into_the_field(C):
+        R = C("spark.connect.Relation")
+        r = R(limit={"limit": 1})
+        r.__init__(limit={"input": {"range": {"end": 2}}})
+        s = R(limit={"limit": 1})
+        s.__init__(limit=R(limit={"input": {"range": {"end": 2}}}).limit)
+        p = R(project={"expressions": [{"literal": {"integer": 1}}]})
+        p.__init__(project=p.project)
+        return [_hex(r), _hex(s), _hex(p)]
+
+    def init_in_the_order_of_the_keywords(C):
+        N = C("tests.alias.Node")
+        n = N()
+        n.next.__init__(v=7, next=n)
+        m = N()
+        m.next.__init__(next=m, v=7)
+        o = N(v=1, items=[{"v": 2}])
+        o.next.__init__(next=o, v=3)
+        return [_hex(n), _hex(m), _hex(o)]
+
+    def init_sets_an_unset_child(C):
+        R = C("spark.connect.Relation")
+        out = []
+        for kwargs in ({"range": {"end": 1}}, {}, {"range": None}):
+            r = R()
+            t = r.limit.input
+            t.__init__(**kwargs)
+            out.append([_hex(r), r.limit.input is t, r.HasField("limit")])
+        r = R()
+        t = r.limit.input
+        t.__init__()
+        out.append([_hex(r), r.HasField("limit")])
+        return out
+
+    def init_mappings_of_holder(C):
+        N = C("tests.alias.Node")
+        n = N(v=1)
+        n.next.__init__(next={"next": n})
+        m = N(v=1)
+        m.next.__init__(children={"a": {"next": m}})
+        return [_hex(n), _hex(m)]
+
+    def init_repeated_of_holder(C):
+        N = C("tests.alias.Node")
+        n = N(v=1)
+        n.next.__init__(items=[n, n.next])
+        m = N(v=1)
+        m.__init__(items=[m, m])
+        o = N(v=1)
+        o.next.__init__(items=(x for x in (o, o.next)))
+        return [_hex(n), _hex(m), _hex(o)]
+
+    def add_of_holder(C):
+        N = C("tests.alias.Node")
+        n = N(v=1)
+        first = n.next.items.add(v=2, next=n)
+        m = N(v=1)
+        second = m.next.items.add(next=m, v=2)
+        return [_hex(n), n.next.items[0] is first, _hex(m), m.next.items[0] is second]
+
+    def append_extend_insert_of_holder(C):
+        N = C("tests.alias.Node")
+        n = N(v=1)
+        item = n.next.items.append(n)
+        m = N(v=1)
+        m.items.append(m)
+        o = N(v=1)
+        o.next.items.extend([o, o.next])
+        p = N(v=1, items=[{"v": 2}])
+        p.items.insert(0, p)
+        d = C("spark.connect.DataType")(struct={"fields": [{"name": "a"}]})
+        f = d.struct.fields[0]
+        f.data_type.struct.fields.append(f)
+        return [_hex(n), n.next.items[0] is item if item is not None else None, _hex(m), _hex(o), _hex(p), _hex(d)]
+
+    def extend_and_merge_between_containers(C):
+        N = C("tests.alias.Node")
+        n = N(items=[{"v": 1}, {"v": 2}])
+        n.items[0].items.extend(n.items)
+        m = N(items=[{"v": 1}, {"v": 2}])
+        m.items[0].items.MergeFrom(m.items)
+        o = N(vs=[1, 2])
+        o.vs.extend(o.vs)
+        o.vs.MergeFrom(o.vs)
+        return [_hex(n), _hex(m), list(o.vs)]
+
+    def maps_of_holder(C):
+        N = C("tests.alias.Node")
+        n = N()
+        n.children["a"].v = 1
+        n.children.MergeFrom(n.children)
+        m = N(v=1)
+        m.children.get_or_create("a").MergeFrom(m)
+        o = N(v=1)
+        p = N(children={"a": o, "b": o.next})
+        return [_hex(n), _hex(m), _hex(p), _hex(o)]
+
+    def parses_of_its_own_bytes(C):
+        r = C("spark.connect.Relation")(limit={"limit": 1})
+        t = r.limit.input
+        t.MergeFromString(r.SerializeToString())
+        n = C("tests.alias.Node")(v=1, items=[{"v": 2}])
+        n.MergeFromString(n.SerializeToString())
+        s = C("spark.connect.Relation")(limit={"limit": 1})
+        u = s.limit.input
+        u.ParseFromString(s.SerializeToString())
+        return [_hex(r), r.limit.input is t, _hex(n), _hex(s), s.limit.input is u]
+
+    def init_of_too_deep_values(C):
+        R = C("spark.connect.Relation")
+        r, _ = deep(R, 60)
+        plan = C("spark.connect.Plan")(root={"limit": {"limit": 9}})
+        out = [_outcome(lambda: plan.__init__(root=r)), _hex(plan)]
+        w = C("spark.connect.WithRelations")(references=[{"limit": {"limit": 9}}])
+        out += [_outcome(lambda: w.__init__(references=[R(limit={"limit": 1}), r])), _hex(w)]
+        return out
+
+    cases = [
+        merge_into_stub_below, merge_into_set_below, merge_into_stub_of_oneof_sibling, merge_into_stub_of_stub,
+        merge_into_below_repeated, merge_into_below_map, merge_into_map_value_and_item,
+        merge_into_oneof_member_of_value, merge_into_stub_below_at_the_limit, merge_from_below, merge_from_itself,
+        copy_from_below, init_message_field_of_holder, init_stub_of_holder, init_merges_into_the_field,
+        init_in_the_order_of_the_keywords, init_sets_an_unset_child, init_mappings_of_holder, init_repeated_of_holder,
+        add_of_holder, append_extend_insert_of_holder, extend_and_merge_between_containers, maps_of_holder,
+        parses_of_its_own_bytes, init_of_too_deep_values,
+    ]
+    return {case.__name__: case for case in cases}
+
+
+def _alias_crash_cases():
+    """The cases of which upb ends its process (of a recursion of its copy, or of a container that
+    grows as it is read), each a function of the lookup of the classes of a runtime, and the copy
+    that the runtime makes first (what a copy of the value taken before gives), of the same lookup."""
+
+    def copy_into_stub_below(C):
+        r = C("spark.connect.Relation")(limit={"limit": 1})
+        t = r.limit.input
+        t.CopyFrom(r)
+        return [_hex(r), r.limit.input is t]
+
+    def copy_into_set_below(C):
+        r = C("spark.connect.Relation")(limit={"limit": 1, "input": {"range": {"end": 2}}})
+        t = r.limit.input
+        t.CopyFrom(r)
+        return [_hex(r), r.limit.input is t]
+
+    def copy_into_stub_of_oneof_sibling(C):
+        r = C("spark.connect.Relation")(limit={"limit": 1})
+        t = r.to_df.input
+        t.CopyFrom(r)
+        return [_hex(r), r.to_df.input is t]
+
+    def copy_into_map_value(C):
+        # The map has the entry (empty) once it is read, so the copy holds it.
+        n = C("tests.alias.Node")(v=1)
+        t = n.children["a"]
+        t.CopyFrom(n)
+        return [_hex(n), n.children["a"] is t]
+
+    def copy_into_repeated_item(C):
+        n = C("tests.alias.Node")(v=1, items=[{"v": 2}])
+        t = n.items[0]
+        t.CopyFrom(n)
+        return [_hex(n), n.items[0] is t]
+
+    def map_value_copy_from_holder(C):
+        n = C("tests.alias.Node")(v=1)
+        n.children["a"].next.CopyFrom(n)
+        return _hex(n)
+
+    def init_map_of_holder(C):
+        # The value is copied before the map takes the entry.
+        n = C("tests.alias.Node")(v=1)
+        n.next.__init__(children={"a": n})
+        return _hex(n)
+
+    def map_merge_into_inner(C):
+        n = C("tests.alias.Node")()
+        n.children["a"].v = 1
+        inner = n.children["a"].children
+        inner.MergeFrom(n.children)
+        return _hex(n)
+
+    def extend_itself(C):
+        # As a list's extend of itself: the messages that it has first.
+        n = C("tests.alias.Node")(items=[{"v": 1}, {"v": 2}])
+        n.items.extend(n.items)
+        m = C("tests.alias.Node")(items=[{"v": 1}, {"v": 2}])
+        m.items.MergeFrom(m.items)
+        return [_hex(n), _hex(m)]
+
+    def expected(C):
+        R, N = C("spark.connect.Relation"), C("tests.alias.Node")
+        return {
+            "copy_into_stub_below": [_hex(R(limit={"limit": 1, "input": {"limit": {"limit": 1}}})), True],
+            "copy_into_set_below": [
+                _hex(R(limit={"limit": 1, "input": {"limit": {"limit": 1, "input": {"range": {"end": 2}}}}})),
+                True,
+            ],
+            "copy_into_stub_of_oneof_sibling": [_hex(R(to_df={"input": {"limit": {"limit": 1}}})), True],
+            "copy_into_map_value": [_hex(N(v=1, children={"a": {"v": 1, "children": {"a": {}}}})), True],
+            "copy_into_repeated_item": [_hex(N(v=1, items=[{"v": 1, "items": [{"v": 2}]}])), True],
+            "map_value_copy_from_holder": _hex(N(v=1, children={"a": {"next": {"v": 1, "children": {"a": {}}}}})),
+            "init_map_of_holder": _hex(N(v=1, next={"children": {"a": {"v": 1, "next": {}}}})),
+            "map_merge_into_inner": _hex(N(children={"a": {"v": 1, "children": {"a": {"v": 1}}}})),
+            "extend_itself": [_hex(N(items=[{"v": 1}, {"v": 2}, {"v": 1}, {"v": 2}]))] * 2,
+        }
+
+    cases = [
+        copy_into_stub_below, copy_into_set_below, copy_into_stub_of_oneof_sibling, copy_into_map_value,
+        copy_into_repeated_item, map_value_copy_from_holder, init_map_of_holder, map_merge_into_inner, extend_itself,
+    ]
+    return {case.__name__: case for case in cases}, expected
+
+
+def _run_alias_cases(which, names, crash=False):
+    """The outcomes of the cases `names` of the runtime `which`, of what each raises too (a panic of
+    the runtime as well)."""
+    C = _alias_classes(which)
+    cases = _alias_crash_cases()[0] if crash else _alias_cases()
+    out = {}
+    for name in names:
+        try:
+            out[name] = ("ok", cases[name](C))
+        except BaseException as e:  # noqa: BLE001 (a PanicException of the runtime too)
+            out[name] = ("raise", type(e).__name__, str(e)[:300])
+    return out
+
+
+def _capped_to_4_gb():
+    """The limits of a process of a case that may recurse without bound (the `preexec_fn` of its
+    `subprocess.run`): an address space of at most 4 GB, which it fails of, rather than the memory
+    of the machine, and no core dump."""
+    import resource
+
+    _, hard = resource.getrlimit(resource.RLIMIT_AS)
+    cap = 4_000_000 * 1024
+    resource.setrlimit(resource.RLIMIT_AS, (cap if hard == resource.RLIM_INFINITY else min(cap, hard), hard))
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+
+
+def _alias_process(which, names, crash=False):
+    """The return code and the outcomes of the cases `names` of the runtime `which` run in a process
+    of its own, of an address space of at most 4 GB and no core dump: a case that recursed without
+    bound fails there, of the memory that it runs out of, rather than in this process."""
+    script = textwrap.dedent(
+        f"""
+        import json
+        from tests.test_proto_rust_offline import _run_alias_cases
+        print(json.dumps(_run_alias_cases({which!r}, {list(names)!r}, crash={crash!r})))
+        """
+    )
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=600,
+        cwd=str(root),
+        preexec_fn=_capped_to_4_gb,
+    )
+    lines = [line for line in result.stdout.splitlines() if line.startswith("{")]
+    return result.returncode, (json.loads(lines[-1]) if lines else None), result.stderr[-2000:]
+
+
+def test_merges_into_a_message_that_the_value_holds_are_upbs(upb):
+    # A merge into a message below its value (an unset child of it too), into the value itself or
+    # from a message below it, and the constructors, `add`, `append`, `extend` and the maps of a
+    # value that holds the message, are upb's, of the same messages: upb serializes the value of a
+    # `MergeFrom` first, so the merge takes what the value was then, where the runtime's merge
+    # read the value as the merge changed it, of a recursion without bound of a message below it.
+    # A second `__init__` sets an unset child in its parent first and merges the values of its
+    # message fields into the messages that the fields have, in the order of the keywords; `add`
+    # appends the message first. Each runtime runs in a process of its own, of 4 GB.
+    names = list(_alias_cases())
+    code, mine, err = _alias_process("ours", names)
+    assert code == 0 and mine is not None, err
+    code, theirs, err = _alias_process("upb", names)
+    assert code == 0 and theirs is not None, err
+    assert {name for name in names if mine[name] != theirs[name]} == set(), {
+        name: (mine[name], theirs[name]) for name in names if mine[name] != theirs[name]
+    }
+    assert all(outcome[0] == "ok" for outcome in mine.values()), mine
+
+
+def test_copies_into_a_message_that_the_value_holds_copy_the_value_first(upb):
+    # Where upb ends its process (its CopyFrom into a message below the value, the copies of a map's
+    # constructor and MergeFrom into an entry below the value, and the extend of a repeated field
+    # by itself, which upb reads as it grows), the runtime copies the value first: the copy of the
+    # value as it was, as a CopyFrom of a copy taken before gives, and a repeated field extended by
+    # itself takes the messages that it has first, as a list. upb runs each case in a process of its
+    # own, which upb's crash ends (another result of upb's must be the runtime's).
+    cases, expected = _alias_crash_cases()
+    names = list(cases)
+    code, mine, err = _alias_process("ours", names, crash=True)
+    assert code == 0 and mine is not None, err
+    assert mine == {name: ["ok", value] for name, value in expected(_alias_classes("ours")).items()}
+    for name in names:
+        code, theirs, err = _alias_process("upb", [name], crash=True)
+        assert code < 0 or (theirs is not None and theirs[name] == mine[name]), (name, code, theirs, err)
+
+
+def _reaching_cases(C):
+    """Python code of a value of a constructor (an `__iter__`, a `__next__`, an `__index__`) that
+    reaches the message under construction through the garbage collector's `get_objects`, and reads
+    or changes it."""
+    N = C("tests.alias.Node")
+    marker = 424242
+
+    def under_construction(before):
+        # The new message of the marker, set first (upb's wrappers of its children are new too).
+        found = [
+            o
+            for o in gc.get_objects()
+            if type(o) is N and id(o) not in before and o.WhichOneof("kind") == "w" and o.w == marker
+        ]
+        assert len(found) == 1, len(found)
+        return found[0]
+
+    def existing():
+        return {id(o) for o in gc.get_objects() if type(o) is N}
+
+    def iter_changes_message():
+        before, seen = existing(), []
+
+        class It:
+            def __iter__(self):
+                m = under_construction(before)
+                seen.append(_hex(m))
+                m.items.add(v=8)
+                m.vs.append(7)
+                return iter([N(v=2)])
+
+        return [_hex(N(w=marker, v=1, items=It(), vs=[3])), seen]
+
+    def next_reads_message():
+        before, seen = existing(), []
+
+        def gen():
+            for v in (2, 3):
+                m = under_construction(before)
+                seen.append([_hex(m), len(m.items)])
+                yield N(v=v)
+
+        return [_hex(N(w=marker, v=1, items=gen())), seen]
+
+    def next_yields_message_itself():
+        before = existing()
+
+        def gen():
+            yield N(v=2)
+            yield under_construction(before)
+
+        return _hex(N(w=marker, v=1, items=gen()))
+
+    def index_changes_message():
+        before, seen = existing(), []
+
+        class Index:
+            def __index__(self):
+                m = under_construction(before)
+                seen.append(_hex(m))
+                m.vs.append(99)
+                m.v = 5
+                return 4
+
+        return [_hex(N(w=marker, v=1, vs=[1, Index(), 3])), seen]
+
+    def index_in_a_mapping():
+        before, seen = existing(), []
+
+        class Index:
+            def __index__(self):
+                m = under_construction(before)
+                seen.append(_hex(m))
+                m.next.next.v = 6
+                return 4
+
+        return [_hex(N(w=marker, v=1, next={"vs": [Index()], "v": 3})), seen]
+
+    def index_clears_message():
+        before = existing()
+
+        class Index:
+            def __index__(self):
+                under_construction(before).Clear()
+                return 4
+
+        return _hex(N(w=marker, v=1, items=[N(v=2)], next={"v": Index()}))
+
+    def index_after_a_list_of_messages():
+        before = existing()
+
+        class Index:
+            def __index__(self):
+                return len(under_construction(before).items)
+
+        return _hex(N(w=marker, items=[N(v=2), N(v=3)], v=Index()))
+
+    cases = [
+        iter_changes_message, next_reads_message, next_yields_message_itself, index_changes_message,
+        index_in_a_mapping, index_clears_message, index_after_a_list_of_messages,
+    ]
+    return {case.__name__: _outcome(case) for case in cases}
+
+
+def test_code_of_a_value_that_reaches_the_message_under_construction_finds_upbs(upb):
+    # The constructor holds no borrow of its message while the Python code of a value runs, and
+    # sets the fields in upb's order: code that reaches the message under construction (of the
+    # garbage collector, which tracks it, as upb's) finds the fields before it set and changes
+    # it as upb's, where it raised the runtime's PanicException ("Already mutably borrowed").
+    assert _reaching_cases(_alias_classes("ours")) == _reaching_cases(_alias_classes("upb"))
+
+
+def _partial_cases(C):
+    """What a second `__init__` (and `add`) leaves of a repeated field whose values fail midway, and
+    of an unset child, as upb's."""
+    N, R = C("tests.alias.Node"), C("spark.connect.Relation")
+
+    def after(make, change):
+        m = make()
+        outcome = _outcome(lambda: change(m))
+        return [outcome, _hex(m)]
+
+    def gen_failing(*values):
+        yield from values
+        raise RuntimeError("midway")
+
+    def unset_child(change):
+        r = R()
+        t = r.limit.input
+        return [_outcome(lambda: change(t)), r.HasField("limit"), _hex(r)]
+
+    return {
+        "scalars, a bad value": after(lambda: N(vs=[0]), lambda m: m.__init__(vs=[1, 2, "x"])),
+        "scalars, a failing iterator": after(lambda: N(vs=[0]), lambda m: m.__init__(vs=gen_failing(1, 2))),
+        "scalars, not iterable": _outcome(lambda: N(vs=5)),
+        "messages, a bad mapping": after(
+            lambda: N(items=[{"v": 0}]), lambda m: m.__init__(items=[{"v": 1}, {"nope": 1}])
+        ),
+        "messages, a bad value of a mapping": after(
+            lambda: N(items=[{"v": 0}]), lambda m: m.__init__(items=[{"v": 1}, {"v": 2, "w": "bad"}])
+        ),
+        "messages, an int": after(lambda: N(items=[{"v": 0}]), lambda m: m.__init__(items=[N(v=1), 5, N(v=3)])),
+        "messages, another type": after(lambda: N(items=[{"v": 0}]), lambda m: m.__init__(items=[N(v=1), R()])),
+        "messages, a failing iterator": after(
+            lambda: N(items=[{"v": 0}]), lambda m: m.__init__(items=gen_failing(N(v=1), {"v": 2}))
+        ),
+        "add, a bad name": after(N, lambda m: m.items.add(v=1, nope=2)),
+        "add, a bad value": after(lambda: N(items=[{"v": 7}]), lambda m: m.items.add(v=1, w="bad")),
+        "a name of no field, of None": _outcome(lambda: R(nope=None)),
+        "an unset child, of **{}": unset_child(lambda t: t.__init__(**{})),
+        "an unset child, of None": unset_child(lambda t: t.__init__(range=None)),
+        "an unset child, of no field": unset_child(lambda t: t.__init__(nope=1)),
+        "an unset child, of no arguments": unset_child(lambda t: t.__init__()),
+    }
+
+
+def test_a_second_init_keeps_what_upbs_keeps_of_a_failure(upb):
+    # A second `__init__` appends the values of a repeated message field in turn, so a failure
+    # midway keeps those before it (and, of a value that is not a mapping, the new message that it
+    # failed to merge into), and those of a repeated scalar field as the container's `extend`
+    # (none, of a failure); `add` removes its message of a failure. A name of no field is upb's
+    # ValueError of a value of None too, and keyword arguments (even none) set an unset child in its
+    # parent first, as upb's `__init__` does.
+    assert _partial_cases(_alias_classes("ours")) == _partial_cases(_alias_classes("upb"))

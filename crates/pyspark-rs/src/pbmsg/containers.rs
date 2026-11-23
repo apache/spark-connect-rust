@@ -30,7 +30,8 @@ use pyo3::ffi;
 use pyo3::prelude::*;
 use pyo3::pyclass_init::PyClassInitializer;
 use pyo3::types::{
-    PyBytes, PyDict, PyInt, PyList, PySlice, PyTuple, PyType, PyWeakrefMethods, PyWeakrefReference,
+    PyBool, PyBytes, PyDict, PyFloat, PyInt, PyList, PySlice, PyString, PyTuple, PyType,
+    PyWeakrefMethods, PyWeakrefReference,
 };
 use pyo3::IntoPyObjectExt;
 
@@ -209,9 +210,23 @@ fn sequence_fast<'py>(value: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> 
 /// now.
 fn fast_item<'py>(values: &Bound<'py, PyAny>, i: usize) -> Option<Bound<'py, PyAny>> {
     match values.cast::<PyList>() {
-        Ok(list) => list.get_item(i).ok(),
-        Err(_) => values.cast::<PyTuple>().ok()?.get_item(i).ok(),
+        Ok(list) => (i < list.len()).then(|| list.get_item(i).ok()).flatten(),
+        Err(_) => {
+            let tuple = values.cast::<PyTuple>().ok()?;
+            (i < tuple.len()).then(|| tuple.get_item(i).ok()).flatten()
+        }
     }
+}
+
+/// Whether `value` converts to a scalar of no Python code: an exact `int`, `float`, `bool`,
+/// `str` or `bytes`, whose conversion (or its error) is CPython's, of no method of a subclass, as
+/// `__index__` and `__float__` of other objects are.
+fn converts_natively(value: &Bound<'_, PyAny>) -> bool {
+    value.is_exact_instance_of::<PyInt>()
+        || value.is_exact_instance_of::<PyFloat>()
+        || value.is_exact_instance_of::<PyBool>()
+        || value.is_exact_instance_of::<PyString>()
+        || value.is_exact_instance_of::<PyBytes>()
 }
 
 /// Whether `a` equals `b`, as `PyObject_RichCompareBool` tells it, as upb's `remove` compares:
@@ -735,20 +750,60 @@ impl RepeatedScalar {
         touch(slf.py(), &owner)
     }
 
-    /// Append the values of `values` (of `PySequence_Fast`), each converted in turn.
+    /// Append the values of `values` (of `PySequence_Fast`), each converted in turn, a step of
+    /// `budget` before each, when it is given. The values that convert of no Python code (of an
+    /// exact `int`, `float`, `bool`, `str` or `bytes`) are appended at once, before a value whose
+    /// conversion may run Python code and at the end, so that such code finds those before it in
+    /// the container, as upb appends each.
     fn append_values(
         slf: &Bound<'_, Self>,
         field: &ScalarField,
         values: &Bound<'_, PyAny>,
+        budget: Option<&ConversionBudget>,
     ) -> PyResult<()> {
         let values = sequence_fast(values)?;
-        let mut i = 0;
-        while let Some(value) = fast_item(&values, i) {
-            let v = field.convert(&value)?;
-            slf.borrow_mut().items.push(v);
-            i += 1;
+        let mut converted = Vec::with_capacity(values.len().unwrap_or(0));
+        let appended = Self::convert_values(slf, field, &values, budget, &mut converted);
+        Self::take_converted(slf, &mut converted);
+        appended
+    }
+
+    /// Convert the values of `values`, a list or a tuple, onto `converted` (see
+    /// [`RepeatedScalar::append_values`]), of the iterator of the list or the tuple, which reads the
+    /// length of a list at each value, as the loop of `PySequence_Fast` does.
+    fn convert_values(
+        slf: &Bound<'_, Self>,
+        field: &ScalarField,
+        values: &Bound<'_, PyAny>,
+        budget: Option<&ConversionBudget>,
+        converted: &mut Vec<Scalar>,
+    ) -> PyResult<()> {
+        let py = slf.py();
+        for value in values.try_iter()? {
+            let value = value?;
+            if let Some(budget) = budget {
+                budget.step(py)?;
+            }
+            if !converts_natively(&value) {
+                Self::take_converted(slf, converted);
+            }
+            converted.push(Scalar::from_py(
+                field.kind,
+                &field.name,
+                &field.enum_type,
+                &value,
+            )?);
         }
         Ok(())
+    }
+
+    /// Append `converted`, values converted for the container, taking them.
+    #[cold]
+    #[inline(never)]
+    fn take_converted(slf: &Bound<'_, Self>, converted: &mut Vec<Scalar>) {
+        if !converted.is_empty() {
+            slf.borrow_mut().items.append(converted);
+        }
     }
 
     /// Set the item at `at` to `value`, as upb's `upb_Array_Set`, whose write past the end of a
@@ -803,10 +858,20 @@ impl RepeatedScalar {
     /// the container of the length that it had: upb resizes it, so a position that Python code
     /// removed meanwhile holds the default.
     fn extend_values(slf: &Bound<'_, Self>, elem_seq: &Bound<'_, PyAny>) -> PyResult<()> {
+        Self::extend_with(slf, elem_seq, None)
+    }
+
+    /// [`RepeatedScalar::extend_values`], of a step of `budget` for each value when it is given,
+    /// as the values of a repeated field of a constructor are (see `PyMessage::init_fields`).
+    pub(crate) fn extend_with(
+        slf: &Bound<'_, Self>,
+        elem_seq: &Bound<'_, PyAny>,
+        budget: Option<&ConversionBudget>,
+    ) -> PyResult<()> {
         Self::reify(slf)?;
         let field = Self::field_of(slf);
         let start = slf.borrow().items.len();
-        let extended = Self::append_values(slf, &field, elem_seq);
+        let extended = Self::append_values(slf, &field, elem_seq, budget);
         if extended.is_err() {
             slf.borrow_mut()
                 .items
@@ -1145,12 +1210,23 @@ impl RepeatedComposite {
     const UPB_CLASS: &'static str = "RepeatedCompositeContainer";
 
     /// As upb's: each value of the iterator of `elem_seq` appended as it comes, so a failure
-    /// leaves the values before it appended. One interrupt budget counts a step for each message
-    /// that the appends merge or copy, so that the extend of many messages lets another thread
-    /// take the GIL, and a signal interrupt it, as a copy does.
+    /// leaves the values before it appended. The container itself is of the messages that it has
+    /// first, as a list's `extend` of itself takes them, where upb's iteration of the container,
+    /// which grows as it is read, ends the process. One interrupt budget counts a step for each
+    /// message that the appends merge or copy, so that the extend of many messages lets another
+    /// thread take the GIL, and a signal interrupt it, as a copy does.
     fn extend_values(slf: &Bound<'_, Self>, elem_seq: &Bound<'_, PyAny>) -> PyResult<()> {
+        let py = slf.py();
         Self::reify(slf)?;
         let budget = ConversionBudget::full();
+        if elem_seq.is(slf) {
+            let items: Vec<Py<PyMessage>> =
+                slf.borrow().items.iter().map(|m| m.clone_ref(py)).collect();
+            for item in items {
+                Self::append_with(slf, item.bind(py), &budget)?;
+            }
+            return Ok(());
+        }
         for value in elem_seq.try_iter()? {
             Self::append_with(slf, &value?, &budget)?;
         }
@@ -1162,8 +1238,10 @@ impl RepeatedComposite {
 /// upb's errors.
 #[pymethods]
 impl RepeatedComposite {
-    /// As upb's: a new message of the fields of `kwargs`, appended; a positional argument is the
-    /// error of a constructor's.
+    /// As upb's: a new message appended, then given the fields of `kwargs` (see
+    /// `PyMessage::init_fields`), so that a value that holds the container reads it with the new
+    /// message in it; a failure removes the last message, as upb's does. A positional argument is
+    /// the error of a constructor's.
     #[pyo3(signature = (*args, **kwargs))]
     fn add<'py>(
         slf: &Bound<'py, Self>,
@@ -1177,10 +1255,16 @@ impl RepeatedComposite {
         Self::reify(slf)?;
         let class = slf.borrow().class.clone_ref(py);
         let child = class.new_message(py)?;
-        if let Some(kwargs) = kwargs {
-            child.borrow_mut().init_from_mapping(py, kwargs.as_any())?;
-        }
         slf.borrow_mut().items.push(child.clone().unbind());
+        if let Some(kwargs) = kwargs {
+            if let Err(err) =
+                PyMessage::init_fields(&child, kwargs.as_any(), &ConversionBudget::full())
+            {
+                // The message removed is dropped once the container is no longer borrowed.
+                let _removed = slf.borrow_mut().items.pop();
+                return Err(err);
+            }
+        }
         Ok(child)
     }
 
@@ -2036,9 +2120,7 @@ impl MapContainer {
     ) -> PyResult<()> {
         if let Ok(fields) = item.cast::<PyDict>() {
             let message = Self::message_of_key(py, target, key)?;
-            message
-                .borrow_mut()
-                .init_from_mapping_with(py, fields.as_any(), budget)?;
+            PyMessage::init_fields(&message, fields.as_any(), budget)?;
             return Ok(());
         }
         if let Ok(message) = item.cast::<PyMessage>() {

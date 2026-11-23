@@ -2271,6 +2271,17 @@ errors are the runtime's `DecodeError` and `EncodeError`. The differences:
   shortens the container, a read past its end raises `IndexError` and an insertion or a deletion
   takes the container as it is, where upb reads or writes past the end of its array, which can
   end the process;
+- a copy of a message into a message that it holds copies the message first, where upb's copy
+  recurses until it ends the process (see "Copies into a message that the value holds" of
+  `dev/parity/known-differences.md`): a `CopyFrom` into a message below its argument (an unset
+  child of it too) or into a value of a map or a repeated field of it, and the constructor and
+  `MergeFrom` of a map of messages, of a value that holds the map, each of what the value was
+  before; and a repeated field of messages extended (or merged) by itself takes the messages that
+  it has first, as a list's `extend` of itself, where upb's reads the field as it grows. A merge
+  into a message that its value holds, the constructor (a second `__init__` too), `add`, `append`
+  and `extend` of a value that holds the message are upb's: upb reads the value as it is when it
+  reads it (it serializes the argument of `MergeFrom` first), after the fields before it are set
+  and the new message of `add` and `append` is appended;
 - the iteration order of a map is the order of insertion, where upb's is that of its hash table,
   which changes from one process to another (two processes of upb serialize the same `Struct` of
   other orders), so no program can rely on upb's. The serialization of a map writes its entries in
@@ -2280,17 +2291,21 @@ errors are the runtime's `DecodeError` and `EncodeError`. The differences:
   them in upb's order of the keys of its text, and `text_format` in its own, as of upb's messages.
   upb's orders take the keys of a signed integer type as unsigned numbers, so that a negative key
   comes after the others;
-- it makes a Python object of each message that it parses or merges, where upb makes one when the
-  message is read. A copy (of a message of the runtime given to a constructor, of `CopyFrom`,
+- it makes a Python object of each message that it parses or merges into, where upb makes one when
+  the message is read. A copy (of a message of the runtime given to a constructor, of `CopyFrom`,
   `copy.copy` and `copy.deepcopy`) holds what it copies natively, of no Python object, and makes
   the object of a message, a repeated field or a map of it, of one level, when Python first reads
   it, as upb makes its objects; what a copy holds natively, a copy of the copy shares, so
-  `proto.Expression(merge_action=action)` copies an action of any size at once. So the parse, the
-  copy of a message that a parse made and the release of a message of many messages take several
-  times as long as upb's (of CPU time, of a message of a million messages: 0.3 s for the parse,
-  upb's 0.05 s, 0.25 s for `CopyFrom` and `copy.deepcopy`, upb's 0.1 s, and 0.3 s for `MergeFrom`,
-  upb's 0.09 s), and a read of every message of a copy takes as long as the copy of each message
-  as an object took before. The parse, the constructor (of lists and mappings too),
+  `proto.Expression(merge_action=action)` copies an action of any size at once. `MergeFrom` copies
+  its argument so first, as upb serializes it first, and merges the copy, of which a field that the
+  message does not hold takes the value as it is (so `append` and `extend`, which merge each value
+  into a new message, make no object of it either). So the parse, the copy of a message that a
+  parse made and the release of a message of many messages take several times as long as upb's
+  (of CPU time, of a message of a million messages: 0.3 s for the parse, upb's 0.05 s, 0.25 s for
+  `CopyFrom`, `copy.deepcopy` and `MergeFrom`, upb's 0.1 s (0.09 s of `MergeFrom`), and 0.33 s for
+  a `MergeFrom` into a message that has the repeated field already, whose objects it makes of the
+  copy, upb's 0.08 s), and a read of every message of a copy takes as long as the copy of each
+  message as an object took before. The parse, the constructor (of lists and mappings too),
   the copies (`CopyFrom`, and `copy.deepcopy` of a message or of a repeated field of messages), the
   merges (`MergeFrom`), the `extend` of a repeated field of messages and the `update` and
   `MergeFrom` of a map let another thread take the GIL, and a signal interrupt them with the

@@ -8,6 +8,8 @@
 //! given a message of the runtime (as `proto.MergeAction(condition=c)`), `CopyFrom`, `copy.copy`
 //! and `copy.deepcopy` copy the message without an object of Python for each message that it holds,
 //! which the copies of the runtime made before, as an object of Python is a message of the runtime.
+//! `MergeFrom` copies its argument so before it merges it (`message::Snapshot`), as upb serializes
+//! it first, so that a merge into a message that the argument holds reads what it was.
 //! A native value is never changed (but by [`Value::discard_unknown`], which clones what it shares
 //! first), so a copy of a message that holds native values shares them.
 //!
@@ -43,9 +45,8 @@ pub(crate) enum Value {
 /// of Python.
 pub(crate) struct Native {
     pub(crate) fields: Fields,
-    /// The levels of messages below the message, as `deeper_than` counts them: a message of a
-    /// field or of a repeated field, a map entry and the message of the value of an entry each a
-    /// level.
+    /// The levels of messages below the message, as upb's parse counts them: a message of a field
+    /// or of a repeated field, a map entry and the message of the value of an entry each a level.
     pub(crate) depth: u32,
     /// The generation of the classes of the messages (see `message::generation`) of the copy that
     /// made the message, which the objects of it and of the messages below it are made of: of the
@@ -81,12 +82,14 @@ pub(crate) enum NativeValue {
     Message(Arc<Native>),
 }
 
-/// Why a copy stopped: an error of Python (of a checkpoint of its budget), or a message of more
+/// Why a copy stopped: an error of Python (of a checkpoint of its budget), a message of more
 /// levels below the message copied than the copy takes, which the caller then copies of its bytes,
-/// as upb copies it, of upb's `DecodeError`.
+/// as upb copies it, of upb's `DecodeError`, or the message that the copy watches for (see
+/// [`At::watching`]), which the copied message is or holds.
 pub(crate) enum CopyError {
     Python(PyErr),
     TooDeep,
+    Holds,
 }
 
 impl From<PyErr> for CopyError {
@@ -118,12 +121,30 @@ fn below(levels: Levels) -> Result<Levels, CopyError> {
 pub(crate) struct At {
     pub(crate) levels: Levels,
     level: u32,
+    /// The object of the message that the copy stops at (see [`At::watching`]), if any.
+    watch: Option<*mut pyo3::ffi::PyObject>,
 }
 
 impl At {
     /// The message copied, of the levels `levels` below it.
     pub(crate) fn top(levels: Levels) -> At {
-        At { levels, level: 0 }
+        At {
+            levels,
+            level: 0,
+            watch: None,
+        }
+    }
+
+    /// The copy as it is, but that it stops with [`CopyError::Holds`] at `message`, if the message
+    /// copied is it or holds it, at any level: a value that the field of a message is given, which
+    /// holds the message, is copied once the field holds what it was given before, as upb copies
+    /// each value of a repeated field after the one before it is appended (see
+    /// `PyMessage::init_fields`).
+    pub(crate) fn watching(self, message: &Bound<'_, PyMessage>) -> At {
+        At {
+            watch: Some(message.as_ptr()),
+            ..self
+        }
     }
 
     /// A message one level below, or [`CopyError::TooDeep`] if the copy may take none.
@@ -131,6 +152,7 @@ impl At {
         Ok(At {
             levels: below(self.levels)?,
             level: self.level + 1,
+            watch: self.watch,
         })
     }
 
@@ -217,8 +239,8 @@ impl NativeMap {
 }
 
 impl Value {
-    /// The levels of messages that the value adds below the message of its field, as
-    /// `deeper_than` counts them.
+    /// The levels of messages that the value adds below the message of its field, as upb's parse
+    /// counts them (see [`Native::depth`]).
     pub(crate) fn depth(&self) -> u32 {
         match self {
             Value::Message(m) => m.depth.saturating_add(1),
@@ -440,6 +462,9 @@ pub(crate) fn copy_message(
     generation: u64,
     budget: &ConversionBudget,
 ) -> Result<Native, CopyError> {
+    if at.watch == Some(message.as_ptr()) {
+        return Err(CopyError::Holds);
+    }
     at.grown(|| {
         budget.step(py)?;
         let (slots, unknown, desc) = copy_parts(py, message, at, generation, budget, true)?;
@@ -477,7 +502,7 @@ pub(crate) fn copy_slots(
 
 /// A native copy of the set fields and the unknown fields of `message`, of its type too when
 /// `with_desc` (of a native message, which an object does not need), of the levels of `at` that
-/// may still be below it, as `deeper_than` counts them: [`CopyError::TooDeep`] at the first
+/// may still be below it, as upb's parse counts them: [`CopyError::TooDeep`] at the first
 /// message past them. Its scalars, its repeated scalars and the native values that it holds
 /// (shared) are read under a short borrow; the messages, the containers of messages and the maps
 /// that it holds are copied after it, in their places, so that the checkpoints of the copy of a
@@ -612,7 +637,9 @@ pub(crate) fn copy_slots_now(
     match copy_slots(py, message, At::top(None), generation(), budget) {
         Ok(parts) => Ok(parts),
         Err(CopyError::Python(err)) => Err(err),
-        Err(CopyError::TooDeep) => unreachable!("a copy of any depth is never too deep"),
+        Err(CopyError::TooDeep | CopyError::Holds) => {
+            unreachable!("a copy of any depth, watching no message, stops for neither")
+        }
     }
 }
 
@@ -633,6 +660,35 @@ pub(crate) fn duplicate_native<'py>(
     };
     copy.borrow_mut().take_fields(fields);
     Ok(copy)
+}
+
+/// An object of the native message `message`, as [`duplicate_native`] makes it, of its own fields,
+/// moved where no other value holds the message, as a merge takes the messages of the snapshot
+/// that it made (see `message::Snapshot`).
+pub(crate) fn duplicate_owned<'py>(
+    py: Python<'py>,
+    message: Arc<Native>,
+    class: Option<&MessageClass>,
+    budget: &ConversionBudget,
+) -> PyResult<Bound<'py, PyMessage>> {
+    budget.step(py)?;
+    let fields = fields_at(py, message, generation());
+    let copy = match class {
+        Some(class) => class.new_message(py)?,
+        None => MessageClass::of(py, &fields.desc.full_name)?.new_message(py)?,
+    };
+    copy.borrow_mut().take_fields(fields);
+    Ok(copy)
+}
+
+/// The fields of the native message `message`, as fields of a copy made at `generation`: its own,
+/// moved, if no other value holds it and it was made then, else a copy of one level of them, at
+/// `generation` (see [`Fields::clone_native_at`]).
+pub(crate) fn fields_at(py: Python<'_>, message: Arc<Native>, generation: u64) -> Fields {
+    if message.generation == generation {
+        return own_fields(py, message);
+    }
+    message.fields.clone_native_at(py, generation)
 }
 
 /// Set the fields of `message`, a new object of the type of `native`, of one level of `native`.
@@ -817,8 +873,8 @@ mod tests {
     }
 
     /// A native message of a million levels drops a level at a time, where a recursion of as many
-    /// levels would overflow the stack of the thread of the test, and knows its levels as
-    /// `deeper_than` counts them.
+    /// levels would overflow the stack of the thread of the test, and knows its levels as upb's
+    /// parse counts them.
     #[test]
     fn deep_native_messages_drop_a_level_at_a_time() {
         let relation = pool()
