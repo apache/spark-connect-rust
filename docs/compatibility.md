@@ -3390,10 +3390,11 @@ object of it. PySpark's session object closes its client when it is freed, and t
 nothing for a closed client. The drop-in drops such a session, closes its client, and closes the
 connection of the process to its server once no session uses it, which the sessions of
 `newSession()` and `cloneSession()` share, as PySpark's channels share their subchannels, but a
-session of a token, whose connection is its own. Once its `catalog` or `streams` is read,
-PySpark's session object is in a reference cycle, which only the garbage collector frees, so that
-until a collection its exit still cleans its ML cache; the drop-in's session has no such cycle and
-is freed at once, as PySpark's is by a collection.
+session of a token, whose connection is its own. Once its `catalog` is read, the session object
+of either client is in a reference cycle with its catalog, which holds it as its `_sparkSession`,
+and which only the garbage collector frees, so that until a collection its exit still cleans its
+ML cache, as PySpark's. PySpark's is so once its `streams` is read too, of whose cycle the
+drop-in's session has none: it is freed at once, as PySpark's is by a collection.
 A client that no session object owns, of `SparkConnectClient(...)` or of its `newSession()` or
 `clone()`, lives until the exit, as PySpark's `atexit` registration keeps it, so its ML cache
 is cleaned at exit unless it is closed, even when the program dropped it.
@@ -3870,23 +3871,44 @@ only, of which the drop-in's native readers and writers are not: their MRO is th
 `object`, and `pyspark.sql.connect.readwriter` has no `OptionUtils`.
 
 PySpark's classes are plain Python classes, which a user subclasses. So are these of the drop-in:
-the DataFrame, `Observation`, and the `SparkSession`, `Catalog`, `DataSourceRegistration`,
-`DataFrameReader` and `DataStreamReader` of `pyspark.sql.connect`, which construct of their PySpark
-arguments (`SparkSession(connection=...)`, `Catalog(spark)`, `DataFrameReader(spark)`), also a
-subclass of an `__init__` of its own, and whose setters, copies and pickles are of the subclass (but
-those of a session, which are the active session of its ID, as PySpark's); `SparkSession.Hook`,
+the DataFrame, `Observation`, and the `SparkSession`, `Catalog`, `TableValuedFunction`,
+`DataSourceRegistration`, `RuntimeConf`, `DataFrameReader` and `DataStreamReader` of
+`pyspark.sql.connect`, which construct of their PySpark arguments (`SparkSession(connection=...)`,
+`Catalog(spark)`, `RuntimeConf(spark.client)`, `DataFrameReader(spark)`), also a subclass of an
+`__init__` of its own, and whose setters, copies and pickles are of the subclass (but those of a
+session, which are the active session of its ID, as PySpark's); `SparkSession.Hook`,
 `StorageLevel` and `PythonEvalType`; and the data types, from `StringType` and `DecimalType` to
 `ArrayType`, `StructField` and `StructType` (see above). A session of a subclass is the session that
-its DataFrames, readers and catalogs give back, as in PySpark. The `__init__` of the class gives an
-object its session, as PySpark's `__init__` sets it: the session of a new client, of
-`SparkSession(connection, userId=None, hook_factories=None)`, and the session of its argument for
-the others, which must be a session, where PySpark's keeps any object until it is used, which raises
-its `AttributeError` then. Until it runs, as for a subclass whose `__init__` does not call it, a
-session, a reader or a catalog is of a session of no server, whose requests raise
-`NO_ACTIVE_SESSION`, where PySpark's raise the `AttributeError` of the first attribute that the
-method reads: `_client` of a session, `_sparkSession` of a catalog, and `_options`, `_schema` or
-`_format` of a reader (a reader or a catalog is of the first session among the arguments of a
-subclass, if any, which then works), and a registration has no `sparkSession`, as PySpark's. So a
+its DataFrames, readers and catalogs give back, as in PySpark.
+
+The catalog, the table-valued functions, the data source registration and the runtime
+configuration of a session keep their state in their `__dict__`, as PySpark's: their `__init__`
+sets the object that it is given, whatever it is, as their `_sparkSession` (`sparkSession` of a
+registration, `_client` of a configuration), and their methods read that attribute where PySpark's
+read it, through a property, a `__getattr__` or an assignment of a subclass too. So
+`vars(spark.catalog)` is `{'_sparkSession': spark}`, an object whose `__init__` never ran, as of a
+subclass whose `__init__` does not call it, raises the `AttributeError` of that attribute at its
+first use, as PySpark's, and their copies and pickles are those of their `__dict__`. Of another
+object than a session, as a proxy of a session, a catalog and the table-valued functions make the
+requests of the session of the client of its `client`, the `range` of the table-valued functions
+is the `range` of that object and the `registerFunction` of a catalog its `udf.register`, as
+PySpark's call them. A configuration calls the `config` of its `_client` with the
+`ConfigRequest.Operation` of `pyspark.sql.connect.proto` of each request, and a registration the
+`register_data_source` of the `_client` of its `sparkSession`, where that client is of another
+class or overrides the method, as PySpark's do; the native transport of the drop-in's client makes
+them otherwise. A catalog and the table-valued functions of a client of another class raise its
+`TypeError`, and the DataFrames that they make are of the session of the client, where PySpark's
+call the methods of the client and make DataFrames of the object (see
+`dev/parity/known-differences.md`).
+
+The `__init__` of a session or a reader gives it its session, as PySpark's `__init__` sets it: the
+session of a new client, of `SparkSession(connection, userId=None, hook_factories=None)`, and the
+session of its argument for a reader, which must be a session, where PySpark's keeps any object
+until it is used, which raises its `AttributeError` then. Until it runs, as for a subclass whose
+`__init__` does not call it, a session or a reader is of a session of no server, whose requests
+raise `NO_ACTIVE_SESSION`, where PySpark's raise the `AttributeError` of the first attribute that
+the method reads: `_client` of a session, and `_options`, `_schema` or `_format` of a reader (a
+reader is of the first session among the arguments of a subclass, if any, which then works). So a
 pickle of PySpark, which makes an object of its class without arguments and then sets its
 `__dict__`, loads in the drop-in: a reader, of the `_client`, `_format`, `_schema` and `_options`
 (and `_source_name`) of its state, which it sets as its setters do, a catalog of its `_sparkSession`
@@ -3912,10 +3934,8 @@ does not have them, so a subclass would have no `__init__` to call:
   `__dict__`: lists of the `_expr` of Columns, whose `repr` is that of PySpark's expressions (`[a]`,
   `[a ASC NULLS FIRST]`), made at each read, and the `WindowFrame` of `pyspark.sql.connect.window`,
   or None.
-- `RuntimeConf` takes a `SparkConnectClient`, whose transport is native.
 - `StreamingQueryManager` and `StreamingQuery` take a session and the IDs of a query, of the
   listener bus and the queries of the Rust core.
-- `TableValuedFunction` takes a session, of whose native core it is.
 
 A `copy.copy` or `copy.deepcopy` of a DataFrame requests its schema as PySpark's does, one request
 for the copy, and one more for the DataFrame in a deep copy when it has no schema yet, so a stopped

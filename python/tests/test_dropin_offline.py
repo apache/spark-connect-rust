@@ -43682,9 +43682,11 @@ def test_pyspark_pickles_of_readers_catalogs_and_registrations_load_as_pyspark(m
         "rate", "", {"rowsPerSecond": "5"}, "src_1")
     catalog = loaded(Catalog, _sparkSession=spark, extra=2)
     assert type(catalog) is Catalog and catalog._sparkSession is spark and catalog.extra == 2
+    # The state of the catalog and of the registration is their __dict__, as PySpark's.
+    assert vars(catalog) == {"_sparkSession": spark, "extra": 2}
     registration = loaded(DataSourceRegistration, sparkSession=spark)
     assert type(registration) is DataSourceRegistration and registration.sparkSession is spark
-    assert vars(registration) == {}
+    assert vars(registration) == {"sparkSession": spark}
     # Without an active session, the session of the pickle raises NO_ACTIVE_SESSION, as
     # PySpark's.
     pickled = cloudpickle.dumps(PySparkObject(DataFrameReader, {"_client": spark, "_options": {}}))

@@ -50,6 +50,7 @@ mod row;
 mod session;
 mod stat;
 mod stat_arguments;
+mod state;
 mod storagelevel;
 mod streaming;
 mod tablearg;
