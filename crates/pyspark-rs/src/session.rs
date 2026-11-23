@@ -2057,6 +2057,51 @@ impl PySparkSession {
         }
     }
 
+    /// PySpark's `createDataFrame` of the local data `data`, which is not empty, under the struct
+    /// `schema`, which holds a type of a Python subclass that overrides what PySpark's conversion
+    /// reads, or of a native class patched over one (see `converts_local_data_of_pyspark`): as
+    /// PySpark's, the rows (`local_rows`, of dicts of sorted keys and of a value that is no row as
+    /// a row of it) are converted by its conversion (`LocalDataToArrowConversion`), which reads
+    /// the fields of the struct, their names, types and flags, and those of the types that they
+    /// hold, as Python reads them, of its errors. Then the number of the fields of the struct is
+    /// checked against the columns of the table (`AXIS_LENGTH_MISMATCH`), and the relation is of
+    /// the table, of the `json()` of the struct as its schema, which reads the attributes too
+    /// (`types::pyspark_schema_json_text`).
+    fn create_from_local_of_pyspark(
+        &self,
+        py: Python<'_>,
+        data: &Bound<'_, PyAny>,
+        schema: &Bound<'_, PyAny>,
+        options: &spark_connect::ArrowInputOptions,
+    ) -> PyResult<PyDataFrame> {
+        // As PySpark's, which reads the number of the fields first.
+        let expected = schema.getattr(pyo3::intern!(py, "fields"))?.len()?;
+        let arrow_input = py.import("pyspark.sql._arrow_input")?;
+        let rows = arrow_input.getattr("local_rows")?.call1((data,))?;
+        let table = arrow_input.getattr("convert_local_rows")?.call1((
+            rows,
+            schema,
+            options.use_large_var_types() == Some("true"),
+        ))?;
+        let actual: usize = table.getattr("num_columns")?.extract()?;
+        if actual != expected {
+            return Err(crate::infer::axis_length_mismatch(py, expected, actual));
+        }
+        let options = with_schema_json(
+            options.clone(),
+            crate::types::pyspark_schema_json_text(Some(schema))?,
+        );
+        let relation = crate::types::py_to_data_type_as_given(schema)?;
+        let batches = crate::pyarrow_import::table_batches(&table)?;
+        // Of no part of plans and expressions, as the other relations of local data.
+        let df = crate::interrupt::interruptible_without_parts(py, &self.session, || {
+            self.session
+                .create_dataframe_from_arrow_with_options(batches, Some(relation), &options)
+                .map_err(Box::new)
+        })?;
+        Ok(PyDataFrame::new(df))
+    }
+
     /// PySpark's `createDataFrame` of `data` under the struct `schema` of a type that does not
     /// lower now, whose lowering raised `error`: PySpark reads its settings and converts the data
     /// to Arrow, of the errors of its converters, also those of the `sqlType()` and the
@@ -2796,9 +2841,22 @@ impl PySparkSession {
         } else {
             data.getattr("shape")?.get_item(1)?.extract()?
         };
+        // As PySpark's, of the number of the fields of the struct as Python reads them, and of
+        // the `json()` of the struct as the relation's schema, which read the attributes of a
+        // Python subclass of its own or of a patched class (`converts_local_data_of_pyspark`).
+        let of_pyspark = match schema_object {
+            Some(schema) => converts_local_data_of_pyspark(py, schema)?,
+            None => false,
+        };
         let (names, num_cols, schema) = match spec {
             Spec::Names(names) => (Some(names), None, None),
-            Spec::Struct(fields) => (None, Some(fields.len()), Some(DataType::Struct { fields })),
+            Spec::Struct(fields) => {
+                let num_cols = match schema_object.filter(|_| of_pyspark) {
+                    Some(schema) => schema.getattr(pyo3::intern!(py, "fields"))?.len()?,
+                    None => fields.len(),
+                };
+                (None, Some(num_cols), Some(DataType::Struct { fields }))
+            }
             Spec::Atomic(atomic) => (None, Some(1), Some(atomic)),
             Spec::None => (None, None, None),
         };
@@ -2835,7 +2893,12 @@ impl PySparkSession {
         if let Some(DataType::Unparsed { data_type_string }) = &schema {
             return schema_text_dataframe(&self.session, data_type_string.clone());
         }
-        let options = with_schema_json(options, crate::types::schema_json_text(schema_object)?);
+        let schema_json = if of_pyspark {
+            crate::types::pyspark_schema_json_text(schema_object)?
+        } else {
+            crate::types::schema_json_text(schema_object)?
+        };
+        let options = with_schema_json(options, schema_json);
         let batches = crate::pyarrow_import::table_batches(&table)?;
         let df = crate::interrupt::interruptible_without_parts(py, &self.session, || {
             self.session
@@ -3400,6 +3463,72 @@ fn pandas_column_names(
             .collect(),
         None => Ok(fields.iter().map(|field| field.name.clone()).collect()),
     }
+}
+
+/// Whether `createDataFrame` of local data under `schema` converts the data with PySpark's
+/// conversion (`create_from_local_of_pyspark`), as PySpark's does, where the native conversion
+/// reads the native types: of a struct that holds a type of a Python subclass that overrides an
+/// attribute that PySpark's conversion and its `json()` read, at any level, or of a native class
+/// patched over one (`types::holds_json_reads_otherwise`), where PyArrow is, which PySpark's
+/// conversion needs. Not of a struct whose `names` and `fields`, as Python reads them, may not be
+/// those that PySpark's `__init__` assigned (`local_fields_as_assigned`), whose rows the native
+/// conversion converts, of the fields that it was given, as of a pandas DataFrame.
+fn converts_local_data_of_pyspark(py: Python<'_>, schema: &Bound<'_, PyAny>) -> PyResult<bool> {
+    Ok(schema.is_instance_of::<crate::types::PyStructType>()
+        && crate::types::holds_json_reads_otherwise(py, schema)?
+        && py
+            .import("pyspark.sql._pandas_input")?
+            .getattr("pyarrow_available")?
+            .call0()?
+            .is_truthy()?
+        && local_fields_as_assigned(py, schema)?)
+}
+
+/// Whether the `names` and the `fields` of the struct `schema`, which PySpark's conversion of local
+/// data reads (`fieldNames()` and `fields`), as Python reads them, may be those that PySpark's
+/// `__init__` assigns together through the class: of a class that defines neither, whose reads
+/// are of the native values, or of one whose reads of them do not raise an `Exception`, and are
+/// as many where both have a length (the conversion takes a list of the names). The native
+/// `__init__` does not assign them through the class's setters (SPARK-62231), so a property of
+/// such a setter reads the state that the setter did not write, of none, of its default, or of
+/// the `AttributeError` of the attribute that the setter sets, where PySpark's reads what
+/// `__init__` gave it: the native conversion converts the rows of such a struct, of the fields
+/// that it was given, as PySpark's of the fields of its setter.
+fn local_fields_as_assigned(py: Python<'_>, schema: &Bound<'_, PyAny>) -> PyResult<bool> {
+    /// The value of `result`, or None of the `Exception` that it raised.
+    fn of_exception<T>(py: Python<'_>, result: PyResult<T>) -> PyResult<Option<T>> {
+        match result {
+            Ok(value) => Ok(Some(value)),
+            Err(err) if err.is_instance_of::<pyo3::exceptions::PyException>(py) => Ok(None),
+            Err(err) => Err(err),
+        }
+    }
+    let reads_as_native = py
+        .import("pyspark.sql._pandas_input")?
+        .getattr("_reads_as")?
+        .call1((
+            schema.get_type(),
+            py.get_type::<crate::types::PyStructType>(),
+            ("names", "fields"),
+        ))?
+        .is_truthy()?;
+    if reads_as_native {
+        return Ok(true);
+    }
+    let names = of_exception(py, schema.getattr(pyo3::intern!(py, "names")))?;
+    let fields = of_exception(py, schema.getattr(pyo3::intern!(py, "fields")))?;
+    let (Some(names), Some(fields)) = (names, fields) else {
+        return Ok(false);
+    };
+    Ok(
+        match (
+            of_exception(py, names.len())?,
+            of_exception(py, fields.len())?,
+        ) {
+            (Some(names), Some(fields)) => names == fields,
+            _ => true,
+        },
+    )
 }
 
 /// Whether the `names` and the `fields` of the struct `schema`, as Python reads them, are as many,
@@ -4158,6 +4287,17 @@ impl PySparkSession {
                 || session.arrow_input_options(),
             )?)
         };
+        // As PySpark's createDataFrame of local data under a struct that holds a type of a Python
+        // subclass that overrides what its conversion reads, or of a native class patched over
+        // one: PySpark's conversion of the rows, and the `json()` of the struct, as the relation's
+        // schema (`create_from_local_of_pyspark`).
+        if let (Some(schema), Some(options)) = (schema, options.as_ref()) {
+            if converts_local_data_of_pyspark(py, schema)? {
+                return this
+                    .get()?
+                    .create_from_local_of_pyspark(py, data, schema, options);
+            }
+        }
         // Preserve schema parsing, ignored-argument warnings, and pandas/Arrow routing.
         // Only a native StructType opts into this explicit integer optimization;
         // DDL, inferred schemas and unsupported values keep schema-driven conversion.

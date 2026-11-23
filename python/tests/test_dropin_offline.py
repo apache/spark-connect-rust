@@ -23598,9 +23598,10 @@ def test_create_dataframe_of_a_pandas_frame_sends_the_json_of_its_struct_as_pysp
     # alone, and of a pyarrow Table, which is cast to the struct. A struct whose `fields` property
     # reads none, as the native `__init__` does not assign through its setter (SPARK-62231),
     # takes the row path, of the relation of the fields that it was given, as its rows are, as
-    # PySpark's are of the fields of its setter. The relation of rows that the native types
-    # convert, of local rows and of a frame without PyArrow, is of those types, as the rows are
-    # (see the known differences).
+    # PySpark's are of the fields of its setter. Local rows convert with PySpark's conversion too
+    # (see `test_create_dataframe_of_local_data_under_a_subclass_converts_it_as_pyspark`); the
+    # relation of the rows that the native types convert, of a frame without PyArrow, is of those
+    # types, as the rows are (see the known differences).
     pd = pytest.importorskip("pandas")
     pa = pytest.importorskip("pyarrow")
     spark, service = mock_connect
@@ -23648,10 +23649,121 @@ def test_create_dataframe_of_a_pandas_frame_sends_the_json_of_its_struct_as_pysp
     assert sent(spark.createDataFrame(pd.DataFrame({"a": [1]}), flds)) == ([{"a": 1}], field("long"))
     assert sent(spark.createDataFrame(pd.DataFrame({"a": pd.Series([], dtype="int64")}), flds)) == (
         None, field("long"))
-    assert sent(spark.createDataFrame([(1,)], strs)) == ([{"a": 1}], field("long"))
+    assert sent(spark.createDataFrame([(1,)], strs)) == ([{"a": "1"}], field("string"))
     with _pandas_row_path():
         assert sent(spark.createDataFrame(pd.DataFrame({"a": [1]}), strs)) == (
             [{"a": 1}], field("long"))
+
+
+def test_create_dataframe_of_local_data_under_a_subclass_converts_it_as_pyspark(mock_connect):
+    # As PySpark's createDataFrame of local data under a struct that holds a type of a Python
+    # subclass that overrides what its conversion reads (`LocalDataToArrowConversion`), which
+    # reads the fields of the struct, and their names, types and flags, and those of the types
+    # that they hold, as Python reads them, at any depth: the rows are converted by those types
+    # (an int under a field whose `dataType` reads `StringType()` is the str of it, a bool its
+    # lower-cased str), of their errors (a None under a field that reads as not nullable, an int
+    # past an int field), and the relation's schema is the `json()` of the struct, which reads
+    # them too. So are the rows of dicts, Rows, values that are no rows and iterators, and a
+    # NumPy array, whose table is of its columns, of the `json()` of the struct. A struct whose
+    # `fields` property reads none, as the native `__init__` does not assign through its setter
+    # (SPARK-62231), and a struct of the native classes, convert by the native types, of the
+    # fields that they were given, as PySpark's are of them; and so does local data without
+    # PyArrow, which PySpark's conversion needs.
+    np = pytest.importorskip("numpy")
+    pa = pytest.importorskip("pyarrow")
+    from pyspark.errors import PySparkValueError
+
+    spark, service = mock_connect
+
+    class FieldStr(T.StructField):
+        @property
+        def dataType(self):
+            return T.StringType()
+
+        @dataType.setter
+        def dataType(self, value):
+            self.__dict__["given"] = value
+
+    class FieldInt(T.StructField):
+        @property
+        def dataType(self):
+            return T.IntegerType()
+
+        @dataType.setter
+        def dataType(self, value):
+            self.__dict__["given"] = value
+
+    class FieldNotNull(T.StructField):
+        @property
+        def nullable(self):
+            return False
+
+        @nullable.setter
+        def nullable(self, value):
+            self.__dict__["given"] = value
+
+    class StructFlds(T.StructType):
+        @property
+        def fields(self):
+            return list(self.__dict__.get("_f", []))
+
+        @fields.setter
+        def fields(self, value):
+            self.__dict__["_f"] = value
+
+    def sent(df):
+        df.toArrow()
+        request = parse_message(service.execute_requests[-1])
+        relation = parse_message(parse_message(request[3][0])[1][0])
+        local = parse_message(relation[11][0])
+        table = pa.ipc.open_stream(local[1][0]).read_all()
+        return table.to_pylist(), [str(t) for t in table.schema.types], json.loads(local[2][0])
+
+    def struct_of(*fields):
+        return {"fields": [{"metadata": {}, "name": name, "nullable": True, "type": type_name}
+                           for name, type_name in fields], "type": "struct"}
+
+    long_type = T.LongType()
+    strs = T.StructType([FieldStr("a", long_type)])
+    of_strs = struct_of(("a", "string"))
+    for data, rows in [
+        ([(1,)], [{"a": "1"}]),
+        ([("x",)], [{"a": "x"}]),
+        ([(True,)], [{"a": "true"}]),
+        ([{"a": 1}], [{"a": "1"}]),
+        ([T.Row(a=1)], [{"a": "1"}]),
+        ([None], [{"a": None}]),
+        ([1, 2], [{"a": "1"}, {"a": "2"}]),
+        ((row for row in [(1,), (2,)]), [{"a": "1"}, {"a": "2"}]),
+    ]:
+        assert sent(spark.createDataFrame(data, strs)) == (rows, ["string"], of_strs)
+    # Of a NumPy array, the table of its columns, of the `json()` of the struct.
+    assert sent(spark.createDataFrame(np.array([[1], [2]]), strs)) == (
+        [{"value": 1}, {"value": 2}], ["int64"], of_strs)
+    assert sent(spark.createDataFrame([(1, 2)], T.StructType([
+        FieldInt("a", long_type), T.StructField("b", long_type)]))) == (
+        [{"a": 1, "b": 2}], ["int32", "int64"], struct_of(("a", "integer"), ("b", "long")))
+    nested = T.StructType([T.StructField("s", T.ArrayType(T.StructType([FieldStr("a", long_type)])))])
+    assert sent(spark.createDataFrame([([(1,)],)], nested)) == (
+        [{"s": [{"a": "1"}]}], ["list<element: struct<a: string>>"],
+        {"fields": [{"metadata": {}, "name": "s", "nullable": True, "type": {
+            "containsNull": True, "elementType": of_strs, "type": "array"}}], "type": "struct"})
+    with pytest.raises(PySparkValueError, match="must not be None"):
+        spark.createDataFrame([(None,)], T.StructType([FieldNotNull("a", long_type)]))
+    with pytest.raises(pa.ArrowInvalid, match="too large to fit in C integer type"):
+        spark.createDataFrame([(2**40,)], T.StructType([FieldInt("a", long_type)]))
+    with pytest.raises(PySparkValueError) as error:
+        spark.createDataFrame([(1, 2)], strs)
+    assert error.value.getCondition() == "AXIS_LENGTH_MISMATCH"
+    # The native types convert the rows of the native classes, and of a struct whose `fields`
+    # property reads none, of the fields that they were given, of their JSON.
+    flds = StructFlds([T.StructField("a", long_type)])
+    for schema in (T.StructType([T.StructField("a", long_type)]), flds):
+        assert sent(spark.createDataFrame([(1,)], schema)) == (
+            [{"a": 1}], ["int64"], struct_of(("a", "long")))
+    with _pandas_row_path():
+        assert sent(spark.createDataFrame([(1,)], strs)) == (
+            [{"a": 1}], ["int64"], struct_of(("a", "long")))
 
 
 def test_customized_pandas_normalization_methods_do_not_run_as_pyspark(mock_connect):

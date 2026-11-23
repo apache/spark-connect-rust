@@ -3187,6 +3187,76 @@ def test_create_dataframe_of_a_pandas_frame_under_a_subclass_that_overrides_its_
     assert error.value.getCondition() == "INVALID_COLUMN_OR_FIELD_DATA_TYPE"
 
 
+def test_create_dataframe_of_local_data_under_a_subclass_that_overrides_its_reads(session):
+    # As official PySpark 4.3.0's createDataFrame of local data, whose conversion
+    # (`LocalDataToArrowConversion`) and the `json()` of the struct that the relation sends read
+    # the attributes of a Python subclass that overrides them, as Python reads them: of a field
+    # whose `dataType` reads `StringType()`, an int is its str and a bool its lower-cased str, of
+    # tuples, dicts, Rows and NumPy arrays, also in a struct in an array; of one that reads
+    # `IntegerType()`, the column is of ints; of one that reads a name of its own, the column is
+    # of that name; and of a struct that iterates its fields in reverse, the schema is of the
+    # fields in reverse, which the table is not of, and which the server raises
+    # INVALID_COLUMN_OR_FIELD_DATA_TYPE of.
+    np = pytest.importorskip("numpy")
+
+    class FieldStr(StructField):
+        @property
+        def dataType(self):
+            return StringType()
+
+        @dataType.setter
+        def dataType(self, value):
+            self.__dict__["given"] = value
+
+    class FieldInt(StructField):
+        @property
+        def dataType(self):
+            return IntegerType()
+
+        @dataType.setter
+        def dataType(self, value):
+            self.__dict__["given"] = value
+
+    class FieldName(StructField):
+        @property
+        def name(self):
+            return "renamed"
+
+        @name.setter
+        def name(self, value):
+            self.__dict__["given"] = value
+
+    class StructRevr(StructType):
+        def __iter__(self):
+            return iter(list(self.fields)[::-1])
+
+    strs = StructType([FieldStr("a", LongType())])
+    for data, rows in [
+        ([(1,), (True,)], [Row(a="1"), Row(a="true")]),
+        ([{"a": 1}], [Row(a="1")]),
+        ([Row(a=2)], [Row(a="2")]),
+        (np.array([[1], [2]]), [Row(a="1"), Row(a="2")]),
+    ]:
+        df = session.createDataFrame(data, strs)
+        assert df.schema.simpleString() == "struct<a:string>"
+        assert df.collect() == rows
+    nested = StructType([StructField("l", ArrayType(strs))])
+    df = session.createDataFrame([([(1,)],)], nested)
+    assert df.schema.simpleString() == "struct<l:array<struct<a:string>>>"
+    assert df.collect() == [Row(l=[Row(a="1")])]
+    df = session.createDataFrame([(1, 2)], StructType([FieldInt("a", LongType()),
+                                                       StructField("b", LongType())]))
+    assert df.schema.simpleString() == "struct<a:int,b:bigint>"
+    assert df.collect() == [Row(a=1, b=2)]
+    df = session.createDataFrame([(1,)], StructType([FieldName("a", LongType())]))
+    assert df.schema.simpleString() == "struct<renamed:bigint>"
+    assert df.collect() == [Row(renamed=1)]
+    reversed_struct = StructRevr([StructField("a", LongType()), StructField("b", StringType())])
+    with pytest.raises(AnalysisException) as error:
+        session.createDataFrame([(1, "x")], reversed_struct).schema
+    assert error.value.getCondition() == "INVALID_COLUMN_OR_FIELD_DATA_TYPE"
+
+
 @pytest.mark.parametrize(
     "frame, schema, columns",
     [
