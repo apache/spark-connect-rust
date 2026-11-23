@@ -1537,6 +1537,45 @@ requests of the unpickled object pickle as it is then. This case still differs:
     attribute, a closure) stays, as do the messages that it made, which the runtime's fields take
     as they are, and equal the runtime's of the same contents.
 
+- **Copies into a message that the value holds** (intentional; upb ends its process). A copy of a
+  message into a message below it copies the message first, as of a copy of it taken before, where
+  upb's copy recurses until its process ends (SIGSEGV): `r = proto.Relation(limit={"limit": 1});
+  t = r.limit.input; t.CopyFrom(r)` gives `limit { input { limit { limit: 1 } } limit: 1 }`, and so
+  do a `CopyFrom` into a set message below the value, into an entry of a map or an item of a
+  repeated field of it, the constructor of a map of messages given a value that holds the map
+  (`n.next.__init__(children={"a": n})`, of a plugin's type that holds itself in a map; the
+  protos of Spark Connect have none) and the `MergeFrom` of such a map into a map below it. A
+  repeated field of messages extended, or merged, by itself
+  (`p.project.expressions.extend(p.project.expressions)`) takes the messages that it has first, as
+  a list's `extend` of itself does, where upb's iteration of the field as it grows ends the process
+  (the drop-in's grew until its memory ran out before SPARK-62270). The merges and the constructors
+  of a value that holds the message are upb's since SPARK-62270 (the drop-in's before, in
+  parentheses):
+  - `MergeFrom` into a message below its argument (`r = proto.Relation(); r.limit.limit = 1;
+    t = r.limit.input; t.MergeFrom(r)`, upb's `limit { input { limit { limit: 1 } } limit: 1 }`)
+    merges what the argument was, as upb serializes it first (a recursion without bound, until the
+    memory ran out; through a repeated field or a map, of the argument as the merge changed it:
+    `t = d.struct.fields[0].data_type; t.MergeFrom(d)` set the inner `data_type { struct { } }`
+    where upb's keeps `string { }`);
+  - a second `__init__` merges the value of a message field into the message that the field has
+    (`r = proto.Relation(limit={"limit": 1}); r.__init__(limit={"input": {"range": {"end": 2}}})`
+    keeps `limit: 1`, and `p.__init__(project=p.project)` doubles the repeated fields of the
+    project; it set the field anew), sets an unset child in its parent first, of any keyword
+    arguments, `**{}` too (it set none), reads a value that holds the message after the keywords
+    before it are set (`limit = r.limit; limit.__init__(input=r)`: a `PanicException`, "Already
+    mutably borrowed"), and raises upb's `ValueError` of a name of no field, of the value None too
+    (it was ignored);
+  - `add(**kwargs)` appends its message first, so a value that holds the container reads it with
+    the new message (`f.data_type.struct.fields.add(name="b", data_type=f.data_type)` holds upb's
+    inner `fields { name: "b" }`; the value was read without it);
+  - the Python code of a value of a constructor (an `__iter__`, a `__next__`, an `__index__`) that
+    reaches the message under construction (of `gc.get_objects()`, which lists it, as upb's) reads
+    and changes it as upb's (a `PanicException`);
+  - a second `__init__` of a repeated message field keeps the values before one that fails, and the
+    new message of a value that is not a mapping and fails to merge, as upb appends each in turn
+    (it kept none), and a value of a repeated scalar field that is not iterable raises upb's
+    `TypeError: must assign iterable` (`Argument for field ... is not iterable`).
+
 ## Type checking (the stubs of `scripts/gen_type_stubs.py`)
 
 mypy and pyright type an application as with `pyspark-client` (see `docs/compatibility.md`), but:
