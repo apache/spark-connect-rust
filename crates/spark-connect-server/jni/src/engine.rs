@@ -366,13 +366,14 @@ impl JvmEngine {
                         retain_dispatch_cleanup(item, error);
                     }
                 }
-                if self
+                let recovered = self
                     .counts
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .pending_dispatch
-                    .is_empty()
-                {
+                    .is_empty();
+                if recovered {
+                    log_diagnostic(format_args!("JNI cleanup thread dispatch recovered"));
                     break;
                 }
                 delay = (delay * 2).min(Duration::from_millis(250));
@@ -683,6 +684,7 @@ impl<W> CleanupAttachment<W> {
     ) -> Option<Self> {
         match Self::attach_with(core, attach) {
             Ok(attachment) => {
+                // A successful cleanup attachment starts a new reporting epoch.
                 core.cleanup_attach_failure_reported
                     .store(false, Ordering::SeqCst);
                 Some(attachment)

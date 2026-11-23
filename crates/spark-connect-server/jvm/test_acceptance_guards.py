@@ -111,6 +111,7 @@ class ShutdownEvidenceTest(unittest.TestCase):
 
     def test_successful_cleanup_dispatch_retry_is_accepted(self):
         content = ("JNI cleanup thread dispatch failed; automatic retry is pending: temporary failure\n"
+                   "JNI cleanup thread dispatch recovered\n"
                    + SHUTDOWN_COMPLETE + "\n")
         self.assertIsNone(shutdown_error(content, 128 + signal.SIGTERM))
 

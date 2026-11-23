@@ -515,6 +515,8 @@ Blocked closes that hold admission are limited to 64 query and 64 session owners
 per engine. Permits are released before detachment and thread exit, so cleanup
 threads and attachments from completed closes can overlap newly admitted work;
 these admission limits are not a strict global thread or attachment bound.
+Releasing many owners during shutdown can create a burst of closer threads and
+JNI attachments.
 
 If a cleanup thread cannot start or its channel rejects an item before execution,
 the engine retains that item's handles and permits. A per-engine asynchronous loop

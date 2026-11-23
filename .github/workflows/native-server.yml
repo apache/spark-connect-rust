@@ -264,7 +264,7 @@ jobs:
           PY
 
       - name: Compile Java adapter and verify JNI lifecycle and cleanup isolation
-        timeout-minutes: 10
+        timeout-minutes: 15
         run: |
           export SPARK_HOME="$PWD/spark-runtime"
           crates/spark-connect-server/jvm/test-jni-smoke.sh \

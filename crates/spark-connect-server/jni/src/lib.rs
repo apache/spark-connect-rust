@@ -252,7 +252,7 @@ fn stop_server(id: i64) -> Result<(), String> {
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
         if remaining.is_zero() {
             return Err(server.backend.dispatch_failure().unwrap_or_else(|| {
-                "JNI stop is incomplete; active JVM calls retained safely, retry close after they finish".into()
+                "JNI stop is incomplete; native work or cleanup dispatch retained safely, retry close after it finishes".into()
             }));
         }
         match completed.recv_timeout(remaining.min(Duration::from_millis(20))) {
