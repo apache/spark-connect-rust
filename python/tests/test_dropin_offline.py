@@ -4987,9 +4987,9 @@ def _sent_root(service, df):
 def test_the_plans_of_a_struct_of_a_foreign_element_read_it_as_pyspark(mock_connect):
     # The plans of `to`, a cast, `from_json`, a reader's schema and a UDF send the type that
     # PySpark's `pyspark_types_to_proto_types` reads of the elements, of each its name, type,
-    # nullable and metadata, and raise its errors before any request. A cast and `to` read the
-    # struct at the call (SPARK-62228); a UDF reads it when the request builds the plan, so an
-    # element appended after the call is sent, as PySpark's.
+    # nullable and metadata, and raise its errors before any request. A cast, `to` and a UDF
+    # read it when the request builds the plan, so an element appended after the call is sent,
+    # as PySpark's (SPARK-62228).
     from pyspark.sql import functions as F
 
     spark, service = mock_connect
@@ -5021,6 +5021,122 @@ def test_the_plans_of_a_struct_of_a_foreign_element_read_it_as_pyspark(mock_conn
     output = _sent_root(service, spark.range(1).select(column)).project.expressions[0]
     struct = output.common_inline_user_defined_function.python_udf.output_type.struct
     assert [f.name for f in struct.fields[0].data_type.struct.fields] == ["a", "d", "e"]
+
+
+def test_dataframe_to_reads_its_schema_when_the_plan_is_built_as_pyspark(mock_connect):
+    # SPARK-62228: as PySpark's ToSchema, which converts the schema object when it builds the
+    # plan, DataFrame.to reads the struct at each request, as it is then: a struct that fails to
+    # convert at the call, and is fixed after it, is sent; one that fails at the build raises its
+    # error then, of the reads of its elements (a KeyError too) and of PySpark's
+    # UNSUPPORTED_OPERATION, before any request; and `schema` is the object.
+    from pyspark.errors import PySparkValueError
+
+    spark, service = mock_connect
+    s = _foreign_struct()
+    df = spark.range(1).to(s)
+    assert df.schema is s or df.schema.fields[1] == "x"
+    s.fields.pop()
+    fields = _sent_root(service, df).to_schema.schema.struct.fields
+    assert [f.name for f in fields] == ["a"]
+    plain = T.StructType([T.StructField("a", T.LongType())])
+    df = spark.range(1).to(plain)
+    plain.fields.append(T.StructField("b", T.LongType()))
+    fields = _sent_root(service, df).to_schema.schema.struct.fields
+    assert [f.name for f in fields] == ["a", "b"]
+
+    class Boom(_ForeignDuck):
+        @property
+        def name(self):
+            raise KeyError("boom name")
+
+    before = len(service.execute_requests)
+    with pytest.raises(KeyError, match="boom name"):
+        spark.range(1).to(_foreign_struct(Boom())).collect()
+    late = T.StructType([T.StructField("a", T.LongType())])
+    df = spark.range(1).to(late)
+    late.fields.append("x")
+    with _no_attribute("name"):
+        df.collect()
+    late.fields[1] = T.StructField("q", T.AtomicType())
+    with pytest.raises(PySparkValueError, match="UNSUPPORTED_OPERATION"):
+        df.collect()
+    assert len(service.execute_requests) == before
+
+
+def test_a_cast_reads_its_type_when_it_renders_and_when_the_plan_is_built_as_pyspark(mock_connect):
+    # SPARK-62228: as PySpark's CastExpression, which keeps the type object and reads it when its
+    # __repr__ renders and when it builds the plan, a cast reads nothing of the object at the
+    # call, shows and sends the struct as it is then, and raises the errors of the reads then,
+    # of the elements too (a KeyError of `simpleString` at the repr and of `name` at the request),
+    # before any request. A deep copy reads its copy of the object, and an unpickled cast the
+    # object of the pickle, as PySpark's copies and pickles of the expression keep theirs.
+    import copy
+    import pickle
+
+    from pyspark.errors import PySparkValueError
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+    s = T.StructType([T.StructField("a", T.LongType())])
+    cast, tried = F.lit(None).cast(s), F.lit(None).try_cast(s)
+    s.fields.append(T.StructField("b", T.LongType()))
+    assert repr(cast) == "Column<'CAST(NULL AS STRUCT<A:BIGINT,B:BIGINT>)'>"
+    assert repr(tried) == "Column<'TRY_CAST(NULL AS STRUCT<A:BIGINT,B:BIGINT>)'>"
+    for column in (cast, tried):
+        sent = _sent_root(service, spark.range(1).select(column)).project.expressions[0].cast
+        assert [f.name for f in sent.type.struct.fields] == ["a", "b"]
+    copied, unpickled = copy.deepcopy(cast), pickle.loads(pickle.dumps(cast))
+    before = len(service.execute_requests)
+    s.fields.append("x")
+    with _no_attribute("simpleString"):
+        repr(cast)
+    with _no_attribute("name"):
+        spark.range(1).select(cast).collect()
+    s.fields[2] = T.StructField("q", T.AtomicType())
+    assert repr(cast) == "Column<'CAST(NULL AS STRUCT<A:BIGINT,B:BIGINT,Q:ATOMIC>)'>"
+    with pytest.raises(PySparkValueError, match="UNSUPPORTED_OPERATION"):
+        spark.range(1).select(cast).collect()
+    assert len(service.execute_requests) == before
+    assert repr(copied) == "Column<'CAST(NULL AS STRUCT<A:BIGINT,B:BIGINT>)'>"
+    for column in (copied, unpickled):
+        sent = _sent_root(service, spark.range(1).select(column)).project.expressions[0].cast
+        assert [f.name for f in sent.type.struct.fields] == ["a", "b"]
+
+    reads = []
+
+    class Counted(_ForeignDuck):
+        def simpleString(self):
+            reads.append("simpleString")
+            return "d:bigint"
+
+        @property
+        def name(self):
+            reads.append("name")
+            return "d"
+
+    counted = F.lit(None).cast(_foreign_struct(Counted()))
+    assert reads == []
+    assert repr(counted) == "Column<'CAST(NULL AS STRUCT<A:BIGINT,D:BIGINT>)'>"
+    assert reads == ["simpleString"]
+    sent = _sent_root(service, spark.range(1).select(counted)).project.expressions[0].cast
+    assert [f.name for f in sent.type.struct.fields] == ["a", "d"]
+    assert reads == ["simpleString", "name"]
+
+    class Boom(_ForeignDuck):
+        def simpleString(self):
+            raise KeyError("boom simpleString")
+
+        @property
+        def name(self):
+            raise KeyError("boom name")
+
+    before = len(service.execute_requests)
+    boom = F.lit(None).cast(_foreign_struct(Boom()))
+    with pytest.raises(KeyError, match="boom simpleString"):
+        repr(boom)
+    with pytest.raises(KeyError, match="boom name"):
+        spark.range(1).select(boom).collect()
+    assert len(service.execute_requests) == before
 
 
 def test_the_proto_of_a_struct_of_a_foreign_element_raises_pysparks_errors(mock_connect):

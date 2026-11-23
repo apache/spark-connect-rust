@@ -259,7 +259,11 @@ when it builds a plan, such as the `&` of the conditions of a join of a list of 
 origin is of that time, as PySpark makes it then. `CastTarget` adds a hidden
 `Shown(DataType, String)` variant, a cast that sends its type as `CastTarget::Type` does and renders
 as the given string, the `simpleString()` of the Python type object, as PySpark's
-`CastExpression.__repr__` renders it. Neither is a stable API; downstream exhaustive matches on
+`CastExpression.__repr__` renders it, and a hidden `Read(Box<CastRead>)` variant, of
+`Column::cast_read`, a cast of a type object of the Python client that reads it when it renders
+and when a request builds the plan, as PySpark's `CastExpression` does: the readers of the
+`CastRead` give the text that the render shows and the `spark.connect.DataType` that the request
+sends, of the errors of each then. None is a stable API; downstream exhaustive matches on
 `ExpressionNode` and `CastTarget` must handle them, or have a wildcard arm.
 
 `GroupedData::transform_with_state` takes the output schema of its `TransformWithStateInfo`, as
@@ -3207,12 +3211,12 @@ struct keep it as it is. The plans of a UDF, of a map or group function and of `
 and `transformWithStateInPandas` send the type that PySpark's `pyspark_types_to_proto_types` reads
 of the elements when the request builds the plan, of each its `name`, `dataType`, `nullable` and
 `metadata` (of a sibling field of a type that it has no proto of, such as `AtomicType()`, its
-`UNSUPPORTED_OPERATION`), and each request raises the error of that. A cast and `DataFrame.to`
-send what those reads give at the call, which a request raises the error of, and the repr of the
-cast shows the `simpleString()` of the object in upper case that the call read (see "A cast and
-`DataFrame.to` of a struct" in `dev/parity/known-differences.md`); `from_json`, a reader's schema
-and `catalog.createTable` read the `json()` or the elements of the object at the call, as
-PySpark's. A struct whose fields hold the struct itself has levels that no walk ends, and its uses
+`UNSUPPORTED_OPERATION`), and each request raises the error of that. So do a cast and
+`DataFrame.to`, as PySpark's `CastExpression` and `ToSchema` keep the object and read it when the
+plan is built, of the struct as it is then, and the repr of the cast shows the `simpleString()` of
+the object in upper case as it is when it renders, of the error of that then, as PySpark's
+`__repr__`: the call reads nothing of the object. `from_json`, a reader's schema and
+`catalog.createTable` read the `json()` or the elements of the object at the call, as PySpark's. A struct whose fields hold the struct itself has levels that no walk ends, and its uses
 raise `RecursionError` as PySpark's do (see "A type that holds itself" above).
 
 The parameters of a type are its attributes, as PySpark's: `t.scale = 3` makes a
@@ -3373,9 +3377,7 @@ What differs:
   __getstate__ cannot be pickled`.
 - The repr of an array, a map, a field or a struct that holds a type whose repr has a str that
   UTF-8 cannot encode, such as one of a lone surrogate, raises its `UnicodeEncodeError`, and so do
-  their `str()` and hash, of the repr, where PySpark's make them. `DataFrame.to` of such a struct
-  of a type that has no proto, of a subclass of `DataType`, raises it at the call, where PySpark's
-  raises the `UNSUPPORTED_OPERATION` of the type at the first request.
+  their `str()` and hash, of the repr, where PySpark's make them.
 - A class of type classes of two branches of their hierarchy, such as
   `class X(StringType, IntegerType)`, raises
   `TypeError: multiple bases have instance lay-out conflict`, as CPython raises of bases of

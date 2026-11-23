@@ -55,13 +55,19 @@ enum CommandKind {
     Udf,
     /// A data type, which is converted to its `spark.connect.DataType`.
     DataType,
+    /// A data type, of which the render of a cast shows `simpleString().upper()`, as PySpark's
+    /// `CastExpression.__repr__` reads it (see [`shown_reader`]). A pickle of a Column carries
+    /// none of it, as no build reads it: the type of the cast is the hole of its `DataType`.
+    Shown,
 }
 
 impl PythonCommand {
     /// The pickler of this command.
     fn pickler(self) -> CommandPickler {
         match self.kind {
-            CommandKind::DataType => CommandPickler::new(self, PythonCommand::pickle),
+            CommandKind::DataType | CommandKind::Shown => {
+                CommandPickler::new(self, PythonCommand::pickle)
+            }
             CommandKind::Udtf | CommandKind::Udf => {
                 CommandPickler::with_output_type(self, PythonCommand::pickle)
             }
@@ -100,6 +106,20 @@ impl PythonCommand {
                 Ok(crate::types::py_to_proto_data_type(object)?
                     .to_proto()
                     .encode_to_vec())
+            }
+            // As PySpark's f-string of `simpleString().upper()`, of its str, whose lone
+            // surrogates show escaped, as the render of the other strs of a Column does (see
+            // `crate::plan_args::rendered`).
+            CommandKind::Shown => {
+                let shown = object
+                    .call_method0(pyo3::intern!(py, "simpleString"))?
+                    .call_method0(pyo3::intern!(py, "upper"))?
+                    .str()?;
+                let text = match shown.to_cow() {
+                    Ok(text) => text.into_owned(),
+                    Err(_) => crate::plan_args::rendered(shown.as_any())?,
+                };
+                Ok(text.into_bytes())
             }
         }
     }
@@ -144,6 +164,18 @@ pub(crate) fn data_type_pickler(data_type: Py<PyAny>) -> CommandPickler {
     PythonCommand {
         object: data_type,
         kind: CommandKind::DataType,
+    }
+    .pickler()
+}
+
+/// The reader of the text of the type of a cast to `data_type`, a type object, which its render
+/// shows: the UTF-8 of `data_type.simpleString().upper()`, as PySpark's `CastExpression.__repr__`
+/// reads it each time it renders, of the object as it is then; its error is the exception itself
+/// ([`crate::errors::callback_error`]), which the repr raises.
+pub(crate) fn shown_reader(data_type: Py<PyAny>) -> CommandPickler {
+    PythonCommand {
+        object: data_type,
+        kind: CommandKind::Shown,
     }
     .pickler()
 }
@@ -269,7 +301,7 @@ impl MarkerOf {
                 ..Default::default()
             }
             .encode_to_vec(),
-            CommandKind::DataType => spark_connect_proto::DataType {
+            CommandKind::DataType | CommandKind::Shown => spark_connect_proto::DataType {
                 kind: Some(spark_connect_proto::data_type::Kind::Unparsed(
                     spark_connect_proto::data_type::Unparsed {
                         data_type_string: String::from_utf8_lossy(&marker).into_owned(),
@@ -295,6 +327,10 @@ impl PickleHoles {
             let Some(command) = pickler.object().downcast_ref::<PythonCommand>() else {
                 continue;
             };
+            // The reader of the text of a cast, which no build calls, is kept as it is.
+            if matches!(command.kind, CommandKind::Shown) {
+                continue;
+            }
             let marker = MarkerOf {
                 log: std::sync::Arc::clone(&log),
                 index: of.len(),
@@ -303,7 +339,9 @@ impl PickleHoles {
             };
             of.push((command.kind, command.object.clone_ref(py)));
             let copy = match command.kind {
-                CommandKind::DataType => CommandPickler::new(marker, MarkerOf::give),
+                CommandKind::DataType | CommandKind::Shown => {
+                    CommandPickler::new(marker, MarkerOf::give)
+                }
                 CommandKind::Udf | CommandKind::Udtf => {
                     CommandPickler::with_output_type(marker, MarkerOf::give)
                 }
@@ -356,7 +394,7 @@ fn hole_payload<'py>(
 ) -> PyResult<(&'static str, Bound<'py, PyAny>)> {
     Ok(match kind {
         CommandKind::Udf => ("udf", object.clone()),
-        CommandKind::DataType => ("datatype", object.clone()),
+        CommandKind::DataType | CommandKind::Shown => ("datatype", object.clone()),
         CommandKind::Udtf => {
             let command = py
                 .import("pyspark.sql.connect.udtf")?

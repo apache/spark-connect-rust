@@ -482,7 +482,13 @@ fn expression_parts<'a>(node: &'a ExpressionNode, held: &mut Vec<PartRef<'a>>) {
         | ExpressionNode::UnresolvedNamedLambdaVariable(_) => {}
         ExpressionNode::UnresolvedFunction(function) => expressions(&function.args, held),
         ExpressionNode::Alias(alias) => held.push(Of(&alias.child)),
-        ExpressionNode::Cast(cast) => held.push(Of(&cast.child)),
+        ExpressionNode::Cast(cast) => {
+            held.push(Of(&cast.child));
+            if let crate::expression::CastTarget::Read(read) = &cast.target {
+                held.extend(read.type_reader.iter().map(Pickler));
+                held.extend(read.shown_reader.iter().map(Pickler));
+            }
+        }
         ExpressionNode::DirectShufflePartitionId(child) => held.push(Of(child)),
         ExpressionNode::SortOrder(sort) => held.push(Of(&sort.child)),
         ExpressionNode::CaseWhen(case_when) => {

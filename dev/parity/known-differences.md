@@ -193,20 +193,6 @@ difference is intentional or tracked for a fix.
 
 ## `DataFrame`
 
-- **A cast and `DataFrame.to` of a struct read it at the call** (tracked: SPARK-62228). PySpark's
-  `CastExpression` and `ToSchema` keep the type object and read it when the Column renders and when
-  the plan is built. The drop-in reads it at the call and keeps what it read, of a plain struct and
-  of a struct whose fields hold an element that is not a `StructField`. So an edit of the struct
-  in place after the call is not seen: of a cast of `[a long]` and then a field appended, PySpark's
-  repr is `CAST(NULL AS STRUCT<A:BIGINT,B:BIGINT>)` and the drop-in's `STRUCT<A:BIGINT>`, and of an
-  element `'x'` appended or popped after it, PySpark's repr and collect raise or work as the struct
-  is then, where the drop-in's are as it was at the call. The errors of the reads are of their
-  time too: of an element whose reads raise an error that a plan does not hold, such as a
-  `KeyError`, PySpark's cast returns a Column whose repr raises it (`KeyError: 'boom
-  simpleString'`), and the drop-in's call raises it (`KeyError: 'boom name'`); and of
-  `to().collect()` of such an element, PySpark raises that `KeyError`, where the drop-in raises
-  `UNSUPPORTED_OPERATION` of the type.
-
 - **The metadata of an element of the fields of a struct that is not a JSON object** (tracked:
   SPARK-62230). PySpark's plans send `json.dumps` of the `metadata` of each element, and the server
   raises `UnknownException: (java.lang.ClassCastException) class org.json4s.JArray cannot be cast
@@ -1311,8 +1297,7 @@ requests of the unpickled object pickle as it is then. This case still differs:
   - a subclass of `__slots__` pickles at the protocols 0 and 1 too, where PySpark's raises the
     `TypeError` of `__slots__` without `__getstate__`;
   - the repr of an array, a map, a field or a struct that holds a type whose repr has a lone
-    surrogate raises its `UnicodeEncodeError`, and so does `DataFrame.to` of such a struct of a
-    type of no proto, at the call;
+    surrogate raises its `UnicodeEncodeError`;
   - `createDataFrame` of data sends the JSON of the core types of its schema, where PySpark sends
     the `json()` of the object, which the server may fail to parse.
 

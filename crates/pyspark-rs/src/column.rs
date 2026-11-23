@@ -1523,161 +1523,34 @@ impl PyColumn {
 /// The cast of `column` to `data_type`, a DataType or a str, as PySpark's `CastExpression`, whose
 /// `to_plan` sets the type after its child, when it builds the plan: a str as the unparsed type,
 /// of which one that UTF-8 cannot encode fails the requests of the plan with its
-/// `UnicodeEncodeError`, and a DataType as the type. A DataType that PySpark's
-/// `pyspark_types_to_proto_types` does not convert, of none of its types
-/// ([`crate::plan_args::unsupported_type_error`]) or with a `StructField` as a type in it, fails
-/// them with its `UNSUPPORTED_OPERATION`, and renders as its `simpleString()` of PySpark, as
-/// PySpark's `__repr__`. A `try_cast` for `try_`.
+/// `UnicodeEncodeError`, and a DataType as the type object, which the cast keeps and reads as
+/// PySpark's does, of the object as it is then and of the errors of the reads then: its repr shows
+/// `simpleString().upper()` of it, and each request sends `pyspark_types_to_proto_types` of it (see
+/// `crate::types::py_to_proto_data_type`), so a DataType that PySpark's conversion does not
+/// convert, such as `AtomicType()` or a struct with a `StructField` as a type in it, fails the
+/// requests with its `UNSUPPORTED_OPERATION`, and a struct changed in place after the call is
+/// shown and sent as it is then. The call reads nothing of the object, as PySpark's. A `try_cast`
+/// for `try_`.
 fn cast_column(column: &Column, data_type: &Bound<'_, PyAny>, try_: bool) -> PyResult<PyColumn> {
-    let mut args = crate::plan_args::PlanArgs::new();
-    let unparsed = |text: &str| match try_ {
-        false => column.clone().cast_str(text),
-        true => column.clone().try_cast_str(text),
-    };
     if data_type.is_instance_of::<pyo3::types::PyString>() {
+        let mut args = crate::plan_args::PlanArgs::new();
         let text = args.str(data_type)?;
-        return Ok(PyColumn::new(args.column_after(unparsed(&text))));
+        let cast = match try_ {
+            false => column.clone().cast_str(&text),
+            true => column.clone().try_cast_str(&text),
+        };
+        return Ok(PyColumn::new(args.column_after(cast)));
     }
-    let error = match crate::plan_args::unsupported_type_error(data_type)? {
-        Some(error) => error,
-        None => {
-            let py = data_type.py();
-            // Of the lowering that the cast makes, of the walk of the foreign fields only of a
-            // type that may hold them (see `crate::types::lower_noting_subclasses`).
-            let (lowered, maybe_foreign) =
-                crate::types::lower_noting_subclasses(data_type, crate::types::MetadataOf::Strict);
-            if crate::types::foreign_of_lowering(data_type, maybe_foreign)? {
-                return foreign_cast_column(column, data_type, try_);
-            }
-            let parsed = match lowered {
-                Ok(parsed) => parsed,
-                // A type that does not lower now, such as an array of a `UserDefinedType` whose
-                // `module()` is not implemented, or a struct of metadata that `json.dumps` refuses,
-                // which PySpark's plan raises the error of at each request, as its repr shows its
-                // `simpleString()` (see `crate::types::lenient_type`).
-                Err(err) if err.is_instance_of::<pyo3::exceptions::PyException>(py) => {
-                    args.raised(py, err)?;
-                    // Of a type that holds itself, whose `simpleString()` raises its
-                    // `RecursionError` too: PySpark's repr reads it as it renders the Column,
-                    // which raises it then, as the Column's repr and requests do.
-                    let text = match data_type.call_method0("simpleString") {
-                        Ok(text) => text.extract::<String>()?,
-                        Err(err)
-                            if err.is_instance_of::<pyo3::exceptions::PyRecursionError>(py) =>
-                        {
-                            let unrenderable = crate::plan_args::recursion_error(py, &err)?;
-                            return Ok(PyColumn::new(Column::new(
-                                spark_connect::expression::Expression::unbuildable(
-                                    unparsed("").expression().clone(),
-                                    None,
-                                    args.error().cloned(),
-                                    Some(unrenderable),
-                                ),
-                            )));
-                        }
-                        Err(err) => return Err(err),
-                    };
-                    return Ok(PyColumn::new(args.column_after(unparsed(&text))));
-                }
-                Err(err) => return Err(err),
-            };
-            let Some(field) = crate::types::unsendable_field_repr(data_type, &parsed)? else {
-                // As PySpark's repr, of the `simpleString()` of the type object, which the core's
-                // type does not tell of a user-defined type or of a type of a Python subclass.
-                return Ok(PyColumn::new(
-                    match crate::types::shown_simple_string(data_type, &parsed)? {
-                        Some(shown) => column.clone().cast_shown(parsed, &shown, try_),
-                        None if try_ => column.clone().try_cast(parsed),
-                        None => column.clone().cast(parsed),
-                    },
-                ));
-            };
-            spark_connect_core::error::SparkError::classed(
-                spark_connect_core::error::SparkErrorKind::ValueError,
-                "UNSUPPORTED_OPERATION",
-                &[("operation", &format!("data type {field}"))],
-            )
-        }
-    };
-    args.record(error);
-    // As PySpark's `simpleString`, which is the `typeName` of the type, unless its class has a
-    // `simpleString` of its own, as a `StructField` has.
-    let base = data_type
-        .py()
-        .import("pyspark.sql.types")?
-        .getattr("DataType")?
-        .getattr("simpleString")?;
-    let simple_string = data_type.get_type().getattr("simpleString")?;
-    let name = if simple_string.is(&base) {
-        "typeName"
-    } else {
-        "simpleString"
-    };
-    let text: String = data_type.call_method0(name)?.extract()?;
-    Ok(PyColumn::new(args.column_after(unparsed(&text))))
-}
-
-/// A cast to a type that holds a struct whose fields hold an element that is not a `StructField`
-/// (see `crate::types::holds_foreign_field`): the Column is made, its repr shows the
-/// `simpleString()` of the object in upper case, of the error of that, and each request sends the
-/// type that PySpark's `pyspark_types_to_proto_types` reads of its elements, of the error of that,
-/// after those of the expression (see `crate::types::py_to_proto_data_type`). Both are read at
-/// the call, where PySpark's `CastExpression` of the type object reads it when it renders and when
-/// it builds (see the known differences, SPARK-62228).
-fn foreign_cast_column(
-    column: &Column,
-    data_type: &Bound<'_, PyAny>,
-    try_: bool,
-) -> PyResult<PyColumn> {
-    let py = data_type.py();
-    let parsed = match crate::types::py_to_proto_data_type(data_type) {
-        Ok(parsed) => Ok(parsed),
-        Err(err) => Err(reading_error(py, err)?),
-    };
-    let shown = match data_type
-        .call_method0(pyo3::intern!(py, "simpleString"))
-        .and_then(|shown| shown.extract::<String>())
-    {
-        Ok(shown) => Ok(shown),
-        Err(err) => Err(reading_error(py, err)?),
-    };
-    let cast = match (&parsed, &shown) {
-        (Ok(parsed), shown) => {
-            let shown = shown.as_deref().unwrap_or_default();
-            column.clone().cast_shown(parsed.clone(), shown, try_)
-        }
-        (Err(_), shown) => {
-            let shown = shown.as_deref().unwrap_or_default();
-            match try_ {
-                false => column.clone().cast_str(shown),
-                true => column.clone().try_cast_str(shown),
-            }
-        }
-    };
-    Ok(PyColumn::new(Column::new(
-        spark_connect::expression::Expression::unbuildable(
-            cast.expression().clone(),
-            None,
-            parsed.err(),
-            shown.err(),
-        ),
+    let type_reader = crate::udf_command::data_type_pickler(data_type.clone().unbind());
+    let shown_reader = crate::udf_command::shown_reader(data_type.clone().unbind());
+    // The null type stands for the type of a reader that gives none, which no request sends: a
+    // request raises the error of the reader, and the repr the error of its text.
+    Ok(PyColumn::new(column.clone().cast_read(
+        spark_connect::types::DataType::Null,
+        type_reader,
+        shown_reader,
+        try_,
     )))
-}
-
-/// The error `err` of a value that PySpark reads when it builds or renders a Column, as a request
-/// or the repr of it raises it again, as [`crate::plan_args::PlanArgs::raised`] takes it: an
-/// `AttributeError`, a `TypeError`, a `ValueError`, an `OverflowError` or a `RecursionError` of
-/// Python, or an exception of one of PySpark's error classes, such as the `PySparkValueError` of
-/// `UNSUPPORTED_OPERATION`; another is given back, for the call to raise.
-fn reading_error(py: Python<'_>, err: PyErr) -> PyResult<spark_connect_core::error::SparkError> {
-    let mut args = crate::plan_args::PlanArgs::new();
-    args.raised(py, err)?;
-    match args.error() {
-        Some(error) => Ok(error.clone()),
-        None => Err(pyo3::exceptions::PyRuntimeError::new_err(
-            "the error of a value of a cast was not recorded",
-        )),
-    }
 }
 
 /// The description of `error`, of an expression that a request does not build or whose

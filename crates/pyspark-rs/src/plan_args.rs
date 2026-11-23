@@ -203,64 +203,6 @@ pub(crate) fn recursion_error(py: Python<'_>, err: &PyErr) -> PyResult<SparkErro
     Ok(SparkError::recursion_msg(err.value(py).str()?.to_string()))
 }
 
-/// The classes of the data types of `pyspark.sql.types` that PySpark's
-/// `pyspark_types_to_proto_types` converts, in its order, and `UnparsedDataType` of
-/// `pyspark.sql.connect.types`.
-const PLAN_TYPE_CLASSES: [&str; 27] = [
-    "NullType",
-    "CharType",
-    "VarcharType",
-    "StringType",
-    "BooleanType",
-    "BinaryType",
-    "ByteType",
-    "ShortType",
-    "IntegerType",
-    "LongType",
-    "FloatType",
-    "DoubleType",
-    "DecimalType",
-    "DateType",
-    "TimeType",
-    "TimestampType",
-    "TimestampNTZType",
-    "DayTimeIntervalType",
-    "YearMonthIntervalType",
-    "CalendarIntervalType",
-    "StructType",
-    "MapType",
-    "ArrayType",
-    "VariantType",
-    "GeometryType",
-    "GeographyType",
-    "UserDefinedType",
-];
-
-/// The error of PySpark's `pyspark_types_to_proto_types` for the data type `data_type`, which it
-/// raises when it builds the plan, if it is of none of the classes that it converts: the
-/// `UNSUPPORTED_OPERATION` of `data type {data_type}`, as of the base `DataType()` or of a Python
-/// subclass of it.
-pub(crate) fn unsupported_type_error(data_type: &Bound<'_, PyAny>) -> PyResult<Option<SparkError>> {
-    let py = data_type.py();
-    let types = py.import("pyspark.sql.types")?;
-    let mut classes = PLAN_TYPE_CLASSES
-        .iter()
-        .map(|name| types.getattr(*name))
-        .collect::<PyResult<Vec<_>>>()?;
-    classes.push(
-        py.import("pyspark.sql.connect.types")?
-            .getattr("UnparsedDataType")?,
-    );
-    if data_type.is_instance(pyo3::types::PyTuple::new(py, classes)?.as_any())? {
-        return Ok(None);
-    }
-    Ok(Some(SparkError::classed(
-        spark_connect_core::error::SparkErrorKind::ValueError,
-        "UNSUPPORTED_OPERATION",
-        &[("operation", &data_type_operation(data_type)?)],
-    )))
-}
-
 /// The `operation` of PySpark's `UNSUPPORTED_OPERATION` of the data type `data_type`, which it
 /// raises when it builds the plan: `f"data type {data_type}"`, of the str of `data_type` as it is,
 /// a lone surrogate too, as [`crate::errors::str_param`] holds it.
