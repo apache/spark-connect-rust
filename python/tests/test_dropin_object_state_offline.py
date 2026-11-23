@@ -60,47 +60,6 @@ except ImportError:
 # and "Subclasses" of dev/parity/known-differences.md say: each change removes its own, and a test
 # of one of them that passes fails the run (strict).
 _DIFFERS_BY_CHANGE = {
-    "the merge writer and its clauses": {
-        "vars": [
-            "MergeIntoWriter",
-            "MergeIntoWriter of its clauses",
-            "WhenMatched",
-            "WhenNotMatched of a condition",
-            "WhenNotMatchedBySource",
-        ],
-        "attributes": [
-            "MergeIntoWriter",
-            "MergeIntoWriter of its clauses",
-            "WhenMatched",
-            "WhenNotMatched of a condition",
-            "WhenNotMatchedBySource",
-        ],
-        "copies": [
-            "MergeIntoWriter: copy",
-            "MergeIntoWriter of its clauses: copy",
-            "WhenMatched: copy",
-            "WhenNotMatched of a condition: copy",
-            "WhenNotMatchedBySource: copy",
-        ],
-        "construct": [
-            "pyspark.sql.connect.merge.MergeIntoWriter",
-            "pyspark.sql.connect.merge.MergeIntoWriter.WhenMatched",
-            "pyspark.sql.connect.merge.MergeIntoWriter.WhenNotMatched",
-            "pyspark.sql.connect.merge.MergeIntoWriter.WhenNotMatchedBySource",
-        ],
-        "uninit": [
-            "pyspark.sql.connect.merge.MergeIntoWriter",
-            "pyspark.sql.connect.merge.MergeIntoWriter.WhenMatched",
-            "pyspark.sql.connect.merge.MergeIntoWriter.WhenNotMatched",
-            "pyspark.sql.connect.merge.MergeIntoWriter.WhenNotMatchedBySource",
-        ],
-        "foreign": [
-            "pyspark.sql.connect.merge.MergeIntoWriter",
-            "pyspark.sql.connect.merge.MergeIntoWriter.WhenMatched",
-            "pyspark.sql.connect.merge.MergeIntoWriter.WhenNotMatched",
-            "pyspark.sql.connect.merge.MergeIntoWriter.WhenNotMatchedBySource",
-        ],
-    },
     "the Column, the WindowSpec and the TableArg": {
         "vars": [
             "Column",
@@ -167,6 +126,10 @@ _DIFFERS_BY_CHANGE = {
             # `df._plan` of its making.
             "DataStreamWriter",
             "DataStreamWriter of its setters",
+            # And the merge writer of `df.mergeInto`, whose `_source_plan` is the `df._plan` of its
+            # making.
+            "MergeIntoWriter",
+            "MergeIntoWriter of its clauses",
             "DataFrame",
             "DataFrame of schema and isStreaming",
             "DataFrame of select",
@@ -2053,12 +2016,13 @@ def test_the_writes_send_what_pysparks_writers_send(objects, case):
     assert _write_outcome(objects.service, call) == _WRITE_OUTCOMES[case]
 
 
-@pytest.mark.parametrize("kind", ["write", "writeTo", "writeStream"])
+@pytest.mark.parametrize("kind", ["write", "writeTo", "writeStream", "mergeInto"])
 def test_a_writer_in_a_cycle_through_a_udf_is_collected(objects, kind):
     # As PySpark's writers, plain objects of their DataFrame's plan (the `_df` and the `_child` of
     # the `_write` of a writer, and the callback of its DataFrame; the `_child` of the
-    # `_write_stream` of a stream writer): a cycle of the writer, its DataFrame and a function of a
-    # UDF of the plan, which refers to the writer, is freed by a collection.
+    # `_write_stream` of a stream writer; the `_source_plan` of a merge writer, and the callback of
+    # its DataFrame): a cycle of the writer, its DataFrame and a function of a UDF of the plan,
+    # which refers to the writer, is freed by a collection.
     from pyspark.sql.functions import udf
 
     def f(x):
@@ -2069,8 +2033,10 @@ def test_a_writer_in_a_cycle_through_a_udf_is_collected(objects, kind):
         writer = df.write
     elif kind == "writeTo":
         writer = df.writeTo("t")
-    else:
+    elif kind == "writeStream":
         writer = df.writeStream
+    else:
+        writer = df.mergeInto("t", df.id > 0)
     f.writer = writer
     freed = [weakref.ref(writer), weakref.ref(df), weakref.ref(f)]
     del df, writer, f
@@ -3005,3 +2971,494 @@ def test_the_stream_writes_send_what_pysparks_writer_sends(objects, case):
     objects.service.execute_payload = _start_result()
     call = _stream_write_cases(objects.sdf)[case]
     assert _stream_write_outcome(objects.service, call) == _STREAM_WRITE_OUTCOMES[case]
+
+
+# The merges of the merge writer, as PySpark's MergeIntoWriter and its clauses make them, of PySpark
+# 4.3.0: what the call raises, and else the merge command that the server receives of it, of the
+# kinds, the conditions and the assignments of its actions.
+def _merge_expression(e):
+    kind = e.WhichOneof("expr_type")
+    if kind == "unresolved_function":
+        f = e.unresolved_function
+        return [kind, f.function_name, [_merge_expression(a) for a in f.arguments]]
+    if kind == "unresolved_attribute":
+        return [kind, e.unresolved_attribute.unparsed_identifier]
+    if kind == "literal":
+        lit = e.literal
+        which = lit.WhichOneof("literal_type")
+        value = getattr(lit, which) if which else None
+        return [kind, which, value if isinstance(value, (int, float, str, bool)) else str(value)]
+    if kind == "expression_string":
+        return [kind, e.expression_string.expression]
+    if kind == "merge_action":
+        a = e.merge_action
+        return [
+            kind,
+            int(a.action_type),
+            _merge_expression(a.condition) if a.HasField("condition") else None,
+            [[_merge_expression(x.key), _merge_expression(x.value)] for x in a.assignments],
+        ]
+    return [kind]
+
+
+def _sent_merge(service):
+    import pyspark.sql.connect.proto as pb2
+
+    request = pb2.ExecutePlanRequest.FromString(service.execute_requests[-1])
+    command = request.plan.command
+    kind = command.WhichOneof("command_type")
+    if kind != "merge_into_table_command":
+        return {"kind": kind}
+    m = command.merge_into_table_command
+    return {
+        "kind": kind,
+        "table": m.target_table_name,
+        "source": m.HasField("source_table_plan"),
+        "condition": _merge_expression(m.merge_condition) if m.HasField("merge_condition") else None,
+        "matched": [_merge_expression(a) for a in m.match_actions],
+        "not_matched": [_merge_expression(a) for a in m.not_matched_actions],
+        "not_matched_by_source": [_merge_expression(a) for a in m.not_matched_by_source_actions],
+        "schema_evolution": m.with_schema_evolution,
+    }
+
+
+def _merge_cases(df):
+    from pyspark.sql import functions as F
+
+    BAD = _BAD_STR
+    cond = F.col("t.id") == F.col("s.id")
+    m = lambda: df.mergeInto("t", cond)  # noqa: E731
+    return {
+        "whenMatched().updateAll().merge()": lambda: m().whenMatched().updateAll().merge(),
+        "whenMatched(c).update({v: x}).merge()": lambda: m().whenMatched(F.col("s.v") > 0).update({"v": F.col("s.v")}).merge(),
+        "whenMatched().delete().merge()": lambda: m().whenMatched().delete().merge(),
+        "whenNotMatched().insertAll().merge()": lambda: m().whenNotMatched().insertAll().merge(),
+        "whenNotMatched(c).insert({v: x, id: y}).merge()": lambda: m().whenNotMatched(F.col("s.v") < 9).insert({"v": F.col("s.v"), "id": F.lit(1)}).merge(),
+        "whenNotMatchedBySource().updateAll().merge()": lambda: m().whenNotMatchedBySource().updateAll().merge(),
+        "whenNotMatchedBySource(c).update({v: 0}).merge()": lambda: m().whenNotMatchedBySource(F.col("t.v") > 1).update({"v": F.lit(0)}).merge(),
+        "whenNotMatchedBySource().delete().merge()": lambda: m().whenNotMatchedBySource().delete().merge(),
+        "every clause, twice, in order": lambda: m().whenMatched(F.col("s.v") > 0).delete().whenMatched().updateAll().whenNotMatched().insertAll().whenNotMatchedBySource().delete().whenNotMatched(F.lit(True)).insert({"v": F.lit(2)}).merge(),
+        "withSchemaEvolution().merge()": lambda: m().withSchemaEvolution().whenMatched().delete().merge(),
+        "merge() of no clause": lambda: m().merge(),
+        "mergeInto(5, c).merge()": lambda: df.mergeInto(5, cond).merge(),
+        "mergeInto(bad, c).merge()": lambda: df.mergeInto(BAD, cond).merge(),
+        "mergeInto(b't', c).merge()": lambda: df.mergeInto(b"t", cond).merge(),
+        "mergeInto(None, c).merge()": lambda: df.mergeInto(None, cond).merge(),
+        "mergeInto(t, 'id = 1').merge()": lambda: df.mergeInto("t", "id = 1").merge(),
+        "mergeInto(t, 5)": lambda: df.mergeInto("t", 5),
+        "mergeInto(t, None).merge()": lambda: df.mergeInto("t", None).merge(),
+        "whenMatched('v > 0').updateAll()": lambda: m().whenMatched("v > 0").updateAll(),
+        "whenMatched(5)": lambda: m().whenMatched(5),
+        "whenMatched(5).delete()": lambda: m().whenMatched(5).delete(),
+        "whenNotMatched(None).insertAll().merge()": lambda: m().whenNotMatched(None).insertAll().merge(),
+        "update({v: 'x'})": lambda: m().whenMatched().update({"v": "x"}),
+        "update({v: 5})": lambda: m().whenMatched().update({"v": 5}),
+        "update({5: x})": lambda: m().whenMatched().update({5: F.col("s.v")}),
+        "update({bad: x})": lambda: m().whenMatched().update({BAD: F.col("s.v")}),
+        "update({'a b': x}).merge()": lambda: m().whenMatched().update({"a b": F.col("s.v")}).merge(),
+        "update({}).merge()": lambda: m().whenMatched().update({}).merge(),
+        "update(None).merge()": lambda: m().whenMatched().update(None).merge(),
+        "update([(v, x)])": lambda: m().whenMatched().update([("v", F.col("s.v"))]),
+        "insert({v: lit(bad)})": lambda: m().whenNotMatched().insert({"v": F.lit(BAD)}),
+        "insert(5)": lambda: m().whenNotMatched().insert(5),
+        "insert({v: x}).insert again": lambda: m().whenNotMatched().insert({"v": F.col("s.v")}).whenNotMatched().insert({"id": F.lit(3)}).merge(),
+        "a clause that raised is not added": lambda: (lambda w: (_merge_raises(lambda: w.whenMatched(5).delete()), w.whenMatched().delete().merge())[1])(m()),
+        "the clause after a change of its condition": lambda: (lambda w, c: (w.whenMatched(c), w.merge()))(m(), F.col("s.v") > 0)[1],
+        "the writer of a clause is the writer": lambda: (lambda w: [w.whenMatched().writer is w, w.whenNotMatched().writer is w, w.whenNotMatchedBySource().writer is w, w.whenMatched().delete() is w])(m()),
+        "the condition of a clause is its argument": lambda: (lambda w, c: w.whenMatched(c)._condition is c)(m(), F.col("s.v") > 0),
+    }
+
+
+def _merge_raises(call):
+    try:
+        call()
+    except Exception:  # noqa: BLE001
+        return True
+    return False
+
+
+_MERGE_OUTCOMES = {'whenMatched().updateAll().merge()': ['sent',
+                                       {'kind': 'merge_into_table_command',
+                                        'table': 't',
+                                        'source': True,
+                                        'condition': ['unresolved_function',
+                                                      '==',
+                                                      [['unresolved_attribute', 't.id'],
+                                                       ['unresolved_attribute', 's.id']]],
+                                        'matched': [['merge_action', 5, None, []]],
+                                        'not_matched': [],
+                                        'not_matched_by_source': [],
+                                        'schema_evolution': False},
+                                       'NoneType'],
+ 'whenMatched(c).update({v: x}).merge()': ['sent',
+                                           {'kind': 'merge_into_table_command',
+                                            'table': 't',
+                                            'source': True,
+                                            'condition': ['unresolved_function',
+                                                          '==',
+                                                          [['unresolved_attribute', 't.id'],
+                                                           ['unresolved_attribute', 's.id']]],
+                                            'matched': [['merge_action',
+                                                         4,
+                                                         ['unresolved_function',
+                                                          '>',
+                                                          [['unresolved_attribute', 's.v'],
+                                                           ['literal', 'integer', 0]]],
+                                                         [[['expression_string', 'v'],
+                                                           ['unresolved_attribute', 's.v']]]]],
+                                            'not_matched': [],
+                                            'not_matched_by_source': [],
+                                            'schema_evolution': False},
+                                           'NoneType'],
+ 'whenMatched().delete().merge()': ['sent',
+                                    {'kind': 'merge_into_table_command',
+                                     'table': 't',
+                                     'source': True,
+                                     'condition': ['unresolved_function',
+                                                   '==',
+                                                   [['unresolved_attribute', 't.id'],
+                                                    ['unresolved_attribute', 's.id']]],
+                                     'matched': [['merge_action', 1, None, []]],
+                                     'not_matched': [],
+                                     'not_matched_by_source': [],
+                                     'schema_evolution': False},
+                                    'NoneType'],
+ 'whenNotMatched().insertAll().merge()': ['sent',
+                                          {'kind': 'merge_into_table_command',
+                                           'table': 't',
+                                           'source': True,
+                                           'condition': ['unresolved_function',
+                                                         '==',
+                                                         [['unresolved_attribute', 't.id'],
+                                                          ['unresolved_attribute', 's.id']]],
+                                           'matched': [],
+                                           'not_matched': [['merge_action', 3, None, []]],
+                                           'not_matched_by_source': [],
+                                           'schema_evolution': False},
+                                          'NoneType'],
+ 'whenNotMatched(c).insert({v: x, id: y}).merge()': ['sent',
+                                                     {'kind': 'merge_into_table_command',
+                                                      'table': 't',
+                                                      'source': True,
+                                                      'condition': ['unresolved_function',
+                                                                    '==',
+                                                                    [['unresolved_attribute',
+                                                                      't.id'],
+                                                                     ['unresolved_attribute',
+                                                                      's.id']]],
+                                                      'matched': [],
+                                                      'not_matched': [['merge_action',
+                                                                       2,
+                                                                       ['unresolved_function',
+                                                                        '<',
+                                                                        [['unresolved_attribute',
+                                                                          's.v'],
+                                                                         ['literal',
+                                                                          'integer',
+                                                                          9]]],
+                                                                       [[['expression_string', 'v'],
+                                                                         ['unresolved_attribute',
+                                                                          's.v']],
+                                                                        [['expression_string',
+                                                                          'id'],
+                                                                         ['literal',
+                                                                          'integer',
+                                                                          1]]]]],
+                                                      'not_matched_by_source': [],
+                                                      'schema_evolution': False},
+                                                     'NoneType'],
+ 'whenNotMatchedBySource().updateAll().merge()': ['sent',
+                                                  {'kind': 'merge_into_table_command',
+                                                   'table': 't',
+                                                   'source': True,
+                                                   'condition': ['unresolved_function',
+                                                                 '==',
+                                                                 [['unresolved_attribute', 't.id'],
+                                                                  ['unresolved_attribute',
+                                                                   's.id']]],
+                                                   'matched': [],
+                                                   'not_matched': [],
+                                                   'not_matched_by_source': [['merge_action',
+                                                                              5,
+                                                                              None,
+                                                                              []]],
+                                                   'schema_evolution': False},
+                                                  'NoneType'],
+ 'whenNotMatchedBySource(c).update({v: 0}).merge()': ['sent',
+                                                      {'kind': 'merge_into_table_command',
+                                                       'table': 't',
+                                                       'source': True,
+                                                       'condition': ['unresolved_function',
+                                                                     '==',
+                                                                     [['unresolved_attribute',
+                                                                       't.id'],
+                                                                      ['unresolved_attribute',
+                                                                       's.id']]],
+                                                       'matched': [],
+                                                       'not_matched': [],
+                                                       'not_matched_by_source': [['merge_action',
+                                                                                  4,
+                                                                                  ['unresolved_function',
+                                                                                   '>',
+                                                                                   [['unresolved_attribute',
+                                                                                     't.v'],
+                                                                                    ['literal',
+                                                                                     'integer',
+                                                                                     1]]],
+                                                                                  [[['expression_string',
+                                                                                     'v'],
+                                                                                    ['literal',
+                                                                                     'integer',
+                                                                                     0]]]]],
+                                                       'schema_evolution': False},
+                                                      'NoneType'],
+ 'whenNotMatchedBySource().delete().merge()': ['sent',
+                                               {'kind': 'merge_into_table_command',
+                                                'table': 't',
+                                                'source': True,
+                                                'condition': ['unresolved_function',
+                                                              '==',
+                                                              [['unresolved_attribute', 't.id'],
+                                                               ['unresolved_attribute', 's.id']]],
+                                                'matched': [],
+                                                'not_matched': [],
+                                                'not_matched_by_source': [['merge_action',
+                                                                           1,
+                                                                           None,
+                                                                           []]],
+                                                'schema_evolution': False},
+                                               'NoneType'],
+ 'every clause, twice, in order': ['sent',
+                                   {'kind': 'merge_into_table_command',
+                                    'table': 't',
+                                    'source': True,
+                                    'condition': ['unresolved_function',
+                                                  '==',
+                                                  [['unresolved_attribute', 't.id'],
+                                                   ['unresolved_attribute', 's.id']]],
+                                    'matched': [['merge_action',
+                                                 1,
+                                                 ['unresolved_function',
+                                                  '>',
+                                                  [['unresolved_attribute', 's.v'],
+                                                   ['literal', 'integer', 0]]],
+                                                 []],
+                                                ['merge_action', 5, None, []]],
+                                    'not_matched': [['merge_action', 3, None, []],
+                                                    ['merge_action',
+                                                     2,
+                                                     ['literal', 'boolean', True],
+                                                     [[['expression_string', 'v'],
+                                                       ['literal', 'integer', 2]]]]],
+                                    'not_matched_by_source': [['merge_action', 1, None, []]],
+                                    'schema_evolution': False},
+                                   'NoneType'],
+ 'withSchemaEvolution().merge()': ['sent',
+                                   {'kind': 'merge_into_table_command',
+                                    'table': 't',
+                                    'source': True,
+                                    'condition': ['unresolved_function',
+                                                  '==',
+                                                  [['unresolved_attribute', 't.id'],
+                                                   ['unresolved_attribute', 's.id']]],
+                                    'matched': [['merge_action', 1, None, []]],
+                                    'not_matched': [],
+                                    'not_matched_by_source': [],
+                                    'schema_evolution': True},
+                                   'NoneType'],
+ 'merge() of no clause': ['sent',
+                          {'kind': 'merge_into_table_command',
+                           'table': 't',
+                           'source': True,
+                           'condition': ['unresolved_function',
+                                         '==',
+                                         [['unresolved_attribute', 't.id'],
+                                          ['unresolved_attribute', 's.id']]],
+                           'matched': [],
+                           'not_matched': [],
+                           'not_matched_by_source': [],
+                           'schema_evolution': False},
+                          'NoneType'],
+ 'mergeInto(5, c).merge()': ['call', 'TypeError', 'bad argument type for built-in operation'],
+ 'mergeInto(bad, c).merge()': ['call',
+                               'UnicodeEncodeError',
+                               "'utf-8' codec can't encode character '\\udc80' in position 1: "
+                               'surrogates not allowed'],
+ "mergeInto(b't', c).merge()": ['sent',
+                                {'kind': 'merge_into_table_command',
+                                 'table': 't',
+                                 'source': True,
+                                 'condition': ['unresolved_function',
+                                               '==',
+                                               [['unresolved_attribute', 't.id'],
+                                                ['unresolved_attribute', 's.id']]],
+                                 'matched': [],
+                                 'not_matched': [],
+                                 'not_matched_by_source': [],
+                                 'schema_evolution': False},
+                                'NoneType'],
+ 'mergeInto(None, c).merge()': ['sent',
+                                {'kind': 'merge_into_table_command',
+                                 'table': '',
+                                 'source': True,
+                                 'condition': ['unresolved_function',
+                                               '==',
+                                               [['unresolved_attribute', 't.id'],
+                                                ['unresolved_attribute', 's.id']]],
+                                 'matched': [],
+                                 'not_matched': [],
+                                 'not_matched_by_source': [],
+                                 'schema_evolution': False},
+                                'NoneType'],
+ "mergeInto(t, 'id = 1').merge()": ['call',
+                                    'AttributeError',
+                                    "'str' object has no attribute 'to_plan'"],
+ 'mergeInto(t, 5)': ['value', 'MergeIntoWriter'],
+ 'mergeInto(t, None).merge()': ['call',
+                                'AttributeError',
+                                "'NoneType' object has no attribute 'to_plan'"],
+ "whenMatched('v > 0').updateAll()": ['call',
+                                      'AttributeError',
+                                      "'str' object has no attribute 'to_plan'"],
+ 'whenMatched(5)': ['value', 'WhenMatched'],
+ 'whenMatched(5).delete()': ['call', 'AttributeError', "'int' object has no attribute 'to_plan'"],
+ 'whenNotMatched(None).insertAll().merge()': ['sent',
+                                              {'kind': 'merge_into_table_command',
+                                               'table': 't',
+                                               'source': True,
+                                               'condition': ['unresolved_function',
+                                                             '==',
+                                                             [['unresolved_attribute', 't.id'],
+                                                              ['unresolved_attribute', 's.id']]],
+                                               'matched': [],
+                                               'not_matched': [['merge_action', 3, None, []]],
+                                               'not_matched_by_source': [],
+                                               'schema_evolution': False},
+                                              'NoneType'],
+ "update({v: 'x'})": ['call', 'AttributeError', "'str' object has no attribute 'to_plan'"],
+ 'update({v: 5})': ['call', 'AttributeError', "'int' object has no attribute 'to_plan'"],
+ 'update({5: x})': ['call', 'AssertionError', ''],
+ 'update({bad: x})': ['call',
+                      'UnicodeEncodeError',
+                      "'utf-8' codec can't encode character '\\udc80' in position 1: surrogates "
+                      'not allowed'],
+ "update({'a b': x}).merge()": ['sent',
+                                {'kind': 'merge_into_table_command',
+                                 'table': 't',
+                                 'source': True,
+                                 'condition': ['unresolved_function',
+                                               '==',
+                                               [['unresolved_attribute', 't.id'],
+                                                ['unresolved_attribute', 's.id']]],
+                                 'matched': [['merge_action',
+                                              4,
+                                              None,
+                                              [[['expression_string', 'a b'],
+                                                ['unresolved_attribute', 's.v']]]]],
+                                 'not_matched': [],
+                                 'not_matched_by_source': [],
+                                 'schema_evolution': False},
+                                'NoneType'],
+ 'update({}).merge()': ['sent',
+                        {'kind': 'merge_into_table_command',
+                         'table': 't',
+                         'source': True,
+                         'condition': ['unresolved_function',
+                                       '==',
+                                       [['unresolved_attribute', 't.id'],
+                                        ['unresolved_attribute', 's.id']]],
+                         'matched': [['merge_action', 4, None, []]],
+                         'not_matched': [],
+                         'not_matched_by_source': [],
+                         'schema_evolution': False},
+                        'NoneType'],
+ 'update(None).merge()': ['sent',
+                          {'kind': 'merge_into_table_command',
+                           'table': 't',
+                           'source': True,
+                           'condition': ['unresolved_function',
+                                         '==',
+                                         [['unresolved_attribute', 't.id'],
+                                          ['unresolved_attribute', 's.id']]],
+                           'matched': [['merge_action', 4, None, []]],
+                           'not_matched': [],
+                           'not_matched_by_source': [],
+                           'schema_evolution': False},
+                          'NoneType'],
+ 'update([(v, x)])': ['call', 'AttributeError', "'list' object has no attribute 'items'"],
+ 'insert({v: lit(bad)})': ['call',
+                           'UnicodeEncodeError',
+                           "'utf-8' codec can't encode character '\\udc80' in position 1: "
+                           'surrogates not allowed'],
+ 'insert(5)': ['call', 'AttributeError', "'int' object has no attribute 'items'"],
+ 'insert({v: x}).insert again': ['sent',
+                                 {'kind': 'merge_into_table_command',
+                                  'table': 't',
+                                  'source': True,
+                                  'condition': ['unresolved_function',
+                                                '==',
+                                                [['unresolved_attribute', 't.id'],
+                                                 ['unresolved_attribute', 's.id']]],
+                                  'matched': [],
+                                  'not_matched': [['merge_action',
+                                                   2,
+                                                   None,
+                                                   [[['expression_string', 'v'],
+                                                     ['unresolved_attribute', 's.v']]]],
+                                                  ['merge_action',
+                                                   2,
+                                                   None,
+                                                   [[['expression_string', 'id'],
+                                                     ['literal', 'integer', 3]]]]],
+                                  'not_matched_by_source': [],
+                                  'schema_evolution': False},
+                                 'NoneType'],
+ 'a clause that raised is not added': ['sent',
+                                       {'kind': 'merge_into_table_command',
+                                        'table': 't',
+                                        'source': True,
+                                        'condition': ['unresolved_function',
+                                                      '==',
+                                                      [['unresolved_attribute', 't.id'],
+                                                       ['unresolved_attribute', 's.id']]],
+                                        'matched': [['merge_action', 1, None, []]],
+                                        'not_matched': [],
+                                        'not_matched_by_source': [],
+                                        'schema_evolution': False},
+                                       'NoneType'],
+ 'the clause after a change of its condition': ['sent',
+                                                {'kind': 'merge_into_table_command',
+                                                 'table': 't',
+                                                 'source': True,
+                                                 'condition': ['unresolved_function',
+                                                               '==',
+                                                               [['unresolved_attribute', 't.id'],
+                                                                ['unresolved_attribute', 's.id']]],
+                                                 'matched': [],
+                                                 'not_matched': [],
+                                                 'not_matched_by_source': [],
+                                                 'schema_evolution': False},
+                                                'NoneType'],
+ 'the writer of a clause is the writer': ['value', 'list'],
+ 'the condition of a clause is its argument': ['value', 'bool']}
+
+
+def _merge_outcome(service, call):
+    before = len(service.execute_requests)
+    try:
+        value = call()
+    except BaseException as error:  # noqa: BLE001
+        return ["call", type(error).__name__, str(error)[:120]]
+    if len(service.execute_requests) == before:
+        return ["value", type(value).__name__]
+    return ["sent", _sent_merge(service), type(value).__name__]
+
+
+@pytest.mark.parametrize("case", list(_MERGE_OUTCOMES))
+def test_the_merges_send_what_pysparks_merge_writer_sends(objects, case):
+    # As PySpark's MergeIntoWriter and its clauses, of whose source the drop-in's are adapted: the
+    # errors of the clauses, which build their actions when they are added, and of the merge, in
+    # the same order, and the merge commands that they send, of the target table, the condition and
+    # the actions of the clauses, in their order, and the schema evolution.
+    call = _merge_cases(objects.df.alias("s"))[case]
+    assert _merge_outcome(objects.service, call) == _MERGE_OUTCOMES[case]
