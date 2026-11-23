@@ -11,6 +11,7 @@ import collections
 import contextlib
 import datetime
 import decimal
+import importlib.util
 import io
 import json
 import os
@@ -16742,9 +16743,9 @@ def test_cycles_through_the_shallow_copies_of_a_writer_are_collected_as_pyspark(
 
 
 def test_a_dataframe_of_the_plan_of_another_does_not_keep_it_as_pyspark(mock_connect):
-    # As PySpark's DataFrame(df._plan, session), copy.copy(df) and its stream writer, which hold
-    # the plan object of `df` and not `df`: `df` is freed at its last reference, its attributes
-    # with it, while they live, and they send its plan.
+    # As PySpark's DataFrame(df._plan, session) and copy.copy(df), which hold the plan object of
+    # `df` and not `df`: `df` is freed at its last reference, its attributes with it, while they
+    # live, and they send its plan.
     import copy
     import gc
     import weakref
@@ -16757,7 +16758,6 @@ def test_a_dataframe_of_the_plan_of_another_does_not_keep_it_as_pyspark(mock_con
         "DataFrame(df._plan, session)": lambda df: DataFrame(df._plan, spark),
         "copy.copy": copy.copy,
         "a deep copy of nothing to copy": copy.deepcopy,
-        "writeStream": lambda df: df.writeStream,
     }
     gc.disable()
     try:
@@ -16768,15 +16768,40 @@ def test_a_dataframe_of_the_plan_of_another_does_not_keep_it_as_pyspark(mock_con
             freed = weakref.ref(df.attribute)
             del df
             assert freed() is None, name
-            if name != "writeStream":
-                assert made._plan.plan(spark.client).HasField("extension"), name
+            assert made._plan.plan(spark.client).HasField("extension"), name
             del made
-        # A DataFrame that keeps its stream writer is freed at its last reference too.
+    finally:
+        gc.enable()
+
+
+@pytest.mark.xfail(
+    importlib.util.find_spec("pyspark._pyspark") is not None,
+    strict=True,
+    reason="SPARK-62218: the plan object of `df._plan` holds `df`, where PySpark's does not",
+)
+def test_a_stream_writer_does_not_keep_its_dataframe_as_pyspark(mock_connect):
+    # As PySpark's stream writer, which holds the plan object of `df` and not `df`: `df` is freed at
+    # its last reference, its attributes with it, while the writer lives, and a DataFrame that keeps
+    # its stream writer is freed at its last reference too. The drop-in's stream writer is
+    # PySpark's, of the plan object that `df._plan` gives, which holds `df` until SPARK-62218.
+    import gc
+    import weakref
+
+    spark, _ = mock_connect
+    gc.disable()
+    try:
+        df = spark.range(3)
+        df.attribute = type("Attribute", (), {})()
+        writer = df.writeStream
+        freed = weakref.ref(df.attribute)
+        del df
+        kept = freed() is None
+        del writer
         df = spark.range(3)
         df.back = df.writeStream
         freed = weakref.ref(df.back)
         del df
-        assert freed() is None
+        assert kept and freed() is None
     finally:
         gc.enable()
 

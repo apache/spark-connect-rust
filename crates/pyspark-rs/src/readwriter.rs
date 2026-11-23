@@ -41,4 +41,3 @@ pub(crate) fn table_name_of(name: &Bound<'_, PyAny>) -> PyResult<(String, Option
     }
     Ok((String::new(), Some(crate::options::builtin_type_error())))
 }
-

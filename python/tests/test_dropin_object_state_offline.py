@@ -2065,9 +2065,12 @@ def test_a_writer_in_a_cycle_through_a_udf_is_collected(objects, kind):
         return x
 
     df = objects.spark.range(1).select(udf(f, "long")("id"))
-    writer = {"write": lambda: df.write, "writeTo": lambda: df.writeTo("t")}.get(
-        kind, lambda: df.writeStream
-    )()
+    if kind == "write":
+        writer = df.write
+    elif kind == "writeTo":
+        writer = df.writeTo("t")
+    else:
+        writer = df.writeStream
     f.writer = writer
     freed = [weakref.ref(writer), weakref.ref(df), weakref.ref(f)]
     del df, writer, f

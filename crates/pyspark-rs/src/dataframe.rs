@@ -7255,7 +7255,8 @@ mod writer_state_tests {
             let (generation, copy) = (state.generation.load(Ordering::SeqCst), state.get());
             let stale = crate::gc::Parts::of(py, held(&copy));
             drop(copy);
-            state.set(Some(udf_of(object(py))));
+            let next = Some(udf_of(object(py)));
+            state.update(|_| next);
             assert_eq!(state.generation.load(Ordering::SeqCst), generation + 1);
             assert_eq!(state.parts.lock().unwrap().0, generation + 1);
             state.give_parts(generation, stale);

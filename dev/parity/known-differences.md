@@ -597,9 +597,8 @@ requests of the unpickled object pickle as it is then. This case still differs:
     `SharedPart`, and the counts and the marks of the calls without the GIL need it too.
   - `gc.get_referents` of a DataFrame, a Column or another object that holds a plan gives the
     `SharedPart`s of its parts that are seen (whose every reference is of a holder that reports it,
-    and that no call that runs without the GIL may clone or drop), and that of a stream or merge
-    writer the `WriterParts` of its state, which its shallow copies share and which gives those of
-    the state,
+    and that no call that runs without the GIL may clone or drop), and that of a merge writer the
+    `WriterParts` of its state, which its shallow copies share and which gives those of the state,
     where PySpark's objects give their plan objects through their `__dict__`; the `SharedPart` of
     the pickler of a UDF gives the tuple of its function and its return type.
   - The attributes of the clients of a session, their `thread_local` and their lists, are kept by
