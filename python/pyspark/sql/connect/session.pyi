@@ -26,14 +26,15 @@ from typing import Optional, Any, Union, Dict, List, Tuple, Type, Set, overload,
 import numpy as np
 import pandas as pd
 import pyarrow as pa
+from pyspark.sql.connect.dataframe import DataFrame as DataFrame
 from pyspark.sql.dataframe import DataFrame as ParentDataFrame
 from pyspark.sql.connect.client import SparkConnectClient, DefaultChannelBuilder
-from pyspark.sql.connect.conf import RuntimeConf
+from pyspark.sql.connect.conf import RuntimeConf as RuntimeConf
 from pyspark.sql.connect.plan import LocalRelation, ChunkedCachedLocalRelation
 from pyspark.sql.connect.profiler import ProfilerCollector
-from pyspark.sql.connect.readwriter import DataFrameReader
-from pyspark.sql.connect.streaming.readwriter import DataStreamReader
-from pyspark.sql.connect.streaming.query import StreamingQueryManager
+from pyspark.sql.connect.readwriter import DataFrameReader as DataFrameReader
+from pyspark.sql.connect.streaming.readwriter import DataStreamReader as DataStreamReader
+from pyspark.sql.connect.streaming.query import StreamingQueryManager as StreamingQueryManager
 from pyspark.sql.pandas.conversion import create_arrow_table_from_pandas as create_arrow_table_from_pandas
 from pyspark.sql.pandas.types import to_arrow_schema as to_arrow_schema, from_arrow_type as from_arrow_type
 from pyspark.sql.profiler import Profile

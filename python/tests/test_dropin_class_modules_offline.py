@@ -6,7 +6,7 @@ show. The expected names are official PySpark's, of the same objects."""
 import pickle
 
 import pytest
-from _mock_connect_server import mock_connect_session
+from _mock_connect_server import message_field, mock_connect_server, mock_connect_session
 from pyspark.sql import Window
 from pyspark.sql import functions as F
 
@@ -86,6 +86,145 @@ def test_the_class_of_an_object_of_a_session_is_pysparks(objects, name):
     assert f"{cls.__module__}.{cls.__qualname__}" == EXPECTED[name]
     # Pickled by reference to that name, which names the same class.
     assert pickle.loads(pickle.dumps(cls)) is cls
+
+
+# The code of a program that makes `obj`, of a session of the mock server of `remote` (`SESSION`)
+# or of none, and the class of `obj`: each runs in an interpreter of its own, which imports nothing
+# else, as a new program that makes such an object for a UDF or a `foreachBatch` function does.
+SESSION = "spark = SparkSession.builder.remote(remote).getOrCreate()\ndf = spark.range(1)\n"
+MERGE = SESSION + "merge = df.mergeInto('t', F.lit(True))\n"
+FRESH_OBJECTS = {
+    "spark": (SESSION + "obj = spark", EXPECTED["spark"]),
+    "conf": (SESSION + "obj = spark.conf", EXPECTED["conf"]),
+    "catalog": (SESSION + "obj = spark.catalog", EXPECTED["catalog"]),
+    "read": (SESSION + "obj = spark.read", EXPECTED["read"]),
+    "readStream": (SESSION + "obj = spark.readStream", EXPECTED["readStream"]),
+    "streams": (SESSION + "obj = spark.streams", EXPECTED["streams"]),
+    "tvf": (SESSION + "obj = spark.tvf", EXPECTED["tvf"]),
+    "dataSource": (SESSION + "obj = spark.dataSource", EXPECTED["dataSource"]),
+    "df": (SESSION + "obj = df", EXPECTED["df"]),
+    "write": (SESSION + "obj = df.write", EXPECTED["write"]),
+    "writeTo": (SESSION + "obj = df.writeTo('t')", EXPECTED["writeTo"]),
+    "writeStream": (SESSION + "obj = df.writeStream", EXPECTED["writeStream"]),
+    "mergeInto": (MERGE + "obj = merge", EXPECTED["mergeInto"]),
+    "whenMatched": (MERGE + "obj = merge.whenMatched()", EXPECTED["whenMatched"]),
+    "whenNotMatched": (MERGE + "obj = merge.whenNotMatched()", EXPECTED["whenNotMatched"]),
+    "whenNotMatchedBySource": (
+        MERGE + "obj = merge.whenNotMatchedBySource()",
+        EXPECTED["whenNotMatchedBySource"],
+    ),
+    "na": (SESSION + "obj = df.na", EXPECTED["na"]),
+    "stat": (SESSION + "obj = df.stat", EXPECTED["stat"]),
+    "groupBy": (SESSION + "obj = df.groupBy('id')", EXPECTED["groupBy"]),
+    "pivot": (SESSION + "obj = df.groupBy('id').pivot('id', [1])", EXPECTED["groupBy"]),
+    "cogroup": (SESSION + "obj = df.groupBy('id').cogroup(df.groupBy('id'))", EXPECTED["cogroup"]),
+    "column": (SESSION + "obj = df.id", EXPECTED["column"]),
+    "asTable": (SESSION + "obj = df.asTable()", EXPECTED["asTable"]),
+    "streamingQuery": (
+        SESSION + "obj = spark.readStream.format('rate').load().writeStream.start()",
+        "pyspark.sql.connect.streaming.query.StreamingQuery",
+    ),
+    "column of no session": ("obj = F.col('id')", EXPECTED["column"]),
+    "window of no session": ("obj = Window.partitionBy('id')", EXPECTED["window"]),
+    "observation of no session": (
+        "obj = Observation('o')",
+        "pyspark.sql.connect.observation.Observation",
+    ),
+}
+
+# The interpreter of an object of FRESH_OBJECTS: it prints the class of `obj`, whether cloudpickle
+# pickles that class by reference, and the classes that cloudpickle pickles by value, as dynamic
+# classes, in the pickle of `obj`. A pickle of the locks and thread-locals of the client of a
+# session fails, as of PySpark's objects (`spark.conf`, `spark.streams`, a MergeIntoWriter).
+FRESH_INTERPRETER = """
+import json
+import sys
+
+from pyspark.sql import Observation, SparkSession, Window
+from pyspark.sql import functions as F
+
+remote = sys.argv[1]
+exec(sys.argv[2])
+from pyspark import cloudpickle
+from pyspark.cloudpickle import cloudpickle as internals
+
+by_value = []
+of_dynamic_class = internals._dynamic_class_reduce
+
+
+def recorded(cls):
+    by_value.append(f"{cls.__module__}.{cls.__qualname__}")
+    return of_dynamic_class(cls)
+
+
+internals._dynamic_class_reduce = recorded
+cls = type(obj)
+by_reference = internals._should_pickle_by_reference(cls)
+try:
+    cloudpickle.dumps(obj)
+except TypeError:
+    pass
+print(json.dumps([f"{cls.__module__}.{cls.__qualname__}", by_reference, by_value]))
+"""
+
+
+@pytest.fixture(scope="module")
+def mock_server():
+    pytest.importorskip("grpc")
+    with mock_connect_server() as service:
+        yield service
+
+
+def test_the_classes_of_the_objects_of_a_new_interpreter_pickle_by_reference_as_pysparks(
+    mock_server, tmp_path
+):
+    # As PySpark's, whose classes are those of their modules, which an object of one imports: in
+    # an interpreter that made only that object, cloudpickle pickles its class by reference, which
+    # it does only of a class of a module of `sys.modules`, and no class of the pickle of the object
+    # by value. The native classes name PySpark Connect's modules, which the session, its DataFrame
+    # and its properties import as PySpark's do, so that a function of a UDF or of `foreachBatch`
+    # that holds such an object pickles as PySpark's, which a Python worker of the server
+    # unpickles, where the dynamic class of a native class has none of its members (`AttributeError:
+    # type object 'GroupedData' has no attribute 'agg'`).
+    import json
+    import subprocess
+    import sys
+    from concurrent.futures import ThreadPoolExecutor
+
+    script = tmp_path / "fresh_object.py"
+    script.write_text(FRESH_INTERPRETER)
+    objects = dict(FRESH_OBJECTS)
+    # And a Column of a plain pickle of this process, which needs no session to unpickle, as
+    # PySpark's unpickle imports the module of its class.
+    pickled = pickle.dumps(F.col("id") + 1).hex()
+    objects["column unpickled of no session"] = (
+        f"import pickle\nobj = pickle.loads(bytes.fromhex({pickled!r}))",
+        EXPECTED["column"],
+    )
+    service = mock_server
+    service.reset()
+    # The result of the start of a query: WriteStreamOperationStartResult (8) of a query_id (1) of
+    # id 1 and run_id 2, of no started event.
+    service.execute_payload = message_field(
+        8, message_field(1, message_field(1, "q") + message_field(2, "r"))
+    )
+
+    def run(code):
+        result = subprocess.run(
+            [sys.executable, str(script), service.remote, code],
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        assert result.returncode == 0, result.stderr
+        return json.loads(result.stdout.strip().splitlines()[-1])
+
+    try:
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            results = dict(zip(objects, pool.map(run, [code for code, _ in objects.values()])))
+    finally:
+        service.reset()
+    assert results == {name: [cls, True, []] for name, (_, cls) in objects.items()}
 
 
 def test_the_repr_of_a_session_names_its_connect_class(objects):

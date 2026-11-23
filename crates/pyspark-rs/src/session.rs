@@ -4485,6 +4485,8 @@ impl PySparkSession {
     #[pyo3(name = "tvf")]
     #[doc = connect_doc!(SparkSession.tvf)]
     fn tvf<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, crate::tvf::PyTableValuedFunction>> {
+        // Of the module of its class imported, as PySpark's property imports it (see `catalog`).
+        slf.py().import("pyspark.sql.connect.tvf")?;
         crate::tvf::PyTableValuedFunction::of_session(slf.as_any())
     }
 
@@ -5626,7 +5628,9 @@ impl PySparkSession {
     #[getter]
     #[doc = connect_doc!(SparkSession.dataSource)]
     fn dataSource<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyDataSourceRegistration>> {
-        // A new one at each access, as PySpark's `DataSourceRegistration(self)`.
+        // A new one at each access, as PySpark's `DataSourceRegistration(self)`, of the module of
+        // its class imported, as PySpark's property imports it (see `catalog`).
+        slf.py().import("pyspark.sql.connect.datasource")?;
         PyDataSourceRegistration::of_session(slf.as_any())
     }
 
