@@ -8153,6 +8153,101 @@ def test_foreach_batch_captures_the_readers_writers_and_groups_as_pyspark(
         session.sql(f"DROP TABLE IF EXISTS {table}").collect()
 
 
+# The program of test_foreach_batch_captures_groups_and_queries_in_a_new_interpreter_as_pyspark,
+# which makes a session and the object that its foreachBatch function captures, and nothing else,
+# and prints what the function wrote on the Python worker of the server.
+FOREACH_BATCH_OF_A_NEW_INTERPRETER = """
+import sys
+
+from pyspark.sql import SparkSession
+
+remote, directory, name = sys.argv[1:]
+spark = SparkSession.builder.remote(remote).getOrCreate()
+df = spark.createDataFrame([(1, "a"), (2, "b"), (1, "c")], "k int, v string")
+running = None
+if name == "streamingQuery":
+    running = spark.readStream.format("rate").option("rowsPerSecond", 1).load()
+    running = running.writeStream.format("memory").queryName("fresh_running").start()
+captured = {
+    "groupBy": lambda: df.groupBy("k"),
+    "cogroup": lambda: df.groupBy("k").cogroup(df.groupBy("k")),
+    "streamingQuery": lambda: running,
+    "namespaces": lambda: (df.na, df.stat, spark.catalog, spark.tvf, spark.dataSource),
+}[name]()
+out = directory + "/out.txt"
+
+
+def func(batch, batch_id):
+    if name == "groupBy":
+        value = captured.agg({"v": "max"}).count()
+    elif name == "cogroup":
+        value = captured.applyInArrow(lambda left, right: left, "k int, v string").count()
+    elif name == "streamingQuery":
+        value = (captured.id == running.id, captured.isActive, captured.awaitTermination(0.1))
+    else:
+        na, stat, catalog, tvf, sources = captured
+        value = (
+            na.drop().count(),
+            stat.crosstab("k", "v").count(),
+            catalog.currentDatabase(),
+            tvf.range(2).count(),
+            type(sources).__name__,
+        )
+    with open(out, "w") as file:
+        file.write(str(value))
+
+
+query = spark.readStream.format("text").load(directory + "/in").writeStream.foreachBatch(func)
+query = query.trigger(once=True).start()
+try:
+    query.awaitTermination()
+finally:
+    if running is not None:
+        running.stop()
+print(open(out).read())
+"""
+
+
+@pytest.mark.parametrize("name", ["groupBy", "cogroup", "streamingQuery", "namespaces"])
+def test_foreach_batch_captures_groups_and_queries_in_a_new_interpreter_as_pyspark(
+        tmp_path, name):
+    # As PySpark's, in an interpreter that made only the session and the object, as a program of
+    # its own process does: a foreachBatch function that captures grouped data, cogrouped ops, a
+    # streaming query, or the na and stat functions of a DataFrame and the catalog, table-valued
+    # functions and data sources of a session uses them on the Python worker of the server.
+    # cloudpickle pickles a class by reference only when its module is in `sys.modules`, and else
+    # by value, which the worker unpickles as a class of none of the native class's members
+    # (`AttributeError: type object 'GroupedData' has no attribute 'agg'`): the modules that the
+    # native classes name are imported as PySpark imports them, with the session, its DataFrames
+    # and its properties. (test_foreach_batch_captures_the_readers_writers_and_groups_as_pyspark
+    # runs in the process of the other tests, which import them too.)
+    import subprocess
+    import sys
+
+    remote = os.environ.get("SPARK_REMOTE")
+    if not remote:
+        pytest.skip("SPARK_REMOTE is required for live-server tests")
+    (tmp_path / "in").mkdir()
+    (tmp_path / "in" / "input.txt").write_text("a\nc\nb\n")
+    script = tmp_path / "foreach_batch.py"
+    script.write_text(FOREACH_BATCH_OF_A_NEW_INTERPRETER)
+    result = subprocess.run(
+        [sys.executable, str(script), remote, str(tmp_path), name],
+        env=dict(os.environ, TZ="UTC"),
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+    assert result.returncode == 0, result.stderr
+    expected = {
+        "groupBy": "2",
+        "cogroup": "3",
+        "streamingQuery": "(True, True, False)",
+        "namespaces": "(3, 2, 'default', 2, 'DataSourceRegistration')",
+    }[name]
+    assert result.stdout.strip().splitlines()[-1] == expected, result.stderr
+
+
 def test_empty_data_with_a_struct_field_as_a_type_is_rejected_by_the_server(session):
     # As PySpark, which sends the schema of empty data as its JSON string, so that the server
     # parses it when the DataFrame is evaluated: the client has no error of its own for it.

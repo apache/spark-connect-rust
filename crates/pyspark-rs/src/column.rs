@@ -1158,6 +1158,7 @@ impl PyColumn {
     ))]
     #[allow(clippy::too_many_arguments)]
     fn _of_expression(
+        py: Python<'_>,
         expression: &[u8],
         rendered: String,
         branches: Option<Vec<(PyRef<'_, PyColumn>, PyRef<'_, PyColumn>)>>,
@@ -1168,6 +1169,11 @@ impl PyColumn {
         subqueries: Option<Vec<Bound<'_, PyTuple>>>,
         holes: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyColumn> {
+        // Of the module of the class imported, as PySpark's unpickle of a Column imports the
+        // module of its class: an unpickled Column needs no session, whose module imports it
+        // otherwise, and cloudpickle pickles a class by reference only when its module is in
+        // `sys.modules` (see `pyspark.sql.connect.session`).
+        py.import("pyspark.sql.connect.column")?;
         if let Some(branches) = branches {
             let branches = branches
                 .iter()

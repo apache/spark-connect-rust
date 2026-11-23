@@ -3995,6 +3995,19 @@ those that it imports too, such as `logger` and `os`, and those of `retries` (`R
 which its `dir()` does not list, but not the others, such as `grpc`, `pd` and `ArtifactManager`.
 The package and `core` need none of pandas, PyArrow, grpc and protobuf, which PySpark's `core`
 imports, and import without them (see `dev/parity/known-differences.md`).
+
+The module that the class of each of the objects of a session above names is imported once the
+object is made, as PySpark imports it with the module that defines the class: the module of the
+session imports those of its DataFrames, its `conf`, its readers and its queries, and with them
+those of grouped data, merges, writers, columns, observations and table arguments, as PySpark's
+does, and `catalog`, `tvf` and `dataSource` import theirs when they make their objects, as
+PySpark's properties do, and a Column that a plain pickle gives back, of no session, imports its
+own, as PySpark's unpickle imports the module of its class. So cloudpickle, which pickles a class
+by reference only when its module is in `sys.modules`, and else by value, as a dynamic class,
+pickles these classes by reference, also in a new interpreter: a UDF or a `foreachBatch` function
+that captures such an object pickles it as PySpark's, which the server's Python worker unpickles as
+PySpark's object.
+
 The functions of `pyspark.sql.connect.functions` are of its modules (`builtin` and
 `partitioning`), and so are those of `pyspark.sql.connect.avro.functions` and
 `pyspark.sql.connect.protobuf.functions`: they are not those of `pyspark.sql.functions`,

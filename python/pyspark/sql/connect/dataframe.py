@@ -25,6 +25,18 @@ from pyspark import cloudpickle as _cloudpickle
 from pyspark._pyspark import DataFrame, DataFrameNaFunctions, DataFrameStatFunctions
 from pyspark.sql.connect import _column_reduce
 
+# As PySpark Connect's module of the DataFrame, which imports those of the classes of the objects
+# of a DataFrame when it is imported, of its groups, merges, writers and columns, by PySpark's
+# imports: so cloudpickle pickles their native classes by reference (see
+# `pyspark.sql.connect.session`). PySpark's imports the Column as `ConnectColumn`, which its stub,
+# of the names that a user imports, does not declare, so the module is imported under a private
+# name here.
+from pyspark.sql.connect import column as _column  # noqa: F401
+from pyspark.sql.connect.group import GroupedData  # noqa: F401
+from pyspark.sql.connect.merge import MergeIntoWriter  # noqa: F401
+from pyspark.sql.connect.readwriter import DataFrameWriter, DataFrameWriterV2  # noqa: F401
+from pyspark.sql.connect.streaming.readwriter import DataStreamWriter  # noqa: F401
+
 __all__ = ["DataFrame", "DataFrameNaFunctions", "DataFrameStatFunctions"]
 
 _cloudpickle.register_pickle_by_value(_column_reduce)

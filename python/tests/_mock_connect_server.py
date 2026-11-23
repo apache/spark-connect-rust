@@ -1374,32 +1374,37 @@ class RemoteService:
 
 
 @contextmanager
-def mock_connect_session():
-    from pyspark.sql import SparkSession
-
+def mock_connect_server():
+    # The service of a mock server in a process of its own, without a session of this process:
+    # its `remote` is the URL of the server, for the sessions of this process or of others.
     context = multiprocessing.get_context("spawn")
     parent, child = context.Pipe()
     process = context.Process(target=serve, args=(child,))
     process.start()
-    spark = None
     try:
         assert parent.poll(20), "Mock server did not start"
         remote = f"sc://127.0.0.1:{parent.recv()}"
-        spark = SparkSession.builder.remote(remote).getOrCreate()
         service = RemoteService(parent)
-        # The URL of the server, for more sessions of it.
         object.__setattr__(service, "remote", remote)
-        yield spark, service
+        yield service
     finally:
-        try:
-            if spark is not None:
-                spark.stop()
-        finally:
-            if process.is_alive():
-                parent.send(("stop",))
+        if process.is_alive():
+            parent.send(("stop",))
+        process.join(10)
+        if process.is_alive():
+            process.terminate()
             process.join(10)
-            if process.is_alive():
-                process.terminate()
-                process.join(10)
-            parent.close()
-            child.close()
+        parent.close()
+        child.close()
+
+
+@contextmanager
+def mock_connect_session():
+    from pyspark.sql import SparkSession
+
+    with mock_connect_server() as service:
+        spark = SparkSession.builder.remote(service.remote).getOrCreate()
+        try:
+            yield spark, service
+        finally:
+            spark.stop()

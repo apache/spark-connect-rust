@@ -30,10 +30,10 @@ from pyspark.errors import PySparkRuntimeError
 from pyspark.serializers import CPickleSerializer
 from pyspark.storagelevel import StorageLevel
 import pyspark.sql.connect.plan as plan
-from pyspark.sql.connect.group import GroupedData
-from pyspark.sql.connect.merge import MergeIntoWriter
-from pyspark.sql.connect.readwriter import DataFrameWriter, DataFrameWriterV2
-from pyspark.sql.connect.streaming.readwriter import DataStreamWriter
+from pyspark.sql.connect.group import GroupedData as GroupedData
+from pyspark.sql.connect.merge import MergeIntoWriter as MergeIntoWriter
+from pyspark.sql.connect.readwriter import DataFrameWriter as DataFrameWriter, DataFrameWriterV2 as DataFrameWriterV2
+from pyspark.sql.connect.streaming.readwriter import DataStreamWriter as DataStreamWriter
 from pyspark.sql.column import Column
 from pyspark.sql.table_arg import TableArg
 from pyspark.sql.connect._typing import ColumnOrName, ColumnOrNameOrOrdinal, LiteralType, PrimitiveType, OptionalPrimitiveType, PandasMapIterFunction, ArrowMapIterFunction

@@ -24,6 +24,24 @@ from typing import TYPE_CHECKING, Callable
 from pyspark._pyspark import SparkSession, _install_builder
 from pyspark.errors import PySparkTypeError as _PySparkTypeError
 
+# As PySpark Connect's module of the session, which imports the modules of the classes of the
+# objects of a session when it is imported: those of its DataFrames (and so those of their groups,
+# merges, writers and columns, see `pyspark.sql.connect.dataframe`), of its runtime config, of its
+# readers and of its streaming queries, by PySpark's imports here, and those of its observations
+# and table arguments, which PySpark's client and module of UDTFs import. The native classes name
+# these modules in their `__module__`, and cloudpickle pickles a class by reference only when its
+# module is in `sys.modules`, else by value, as a dynamic class, which a Python worker of the
+# server cannot unpickle: so an object of a session that a UDF or a `foreachBatch` function holds
+# pickles as PySpark's, in a new interpreter too. The properties of the session import the modules
+# of `catalog`, `tvf` and `dataSource` when they make the objects, as PySpark's do.
+from pyspark.sql.connect import observation as _observation  # noqa: F401
+from pyspark.sql.connect import table_arg as _table_arg  # noqa: F401
+from pyspark.sql.connect.conf import RuntimeConf  # noqa: F401
+from pyspark.sql.connect.dataframe import DataFrame  # noqa: F401
+from pyspark.sql.connect.readwriter import DataFrameReader  # noqa: F401
+from pyspark.sql.connect.streaming.query import StreamingQueryManager  # noqa: F401
+from pyspark.sql.connect.streaming.readwriter import DataStreamReader  # noqa: F401
+
 # As PySpark Connect's module of the session, which binds the conversions of `createDataFrame` and
 # the types that they make when it is imported, with the first session: its `createDataFrame`
 # calls these by their names here, so a name rebound in `pyspark.sql.types` or
