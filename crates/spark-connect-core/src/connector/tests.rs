@@ -20,6 +20,7 @@
 //! preface and the settings that the connector exchanges for hyper, and the texts of the failures,
 //! as grpcio gives them in its dialect and as the Rust client does otherwise.
 
+use super::subchannel::Subchannel;
 use super::*;
 use std::sync::atomic::AtomicUsize;
 use tokio::net::TcpListener;
@@ -126,13 +127,101 @@ fn target(addresses: Vec<SocketAddr>, grpcio: bool) -> Target {
         grpcio,
         form: None,
         names: None,
-        resolved: Default::default(),
-        addresses: Some(addresses),
+        addresses: Some(Arc::new(Mutex::new(addresses))),
+        resolution_fails: Default::default(),
         resolves_never: false,
         dns_config: None,
         lookups: Default::default(),
         name_lookups: Default::default(),
+        deadline: None,
     }
+}
+
+/// A channel of a client to `target`, of subchannels of a pool of its own, of an endpoint of no
+/// keepalive, whose work runs on the runtime of the test.
+fn channel_of(target: Target) -> Arc<ClientChannel> {
+    channel_in(target, Arc::default())
+}
+
+/// A channel of a client to `target`, of the subchannels of `pool` (see [`channel_of`]).
+fn channel_in(target: Target, pool: Arc<Pool>) -> Arc<ClientChannel> {
+    channel_of_delay(target, pool, ATTEMPT_DELAY)
+}
+
+/// A channel of a client to `target`, of the subchannels of `pool`, of happy eyeballs of `delay`.
+fn channel_of_delay(target: Target, pool: Arc<Pool>, delay: Duration) -> Arc<ClientChannel> {
+    let args = SubchannelArgs::new(&target, "http://localhost", None, false);
+    ClientChannel::with_attempt_delay(
+        target,
+        args,
+        tonic::transport::Endpoint::from_static("http://localhost"),
+        pool,
+        tokio::runtime::Handle::current(),
+        delay,
+    )
+}
+
+/// What a call of `channel` gets: Ok of the connection that it picked, or the failure of the
+/// channel.
+async fn picked(channel: &Arc<ClientChannel>) -> Result<(), ChannelFailure> {
+    match channel.pick().await {
+        Ok(_) => Ok(()),
+        Err(unpicked) => Err(unpicked.failure().expect("the channel is not closed")),
+    }
+}
+
+/// One pass of `pick_first` of a new channel to `target`, as its first call makes it, of the
+/// deadline `per_address` of each attempt: the connection of the subchannel that it picked, or the
+/// failure of the channel.
+async fn attempt(target: &Target, per_address: Duration) -> Result<Ready, ChannelFailure> {
+    attempt_after(target, per_address, ATTEMPT_DELAY).await
+}
+
+/// As [`attempt`], of the attempt to an address starting `delay` after the previous one while that
+/// one is not done.
+async fn attempt_after(
+    target: &Target,
+    per_address: Duration,
+    delay: Duration,
+) -> Result<Ready, ChannelFailure> {
+    let mut target = target.clone();
+    target.deadline = Some(per_address);
+    let channel = channel_of_delay(target, Arc::default(), delay);
+    let result = match picked(&channel).await {
+        Ok(()) => Ok(channel
+            .picked_subchannel()
+            .expect("a picked subchannel")
+            .take_held()
+            .expect("the connection of the subchannel")),
+        Err(failure) => Err(failure),
+    };
+    channel.shutdown();
+    result
+}
+
+/// A target of grpcio's dialect if `grpcio` whose connections fail as they start, of no I/O to
+/// wait for: of a Unix socket of no file, so that a test of a paused clock, which advances it once
+/// nothing runs, does not advance it while an attempt waits for its socket.
+fn failing_target(grpcio: bool) -> Target {
+    form_target(
+        ChannelTarget::Unix {
+            paths: vec![b"/nonexistent-spark-connect-test/s.sock".to_vec()],
+            abstract_names: false,
+        },
+        grpcio,
+    )
+}
+
+/// Wait until `condition`, at most `limit`.
+async fn until(limit: Duration, mut condition: impl FnMut() -> bool) {
+    let waited = async {
+        while !condition() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    };
+    tokio::time::timeout(limit, waited)
+        .await
+        .expect("the condition holds in time");
 }
 
 /// A port of the loopback that nothing listens on, reserved while it lives: of a socket that is
@@ -805,31 +894,174 @@ fn a_call_that_the_end_of_its_connection_fails_is_a_removed_stream_in_grpcio_s_d
     );
 }
 
-/// What a call of `connector` gets: the connection, or the text of its failure.
-async fn connection(connector: &mut Connector) -> Result<Handover, String> {
-    use tonic::codegen::Service;
-    let uri = tonic::codegen::http::Uri::from_static("http://localhost");
-    connector
-        .call(uri)
-        .await
-        .map(TokioIo::into_inner)
-        .map_err(|error| error.to_string())
+/// A connection whose reads wait, and whose writes and flushes fail of `errno`, as of a connection
+/// that its peer closed or reset.
+struct FailingWrites(i32);
+
+impl AsyncRead for FailingWrites {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+        _: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Poll::Pending
+    }
+}
+
+impl AsyncWrite for FailingWrites {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+        _: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Poll::Ready(Err(std::io::Error::from_raw_os_error(self.0)))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Poll::Ready(Err(std::io::Error::from_raw_os_error(self.0)))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
+#[tokio::test]
+async fn a_failed_write_of_a_connection_is_a_removed_stream_in_grpcio_s_dialect() {
+    // As gRPC's core, whose call that a failed write of its connection ends is `Stream removed
+    // (sendmsg: Broken pipe (32))`, or of `Connection reset by peer (104)` (30 calls of grpcio 1.85.1
+    // to a server that closes each connection once it sent its settings: 9 and 1 of them, the
+    // others of a read): the writes and the flushes of the connection that hyper is given fail of
+    // grpcio's text of the error in its dialect, of its kind, where tonic's message of them was
+    // `transport error`, and of the error of the system in the Rust client's.
+    let removed = |error: std::io::Error| {
+        stream_removed_in(
+            &tonic::Status::from_error(Box::new(Transport(Box::new(error)))),
+            true,
+        )
+    };
+    for (errno, text) in [
+        (libc::EPIPE, "sendmsg: Broken pipe (32)"),
+        (libc::ECONNRESET, "sendmsg: Connection reset by peer (104)"),
+    ] {
+        for grpcio in [true, false] {
+            let ready = Ready {
+                io: Box::new(FailingWrites(errno)),
+                replay: EMPTY_SETTINGS.to_vec(),
+            };
+            let mut handover = Handover::new(ready).in_the_dialect(grpcio);
+            // The preface, which the connector sent, is not written.
+            handover.write_all(PREFACE).await.unwrap();
+            let system = std::io::Error::from_raw_os_error(errno).to_string();
+            let expected = if grpcio { text } else { system.as_str() };
+            // hyper's settings, a frame after them, and a flush.
+            let settings = handover.write_all(&EMPTY_SETTINGS).await.unwrap_err();
+            assert_eq!(settings.to_string(), expected);
+            let frames = [std::io::IoSlice::new(&EMPTY_SETTINGS)];
+            let vectored = handover.write_vectored(&frames).await.unwrap_err();
+            assert_eq!(vectored.to_string(), expected);
+            handover.settings_written = None;
+            let frame = handover.write_all(&EMPTY_SETTINGS).await.unwrap_err();
+            assert_eq!(frame.to_string(), expected);
+            let vectored = handover.write_vectored(&frames).await.unwrap_err();
+            assert_eq!(vectored.to_string(), expected);
+            let flush = handover.flush().await.unwrap_err();
+            assert_eq!(flush.to_string(), expected);
+            assert_eq!(
+                flush.kind(),
+                std::io::Error::from_raw_os_error(errno).kind()
+            );
+            assert_eq!(
+                removed(flush),
+                grpcio.then(|| format!("Stream removed ({text})"))
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn the_end_of_a_connection_of_no_cause_that_h2_or_hyper_kept_is_a_closed_socket() {
+    // As grpcio, whose call that the end of its connection fails is `Stream removed (...)` of the
+    // socket call that saw it, of the timing (30 calls of grpcio 1.85.1 to a server that closes
+    // each connection once it sent its settings: `recvmsg:Connection reset by peer (104)` 16
+    // times, `sendmsg: Broken pipe (32)` 9, `Socket closed` 4, `sendmsg: Connection reset by peer
+    // (104)` once): the end that h2 gives the streams still open as hyper drops the connection, and
+    // a request that hyper did not send as its connection closed, of which neither keeps the
+    // cause, are `Stream removed (Socket closed)` in the dialect of grpcio, still of `UNAVAILABLE`,
+    // where their details were tonic's `transport error` and hyper's `operation was canceled`.
+    let ended =
+        |error: std::io::Error| tonic::Status::from_error(Box::new(Transport(Box::new(error))));
+    for text in H2_ENDS_OF_A_CONNECTION {
+        let status = ended(std::io::Error::new(std::io::ErrorKind::BrokenPipe, text));
+        assert_eq!(
+            stream_removed_in(&status, true).as_deref(),
+            Some("Stream removed (Socket closed)")
+        );
+        assert_eq!(stream_removed_in(&status, false), None);
+        // Of h2's error of that kind only.
+        assert_eq!(
+            stream_removed_in(&ended(std::io::Error::other(text)), true),
+            None
+        );
+    }
+    // A request queued on a connection whose task ends before it sent it.
+    let (io, _server) = tokio::io::duplex(1 << 16);
+    let (mut sender, connection) = hyper::client::conn::http2::handshake(
+        hyper_util::rt::TokioExecutor::new(),
+        TokioIo::new(io),
+    )
+    .await
+    .unwrap();
+    let response = sender.send_request(tonic::codegen::http::Request::new(
+        tonic::body::Body::empty(),
+    ));
+    drop(connection);
+    let error = response.await.expect_err("the connection closed");
+    assert!(error.is_canceled(), "{error:?}");
+    let unsent = tonic::Status::from_error(Box::new(error));
+    assert_eq!(unsent.code(), tonic::Code::Cancelled);
+    assert_eq!(
+        crate::retries::grpc_python_code(&unsent),
+        tonic::Code::Unavailable
+    );
+    assert_eq!(
+        stream_removed_in(&unsent, true).as_deref(),
+        Some("Stream removed (Socket closed)")
+    );
+    assert_eq!(stream_removed_in(&unsent, false), None);
+    // A cancellation that the client makes keeps its code and its text: of the close of its
+    // channel (a session's `stop()`), of a stream of it, of its deadline, and one of the server.
+    for status in [
+        tonic::Status::cancelled(crate::client::CLOSED_CHANNEL),
+        tonic::Status::cancelled(crate::client::STREAM_OF_A_CLOSED_CHANNEL),
+        tonic::Status::from_error(Box::new(tonic::TimeoutExpired(()))),
+        tonic::Status::cancelled("operation was canceled"),
+    ] {
+        assert_eq!(stream_removed_in(&status, true), None, "{status:?}");
+        assert_eq!(
+            crate::retries::grpc_python_code(&status),
+            tonic::Code::Cancelled,
+            "{status:?}"
+        );
+    }
 }
 
 #[tokio::test]
 async fn a_channel_that_failed_fails_its_calls_at_once_and_connects_again_in_the_background() {
     // As gRPC's channel in TRANSIENT_FAILURE: the calls after a failure fail at once with its
-    // error, while the channel connects again after its backoff of 1 s; the next call takes the
+    // error, while its subchannel connects again after its backoff of 1 s; the next call takes the
     // connection that it made.
     let closed = closed_port();
     let address = closed.address;
-    let mut connector = Connector::new(target(vec![address], true));
-    connector.acquire();
-    let failure = connection(&mut connector).await.err().expect("refused");
+    let channel = channel_of(target(vec![address], true));
+    let failure = picked(&channel).await.expect_err("refused").text(true);
     assert!(failure.ends_with("Connection refused"), "{failure}");
     let start = Instant::now();
     assert_eq!(
-        connection(&mut connector).await.err(),
+        picked(&channel)
+            .await
+            .err()
+            .map(|failure| failure.text(true)),
         Some(failure.clone())
     );
     assert!(
@@ -841,20 +1073,25 @@ async fn a_channel_that_failed_fails_its_calls_at_once_and_connects_again_in_the
     let accepted = settings_server_on(listener);
     // Still failing until the background connection is made, between 0.8 and 1.2 s after the
     // first attempt.
-    assert_eq!(connection(&mut connector).await.err(), Some(failure));
-    let held = async {
-        while !matches!(*connector.0.state(), State::Held(_)) {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    };
-    tokio::time::timeout(Duration::from_secs(5), held)
-        .await
-        .expect("connected in the background");
-    assert!(connection(&mut connector).await.is_ok());
+    assert_eq!(
+        picked(&channel)
+            .await
+            .err()
+            .map(|failure| failure.text(true)),
+        Some(failure)
+    );
+    until(Duration::from_secs(5), || {
+        channel.picked_subchannel().is_some()
+    })
+    .await;
+    assert!(picked(&channel).await.is_ok());
     assert_eq!(accepted.load(Ordering::SeqCst), 1);
-    assert!(matches!(*connector.0.state(), State::Ready));
-    // A connection that ended leaves the channel idle: the next call connects again.
-    assert!(connection(&mut connector).await.is_ok());
+    // The connection, as tonic takes it, which ends: the channel is idle, and its next call
+    // connects again.
+    let subchannel = channel.picked_subchannel().expect("picked");
+    drop(subchannel.hand_over().await.expect("the connection"));
+    until(Duration::from_secs(5), || channel.is_idle()).await;
+    assert!(picked(&channel).await.is_ok());
     assert_eq!(accepted.load(Ordering::SeqCst), 2);
 }
 
@@ -876,76 +1113,56 @@ async fn the_backoff_of_the_connections_is_grpc_s() {
 
 #[tokio::test(start_paused = true)]
 async fn a_channel_stops_connecting_after_30_minutes_without_a_call() {
-    let closed = closed_port();
-    let address = closed.address;
-    let mut connector = Connector::new(target(vec![address], true));
-    connector.acquire();
-    assert!(connection(&mut connector).await.is_err());
+    let channel = channel_of(failing_target(true));
+    assert!(picked(&channel).await.is_err());
     tokio::time::sleep(Duration::from_secs(29 * 60)).await;
-    assert!(matches!(*connector.0.state(), State::TransientFailure(_)));
-    // The next attempt after the 30 minutes stops, within a backoff of at most 2 minutes.
-    let idle = async {
-        while !matches!(*connector.0.state(), State::Idle) {
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        }
-    };
-    tokio::time::timeout(Duration::from_secs(4 * 60), idle)
-        .await
-        .expect("idle");
+    assert!(channel.in_transient_failure());
+    // Idle at 30 minutes after the call, as gRPC's channel idles: it lets go of its subchannels.
+    until(Duration::from_secs(4 * 60), || channel.is_idle()).await;
+    assert_eq!(channel.subchannel_addresses(), (vec![], false));
     // The next call connects again, and fails again.
-    assert!(connection(&mut connector).await.is_err());
-    assert!(matches!(*connector.0.state(), State::TransientFailure(_)));
+    assert!(picked(&channel).await.is_err());
+    assert!(channel.in_transient_failure());
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_channel_that_no_open_client_uses_stops_connecting_in_the_background() {
-    // As grpcio's channel that is closed: once its last open client is closed, the channel stops
-    // connecting in the background, drops what it made there, and the next call of a client that
-    // opens again connects at once.
-    // Each pass of attempts, of the refused address, looks the name up once.
-    let closed = closed_port();
-    let target = target(vec![closed.address], true);
-    let attempts = Arc::clone(&target.lookups);
-    let mut connector = Connector::new(target);
-    connector.acquire();
-    connector.acquire();
-    assert!(connection(&mut connector).await.is_err());
-    // The attempts in the background after 1, 2.6 and 5.2 s, of the backoff with its jitter.
+async fn the_subchannel_of_two_channels_connects_again_once_of_each_backoff_until_both_close() {
+    // As gRPC's subchannel, which two channels share: its attempts in the background are its own,
+    // one as each backoff ends, whatever the channels that want it; once its last channel is
+    // closed, as grpcio's channel that is closed shuts its subchannels down, it makes none, and a
+    // new channel connects at once.
+    let target = failing_target(true);
+    let pool: Arc<Pool> = Arc::default();
+    let first = channel_in(target.clone(), Arc::clone(&pool));
+    let second = channel_in(target.clone(), Arc::clone(&pool));
+    assert!(picked(&first).await.is_err());
+    // The second channel finds the subchannel in transient failure, and fails at once of its
+    // failure, of no attempt of its own.
+    assert!(picked(&second).await.is_err());
+    let subchannel = first.subchannels().remove(0);
+    assert!(Arc::ptr_eq(&subchannel, &second.subchannels()[0]));
+    assert_eq!(subchannel.counts().0, 1);
+    // The attempts in the background after 1, 2.6 and 5.2 s, of the backoff with its jitter, and
+    // none more of the second channel.
     tokio::time::sleep(Duration::from_secs(8)).await;
-    let made = attempts.load(Ordering::SeqCst);
-    assert!(made >= 3, "{made}");
-    // One of two clients is closed: the channel goes on.
-    connector.release();
+    let made = subchannel.counts().0;
+    assert!((4..=5).contains(&made), "{made}");
+    // One of two channels is closed: the other goes on.
+    first.shutdown();
     tokio::time::sleep(Duration::from_secs(30)).await;
-    assert!(attempts.load(Ordering::SeqCst) > made);
+    assert!(subchannel.counts().0 > made);
     // The last one is closed: no attempt is made from then on.
-    connector.release();
-    assert!(matches!(*connector.0.state(), State::Idle));
-    let made = attempts.load(Ordering::SeqCst);
+    second.shutdown();
+    assert_eq!(pool.len(), 1, "of the subchannel that the test holds");
+    let made = subchannel.counts().0;
     tokio::time::sleep(Duration::from_secs(10 * 60)).await;
-    assert_eq!(attempts.load(Ordering::SeqCst), made);
-    // A call of a client that opens again connects at once.
-    connector.acquire();
-    assert!(connection(&mut connector).await.is_err());
-    assert_eq!(attempts.load(Ordering::SeqCst), made + 1);
-}
-
-#[tokio::test(start_paused = true)]
-async fn a_notification_of_a_release_does_not_stop_a_channel_that_a_client_uses() {
-    // The release of the last client of a channel notifies its connections in the background
-    // after it stopped them; another client may open, fail and start them again in between, whose
-    // loop the notification then wakes: the loop goes on, as a client uses the channel.
-    let closed = closed_port();
-    let target = target(vec![closed.address], true);
-    let attempts = Arc::clone(&target.lookups);
-    let mut connector = Connector::new(target);
-    connector.acquire();
-    assert!(connection(&mut connector).await.is_err());
-    connector.0.shutdown.notify_waiters();
-    tokio::time::sleep(Duration::from_secs(8)).await;
-    let made = attempts.load(Ordering::SeqCst);
-    assert!(made >= 3, "{made}");
-    assert!(matches!(*connector.0.state(), State::TransientFailure(_)));
+    assert_eq!(subchannel.counts().0, made);
+    // A call of a new channel connects at once, as the backoff of the subchannel ended.
+    let third = channel_in(target, Arc::clone(&pool));
+    assert!(picked(&third).await.is_err());
+    assert_eq!(subchannel.counts().0, made + 1);
+    drop((third, subchannel));
+    assert_eq!(pool.len(), 0);
 }
 
 #[test]
@@ -968,14 +1185,13 @@ async fn a_rust_client_s_channel_connects_again_at_each_call() {
     // does, rather than failing at once while the channel connects in the background.
     let closed = closed_port();
     let address = closed.address;
-    let mut connector = Connector::new(target(vec![address], false));
-    connector.acquire();
-    let failure = connection(&mut connector).await.err().expect("refused");
+    let channel = channel_of(target(vec![address], false));
+    let failure = picked(&channel).await.expect_err("refused").text(false);
     assert!(failure.contains("tcp connect error"), "{failure}");
-    assert!(matches!(*connector.0.state(), State::Idle));
+    assert!(channel.is_idle());
     let listener = closed.listen();
     let accepted = settings_server_on(listener);
-    assert!(connection(&mut connector).await.is_ok());
+    assert!(picked(&channel).await.is_ok());
     assert_eq!(accepted.load(Ordering::SeqCst), 1);
 }
 
@@ -1226,9 +1442,33 @@ async fn the_bundled_roots_are_trusted_besides_those_of_the_system() {
     // grpcio's: the CA of the tests, in the bundle, is trusted.
     let address = tls_server(&certs().localhost, true, true).await;
     let ca = pem(&certs().ca);
-    let tls = Tls::new("localhost", Roots::System(Some(ca.as_bytes()))).unwrap();
+    let native = system_roots();
+    let roots = Roots::System {
+        native: &native,
+        bundle: Some(ca.as_bytes()),
+    };
+    let tls = Tls::new("localhost", roots).unwrap();
     let target = Target {
         tls: Some(tls),
+        ..target(vec![address], true)
+    };
+    let ready = attempt(&target, Duration::from_secs(5)).await;
+    assert!(ready.is_ok(), "{:?}", ready.err());
+}
+
+#[tokio::test]
+async fn a_tls_of_the_system_s_roots_trusts_those_that_the_process_read() {
+    // The roots of the system's store are those that the process read once, as grpcio computes
+    // its default roots once (see `crate::client::ssl_roots`), which the TLS of a channel trusts as
+    // they are given, where it read the store again as each client was made.
+    let address = tls_server(&certs().localhost, true, true).await;
+    let native = vec![certs().ca.clone()];
+    let roots = Roots::System {
+        native: &native,
+        bundle: None,
+    };
+    let target = Target {
+        tls: Some(Tls::new("localhost", roots).unwrap()),
         ..target(vec![address], true)
     };
     let ready = attempt(&target, Duration::from_secs(5)).await;
@@ -1255,12 +1495,13 @@ fn form_target(form: ChannelTarget, grpcio: bool) -> Target {
         grpcio,
         form: None,
         names: None,
-        resolved: Default::default(),
         addresses: None,
+        resolution_fails: Default::default(),
         resolves_never: false,
         dns_config: None,
         lookups: Default::default(),
         name_lookups: Default::default(),
+        deadline: None,
     }
     .of_channel_target(Some(form), None)
 }
@@ -1537,16 +1778,14 @@ async fn the_calls_of_a_target_that_grpc_refuses_fail_of_its_status() {
     // Of the code and the message of the status, as gRPC's channel of a target that is not valid
     // fails each call, and not of `UNAVAILABLE`, which a failure of a connection is.
     let message = "Failed to create channel to 'a?':the target uri is not valid: dns:///a?";
-    let connector = Connector::new(form_target(
+    let channel = channel_of(form_target(
         ChannelTarget::Refused {
             code: 2,
             message: message.to_string(),
         },
         true,
     ));
-    let channel = tonic::transport::Endpoint::from_static("http://localhost")
-        .connect_with_connector_lazy(connector);
-    let mut grpc = tonic::client::Grpc::new(channel);
+    let mut grpc = tonic::client::Grpc::new(channel.pick().await.ok().expect("a channel"));
     for _ in 0..2 {
         grpc.ready().await.unwrap();
         let status = grpc
@@ -1626,13 +1865,12 @@ async fn a_call_host_that_the_certificate_is_not_of_fails_each_call_of_unauthent
     // the host of each call does not, of which each call fails of `UNAUTHENTICATED`, which a
     // retry policy does not retry as it retries a failure of a connection.
     let address = tls_server(&certs().wildcard, true, true).await;
-    let channel = tonic::transport::Endpoint::from_static("http://localhost")
-        .connect_with_connector_lazy(Connector::new(tls_target_of_name(
-            address,
-            Some("xyz.localhost"),
-            &certs().ca,
-        )));
-    let mut grpc = tonic::client::Grpc::new(channel);
+    let channel = channel_of(tls_target_of_name(
+        address,
+        Some("xyz.localhost"),
+        &certs().ca,
+    ));
+    let mut grpc = tonic::client::Grpc::new(channel.pick().await.ok().expect("a channel"));
     for _ in 0..2 {
         grpc.ready().await.unwrap();
         let status = grpc
@@ -1763,15 +2001,20 @@ async fn a_name_of_a_dns_server_of_its_target_is_resolved_through_it() {
         target
     };
     let target = of_server("spark.test", true);
-    assert!(attempt(&target, Duration::from_secs(20)).await.is_ok());
+    let channel = channel_of(target);
+    assert!(picked(&channel).await.is_ok());
     assert!(dns
         .asked()
         .contains(&(false, "spark.test".to_string(), "A")));
-    // The next attempt within 30 s of the resolution takes its addresses, as gRPC's channel does
-    // not resolve the name again sooner (SPARK-62233).
+    // Once its connection ended, the next call of the channel within 30 s of its resolution takes
+    // its addresses, as gRPC's channel does not resolve the name again sooner (SPARK-62233).
     let asked = dns.asked().len();
-    assert!(attempt(&target, Duration::from_secs(20)).await.is_ok());
+    let subchannel = channel.picked_subchannel().expect("picked");
+    drop(subchannel.hand_over().await.expect("the connection"));
+    until(Duration::from_secs(5), || channel.is_idle()).await;
+    assert!(picked(&channel).await.is_ok());
     assert_eq!(dns.asked().len(), asked);
+    channel.shutdown();
     assert_eq!(
         failure_of(&of_server("nx.test", true)).await,
         format!(
@@ -1797,61 +2040,216 @@ async fn a_name_of_a_dns_server_of_its_target_is_resolved_through_it() {
     assert_eq!(dns.asked().len(), asked);
 }
 
-#[tokio::test(start_paused = true)]
-async fn a_name_is_resolved_again_no_sooner_than_30_s_after_its_last_resolution() {
-    // As gRPC's resolver (`grpc.dns_min_time_between_resolutions_ms`, SPARK-62233): in the dialect
-    // of grpcio, the addresses of the last resolution of a name that succeeded are taken for 30 s
-    // from its start, by every clone of the target; a Rust client resolves the name for each pass
-    // of its attempts, as tonic's channel does.
-    for grpcio in [true, false] {
-        let mut target = Target::new("localhost", 15002, None, None);
-        target.grpcio = grpcio;
-        let lookups = Arc::clone(&target.name_lookups);
-        let first = target.resolve().await.unwrap();
-        assert!(!first.is_empty());
-        assert_eq!(target.clone().resolve().await.unwrap(), first);
-        assert_eq!(lookups.load(Ordering::SeqCst), if grpcio { 1 } else { 2 });
-        tokio::time::advance(Duration::from_secs(29)).await;
-        target.resolve().await.unwrap();
-        assert_eq!(lookups.load(Ordering::SeqCst), if grpcio { 1 } else { 3 });
-        tokio::time::advance(Duration::from_secs(1)).await;
-        target.resolve().await.unwrap();
-        assert_eq!(lookups.load(Ordering::SeqCst), if grpcio { 2 } else { 4 });
-    }
-    // An address is no name, which is not looked up.
-    let mut target = Target::new("127.0.0.1", 15002, None, None);
-    target.grpcio = true;
-    target.resolve().await.unwrap();
-    assert_eq!(target.name_lookups.load(Ordering::SeqCst), 0);
+/// End the connection of the subchannel that `channel` picked, as hyper drops it once its server
+/// closed it, and wait until the channel is idle.
+async fn end_connection(channel: &Arc<ClientChannel>) {
+    let subchannel = channel.picked_subchannel().expect("a picked subchannel");
+    drop(subchannel.hand_over().await.expect("the connection"));
+    until(Duration::from_secs(5), || channel.is_idle()).await;
 }
 
-#[test]
-fn a_failed_resolution_is_tried_again_a_backoff_after_its_end() {
-    // As gRPC's resolver, whose next resolution after one that failed is a backoff after the end of
-    // that one, where a subchannel connects again a backoff after the start of its last attempt.
-    let start = Instant::now();
-    let end = start + Duration::from_secs(6);
-    let delay = Duration::from_secs(1);
-    let resolve = ChannelFailure::Resolve {
-        name: "spark.test:15002".to_string(),
-        failure: ResolveFailure::Timeout,
+#[tokio::test]
+async fn each_channel_of_a_connection_that_ends_resolves_its_name_again_of_its_own() {
+    // As grpcio's channels of one subchannel (SPARK-62257, of the probes of grpcio 1.85.1 of
+    // `p_steps.py`): as their connection ends, each channel asks its own resolver to resolve the
+    // name again, which does at once in the background, 30 s after the start of its last
+    // resolution or later (C2), else once those 30 s are over (C1); their next calls connect
+    // again, of one connection.
+    let (server, accepted) = settings_server().await;
+    let pool: Arc<Pool> = Arc::default();
+    let (first_target, second_target) = (target(vec![server], true), target(vec![server], true));
+    let lookups = [
+        Arc::clone(&first_target.lookups),
+        Arc::clone(&second_target.lookups),
+    ];
+    let looked_up = || {
+        lookups
+            .each_ref()
+            .map(|lookups| lookups.load(Ordering::SeqCst))
     };
-    assert_eq!(next_attempt(start, end, delay, &resolve), end + delay);
-    assert!(failed_to_resolve(&resolve));
-    assert_eq!(
-        next_attempt(start, end, delay, &ChannelFailure::NoAddress),
-        start + delay
+    let first = channel_in(first_target, Arc::clone(&pool));
+    let second = channel_in(second_target, Arc::clone(&pool));
+    assert!(picked(&first).await.is_ok());
+    assert!(picked(&second).await.is_ok());
+    assert_eq!(accepted.load(Ordering::SeqCst), 1);
+    assert!(Arc::ptr_eq(
+        &first.picked_subchannel().unwrap(),
+        &second.picked_subchannel().unwrap()
+    ));
+    assert_eq!(looked_up(), [1, 1]);
+    // Past 30 s of the resolutions, the end of the connection resolves both names again at once.
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(31)).await;
+    assert_eq!(looked_up(), [1, 1]);
+    end_connection(&first).await;
+    until(Duration::from_secs(5), || second.is_idle()).await;
+    until(Duration::from_secs(1), || looked_up() == [2, 2]).await;
+    // Within 30 s of those resolutions, the end of the connection resolves them again once the
+    // 30 s are over, while the next calls connect to the addresses that they gave.
+    tokio::time::resume();
+    assert!(picked(&first).await.is_ok());
+    assert!(picked(&second).await.is_ok());
+    assert_eq!(accepted.load(Ordering::SeqCst), 2);
+    tokio::time::pause();
+    end_connection(&first).await;
+    until(Duration::from_secs(5), || second.is_idle()).await;
+    tokio::time::advance(Duration::from_secs(28)).await;
+    assert_eq!(looked_up(), [2, 2]);
+    tokio::time::advance(Duration::from_secs(3)).await;
+    until(Duration::from_secs(1), || looked_up() == [3, 3]).await;
+    tokio::time::resume();
+    assert!(picked(&first).await.is_ok());
+    assert_eq!(accepted.load(Ordering::SeqCst), 3);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_channel_in_transient_failure_resolves_its_name_again_every_30_s() {
+    // As grpcio's channels in TRANSIENT_FAILURE (C3 of the probes of SPARK-62257): each asks its
+    // resolver to resolve the name again each time its subchannels failed again, which it does no
+    // sooner than 30 s after the start of its last resolution (SPARK-62233), of each channel, of a
+    // subchannel that two share too. A Rust client resolves the name as each call connects.
+    let pool: Arc<Pool> = Arc::default();
+    let (first_target, second_target) = (failing_target(true), failing_target(true));
+    let lookups = [
+        Arc::clone(&first_target.lookups),
+        Arc::clone(&second_target.lookups),
+    ];
+    let looked_up = || {
+        lookups
+            .each_ref()
+            .map(|lookups| lookups.load(Ordering::SeqCst))
+    };
+    let first = channel_in(first_target, Arc::clone(&pool));
+    assert!(picked(&first).await.is_err());
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    let second = channel_in(second_target, Arc::clone(&pool));
+    assert!(picked(&second).await.is_err());
+    assert_eq!(looked_up(), [1, 1]);
+    tokio::time::sleep(Duration::from_secs(24)).await;
+    assert_eq!(looked_up(), [1, 1]);
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(looked_up(), [2, 1]);
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert_eq!(looked_up(), [2, 2]);
+    tokio::time::sleep(Duration::from_secs(25)).await;
+    assert_eq!(looked_up(), [3, 2]);
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert_eq!(looked_up(), [3, 3]);
+    let rust_target = failing_target(false);
+    let rust_lookups = Arc::clone(&rust_target.lookups);
+    let rust = channel_of(rust_target);
+    assert!(picked(&rust).await.is_err());
+    assert!(picked(&rust).await.is_err());
+    tokio::time::sleep(Duration::from_secs(61)).await;
+    assert_eq!(rust_lookups.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_resolution_is_tried_again_a_backoff_after_its_end() {
+    // As gRPC's resolver, whose next resolution after one that failed is a backoff after the end of
+    // that one, in the background, where a subchannel connects again a backoff after the start of
+    // its last attempt; the calls fail at once meanwhile of the failure.
+    let closed = closed_port();
+    let mut target = Target {
+        host: "slow.test".to_string(),
+        resolves_never: true,
+        ..target(vec![closed.address], true)
+    };
+    target.deadline = Some(Duration::from_secs(6));
+    let lookups = Arc::clone(&target.lookups);
+    let channel = channel_of(target);
+    let start = Instant::now();
+    let failure = picked(&channel).await.expect_err("timed out");
+    assert_eq!(start.elapsed(), Duration::from_secs(6));
+    assert!(
+        matches!(
+            failure,
+            ChannelFailure::Resolve {
+                failure: ResolveFailure::Timeout,
+                ..
+            }
+        ),
+        "{failure:?}"
     );
+    assert_eq!(lookups.load(Ordering::SeqCst), 1);
+    tokio::time::sleep(Duration::from_millis(790)).await;
+    assert!(picked(&channel).await.is_err());
+    assert_eq!(lookups.load(Ordering::SeqCst), 1);
+    tokio::time::sleep(Duration::from_millis(420)).await;
+    assert_eq!(lookups.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn a_resolution_that_fails_after_one_that_succeeded_keeps_its_addresses() {
+    // As grpcio's channel (Q1 of the probes of SPARK-62257): a resolution that fails as the
+    // connection ended leaves the channel with the addresses of the last one that succeeded,
+    // whose next call connects to them, while the resolution is tried again a backoff after its
+    // end.
+    let (server, accepted) = settings_server().await;
+    let target = target(vec![server], true);
+    let (lookups, fails) = (
+        Arc::clone(&target.lookups),
+        Arc::clone(&target.resolution_fails),
+    );
+    let channel = channel_of(target);
+    assert!(picked(&channel).await.is_ok());
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(31)).await;
+    fails.store(true, Ordering::SeqCst);
+    end_connection(&channel).await;
+    until(Duration::from_secs(1), || {
+        lookups.load(Ordering::SeqCst) == 2
+    })
+    .await;
+    until(Duration::from_millis(1500), || {
+        lookups.load(Ordering::SeqCst) == 3
+    })
+    .await;
+    tokio::time::resume();
+    assert!(picked(&channel).await.is_ok());
+    assert_eq!(accepted.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn a_first_resolution_that_failed_is_tried_again_and_connects_in_the_background() {
+    // As grpcio's channel (Q2 of the probes of SPARK-62257): the first resolution fails the call,
+    // and is tried again in the background, of no call, a backoff after its end, until it
+    // succeeds, and the channel connects then, also of no call.
+    let (server, accepted) = settings_server().await;
+    let target = target(vec![server], true);
+    let (lookups, fails) = (
+        Arc::clone(&target.lookups),
+        Arc::clone(&target.resolution_fails),
+    );
+    fails.store(true, Ordering::SeqCst);
+    let channel = channel_of(target);
+    assert!(matches!(
+        picked(&channel).await,
+        Err(ChannelFailure::Resolve { .. })
+    ));
+    until(Duration::from_secs(3), || {
+        lookups.load(Ordering::SeqCst) >= 2
+    })
+    .await;
+    assert_eq!(accepted.load(Ordering::SeqCst), 0);
+    fails.store(false, Ordering::SeqCst);
+    until(Duration::from_secs(5), || {
+        channel.picked_subchannel().is_some()
+    })
+    .await;
+    assert_eq!(accepted.load(Ordering::SeqCst), 1);
+    assert!(picked(&channel).await.is_ok());
+    assert_eq!(accepted.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
 async fn each_new_channel_resolves_its_name_of_its_own_before_its_first_call() {
     use crate::dns::tests::{Answer, Responder};
-    // As each channel of grpcio, whose resolver resolves its name before its first call, of the
-    // subchannels that it shares with the other channels of the process (SPARK-62234): each
-    // channel of a connector asks the DNS server once, whatever another one asked before, and the
-    // connections of the target take the addresses of the last resolution.
-    let (server, _) = settings_server().await;
+    // As each channel of grpcio, whose resolver resolves its name before its first call
+    // (SPARK-62234), of the subchannels that it shares with the other channels of the process
+    // (SPARK-62257): each channel asks the DNS server once, whatever another one asked before, and
+    // takes the subchannel of its address that another connected.
+    let (server, accepted) = settings_server().await;
     let dns = Responder::start(
         move |name: &str, _| match name {
             "spark.test" => Answer::Addresses(vec![server.ip()]),
@@ -1861,7 +2259,8 @@ async fn each_new_channel_resolves_its_name_of_its_own_before_its_first_call() {
     )
     .await;
     let port = server.port();
-    let connector_of = |host: &str| {
+    let pool: Arc<Pool> = Arc::default();
+    let channel_of_name = |host: &str, grpcio: bool| {
         let mut target = form_target(
             ChannelTarget::Name {
                 host: host.to_string(),
@@ -1869,39 +2268,37 @@ async fn each_new_channel_resolves_its_name_of_its_own_before_its_first_call() {
                 name: format!("{host}:{port}"),
                 server: Some(dns.address),
             },
-            true,
+            grpcio,
         );
         target.dns_config = Some(crate::dns::Config::default());
-        Connector::new(target)
+        channel_in(target, Arc::clone(&pool))
     };
-    let connector = connector_of("spark.test");
     let asked_a = || {
         dns.asked()
             .iter()
             .filter(|(_, name, kind)| name == "spark.test" && *kind == "A")
             .count()
     };
-    let first = ChannelResolution::new(true);
-    assert!(!first.is_ready());
-    assert!(first.ready(&connector).await.is_ok());
-    assert!(first.is_ready());
+    let first = channel_of_name("spark.test", true);
+    assert_eq!(asked_a(), 0);
+    assert!(picked(&first).await.is_ok());
     assert_eq!(asked_a(), 1);
-    // Resolved: the next calls of the channel ask nothing, nor does a connection of the target
-    // within 30 s of its resolution.
-    assert!(first.ready(&connector).await.is_ok());
-    assert!(attempt(&connector.0.target, Duration::from_secs(20))
-        .await
-        .is_ok());
+    // Resolved: the next calls of the channel ask nothing.
+    assert!(picked(&first).await.is_ok());
     assert_eq!(asked_a(), 1);
-    // A new channel of the same connector resolves the name again.
-    let second = ChannelResolution::new(true);
-    assert!(second.ready(&connector).await.is_ok());
+    // A new channel resolves the name again, and takes the connection of the subchannel.
+    let second = channel_of_name("spark.test", true);
+    assert!(picked(&second).await.is_ok());
     assert_eq!(asked_a(), 2);
-    // A failure fails the calls of the channel of its error, at once, until a backoff after its
-    // end.
-    let connector = connector_of("nx.test");
-    let failed = ChannelResolution::new(true);
-    let error = failed.ready(&connector).await.unwrap_err().to_string();
+    assert_eq!(accepted.load(Ordering::SeqCst), 1);
+    assert!(Arc::ptr_eq(
+        &first.picked_subchannel().unwrap(),
+        &second.picked_subchannel().unwrap()
+    ));
+    // A failure fails the calls of the channel of its error, at once, until it is tried again in
+    // the background a backoff after its end.
+    let failed = channel_of_name("nx.test", true);
+    let error = picked(&failed).await.unwrap_err().text(true);
     assert_eq!(
         error,
         format!(
@@ -1910,12 +2307,797 @@ async fn each_new_channel_resolves_its_name_of_its_own_before_its_first_call() {
         )
     );
     let asked = dns.asked().len();
-    assert_eq!(
-        failed.ready(&connector).await.unwrap_err().to_string(),
-        error
-    );
+    assert_eq!(picked(&failed).await.unwrap_err().text(true), error);
     assert_eq!(dns.asked().len(), asked);
-    assert!(!failed.is_ready());
-    // A Rust client resolves its name as it connects, as tonic's channel does.
-    assert!(ChannelResolution::new(false).is_ready());
+    until(Duration::from_secs(3), || dns.asked().len() > asked).await;
+    // A Rust client resolves its name as each call connects, as tonic's channel does.
+    let rust = channel_of_name("spark.test", false);
+    assert!(picked(&rust).await.is_ok());
+    assert_eq!(asked_a(), 3);
+}
+
+#[tokio::test]
+async fn each_channel_connects_to_the_subchannels_of_its_own_addresses() {
+    // As grpcio's channels of gRPC's subchannel pool (B, O1 and O2 of the probes of SPARK-62257):
+    // a channel takes at once a subchannel of its addresses that another channel connected, the
+    // first of them in their order, without an attempt to the addresses before it; else it connects
+    // to its own addresses, whatever another channel of the process connected to; and it fails of
+    // its own addresses, also while another channel of the process is connected.
+    let (one, one_accepted) = settings_server().await;
+    let (two, two_accepted) = settings_server().await;
+    let (silent, silent_accepted) = silent_server().await;
+    let refused = closed_port();
+    let pool: Arc<Pool> = Arc::default();
+    let channel =
+        |addresses: Vec<SocketAddr>| channel_in(target(addresses, true), Arc::clone(&pool));
+    let first = channel(vec![one]);
+    assert!(picked(&first).await.is_ok());
+    let second = channel(vec![two]);
+    assert!(picked(&second).await.is_ok());
+    assert_eq!(
+        (
+            one_accepted.load(Ordering::SeqCst),
+            two_accepted.load(Ordering::SeqCst)
+        ),
+        (1, 1)
+    );
+    let start = Instant::now();
+    let third = channel(vec![silent, one]);
+    assert!(picked(&third).await.is_ok());
+    assert!(
+        start.elapsed() < Duration::from_millis(200),
+        "{:?}",
+        start.elapsed()
+    );
+    assert_eq!(silent_accepted.load(Ordering::SeqCst), 0);
+    let of = |channel: &Arc<ClientChannel>| channel.picked_subchannel().unwrap();
+    assert!(Arc::ptr_eq(&of(&third), &of(&first)));
+    let fourth = channel(vec![two, one]);
+    assert!(picked(&fourth).await.is_ok());
+    assert!(Arc::ptr_eq(&of(&fourth), &of(&second)));
+    let fifth = channel(vec![one, two]);
+    assert!(picked(&fifth).await.is_ok());
+    assert!(Arc::ptr_eq(&of(&fifth), &of(&first)));
+    // The picked subchannel is the channel's only one: the others are let go.
+    assert_eq!(fifth.subchannel_addresses(), (vec![one.to_string()], true));
+    let sixth = channel(vec![refused.address]);
+    assert_eq!(
+        picked(&sixth).await.unwrap_err().text(true),
+        format!(
+            "failed to connect to all addresses; last error: UNKNOWN: ipv4:{}: Failed to connect \
+             to remote host: Connection refused",
+            refused.address
+        )
+    );
+    assert_eq!(
+        (
+            one_accepted.load(Ordering::SeqCst),
+            two_accepted.load(Ordering::SeqCst)
+        ),
+        (1, 1)
+    );
+}
+
+/// Resolve the name of the target of `channel` again while it is ready, of `addresses` from then
+/// on, of `lookups`, its count of resolutions, which is `before` before: end its connection, which
+/// asks for a resolution 30 s after the last one, connect again of its next call, and let the 30 s
+/// pass.
+async fn resolve_while_ready(
+    channel: &Arc<ClientChannel>,
+    resolved: &Arc<Mutex<Vec<SocketAddr>>>,
+    addresses: Vec<SocketAddr>,
+    lookups: &Arc<AtomicUsize>,
+    before: usize,
+) {
+    tokio::time::pause();
+    end_connection(channel).await;
+    tokio::time::resume();
+    assert!(picked(channel).await.is_ok());
+    *resolved.lock().unwrap() = addresses;
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(31)).await;
+    tokio::time::resume();
+    until(Duration::from_secs(5), || {
+        lookups.load(Ordering::SeqCst) == before + 1
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_ready_channel_takes_a_ready_subchannel_of_a_new_resolution_else_it_goes_idle() {
+    // As gRPC 1.85.1's `pick_first` of a resolution that comes while its channel is ready, which
+    // it asked for as its last connection ended (P7 of the review of SPARK-62257, of grpcio
+    // 1.85.1: its connection to .1 closes at the resolution, and its next call connects to .2): it
+    // replaces its list of subchannels at once; the first subchannel of the new addresses that is
+    // ready, of any channel, is picked, also of an address before it that is not, and the others
+    // are let go; if none is ready, the channel lets go of its subchannel, whose connection ends
+    // once no other channel holds it, and is idle, of no attempt to the new addresses, which its
+    // next call connects to.
+    let (one, one_accepted) = settings_server().await;
+    let (two, two_accepted) = settings_server().await;
+    let (three, three_accepted) = settings_server().await;
+    let pool: Arc<Pool> = Arc::default();
+    let first_target = target(vec![one], true);
+    let resolved = Arc::clone(first_target.addresses.as_ref().unwrap());
+    let lookups = Arc::clone(&first_target.lookups);
+    let channel = channel_in(first_target, Arc::clone(&pool));
+    assert!(picked(&channel).await.is_ok());
+    // Of `two` alone, which no channel connected: idle, of the subchannel of `one` let go.
+    resolve_while_ready(&channel, &resolved, vec![two], &lookups, 1).await;
+    assert_eq!(one_accepted.load(Ordering::SeqCst), 2);
+    until(Duration::from_secs(5), || channel.is_idle()).await;
+    assert_eq!(channel.subchannel_addresses(), (vec![], false));
+    assert_eq!(pool.len(), 0);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(two_accepted.load(Ordering::SeqCst), 0);
+    assert!(picked(&channel).await.is_ok());
+    assert_eq!(two_accepted.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        channel.subchannel_addresses(),
+        (vec![two.to_string()], true)
+    );
+    // Of `three`, which no channel connected, and `one`, which another channel did: `one` at once,
+    // of no attempt to `three`, and the subchannel of `two` let go.
+    let other = channel_in(target(vec![one], true), Arc::clone(&pool));
+    assert!(picked(&other).await.is_ok());
+    assert_eq!(one_accepted.load(Ordering::SeqCst), 3);
+    resolve_while_ready(&channel, &resolved, vec![three, one], &lookups, 2).await;
+    until(Duration::from_secs(5), || {
+        channel.subchannel_addresses() == (vec![one.to_string()], true)
+    })
+    .await;
+    assert!(Arc::ptr_eq(
+        &channel.picked_subchannel().unwrap(),
+        &other.picked_subchannel().unwrap()
+    ));
+    assert_eq!(pool.len(), 1);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(three_accepted.load(Ordering::SeqCst), 0);
+    assert_eq!(two_accepted.load(Ordering::SeqCst), 2);
+    assert_eq!(one_accepted.load(Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
+async fn the_close_of_a_channel_lets_go_of_its_subchannels() {
+    // As grpcio's `close` of a channel (Q5 of the probes of SPARK-62257): the subchannel of two
+    // channels stays while one of them is open, and its connection ends once the last one is
+    // closed.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let server = listener.local_addr().unwrap();
+    let ended = Arc::new(AtomicUsize::new(0));
+    let ends = Arc::clone(&ended);
+    let accepted = serve(listener, move |mut stream| {
+        let ends = Arc::clone(&ends);
+        async move {
+            let _ = stream.write_all(&EMPTY_SETTINGS).await;
+            let mut buffer = [0u8; 1024];
+            while matches!(stream.read(&mut buffer).await, Ok(read) if read > 0) {}
+            ends.fetch_add(1, Ordering::SeqCst);
+        }
+    });
+    let pool: Arc<Pool> = Arc::default();
+    let first = channel_in(target(vec![server], true), Arc::clone(&pool));
+    let second = channel_in(target(vec![server], true), Arc::clone(&pool));
+    assert!(picked(&first).await.is_ok());
+    assert!(picked(&second).await.is_ok());
+    assert_eq!(accepted.load(Ordering::SeqCst), 1);
+    first.shutdown();
+    match first.pick().await {
+        Err(unpicked) => assert!(unpicked.failure().is_none(), "closed"),
+        Ok(_) => panic!("a closed channel has no connection"),
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(ended.load(Ordering::SeqCst), 0);
+    assert_eq!(pool.len(), 1);
+    second.shutdown();
+    assert_eq!(pool.len(), 0);
+    until(Duration::from_secs(5), || ended.load(Ordering::SeqCst) == 1).await;
+}
+
+#[tokio::test]
+async fn a_tls_connection_is_shared_by_the_channels_of_its_name_and_credentials_only() {
+    // As gRPC's subchannel pool, whose key holds the channel's credentials and the name that its
+    // TLS verifies: the channels of one name and trust share the connection; a channel of another
+    // name, of the server's address too, has a subchannel of its own, which verifies the name of
+    // its own handshake (here it fails, as the certificate is not of it); a plaintext channel, or
+    // one of call credentials of its own, shares none.
+    let address = tls_server(&certs().localhost, true, true).await;
+    let pool: Arc<Pool> = Arc::default();
+    let tls = |name: Option<&str>| tls_target_of_name(address, name, &certs().ca);
+    let first = channel_in(tls(Some("localhost")), Arc::clone(&pool));
+    let second = channel_in(tls(Some("localhost")), Arc::clone(&pool));
+    assert!(picked(&first).await.is_ok());
+    assert!(picked(&second).await.is_ok());
+    let of = |channel: &Arc<ClientChannel>| channel.picked_subchannel().unwrap();
+    assert!(Arc::ptr_eq(&of(&first), &of(&second)));
+    let other = channel_in(tls(Some("other.test")), Arc::clone(&pool));
+    assert_eq!(
+        picked(&other).await.unwrap_err().text(true),
+        format!(
+            "failed to connect to all addresses; last error: UNKNOWN: ipv4:{address}: Custom \
+             verification check failed with error: UNAUTHENTICATED: Hostname Verification Check \
+             failed."
+        )
+    );
+    assert!(!Arc::ptr_eq(&other.subchannels()[0], &of(&first)));
+    let plaintext = channel_in(target(vec![address], true), Arc::clone(&pool));
+    let _ = picked(&plaintext).await;
+    assert!(!Arc::ptr_eq(&plaintext.subchannels()[0], &of(&first)));
+    let target = tls(Some("localhost"));
+    let own = ClientChannel::new(
+        target.clone(),
+        SubchannelArgs::new(&target, "http://localhost", None, true),
+        tonic::transport::Endpoint::from_static("http://localhost"),
+        Arc::clone(&pool),
+        tokio::runtime::Handle::current(),
+    );
+    assert!(picked(&own).await.is_ok());
+    assert!(!Arc::ptr_eq(&of(&own), &of(&first)));
+}
+
+#[test]
+fn a_goaway_of_the_server_is_seen_in_its_frames_wherever_they_are_cut() {
+    // The frames that hyper is given, of any cut of their bytes: a GOAWAY is seen once, and not of
+    // the payload of another frame that holds the byte of its type.
+    let frame = |frame_type: u8, payload: &[u8]| {
+        let mut frame = (payload.len() as u32).to_be_bytes()[1..].to_vec();
+        frame.extend_from_slice(&[frame_type, 0, 0, 0, 0, 0]);
+        frame.extend_from_slice(payload);
+        frame
+    };
+    let mut bytes = frame(SETTINGS, &[]);
+    bytes.extend(frame(0, &[GOAWAY; 20]));
+    let before_goaway = bytes.len();
+    bytes.extend(frame(GOAWAY, &[0x7f, 0xff, 0xff, 0xff, 0, 0, 0, 0]));
+    bytes.extend(frame(GOAWAY, &[0, 0, 0, 1, 0, 0, 0, 0]));
+    for cut in 1..=bytes.len() {
+        let mut watch = FrameWatch::default();
+        let seen: Vec<usize> = bytes
+            .chunks(cut)
+            .enumerate()
+            .filter(|(_, chunk)| watch.follow(chunk))
+            .map(|(index, _)| index)
+            .collect();
+        assert_eq!(seen.len(), 1, "{cut}");
+        assert!((seen[0] + 1) * cut > before_goaway, "{cut}");
+    }
+}
+
+#[tokio::test]
+async fn a_goaway_of_the_server_ends_the_connection_of_its_subchannel_for_new_calls() {
+    // As gRPC's subchannel whose transport receives a GOAWAY: it is idle at once, so that its
+    // channels resolve their names again and their next calls connect again, while hyper keeps the
+    // connection for the calls in flight.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (go, gone) = tokio::sync::oneshot::channel::<()>();
+    let gone = Arc::new(tokio::sync::Mutex::new(Some(gone)));
+    serve(listener, move |mut stream| {
+        let gone = Arc::clone(&gone);
+        async move {
+            let _ = stream.write_all(&EMPTY_SETTINGS).await;
+            if let Some(gone) = gone.lock().await.take() {
+                let _ = gone.await;
+                let mut goaway = vec![0, 0, 8, GOAWAY, 0, 0, 0, 0, 0];
+                goaway.extend_from_slice(&[0x7f, 0xff, 0xff, 0xff, 0, 0, 0, 0]);
+                let _ = stream.write_all(&goaway).await;
+            }
+            let mut buffer = [0u8; 1024];
+            while matches!(stream.read(&mut buffer).await, Ok(read) if read > 0) {}
+        }
+    });
+    let channel = channel_of(target(vec![address], true));
+    assert!(picked(&channel).await.is_ok());
+    let subchannel = channel.picked_subchannel().unwrap();
+    let mut handover = subchannel.hand_over().await.unwrap();
+    assert!(subchannel.ready().is_some());
+    // The server's settings first, which hyper is given as they came; the subchannel is ready.
+    let mut buffer = [0u8; 64];
+    let read = handover.read(&mut buffer).await.unwrap();
+    assert_eq!((read, buffer[3]), (FRAME_HEADER_LEN, SETTINGS));
+    assert!(subchannel.ready().is_some());
+    go.send(()).unwrap();
+    let read = tokio::time::timeout(Duration::from_secs(5), handover.read(&mut buffer))
+        .await
+        .expect("the GOAWAY")
+        .unwrap();
+    assert_eq!((read, buffer[3]), (FRAME_HEADER_LEN + 8, GOAWAY));
+    assert_eq!(subchannel.ready(), None);
+    until(Duration::from_secs(5), || channel.is_idle()).await;
+    // The connection is still open for the calls in flight.
+    let alive = handover.read(&mut buffer);
+    assert!(tokio::time::timeout(Duration::from_millis(100), alive)
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn a_channel_takes_the_connection_that_its_subchannel_made_for_a_call_as_its_own_ended() {
+    // A call that tonic sends on the connection of the picked subchannel as that connection ends
+    // makes the subchannel connect again (see `subchannel::connection`): the channel, idle as it
+    // sees the end, takes that connection at its next call, of the same subchannel, rather than
+    // making another.
+    let (server, accepted) = settings_server().await;
+    let channel = channel_of(target(vec![server], true));
+    assert!(picked(&channel).await.is_ok());
+    let subchannel = channel.picked_subchannel().unwrap();
+    let first = subchannel.hand_over().await.unwrap();
+    // tonic asks again, as of a connection that hyper cannot use any more.
+    let second = subchannel.hand_over().await.unwrap();
+    assert_eq!(accepted.load(Ordering::SeqCst), 2);
+    until(Duration::from_secs(5), || channel.is_idle()).await;
+    assert!(picked(&channel).await.is_ok());
+    assert!(Arc::ptr_eq(
+        &channel.picked_subchannel().unwrap(),
+        &subchannel
+    ));
+    assert_eq!(accepted.load(Ordering::SeqCst), 2);
+    drop((first, second));
+}
+
+/// How the server of [`unix_server`] serves the connections that it accepts from then on.
+#[cfg(unix)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Serving {
+    /// Its settings at once, and it holds the connection.
+    Settings,
+    /// Nothing: it holds the connection, and never answers.
+    Silent,
+    /// Its settings, and it closes the connection once it read the preface and the settings of the
+    /// connector.
+    Closing,
+}
+
+/// A server of the Unix socket of `path`, which serves each connection as `serving` says as it
+/// accepts it, and the counts of the connections that it accepted and that it closed. A connection
+/// to a Unix socket is made as `connect` returns, so that a test of a paused clock, which advances
+/// it once nothing runs, does not advance it while an attempt waits for its socket.
+#[cfg(unix)]
+fn unix_server(
+    path: &std::path::Path,
+    serving: Arc<Mutex<Serving>>,
+) -> (Arc<AtomicUsize>, Arc<AtomicUsize>) {
+    let listener = tokio::net::UnixListener::bind(path).unwrap();
+    let (accepted, closed) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+    let (accepts, closes) = (Arc::clone(&accepted), Arc::clone(&closed));
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            accepts.fetch_add(1, Ordering::SeqCst);
+            let serving = *serving.lock().unwrap();
+            let closes = Arc::clone(&closes);
+            tokio::spawn(async move {
+                if serving != Serving::Silent {
+                    let _ = stream.write_all(&EMPTY_SETTINGS).await;
+                }
+                if serving == Serving::Closing {
+                    let mut preface = [0u8; PREFACE.len() + EMPTY_SETTINGS.len()];
+                    let _ = stream.read_exact(&mut preface).await;
+                    drop(stream);
+                    closes.fetch_add(1, Ordering::SeqCst);
+                    return;
+                }
+                let mut buffer = [0u8; 1024];
+                while matches!(stream.read(&mut buffer).await, Ok(read) if read > 0) {}
+            });
+        }
+    });
+    (accepted, closed)
+}
+
+/// A server of gRPC of the Unix socket of `path`, which answers each call `grpc-status: 0` of no
+/// message, and the abort handles of its connections.
+#[cfg(unix)]
+fn grpc_unix_server(path: &std::path::Path) -> Arc<Mutex<Vec<tokio::task::AbortHandle>>> {
+    let listener = tokio::net::UnixListener::bind(path).unwrap();
+    let connections: Arc<Mutex<Vec<tokio::task::AbortHandle>>> = Default::default();
+    let held = Arc::clone(&connections);
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let connection = tokio::spawn(async move {
+                let Ok(mut connection) = h2::server::handshake(stream).await else {
+                    return;
+                };
+                while let Some(Ok((_, mut respond))) = connection.accept().await {
+                    let response = tonic::codegen::http::Response::builder()
+                        .status(200)
+                        .header("content-type", "application/grpc")
+                        .header("grpc-status", "0")
+                        .body(())
+                        .unwrap();
+                    let _ = respond.send_response(response, true);
+                }
+            });
+            held.lock().unwrap().push(connection.abort_handle());
+        }
+    });
+    connections
+}
+
+/// A target of the Unix socket of `path`, in the dialect of grpcio if `grpcio`.
+#[cfg(unix)]
+fn unix_target(path: &std::path::Path, grpcio: bool) -> Target {
+    form_target(
+        ChannelTarget::Unix {
+            paths: vec![path.to_str().unwrap().as_bytes().to_vec()],
+            abstract_names: false,
+        },
+        grpcio,
+    )
+}
+
+/// The status of a `Config` call of tonic on `channel`, of the deadline `timeout` (its
+/// `grpc-timeout`).
+async fn config_call(
+    channel: tonic::transport::Channel,
+    timeout: Duration,
+) -> Result<(), tonic::Status> {
+    let mut grpc = tonic::client::Grpc::new(channel);
+    grpc.ready()
+        .await
+        .map_err(|error| tonic::Status::unknown(error.to_string()))?;
+    let mut request = tonic::Request::new(spark_connect_proto::ConfigRequest::default());
+    request.set_timeout(timeout);
+    grpc.unary::<spark_connect_proto::ConfigRequest, spark_connect_proto::ConfigResponse, _>(
+        request,
+        tonic::codegen::http::uri::PathAndQuery::from_static(
+            "/spark.connect.SparkConnectService/Config",
+        ),
+        tonic_prost::ProstCodec::default(),
+    )
+    .await
+    .map(|_| ())
+}
+
+/// The failure of the attempt to the Unix socket of no file `path` of a subchannel, in the dialect
+/// of grpcio if `grpcio`.
+#[cfg(unix)]
+fn no_socket_failure(path: &std::path::Path, grpcio: bool) -> String {
+    let path = path.to_str().unwrap();
+    if grpcio {
+        format!(
+            "failed to connect to all addresses; last error: FAILED_PRECONDITION: unix:{path}: \
+             connect failed: addr: unix:{path} error: No such file or directory"
+        )
+    } else {
+        format!(
+            "failed to connect to all addresses; last error: unix:{path}: unix connect error: No \
+             such file or directory (os error 2)"
+        )
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn the_connector_of_a_subchannel_makes_one_attempt_once_its_connection_ended() {
+    // tonic asks the connector of the channel of a subchannel for a connection again once the one
+    // that it had ended, for a call that it sends then (as one that picked the subchannel just
+    // before the end): of a server that is gone, the connector fails of the failure of the one
+    // attempt that it makes, as a call of the transport failed of its attempt before SPARK-62257,
+    // where a Rust client's subchannel, idle at once after its failure, made attempts until the
+    // deadline of the client; in the dialect of grpcio, the subchannel is in transient failure
+    // then, of which the next call fails at once, of no attempt.
+    for grpcio in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("spark.sock");
+        let serving = Arc::new(Mutex::new(Serving::Settings));
+        let (accepted, _) = unix_server(&path, serving);
+        let channel = channel_of(unix_target(&path, grpcio));
+        assert!(picked(&channel).await.is_ok());
+        let subchannel = channel.picked_subchannel().unwrap();
+        let taken = subchannel.hand_over().await.unwrap();
+        // The server goes away, and the connection ends, as hyper drops it.
+        std::fs::remove_file(&path).unwrap();
+        drop(taken);
+        until(Duration::from_secs(5), || channel.is_idle()).await;
+        assert_eq!(subchannel.counts(), (0, 1));
+        let start = Instant::now();
+        for (call, failures) in [(1, 1), (2, if grpcio { 1 } else { 2 })] {
+            let failure = tokio::time::timeout(Duration::from_secs(5), subchannel.hand_over())
+                .await
+                .expect("the connector ends")
+                .err()
+                .expect("no connection");
+            assert_eq!(failure, no_socket_failure(&path, grpcio), "{call}");
+            assert_eq!(subchannel.counts(), (failures, 1), "{grpcio} {call}");
+            // The connector that ended watches the subchannel no more, nor does the idle channel.
+            assert_eq!(subchannel.watches(), 0);
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "{:?}",
+            start.elapsed()
+        );
+        assert_eq!(accepted.load(Ordering::SeqCst), 1);
+        channel.shutdown();
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test(start_paused = true)]
+async fn the_connector_of_a_subchannel_fails_of_an_attempt_that_timed_out_past_its_backoff() {
+    // In the dialect of grpcio, an attempt that times out at its deadline, the longer of 20 s and
+    // its backoff, leaves the subchannel idle rather than in transient failure, as its backoff is
+    // over: the connector that waited for it fails of its failure all the same, at the deadline,
+    // as gRPC's call fails once the attempt of its channel failed, where it connected again.
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("spark.sock");
+    let serving = Arc::new(Mutex::new(Serving::Settings));
+    let (accepted, _) = unix_server(&path, Arc::clone(&serving));
+    let channel = channel_of(unix_target(&path, true));
+    assert!(picked(&channel).await.is_ok());
+    let subchannel = channel.picked_subchannel().unwrap();
+    let taken = subchannel.hand_over().await.unwrap();
+    *serving.lock().unwrap() = Serving::Silent;
+    drop(taken);
+    until(Duration::from_secs(5), || channel.is_idle()).await;
+    let start = Instant::now();
+    let failure = tokio::time::timeout(Duration::from_secs(300), subchannel.hand_over())
+        .await
+        .expect("the connector ends")
+        .err()
+        .expect("no connection");
+    assert_eq!(start.elapsed(), CONNECT_TIMEOUT);
+    assert_eq!(
+        failure,
+        format!(
+            "failed to connect to all addresses; last error: UNKNOWN: unix:{}: connection attempt \
+             timed out before receiving SETTINGS frame",
+            path.to_str().unwrap()
+        )
+    );
+    assert_eq!(subchannel.counts(), (1, 1));
+    assert!(subchannel.snapshot().idle);
+    assert_eq!(accepted.load(Ordering::SeqCst), 2);
+    channel.shutdown();
+}
+
+#[cfg(unix)]
+#[tokio::test(start_paused = true)]
+async fn the_connector_of_a_subchannel_gives_the_connection_of_its_attempt_as_it_is() {
+    // Of a server that closes each connection once it read the preface: the connector gives hyper
+    // the connection of the one attempt that it makes, also as it ended since, which then fails the
+    // call of its end, rather than connecting again; and it makes one attempt only of a connection
+    // that the subchannel held and that ended before a call took it.
+    for grpcio in [true, false] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("spark.sock");
+        let serving = Arc::new(Mutex::new(Serving::Settings));
+        let (accepted, closed) = unix_server(&path, Arc::clone(&serving));
+        let channel = channel_of(unix_target(&path, grpcio));
+        assert!(picked(&channel).await.is_ok());
+        let subchannel = channel.picked_subchannel().unwrap();
+        let taken = subchannel.hand_over().await.unwrap();
+        *serving.lock().unwrap() = Serving::Closing;
+        drop(taken);
+        until(Duration::from_secs(5), || channel.is_idle()).await;
+        // Its connection is hyper's, which reads the server's settings and then its end.
+        let mut handover = tokio::time::timeout(Duration::from_secs(60), subchannel.hand_over())
+            .await
+            .expect("the connector ends")
+            .expect("the connection");
+        assert_eq!(accepted.load(Ordering::SeqCst), 2);
+        let mut buffer = [0u8; 64];
+        let read = handover.read(&mut buffer).await.unwrap();
+        assert_eq!((read, buffer[3]), (FRAME_HEADER_LEN, SETTINGS));
+        let end = handover.read(&mut buffer).await.unwrap_err();
+        assert_eq!(end.to_string(), SOCKET_CLOSED);
+        drop(handover);
+        until(Duration::from_secs(5), || subchannel.snapshot().idle).await;
+        // The next call's channel connects again, of a connection that ends before a call takes
+        // it: the connector connects again once, and gives that connection as it is.
+        assert!(picked(&channel).await.is_ok());
+        until(Duration::from_secs(5), || {
+            closed.load(Ordering::SeqCst) == 2
+        })
+        .await;
+        let handover = tokio::time::timeout(Duration::from_secs(60), subchannel.hand_over())
+            .await
+            .expect("the connector ends")
+            .expect("the connection");
+        assert_eq!(accepted.load(Ordering::SeqCst), 4);
+        assert_eq!(subchannel.counts(), (0, 4));
+        drop(handover);
+        channel.shutdown();
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test(start_paused = true)]
+async fn a_subchannel_is_freed_as_the_connector_of_a_dropped_call_waits_for_its_attempt() {
+    // The connector of the channel of tonic of a subchannel holds the subchannel only while it reads
+    // its state: once a call that waits for its attempt is dropped and the channels let go of the
+    // subchannel, it is freed, and its attempt ends, where the connector, in the worker of that
+    // channel of tonic, held it for good.
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("spark.sock");
+    let serving = Arc::new(Mutex::new(Serving::Settings));
+    let (accepted, _) = unix_server(&path, Arc::clone(&serving));
+    let pool: Arc<Pool> = Arc::default();
+    let channel = channel_in(unix_target(&path, true), Arc::clone(&pool));
+    let stale = channel.pick().await.ok().expect("a connection");
+    let subchannel = channel.picked_subchannel().unwrap();
+    *serving.lock().unwrap() = Serving::Silent;
+    drop(subchannel.hand_over().await.unwrap());
+    until(Duration::from_secs(5), || channel.is_idle()).await;
+    let freed = Arc::downgrade(&subchannel);
+    drop(subchannel);
+    // A call that picked the subchannel as its connection ended: tonic's connector waits for the
+    // attempt to the silent server, until the call is dropped.
+    let call = config_call(stale.clone(), Duration::from_secs(60));
+    assert!(tokio::time::timeout(Duration::from_secs(1), call)
+        .await
+        .is_err());
+    assert_eq!(accepted.load(Ordering::SeqCst), 2);
+    channel.shutdown();
+    drop((channel, stale));
+    until(Duration::from_secs(5), || freed.upgrade().is_none()).await;
+    assert_eq!(pool.len(), 0);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_call_on_the_connection_of_a_subchannel_whose_server_went_away_fails_of_one_attempt() {
+    // A call of tonic that picked the subchannel of a channel just before its connection ended, of
+    // a server that is gone: it fails of `UNAVAILABLE`, of the failure of the one attempt that its
+    // connector made, within its deadline, as a call of the transport failed before SPARK-62257,
+    // and as gRPC's call fails once the attempts of its channel failed, where a Rust client's call
+    // waited for the deadline of the client, as its connector connected again and again.
+    for grpcio in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("spark.sock");
+        let connections = grpc_unix_server(&path);
+        let channel = channel_of(unix_target(&path, grpcio));
+        let stale = channel.pick().await.ok().expect("a connection");
+        let _ = config_call(stale.clone(), Duration::from_secs(5)).await;
+        let subchannel = channel.picked_subchannel().unwrap();
+        std::fs::remove_file(&path).unwrap();
+        for connection in connections.lock().unwrap().drain(..) {
+            connection.abort();
+        }
+        until(Duration::from_secs(5), || channel.is_idle()).await;
+        let (failures, connections) = subchannel.counts();
+        let status = tokio::time::timeout(
+            Duration::from_secs(5),
+            config_call(stale, Duration::from_secs(1)),
+        )
+        .await
+        .expect("the call ends")
+        .unwrap_err();
+        assert_eq!(status.code(), tonic::Code::Unavailable, "{status:?}");
+        assert_eq!(status.message(), no_socket_failure(&path, grpcio));
+        assert_eq!(subchannel.counts(), (failures + 1, connections));
+        channel.shutdown();
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_pass_of_a_rust_client_makes_one_attempt_of_each_address() {
+    // A Rust client's channel goes idle of the failure of its pass, which fails its calls, and
+    // asks no subchannel to connect again then, as gRPC's `pick_first` asks once every subchannel
+    // failed in transient failure only: each call makes one attempt of the address, where an
+    // attempt asked for as the channel let go of the list was made as it had started.
+    let target = failing_target(false);
+    let pool: Arc<Pool> = Arc::default();
+    // The subchannel of the address of the target, which the test holds, so that every attempt of
+    // the channel is of it, and none that is asked for is aborted.
+    let held = Subchannel::of(
+        &pool,
+        Address::Unix {
+            path: b"/nonexistent-spark-connect-test/s.sock".to_vec(),
+            abstract_name: false,
+        },
+        &SubchannelArgs::new(&target, "http://localhost", None, false),
+        &target,
+        &tonic::transport::Endpoint::from_static("http://localhost"),
+        &tokio::runtime::Handle::current(),
+    );
+    let channel = channel_in(target, Arc::clone(&pool));
+    for call in 1..=4 {
+        assert!(picked(&channel).await.is_err());
+        assert!(channel.is_idle());
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        assert_eq!(held.counts(), (call, 0));
+        assert!(held.snapshot().idle);
+    }
+    assert_eq!(pool.len(), 1);
+}
+
+/// The status of a `Config` call of tonic on `checked`, the channel of the calls of a client (see
+/// [`crate::metadata::Checked`]), of the deadline `timeout`.
+async fn checked_call(
+    checked: crate::metadata::Checked,
+    timeout: Duration,
+) -> Result<(), tonic::Status> {
+    let mut grpc = tonic::client::Grpc::new(checked);
+    grpc.ready()
+        .await
+        .map_err(|error| tonic::Status::unknown(error.to_string()))?;
+    let mut request = tonic::Request::new(spark_connect_proto::ConfigRequest::default());
+    request.set_timeout(timeout);
+    grpc.unary::<spark_connect_proto::ConfigRequest, spark_connect_proto::ConfigResponse, _>(
+        request,
+        tonic::codegen::http::uri::PathAndQuery::from_static(
+            "/spark.connect.SparkConnectService/Config",
+        ),
+        tonic_prost::ProstCodec::default(),
+    )
+    .await
+    .map(|_| ())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_call_that_waits_for_its_connector_as_its_client_closes_is_cancelled() {
+    // As grpcio's `close`, which cancels the calls in flight on its channel: a call that waits in
+    // the connector of its subchannel as its client closes, of a connection that ended before it
+    // took it and of an attempt that the server holds, ends of `CANCELLED` (`Channel closed!`),
+    // which no retry policy retries, whether it sees the close first or the failure of the
+    // connector, whose subchannel the close lets go of, which it had of `UNAVAILABLE` (`Socket
+    // closed`, which a retry policy retried, to `NO_ACTIVE_SESSION`).
+    for grpcio in [true, false] {
+        for failure_first in [true, false] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("spark.sock");
+            let serving = Arc::new(Mutex::new(Serving::Closing));
+            let (accepted, closed) = unix_server(&path, Arc::clone(&serving));
+            let channel = channel_of(unix_target(&path, grpcio));
+            // The connection of the pass of the channel, which the server closes before a call
+            // takes it, and which the subchannel holds, ready, as it reads nothing of it.
+            assert!(picked(&channel).await.is_ok());
+            until(Duration::from_secs(5), || {
+                closed.load(Ordering::SeqCst) == 1
+            })
+            .await;
+            *serving.lock().unwrap() = Serving::Silent;
+            let client_closed: Arc<crate::client::ChannelClosed> = Arc::default();
+            let checked = crate::metadata::Checked {
+                channel: Arc::clone(&channel),
+                closed: Arc::clone(&client_closed),
+                refused: false,
+            };
+            let call = tokio::spawn(checked_call(checked, Duration::from_secs(60)));
+            // The connector connects again, once, to the server that holds the attempt.
+            until(Duration::from_secs(5), || {
+                accepted.load(Ordering::SeqCst) == 2
+            })
+            .await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            assert!(!call.is_finished());
+            // The close of the client (`SparkConnectClient::close`): the channel is marked closed,
+            // its calls are woken, and it lets go of its subchannels; of `failure_first`, the call
+            // sees the failure of its connector before it is woken.
+            client_closed.mark_closed();
+            if failure_first {
+                channel.shutdown();
+                let _ = tokio::time::timeout(Duration::from_secs(1), async {
+                    while !call.is_finished() {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                })
+                .await;
+                client_closed.wake_up();
+            } else {
+                client_closed.wake_up();
+                channel.shutdown();
+            }
+            let status = tokio::time::timeout(Duration::from_secs(5), call)
+                .await
+                .expect("the call ends")
+                .unwrap()
+                .unwrap_err();
+            let case = format!("grpcio={grpcio} failure_first={failure_first}");
+            assert_eq!(status.code(), tonic::Code::Cancelled, "{case}: {status:?}");
+            assert_eq!(status.message(), crate::client::CLOSED_CHANNEL, "{case}");
+            assert_eq!(
+                crate::retries::grpc_python_code(&status),
+                tonic::Code::Cancelled,
+                "{case}"
+            );
+            assert!(
+                !crate::retries::RetryPolicy::default().can_retry(&status),
+                "{case}"
+            );
+            assert_eq!(accepted.load(Ordering::SeqCst), 2, "{case}");
+        }
+    }
 }

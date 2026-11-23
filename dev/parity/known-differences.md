@@ -762,22 +762,18 @@ requests of the unpickled object pickle as it is then. This case still differs:
   exclusions, and the name of `dns://` and an authority of an IP address and a port is asked of that
   DNS server, as gRPC's resolver asks it; the host of the connection string stands for the target
   only, and decides neither its TLS, nor its token, nor its proxy, nor its calls. What stays
-  different: the channels of a target that share the connection of the process resolve its name
-  again once between them as that connection fails, where each channel of grpcio resolves it again
-  of its own; a new channel takes the connection of the process whatever addresses its own
-  resolution gives, where grpcio's connects to those addresses (both until SPARK-62257); the
-  `:authority` of the calls of a target whose authority HTTP's URIs cannot hold, of a `%` but in
-  brackets or of more than one `:`, as of a Unix socket (`tmp%2Fa.sock`) or of a list of addresses,
-  is the host and the port of the connection string (`localhost:443`, the first address), as hyper
-  and h2, the HTTP/2 of the transport, take the authority of a URI only, where gRPC sends its own,
-  so the server of a long list does not refuse the headers of its calls, as grpc-java refuses those
-  of grpcio past their limit; the TLS sends the name that it verifies as SNI only of a name of DNS,
-  up to a `%` (`localhost` of `localhost%00`), as rustls takes no other, where BoringSSL sends the
-  host of gRPC's authority as it is (`x*y.localhost`, `a%2Fb.localhost`); a target of `xds:` of a
-  bootstrap of xDS in the environment fails each call of `UNAVAILABLE`, as the transport has no
-  client of xDS, where grpcio's would connect through it; and gRPC's core writes to stderr the
-  errors of a target that it refuses (`Error parsing URI(s)`, `channel stack builder failed`, `no
-  port given for ipv4 scheme`), which the transport does not write.
+  different: the `:authority` of the calls of a target whose authority HTTP's URIs cannot hold, of a
+  `%` but in brackets or of more than one `:`, as of a Unix socket (`tmp%2Fa.sock`) or of a list of
+  addresses, is the host and the port of the connection string (`localhost:443`, the first address),
+  as hyper and h2, the HTTP/2 of the transport, take the authority of a URI only, where gRPC sends
+  its own, so the server of a long list does not refuse the headers of its calls, as grpc-java
+  refuses those of grpcio past their limit; the TLS sends the name that it verifies as SNI only of a
+  name of DNS, up to a `%` (`localhost` of `localhost%00`), as rustls takes no other, where
+  BoringSSL sends the host of gRPC's authority as it is (`x*y.localhost`, `a%2Fb.localhost`); a
+  target of `xds:` of a bootstrap of xDS in the environment fails each call of `UNAVAILABLE`, as the
+  transport has no client of xDS, where grpcio's would connect through it; and gRPC's core writes to
+  stderr the errors of a target that it refuses (`Error parsing URI(s)`, `channel stack builder
+  failed`, `no port given for ipv4 scheme`), which the transport does not write.
 
   The members of a gRPC channel are not there: `toChannel`, which the transport calls of a builder
   of its own for its errors only, so a subclass whose `toChannel` connects elsewhere is of its
@@ -872,7 +868,8 @@ requests of the unpickled object pickle as it is then. This case still differs:
   that does not resolve (`errors resolving ...: [field:hostname lookup error:address lookup failed
   for ...: Domain name not found]`), a call that the end of its connection fails (`Stream
   removed (Socket closed)`, `Stream removed (recvmsg:Connection reset by peer (104))`, `Stream
-  removed (ping timeout)`), and a call whose stream the server resets, of the code of its reason as
+  removed (sendmsg: Broken pipe (32))` of a write of it that fails, `Stream removed (ping
+  timeout)`), and a call whose stream the server resets, of the code of its reason as
   gRPC's core gives it (`INTERNAL`, `Stream removed (RST_STREAM (Received RST_STREAM with error code
   1))`). What stays different: the TLS handshake is rustls's, so its failure has
   BoringSSL's text of the same cause, a certificate that fails its verification, an alert of the
@@ -889,22 +886,32 @@ requests of the unpickled object pickle as it is then. This case still differs:
 - **The connections of the transport** (intentional; the transport is native). A channel connects as
   grpcio's (see `docs/compatibility.md`): to the addresses of the host, or of the proxy, each 250 ms
   after the previous one, each with a connect deadline of 20 s of its own, its calls failing at once
-  once it failed to connect, while it connects again with gRPC's backoff, and the sessions of the
-  same target and of no token share one connection, as gRPC's subchannel pool shares one, where a
-  session of a token has a connection of its own. What stays different: a name of `/etc/hosts` other
-  than `localhost` and the names under it, which are the loopback of both families, as c-ares gives
-  them, is resolved by the system's resolver, which gives the addresses of both families of the
-  file, where c-ares, grpcio's, gives those of the family of its first line; the keepalive pings are
-  hyper's, at the time and the timeout of the parameters, where gRPC's core paces its pings itself,
-  so a connection that stops answering does not end at the same time; a TLS channel trusts the
-  system's store too, besides the bundle of grpcio, where grpcio trusts its bundle alone, so that a
-  CA that the administrator of the system installs is trusted (see `docs/configuration.md`); of a
-  roots file without a certificate, the client writes to stderr two lines of each attempt,
-  `Handshaker factory creation failed with TSI_INVALID_ARGUMENT` and `Update handshaker factory
-  failed.`, where gRPC's core writes those and the errors of BoringSSL's load of the roots, of each
-  channel that it makes; and of a `GRPC_VERBOSITY` of `INFO` or `DEBUG`, the client writes to stderr
-  the lines that it writes by default, without the other lines of gRPC's core, whose code it has
-  not.
+  once it failed to connect, while its subchannels connect again with gRPC's backoff; a connection
+  is of a subchannel of the process, of one address and of what the connection is made of besides
+  it, as gRPC's subchannel pool keys them, which the sessions whose own resolution gives that
+  address share, of the same TLS, proxy and keepalive and of no token, where a session of a token
+  has a connection of its own; each session's channel resolves the name of its target of its own,
+  and again as its connection ends or fails, and picks a subchannel of its own addresses, as
+  grpcio's `pick_first`. What stays different: a name of `/etc/hosts` other than `localhost` and the
+  names under it, which are the loopback of both families, as c-ares gives them, is resolved by the
+  system's resolver, which gives the addresses of both families of the file, where c-ares, grpcio's,
+  gives those of the family of its first line; the keepalive pings are hyper's, at the time and the
+  timeout of the parameters, where gRPC's core paces its pings itself, so a connection that stops
+  answering does not end at the same time; a call that the end of its connection fails is `Stream
+  removed (Socket closed)`, `(recvmsg:...)` or `(sendmsg:...)` of the socket call that saw the
+  failure, as grpcio's, whose own choice depends on the timing (of 30 calls of grpcio 1.85.1 to a
+  server that closes each connection once it sent its settings, 16 `recvmsg:Connection reset by peer
+  (104)`, 9 `sendmsg: Broken pipe (32)`, 4 `Socket closed`, 1 `sendmsg: Connection reset by peer
+  (104)`), but `Socket closed` where h2 dropped the cause, of the streams that it ends as hyper
+  drops the connection after its first failure and of a request that hyper did not send as the
+  connection closed (inherent: h2 0.4 keeps no cause there); a TLS channel trusts the system's store
+  too, besides the bundle of grpcio, where grpcio trusts its bundle alone, so that a CA that the
+  administrator of the system installs is trusted (see `docs/configuration.md`); of a roots file
+  without a certificate, the client writes to stderr two lines of each attempt, `Handshaker factory
+  creation failed with TSI_INVALID_ARGUMENT` and `Update handshaker factory failed.`, where gRPC's
+  core writes those and the errors of BoringSSL's load of the roots, of each channel that it makes;
+  and of a `GRPC_VERBOSITY` of `INFO` or `DEBUG`, the client writes to stderr the lines that it
+  writes by default, without the other lines of gRPC's core, whose code it has not.
 - **Messages over the size limit of a call** (intentional; the transport is native). A response or a
   request over 128 MiB fails its call with grpcio's `RESOURCE_EXHAUSTED` and the details of gRPC's
   core (see `docs/compatibility.md`). What stays different: tonic checks the length of a response

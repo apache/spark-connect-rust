@@ -15,33 +15,36 @@
 // specific language governing permissions and limitations
 // under the License.
 
-//! The connections of a channel, made as grpcio makes those of PySpark's channel.
+//! The connections of the channels of the clients, made as grpcio makes those of PySpark's channels.
 //!
-//! A channel has one connection at a time, which tonic asks this connector for when a call needs
-//! one: lazily, at the first call, and again once the connection it had is gone. The connector
-//! keeps the connectivity state of the channel, as gRPC's channel does:
+//! As gRPC's, a connection is of a subchannel ([`subchannel`]): of one address, of what the
+//! connection is made of besides it, which every channel of the process whose resolution gives that
+//! address shares, as gRPC's global subchannel pool; and each channel of a client has a resolver and
+//! a `pick_first` of its own ([`pick_first`]), which resolve the name of its target and pick a
+//! subchannel of the addresses that it gives, whose connection its calls take:
 //!
 //! - A connection is made to the addresses of the host (or of the proxy) in the order of their
 //!   resolution, as gRPC's `pick_first` with its happy eyeballs: the attempt to an address starts
 //!   250 ms after the previous one while that one is not done, or at once when it fails, each
 //!   with a deadline of its own, 20 s from its start. The first that completes is the connection,
-//!   and the others are dropped.
+//!   and the others are dropped; a subchannel of the addresses that another channel connected is
+//!   taken at once.
 //! - An attempt completes when the server's HTTP/2 settings have arrived, within its deadline:
 //!   after the TCP connection, the tunnel of a proxy, and the TLS handshake, which the connector
 //!   makes itself, so that the settings of a TLS connection are bounded too.
 //! - The addresses are those of the system's resolver, within the deadline of an attempt; in the
 //!   dialect of grpcio, `localhost` and the names under it are the loopback of both families, as
 //!   c-ares, grpcio's resolver, gives them.
-//! - While tonic waits for a connection, its calls wait, as gRPC's wait in `CONNECTING`. In the
-//!   dialect of grpcio, once a connection has failed, the channel is in `TRANSIENT_FAILURE`: its
-//!   calls fail at once with the error of the failure, while it connects again in the
-//!   background, with gRPC's backoff (1 s, times 1.6 up to 120 s, with a jitter of 20 %), until a
-//!   connection succeeds; the next call takes it. After 30 minutes without a call, or once no open
-//!   client uses the channel ([`Connector::release`]), the channel stops connecting, as gRPC's
-//!   idles or shuts down, and the next call connects again. A Rust client's channel connects
-//!   again at each call that needs a connection, as tonic's does.
-//! - A connection that ends (the server closed it, or its keepalive) leaves the channel idle: the
-//!   next call waits for a new connection.
+//! - While a channel connects, its calls wait, as gRPC's wait in `CONNECTING`. In the dialect of
+//!   grpcio, once all its addresses failed, the channel is in `TRANSIENT_FAILURE`: its calls fail at
+//!   once with the error of the last failure, while each subchannel connects again in the background
+//!   once its backoff ends (1 s, times 1.6 up to 120 s, with a jitter of 20 %), until one connects;
+//!   the next call takes it. After 30 minutes without a call, or once its client is closed, the
+//!   channel stops connecting, as gRPC's idles or shuts down, and the next call connects again. A
+//!   Rust client's channel connects again at each call that needs a connection, as tonic's does.
+//! - A connection that ends (the server closed it, or its keepalive) leaves the channels of it
+//!   idle: the next call connects again, and, in the dialect of grpcio, each of them resolves the
+//!   name of its target again.
 //!
 //! The connector does the HTTP/2 preface of the client itself, so that it can wait for the
 //! settings of the server before tonic has the connection, and hands the connection to hyper
@@ -61,7 +64,6 @@ use std::sync::{Arc, Mutex, Weak};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use futures::stream::{FuturesUnordered, StreamExt};
 use hyper_util::rt::TokioIo;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpStream;
@@ -70,6 +72,12 @@ use tokio_rustls::rustls;
 
 use crate::channel::{ChannelTarget, TargetNames};
 use crate::proxy::HttpProxy;
+
+mod pick_first;
+mod subchannel;
+
+pub(crate) use pick_first::ClientChannel;
+pub(crate) use subchannel::{Pool, SubchannelArgs};
 
 /// Whether the transport speaks as grpcio, where a Rust client would not: the texts of the
 /// failures of its connections, and the `User-Agent` of the `CONNECT` request of a proxy.
@@ -113,9 +121,10 @@ const MAX_BACKOFF: Duration = Duration::from_secs(120);
 /// channel idles after `grpc.client_idle_timeout_ms`.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
-/// How long, in the dialect of grpcio, a channel takes the addresses of its last resolution of a
-/// name, from its start, before it resolves the name again, as gRPC's resolver resolves it again
-/// no sooner (`grpc.dns_min_time_between_resolutions_ms`).
+/// How long, in the dialect of grpcio, a channel waits from the start of its last resolution of
+/// the name of its target before it resolves it again, as gRPC's resolver resolves it again no
+/// sooner (`grpc.dns_min_time_between_resolutions_ms`), which the channel asks for as its
+/// connection ends or fails (see [`pick_first`]).
 const MIN_TIME_BETWEEN_RESOLUTIONS: Duration = Duration::from_secs(30);
 
 /// The connection preface of an HTTP/2 client (RFC 9113, section 3.4).
@@ -130,6 +139,9 @@ const FRAME_HEADER_LEN: usize = 9;
 /// The type of an HTTP/2 SETTINGS frame, and its ACK flag.
 const SETTINGS: u8 = 4;
 const ACK: u8 = 1;
+
+/// The type of an HTTP/2 GOAWAY frame (RFC 9113, section 6.8).
+const GOAWAY: u8 = 7;
 
 /// The identifier of `SETTINGS_MAX_HEADER_LIST_SIZE` (RFC 9113, section 6.5.2), and the length
 /// of an entry of a SETTINGS frame, of its identifier and its value.
@@ -148,9 +160,31 @@ pub(crate) enum Roots<'a> {
     /// The certificates of this PEM only, as grpcio trusts those of the file of
     /// `GRPC_DEFAULT_SSL_ROOTS_FILE_PATH` alone.
     Only(&'a [u8]),
-    /// The roots of the system's store, and the certificates of this PEM too, if there is one,
-    /// which the Python binding gives: grpcio's own bundle.
-    System(Option<&'a [u8]>),
+    /// The roots of the system's store, `native`, as the process read them once (see
+    /// [`system_roots`]), and the certificates of the PEM `bundle` too, if there is one, which the
+    /// Python binding gives: grpcio's own bundle.
+    System {
+        native: &'a [SystemRoot],
+        bundle: Option<&'a [u8]>,
+    },
+}
+
+/// A certificate of the system's store (see [`system_roots`]).
+pub(crate) type SystemRoot = rustls::pki_types::CertificateDer<'static>;
+
+/// The certificates of the system's store, as `rustls-native-certs` reads them now, which the
+/// process reads once, as grpcio computes its default roots once (see `crate::client::ssl_roots`),
+/// so that all its channels trust the same roots, which the subchannels of the process share (see
+/// [`SubchannelArgs`]).
+pub(crate) fn system_roots() -> Vec<SystemRoot> {
+    let native = rustls_native_certs::load_native_certs();
+    if !native.errors.is_empty() {
+        tracing::debug!(
+            "errors loading the native certificates: {:?}",
+            native.errors
+        );
+    }
+    native.certs
 }
 
 /// The TLS of a channel: the configuration of its sessions and the verifier of the certificates
@@ -262,15 +296,8 @@ impl Tls {
             Roots::Only(pem) => {
                 store.add_parsable_certificates(certificates(pem));
             }
-            Roots::System(bundle) => {
-                let native = rustls_native_certs::load_native_certs();
-                if !native.errors.is_empty() {
-                    tracing::debug!(
-                        "errors loading the native certificates: {:?}",
-                        native.errors
-                    );
-                }
-                store.add_parsable_certificates(native.certs);
+            Roots::System { native, bundle } => {
+                store.add_parsable_certificates(native.iter().cloned());
                 if let Some(bundle) = bundle {
                     store.add_parsable_certificates(certificates(bundle));
                 }
@@ -499,13 +526,13 @@ pub(crate) struct Target {
     form: Option<ChannelTarget>,
     /// gRPC's names of the target of gRPC, if any, of which the tunnel of a proxy names the server.
     names: Option<TargetNames>,
-    /// The addresses of the last resolution of the name of the host that succeeded, and when it
-    /// started, in the dialect of grpcio (see [`Target::resolve_host`]), of every clone of the
-    /// target.
-    resolved: Arc<Mutex<Option<Resolution>>>,
-    /// The addresses of the host, resolved by the tests rather than by the system's resolver.
+    /// The addresses of the host, resolved by the tests rather than by the system's resolver, of
+    /// every clone of the target, which a test changes.
     #[cfg(test)]
-    addresses: Option<Vec<SocketAddr>>,
+    addresses: Option<Arc<Mutex<Vec<SocketAddr>>>>,
+    /// Whether the resolutions fail, of the tests, of every clone of the target.
+    #[cfg(test)]
+    resolution_fails: Arc<AtomicBool>,
     /// Whether the lookup of the host never ends, of the tests of its deadline.
     #[cfg(test)]
     resolves_never: bool,
@@ -513,12 +540,16 @@ pub(crate) struct Target {
     /// the system's.
     #[cfg(test)]
     dns_config: Option<crate::dns::Config>,
-    /// The count of the lookups of the host, one for each pass of attempts, of the tests.
+    /// The count of the resolutions of the target, of the tests.
     #[cfg(test)]
     lookups: Arc<std::sync::atomic::AtomicUsize>,
     /// The count of the lookups of the name of the host that were made, of the tests.
     #[cfg(test)]
     name_lookups: Arc<std::sync::atomic::AtomicUsize>,
+    /// The connect deadline of the attempts and of the lookups, of the tests, in place of
+    /// [`CONNECT_TIMEOUT`].
+    #[cfg(test)]
+    deadline: Option<Duration>,
 }
 
 /// The tunnel of a proxy to the server.
@@ -555,9 +586,10 @@ impl Target {
             grpcio: grpcio_dialect(),
             form: None,
             names: None,
-            resolved: Default::default(),
             #[cfg(test)]
             addresses: None,
+            #[cfg(test)]
+            resolution_fails: Default::default(),
             #[cfg(test)]
             resolves_never: false,
             #[cfg(test)]
@@ -566,7 +598,19 @@ impl Target {
             lookups: Default::default(),
             #[cfg(test)]
             name_lookups: Default::default(),
+            #[cfg(test)]
+            deadline: None,
         }
+    }
+
+    /// The connect deadline of an attempt to an address and of a lookup of the name,
+    /// [`CONNECT_TIMEOUT`].
+    fn connect_timeout(&self) -> Duration {
+        #[cfg(test)]
+        if let Some(deadline) = self.deadline {
+            return deadline;
+        }
+        CONNECT_TIMEOUT
     }
 
     /// This target, of gRPC's local credentials when `local` (see
@@ -633,25 +677,6 @@ impl Target {
         self
     }
 
-    /// What the connections of this target are made of, by which the channels of the process
-    /// share them (see `crate::client`): the host and the port, the tunnel and its credentials,
-    /// the name of the server of the TLS, whose roots are those of the process, local
-    /// credentials, and the dialect.
-    pub(crate) fn key(&self) -> TargetKey {
-        TargetKey {
-            host: self.host.clone(),
-            port: self.port,
-            tunnel: self
-                .tunnel
-                .as_ref()
-                .map(|tunnel| (tunnel.authority.clone(), tunnel.authorization.clone())),
-            tls: self.tls.as_ref().map(|tls| tls.name.clone()),
-            local: self.local,
-            grpcio: self.grpcio,
-            form: self.form.clone(),
-        }
-    }
-
     /// What a new channel of the same server and TLS as this target connects to, through `proxy`,
     /// in the dialect of the transport now.
     pub(crate) fn renewed(&self, host: &str, port: u16, proxy: Option<HttpProxy>) -> Self {
@@ -691,7 +716,14 @@ impl Target {
             std::future::pending::<()>().await;
         }
         #[cfg(test)]
+        if self.resolution_fails.load(Ordering::SeqCst) {
+            return Err(ResolveFailure::ServerFailure(
+                "the resolution of the test failed".to_string(),
+            ));
+        }
+        #[cfg(test)]
         if let Some(addresses) = &self.addresses {
+            let addresses = addresses.lock().unwrap_or_else(|e| e.into_inner());
             return Ok(addresses.iter().copied().map(Address::Ip).collect());
         }
         match &self.form {
@@ -728,58 +760,13 @@ impl Target {
     /// (`Misformatted domain name`); and a name that the system's resolver would read as an
     /// address, as of `inet_aton` (`127.1`), is a name that it looks up.
     ///
-    /// In the dialect of grpcio, as gRPC's resolver resolves a name again no sooner than
-    /// [`MIN_TIME_BETWEEN_RESOLUTIONS`] after the start of its last resolution, of whose addresses
-    /// its channel connects meanwhile, the addresses of the last resolution that succeeded are
-    /// taken until then (and see [`failed_to_resolve`]).
+    /// Each resolution looks the name up now: how often a channel resolves it is the channel's (see
+    /// [`pick_first`]).
     async fn resolve_host(&self) -> Result<Vec<SocketAddr>, ResolveFailure> {
         if let Ok(ip) = self.host.parse::<std::net::IpAddr>() {
             return Ok(vec![SocketAddr::new(ip, self.port)]);
         }
-        if !self.grpcio {
-            return self.look_up_host().await;
-        }
-        let started = Instant::now();
-        if let Some((at, addresses)) = &*self.resolved.lock().unwrap_or_else(|e| e.into_inner()) {
-            if started.duration_since(*at) < MIN_TIME_BETWEEN_RESOLUTIONS {
-                return Ok(addresses.clone());
-            }
-        }
-        let addresses = self.look_up_host().await?;
-        *self.resolved.lock().unwrap_or_else(|e| e.into_inner()) =
-            Some((started, addresses.clone()));
-        Ok(addresses)
-    }
-
-    /// The resolution of the target that a new channel makes, as the resolver of a new channel of
-    /// grpcio resolves its name, whatever another channel resolved before (see
-    /// [`ChannelResolution`]): of a name, a lookup now, whose addresses the connections of the
-    /// target take then (see [`Target::resolve_host`]); of another target, as [`Target::resolve`].
-    async fn resolve_for_a_new_channel(&self) -> Result<(), ResolveFailure> {
-        if self.tunnel.is_none() && matches!(&self.form, Some(ChannelTarget::Refused { .. })) {
-            return Ok(());
-        }
-        if self.form_resolves_itself() || self.host.parse::<std::net::IpAddr>().is_ok() {
-            return self.resolve().await.map(drop);
-        }
-        let started = Instant::now();
-        let addresses = self.look_up_host().await?;
-        *self.resolved.lock().unwrap_or_else(|e| e.into_inner()) = Some((started, addresses));
-        Ok(())
-    }
-
-    /// Whether the target of gRPC resolves of itself, of no lookup of a name: its addresses, its
-    /// Unix sockets, or a name that gRPC's resolver does not resolve.
-    fn form_resolves_itself(&self) -> bool {
-        self.tunnel.is_none()
-            && matches!(
-                &self.form,
-                Some(
-                    ChannelTarget::Addresses { .. }
-                        | ChannelTarget::Unresolvable { .. }
-                        | ChannelTarget::Unix { .. }
-                )
-            )
+        self.look_up_host().await
     }
 
     /// The addresses of the host, of a lookup now (see [`Target::resolve_host`]).
@@ -864,44 +851,6 @@ impl Target {
             .await
             .map_err(ResolveFailure::Server)
     }
-}
-
-/// The addresses of a resolution of a name, and when it started.
-type Resolution = (Instant, Vec<SocketAddr>);
-
-/// Whether `failure` is of a resolution of the target, which gRPC's resolver tries again a backoff
-/// after its end, where an attempt to connect starts a backoff after the start of the previous one:
-/// a resolution that fails late, of its timeouts, is not tried again at once.
-fn failed_to_resolve(failure: &ChannelFailure) -> bool {
-    matches!(failure, ChannelFailure::Resolve { .. })
-}
-
-/// When the attempt after one that started at `start` and failed of `failure` at `end` starts, of
-/// the backoff `delay`: a backoff after the end of a resolution that failed, as gRPC's resolver
-/// tries it again, else after the start of the attempt, as gRPC's subchannel connects again.
-fn next_attempt(
-    start: Instant,
-    end: Instant,
-    delay: Duration,
-    failure: &ChannelFailure,
-) -> Instant {
-    if failed_to_resolve(failure) {
-        end + delay
-    } else {
-        start + delay
-    }
-}
-
-/// What the connections of a [`Target`] are made of (see [`Target::key`]).
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct TargetKey {
-    host: String,
-    port: u16,
-    tunnel: Option<(String, Option<String>)>,
-    tls: Option<String>,
-    local: bool,
-    grpcio: bool,
-    form: Option<ChannelTarget>,
 }
 
 /// Whether `host` is a name of the loopback of RFC 6761, `localhost` or a name under it, which
@@ -1449,7 +1398,7 @@ fn boringssl_error(error: &rustls::Error, self_signed: Option<SelfSigned>) -> St
 
 /// An address that a connection is made to: of TCP, or of a Unix socket, of its path or of its
 /// abstract name.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Address {
     Ip(SocketAddr),
     Unix { path: Vec<u8>, abstract_name: bool },
@@ -2136,76 +2085,6 @@ fn http1_status(bytes: &[u8]) -> Option<u16> {
         .ok()
 }
 
-/// One pass of attempts to the addresses of `target`, as gRPC's happy eyeballs makes them: in
-/// the order of the addresses, each [`ATTEMPT_DELAY`] after the previous one while that one is
-/// not done, or at once when it fails, each with the deadline `per_address` from its start. The
-/// first connection that completes, or the failure of the last attempt to fail.
-async fn attempt(target: &Target, per_address: Duration) -> Result<Ready, ChannelFailure> {
-    attempt_after(target, per_address, ATTEMPT_DELAY).await
-}
-
-/// As [`attempt`], of the attempt to an address starting `delay` after the previous one while
-/// that one is not done.
-async fn attempt_after(
-    target: &Target,
-    per_address: Duration,
-    delay: Duration,
-) -> Result<Ready, ChannelFailure> {
-    // The lookup has the deadline of an attempt too, as tonic's connect timeout bounded it, but
-    // through a DNS server, whose lookup ends of the timeout of gRPC's resolution itself.
-    let resolved = if target.dns_server().is_some() {
-        target.resolve().await
-    } else {
-        match tokio::time::timeout(per_address, target.resolve()).await {
-            Ok(resolved) => resolved,
-            Err(_) => Err(ResolveFailure::Timeout),
-        }
-    };
-    let addresses = resolved.map_err(|failure| ChannelFailure::Resolve {
-        name: target.name(),
-        failure,
-    })?;
-    if addresses.is_empty() {
-        return Err(ChannelFailure::NoAddress);
-    }
-    let mut started = 0;
-    let mut pending = FuturesUnordered::new();
-    let start = |address: Address| {
-        let deadline = Instant::now() + per_address;
-        async move {
-            let result = connect_address(target, &address, deadline).await;
-            (address, result)
-        }
-    };
-    pending.push(start(addresses[0].clone()));
-    started += 1;
-    let mut next_start = Instant::now() + delay;
-    loop {
-        let more = started < addresses.len();
-        tokio::select! {
-            Some((address, result)) = pending.next() => match result {
-                Ok(ready) => return Ok(ready),
-                Err(failure) => {
-                    log_failure(target.grpcio, &address, &failure);
-                    if more {
-                        pending.push(start(addresses[started].clone()));
-                        started += 1;
-                        next_start = Instant::now() + delay;
-                    } else if pending.is_empty() {
-                        // The last attempt to fail.
-                        return Err(ChannelFailure::Addresses { address, failure });
-                    }
-                }
-            },
-            _ = tokio::time::sleep_until(next_start), if more => {
-                pending.push(start(addresses[started].clone()));
-                started += 1;
-                next_start = Instant::now() + delay;
-            }
-        }
-    }
-}
-
 /// How often the failure of the tunnel of a proxy is logged at most, as gRPC's core logs it, once
 /// a minute, whatever the attempts in between, where it logs the failure of each TLS handshake.
 const PROXY_FAILURE_LOG_INTERVAL: Duration = Duration::from_secs(60);
@@ -2273,265 +2152,6 @@ fn log_failure(grpcio: bool, address: &Address, failure: &Failure) {
         log_proxy_failure(format!(
             "HTTP proxy handshake with {address} failed: {code}: {text}"
         ));
-    }
-}
-
-/// The connectivity state of a channel, as gRPC's.
-enum State {
-    /// No connection, nor any attempt: the next call connects.
-    Idle,
-    /// A call is connecting.
-    Connecting,
-    /// tonic has the connection.
-    Ready,
-    /// A connection made in the background, which the next call takes.
-    Held(Ready),
-    /// The last connection failed: the calls fail at once with this, while the channel connects
-    /// again in the background.
-    TransientFailure(ChannelFailure),
-}
-
-/// What the connector of a channel shares with its connections in the background.
-struct Shared {
-    target: Target,
-    state: Mutex<State>,
-    /// When a call last asked for a connection, for [`IDLE_TIMEOUT`].
-    last_call: Mutex<Instant>,
-    /// How many open clients use the channel (see [`Connector::acquire`]).
-    users: std::sync::atomic::AtomicUsize,
-    /// Told when the last open client of the channel stops using it, which ends its connections
-    /// in the background.
-    shutdown: Arc<tokio::sync::Notify>,
-}
-
-impl Shared {
-    fn state(&self) -> std::sync::MutexGuard<'_, State> {
-        self.state.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    /// Whether no open client uses the channel.
-    fn unused(&self) -> bool {
-        self.users.load(Ordering::SeqCst) == 0
-    }
-
-    /// Stop connecting in the background, as a channel that no open client uses: the connection
-    /// made there and the failure are dropped, and the next call connects.
-    fn stop(&self) {
-        let mut state = self.state();
-        if matches!(*state, State::Held(_) | State::TransientFailure(_)) {
-            *state = State::Idle;
-        }
-    }
-}
-
-/// The connector of a channel, which tonic calls for each connection it needs (see the module).
-#[derive(Clone)]
-pub(crate) struct Connector(Arc<Shared>);
-
-impl Connector {
-    pub(crate) fn new(target: Target) -> Self {
-        Self(Arc::new(Shared {
-            target,
-            state: Mutex::new(State::Idle),
-            last_call: Mutex::new(Instant::now()),
-            users: Default::default(),
-            shutdown: Default::default(),
-        }))
-    }
-
-    /// Whether the channel speaks as grpcio (see [`set_grpcio_dialect`]).
-    pub(crate) fn grpcio(&self) -> bool {
-        self.0.target.grpcio
-    }
-
-    /// An open client uses the channel, until it releases it ([`Connector::release`]).
-    pub(crate) fn acquire(&self) {
-        self.0.users.fetch_add(1, Ordering::SeqCst);
-    }
-
-    /// An open client stops using the channel: it is closed, or gone. Once no open client uses
-    /// it, the channel stops connecting in the background and drops the connection that it made
-    /// there, as grpcio's channel that is closed shuts its subchannels down; the next call of a
-    /// client that opens again connects.
-    pub(crate) fn release(&self) {
-        if self.0.users.fetch_sub(1, Ordering::SeqCst) == 1 {
-            self.0.stop();
-            self.0.shutdown.notify_waiters();
-        }
-    }
-}
-
-/// The resolution of the name of the target of a channel of a client, which shares the connections
-/// of its connector with the other channels of the process (see `crate::client`), as each channel
-/// of grpcio resolves its name with a resolver of its own before its first call, of the
-/// subchannels of gRPC's global pool that it then shares: in the dialect of grpcio, before its
-/// first call, a channel resolves the name of its target once, of a lookup of its own, whatever
-/// another channel resolved before, of whose addresses the connections of the target take then
-/// ([`MIN_TIME_BETWEEN_RESOLUTIONS`]); of a failure, its calls fail of the error of it, at once,
-/// until it is tried again a backoff after its end, as gRPC's resolver tries it again.
-pub(crate) struct ChannelResolution {
-    /// Whether the calls go on of no resolution: of a channel that resolved, or of a Rust client.
-    ready: std::sync::atomic::AtomicBool,
-    state: tokio::sync::Mutex<Resolving>,
-}
-
-/// The state of a [`ChannelResolution`].
-enum Resolving {
-    /// Not resolved yet.
-    Unresolved,
-    /// Resolved: the calls go on.
-    Resolved,
-    /// The last resolution failed, of the error of the calls, which is tried again at `next`, of
-    /// the backoff `backoff`.
-    Failed {
-        error: ConnectError,
-        next: Instant,
-        backoff: Backoff,
-    },
-}
-
-impl ChannelResolution {
-    /// The resolution of a channel of a connector in the dialect of grpcio if `grpcio`: of a Rust
-    /// client, none.
-    pub(crate) fn new(grpcio: bool) -> Self {
-        Self {
-            ready: std::sync::atomic::AtomicBool::new(!grpcio),
-            state: tokio::sync::Mutex::new(Resolving::Unresolved),
-        }
-    }
-
-    /// Whether the calls of the channel go on, of no resolution (see [`ChannelResolution::ready`]).
-    pub(crate) fn is_ready(&self) -> bool {
-        self.ready.load(Ordering::SeqCst)
-    }
-
-    /// Whether the calls of the channel of `connector` go on, its name resolved, or the error of
-    /// its resolution, which fails them (see [`ChannelResolution`]). A Rust client resolves the
-    /// name as it connects, as tonic's channel does.
-    pub(crate) async fn ready(&self, connector: &Connector) -> Result<(), ConnectError> {
-        let target = &connector.0.target;
-        if !target.grpcio {
-            return Ok(());
-        }
-        let mut state = self.state.lock().await;
-        match &*state {
-            Resolving::Resolved => return Ok(()),
-            Resolving::Failed { error, next, .. } if Instant::now() < *next => {
-                return Err(error.clone());
-            }
-            _ => {}
-        }
-        match target.resolve_for_a_new_channel().await {
-            Ok(()) => {
-                *state = Resolving::Resolved;
-                self.ready.store(true, Ordering::SeqCst);
-                Ok(())
-            }
-            Err(failure) => {
-                let failure = ChannelFailure::Resolve {
-                    name: target.name(),
-                    failure,
-                };
-                let error = ConnectError::of(&failure, true);
-                let mut backoff = match std::mem::replace(&mut *state, Resolving::Unresolved) {
-                    Resolving::Failed { backoff, .. } => backoff,
-                    _ => Backoff::new(),
-                };
-                let next = Instant::now() + backoff.next();
-                *state = Resolving::Failed {
-                    error: error.clone(),
-                    next,
-                    backoff,
-                };
-                Err(error)
-            }
-        }
-    }
-}
-
-/// Resets a channel that is still connecting to idle when the call that connects drops its
-/// attempt, so that the next call connects.
-struct ConnectingGuard(Option<Arc<Shared>>);
-
-impl Drop for ConnectingGuard {
-    fn drop(&mut self) {
-        if let Some(shared) = self.0.take() {
-            let mut state = shared.state();
-            if matches!(*state, State::Connecting) {
-                *state = State::Idle;
-            }
-        }
-    }
-}
-
-impl tonic::codegen::Service<tonic::codegen::http::Uri> for Connector {
-    type Response = TokioIo<Handover>;
-    type Error = ConnectError;
-    type Future = tonic::codegen::BoxFuture<Self::Response, Self::Error>;
-
-    fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        Poll::Ready(Ok(()))
-    }
-
-    fn call(&mut self, _: tonic::codegen::http::Uri) -> Self::Future {
-        let shared = self.0.clone();
-        Box::pin(async move {
-            if let Some(ChannelTarget::Refused { code, message }) = &shared.target.form {
-                return match refused_connection(*code, message).await {
-                    Ok(ready) => Ok(TokioIo::new(Handover::new(ready))),
-                    Err(failure) => Err(ConnectError::of(&failure, shared.target.grpcio)),
-                };
-            }
-            *shared.last_call.lock().unwrap_or_else(|e| e.into_inner()) = Instant::now();
-            {
-                let mut state = shared.state();
-                match std::mem::replace(&mut *state, State::Connecting) {
-                    State::Held(mut ready) => {
-                        if ready.alive() {
-                            *state = State::Ready;
-                            return Ok(TokioIo::new(Handover::new(ready)));
-                        }
-                    }
-                    State::TransientFailure(failure) => {
-                        let error = ConnectError::of(&failure, shared.target.grpcio);
-                        *state = State::TransientFailure(failure);
-                        return Err(error);
-                    }
-                    // A held connection that is gone, or none: connect.
-                    _ => {}
-                }
-            }
-            let mut guard = ConnectingGuard(Some(shared.clone()));
-            let started = Instant::now();
-            let result = attempt(&shared.target, CONNECT_TIMEOUT).await;
-            guard.0 = None;
-            let mut state = shared.state();
-            match result {
-                Ok(ready) => {
-                    *state = State::Ready;
-                    Ok(TokioIo::new(Handover::new(ready)))
-                }
-                // In the dialect of grpcio, as gRPC's channel: the calls fail at once from now on,
-                // while the channel connects again in the background. A Rust client connects
-                // again at each call that needs a connection, as tonic's channel does.
-                Err(failure) if shared.target.grpcio && !shared.unused() => {
-                    let error = ConnectError::of(&failure, shared.target.grpcio);
-                    let started = if failed_to_resolve(&failure) {
-                        Instant::now()
-                    } else {
-                        started
-                    };
-                    *state = State::TransientFailure(failure);
-                    drop(state);
-                    reconnect_in_background(&shared, started);
-                    Err(error)
-                }
-                Err(failure) => {
-                    *state = State::Idle;
-                    Err(ConnectError::of(&failure, shared.target.grpcio))
-                }
-            }
-        })
     }
 }
 
@@ -2638,102 +2258,13 @@ fn random_fraction() -> f64 {
     (hasher.finish() >> 11) as f64 / (1u64 << 53) as f64
 }
 
-/// Connect the channel of `shared`, whose attempt that started at `started` failed, again in the
-/// background, until a connection succeeds, which the next call takes, or the channel is gone,
-/// or no call came for [`IDLE_TIMEOUT`]. As gRPC's, each attempt starts a backoff after the start
-/// of the previous one, and has the backoff as its deadline, but not less than
-/// [`CONNECT_TIMEOUT`].
-fn reconnect_in_background(shared: &Arc<Shared>, started: Instant) {
-    let weak: Weak<Shared> = Arc::downgrade(shared);
-    let shutdown = Arc::clone(&shared.shutdown);
-    let mut backoff = Backoff::new();
-    let mut next = started + backoff.next();
-    // On the runtime of the channel, whose worker calls the connector.
-    let spawn = |task| match tokio::runtime::Handle::try_current() {
-        Ok(runtime) => drop(runtime.spawn(task)),
-        Err(_) => drop(crate::runtime::get_runtime().spawn(task)),
-    };
-    spawn(async move {
-        loop {
-            // The wait for the next attempt, which ends once no open client uses the channel. A
-            // notification of a release is checked against the clients that use it now: another
-            // client may have opened since, whose failed call started this loop.
-            loop {
-                // Registered before the check of the users, so that a release after it is seen.
-                let released = shutdown.notified();
-                tokio::pin!(released);
-                released.as_mut().enable();
-                match weak.upgrade() {
-                    Some(shared) if shared.unused() => return shared.stop(),
-                    Some(_) => {}
-                    None => return,
-                }
-                tokio::select! {
-                    _ = tokio::time::sleep_until(next) => break,
-                    _ = &mut released => {}
-                }
-            }
-            let Some(shared) = weak.upgrade() else {
-                return;
-            };
-            if shared.unused() {
-                return shared.stop();
-            }
-            let last_call = *shared.last_call.lock().unwrap_or_else(|e| e.into_inner());
-            if last_call.elapsed() >= IDLE_TIMEOUT {
-                let mut state = shared.state();
-                if matches!(*state, State::TransientFailure(_)) {
-                    *state = State::Idle;
-                }
-                return;
-            }
-            let start = Instant::now();
-            let delay = backoff.next();
-            let per_address = delay.max(CONNECT_TIMEOUT);
-            // The attempt, dropped once no open client uses the channel, and not of a notification
-            // that another client's open followed.
-            let attempting = attempt(&shared.target, per_address);
-            tokio::pin!(attempting);
-            let result = loop {
-                let released = shutdown.notified();
-                tokio::pin!(released);
-                released.as_mut().enable();
-                if shared.unused() {
-                    return shared.stop();
-                }
-                tokio::select! {
-                    result = &mut attempting => break result,
-                    _ = &mut released => {}
-                }
-            };
-            if shared.unused() {
-                return shared.stop();
-            }
-            let mut state = shared.state();
-            if !matches!(*state, State::TransientFailure(_)) {
-                return;
-            }
-            match result {
-                Ok(ready) => {
-                    *state = State::Held(ready);
-                    return;
-                }
-                Err(failure) => {
-                    next = next_attempt(start, Instant::now(), delay, &failure);
-                    *state = State::TransientFailure(failure);
-                }
-            }
-        }
-    });
-}
-
 /// A connection, as the connector gives it to hyper: the connector sent the client's preface and
 /// read the server's settings already, so the preface that hyper writes is dropped, the bytes
 /// that the connector read are given first, and the server's acknowledgment of the connector's
 /// own settings, its first SETTINGS frame with the ACK flag, is dropped, as hyper sent no
 /// settings that it acknowledges. The end of the connection, or an error of its reads, is an
-/// I/O error of grpcio's text of it, which the errors of the calls that it ends give (see
-/// [`stream_removed_in`]).
+/// I/O error of grpcio's text of it, and so is an error of its writes in the dialect of grpcio,
+/// which the errors of the calls that it ends give (see [`stream_removed_in`]).
 ///
 /// hyper's settings, the frame that it writes after its preface, advertise the size of a header
 /// list of grpcio's channel, gRPC's hard limit of the metadata of a call, in the place of hyper's
@@ -2755,6 +2286,54 @@ pub(crate) struct Handover {
     /// The bytes of hyper's settings, the frame after its preface, that were written, as hyper
     /// wrote them, until the frame is whole: None then.
     settings_written: Option<Vec<u8>>,
+    /// The end of the connection of a subchannel, which hyper's drop of the connection tells it,
+    /// and the first GOAWAY of the server, which ends it for new calls (see [`FrameWatch`]).
+    end: Option<subchannel::ConnectionEnd>,
+    /// The frames that hyper is given, of which a GOAWAY is looked for.
+    frames: FrameWatch,
+    /// Whether the connection is of the dialect of grpcio, whose failed writes are of grpcio's
+    /// text (see [`Handover::of_a_write`]).
+    grpcio: bool,
+}
+
+/// Where the bytes that hyper is given are in the frames of the server (RFC 9113, section 4.1),
+/// so that a GOAWAY is seen as it comes, as gRPC's transport sees it: the connection takes no new
+/// call from then on, though hyper keeps it for the calls in flight.
+#[derive(Default)]
+struct FrameWatch {
+    /// The header of the frame that is read, and how much of it was read.
+    header: [u8; FRAME_HEADER_LEN],
+    read: usize,
+    /// How many bytes of the payload of the frame are still to come.
+    payload: usize,
+    /// Whether a GOAWAY came.
+    goaway: bool,
+}
+
+impl FrameWatch {
+    /// Follow `bytes`, the next bytes that hyper is given: whether a GOAWAY came first in them.
+    fn follow(&mut self, mut bytes: &[u8]) -> bool {
+        let before = self.goaway;
+        while !bytes.is_empty() && !self.goaway {
+            if self.payload > 0 {
+                let skipped = self.payload.min(bytes.len());
+                self.payload -= skipped;
+                bytes = &bytes[skipped..];
+                continue;
+            }
+            let taken = (FRAME_HEADER_LEN - self.read).min(bytes.len());
+            self.header[self.read..self.read + taken].copy_from_slice(&bytes[..taken]);
+            self.read += taken;
+            bytes = &bytes[taken..];
+            if self.read == FRAME_HEADER_LEN {
+                self.read = 0;
+                let [a, b, c, frame_type, ..] = self.header;
+                self.payload = u32::from_be_bytes([0, a, b, c]) as usize;
+                self.goaway = frame_type == GOAWAY;
+            }
+        }
+        self.goaway && !before
+    }
 }
 
 impl Handover {
@@ -2766,9 +2345,48 @@ impl Handover {
             looking_for_ack: true,
             preface_left: PREFACE.len(),
             settings_written: Some(Vec::new()),
+            end: None,
+            frames: FrameWatch::default(),
+            grpcio: false,
         };
         handover.scan();
         handover
+    }
+
+    /// This connection, of a subchannel, which `end` tells of its end.
+    fn ending(mut self, end: subchannel::ConnectionEnd) -> Self {
+        self.end = Some(end);
+        self
+    }
+
+    /// This connection, in the dialect of grpcio if `grpcio` (see [`Handover::of_a_write`]).
+    fn in_the_dialect(mut self, grpcio: bool) -> Self {
+        self.grpcio = grpcio;
+        self
+    }
+
+    /// `written`, the outcome of a write of the connection, whose error is of grpcio's text of it
+    /// in its dialect (`sendmsg: Broken pipe (32)`), of its kind, as gRPC's core gives the calls
+    /// that a failed write of their connection ends (`Stream removed (sendmsg: Broken pipe (32))`,
+    /// see [`stream_removed_in`]); a Rust client's keeps the error of the system.
+    fn of_a_write<T>(&self, written: Poll<std::io::Result<T>>) -> Poll<std::io::Result<T>> {
+        match written {
+            Poll::Ready(Err(error)) if self.grpcio => Poll::Ready(Err(std::io::Error::new(
+                error.kind(),
+                IoFailure::of(&error).sendmsg(),
+            ))),
+            written => written,
+        }
+    }
+
+    /// Follow the bytes of the server that hyper is given, `bytes`, of `frames`: a GOAWAY ends the
+    /// connection of the subchannel of `end` for new calls.
+    fn given(frames: &mut FrameWatch, end: &Option<subchannel::ConnectionEnd>, bytes: &[u8]) {
+        if frames.follow(bytes) {
+            if let Some(end) = end {
+                end.going_away();
+            }
+        }
     }
 
     /// Write `buf`, of hyper's settings, the frame after its preface: the bytes of the frame, of
@@ -2889,6 +2507,7 @@ impl AsyncRead for Handover {
             if ready > 0 {
                 let count = ready.min(buf.remaining());
                 buf.put_slice(&this.pending[..count]);
+                Handover::given(&mut this.frames, &this.end, &this.pending[..count]);
                 this.pending.drain(..count);
                 this.deliverable = this.deliverable.saturating_sub(count);
                 return Poll::Ready(Ok(()));
@@ -2904,6 +2523,10 @@ impl AsyncRead for Handover {
                         )))
                     }
                     Poll::Ready(Err(error)) => Poll::Ready(Err(read_error(error))),
+                    Poll::Ready(Ok(())) => {
+                        Handover::given(&mut this.frames, &this.end, &buf.filled()[filled..]);
+                        Poll::Ready(Ok(()))
+                    }
                     other => other,
                 };
             }
@@ -2955,10 +2578,12 @@ impl AsyncWrite for Handover {
             this.preface_left -= count;
             return Poll::Ready(Ok(count));
         }
-        if this.settings_written.is_some() {
-            return this.poll_write_settings(cx, buf);
-        }
-        Pin::new(&mut this.io).poll_write(cx, buf)
+        let written = if this.settings_written.is_some() {
+            this.poll_write_settings(cx, buf)
+        } else {
+            Pin::new(&mut this.io).poll_write(cx, buf)
+        };
+        this.of_a_write(written)
     }
 
     fn poll_write_vectored(
@@ -2973,7 +2598,8 @@ impl AsyncWrite for Handover {
                 None => Poll::Ready(Ok(0)),
             };
         }
-        Pin::new(&mut self.io).poll_write_vectored(cx, bufs)
+        let written = Pin::new(&mut self.io).poll_write_vectored(cx, bufs);
+        self.of_a_write(written)
     }
 
     fn is_write_vectored(&self) -> bool {
@@ -2981,7 +2607,8 @@ impl AsyncWrite for Handover {
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.io).poll_flush(cx)
+        let flushed = Pin::new(&mut self.io).poll_flush(cx);
+        self.of_a_write(flushed)
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
@@ -2991,10 +2618,15 @@ impl AsyncWrite for Handover {
 
 /// The details of a call that the end of its connection or of its stream failed, as grpcio gives
 /// them in its dialect, `grpcio`: `Stream removed (Socket closed)`, `Stream removed
-/// (recvmsg:Connection reset by peer (104))`, `Stream removed (ping timeout)` of a keepalive that
-/// timed out, and `Stream removed (RST_STREAM (Received RST_STREAM with error code 1))` of a
-/// stream that the server reset, of the code of its reason. None for any other status, or out of
-/// the dialect of grpcio.
+/// (recvmsg:Connection reset by peer (104))`, `Stream removed (sendmsg: Broken pipe (32))` of a
+/// write of the connection that failed, `Stream removed (ping timeout)` of a keepalive that timed
+/// out, and `Stream removed (RST_STREAM (Received RST_STREAM with error code 1))` of a stream that
+/// the server reset, of the code of its reason. The end of a connection of which h2 or hyper kept
+/// no cause is `Stream removed (Socket closed)`: of the streams that h2 ends as hyper drops the
+/// connection after its first failure (see [`H2_ENDS_OF_A_CONNECTION`]), and of a request that
+/// hyper did not send as its connection closed, where grpcio gives the text of the socket call
+/// that saw the failure, of a read, a write or the end. None for any other status, a cancellation
+/// of the client too, or out of the dialect of grpcio.
 pub(crate) fn stream_removed_in(status: &tonic::Status, grpcio: bool) -> Option<String> {
     if !grpcio {
         return None;
@@ -3005,6 +2637,13 @@ pub(crate) fn stream_removed_in(status: &tonic::Status, grpcio: bool) -> Option<
         if let Some(error) = error.downcast_ref::<hyper::Error>() {
             if error.is_timeout() {
                 return Some("Stream removed (ping timeout)".to_string());
+            }
+            // A request that hyper did not send as its connection closed (of its dispatch, which
+            // keeps no cause), not one that the client cancels, which hyper does not.
+            let closed = std::error::Error::source(error)
+                .is_some_and(|cause| cause.to_string() == HYPER_CONNECTION_CLOSED);
+            if error.is_canceled() && closed {
+                return Some(format!("Stream removed ({SOCKET_CLOSED})"));
             }
         }
         if let Some(error) = error.downcast_ref::<h2::Error>() {
@@ -3022,10 +2661,28 @@ pub(crate) fn stream_removed_in(status: &tonic::Status, grpcio: bool) -> Option<
             .downcast_ref::<std::io::Error>()
             .or_else(|| error.downcast_ref::<h2::Error>()?.get_io())?;
         let text = io.to_string();
-        (text == SOCKET_CLOSED || text.starts_with("recvmsg:"))
+        if io.kind() == std::io::ErrorKind::BrokenPipe
+            && H2_ENDS_OF_A_CONNECTION.contains(&text.as_str())
+        {
+            return Some(format!("Stream removed ({SOCKET_CLOSED})"));
+        }
+        (text == SOCKET_CLOSED || text.starts_with("recvmsg:") || text.starts_with("sendmsg:"))
             .then(|| format!("Stream removed ({text})"))
     })
 }
+
+/// The errors of h2 (0.4) of the end of a connection of no cause that it keeps, of kind
+/// `BrokenPipe` (`Streams::recv_eof`), which it gives the connection and the streams still open as
+/// hyper drops the connection after its first failure, of the read, the write or the end that it
+/// saw (see [`stream_removed_in`]).
+const H2_ENDS_OF_A_CONNECTION: [&str; 2] = [
+    "connection closed because of a broken pipe",
+    "stream closed because of a broken pipe",
+];
+
+/// The cause of the error of hyper of a request that its dispatch did not send as its connection
+/// closed, which it cancels (see [`stream_removed_in`]).
+const HYPER_CONNECTION_CLOSED: &str = "connection closed";
 
 #[cfg(test)]
 mod tests;
