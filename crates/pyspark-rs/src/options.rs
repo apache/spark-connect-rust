@@ -7,13 +7,6 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyBytes, PyDict, PyString};
 use spark_connect_core::error::SparkError;
 
-/// The `str()` of `v`, as the reference client sends it in a protobuf string field, which raises
-/// the `UnicodeEncodeError` of a str that UTF-8 cannot encode (a lone surrogate), as
-/// [`str_argument`], where a lossy conversion would send another text, such as another path.
-pub(crate) fn str_text(v: &Bound<'_, PyAny>) -> PyResult<String> {
-    str_argument(v.str()?.as_any())
-}
-
 /// The text of `v` that PySpark sets in a protobuf string field as it is, as protobuf's default
 /// (upb) backend converts it: a str as its UTF-8, and bytes decoded as UTF-8, with the error of
 /// that conversion: the `UnicodeEncodeError` of a str that UTF-8 cannot encode (a lone

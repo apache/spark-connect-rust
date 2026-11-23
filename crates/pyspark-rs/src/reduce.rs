@@ -1,7 +1,8 @@
-//! The copies and pickles of the wrappers of PySpark's plain objects (readers, writers, groups,
-//! catalogs and the like). As PySpark's, a copy of one shares the state that PySpark's shallow
-//! copy shares, and a pickle keeps the session or DataFrame that the object holds, which
-//! unpickles first, with the state of the object.
+//! The copies and pickles of the native objects of the binding that PySpark has as plain Python
+//! objects, such as the Observations, the data types and the objects of `pyspark.ml`: of their
+//! class, and of the state that the copy and the pickle of a plain object keep (its `__dict__` and
+//! the values of the `__slots__` of its class), as PySpark's copies share what its shallow copy
+//! shares.
 
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyString, PyTuple};
@@ -40,19 +41,6 @@ pub(crate) fn new_of_class<'py, T: pyo3::PyClass>(
     }
 }
 
-/// The reduce of an object of its state `args`, through the reconstructor `name` of
-/// `pyspark.sql.connect._state_reduce`: a function of the state, which gives back the function
-/// that rebuilds the object, which cloudpickle pickles by value, and the arguments of it.
-pub(crate) fn state_reduce<'py>(
-    py: Python<'py>,
-    name: &str,
-    args: Bound<'py, PyTuple>,
-) -> PyResult<Bound<'py, PyAny>> {
-    py.import("pyspark.sql.connect._state_reduce")?
-        .getattr(name)?
-        .call1(args)
-}
-
 /// The shallow copy `copy` of `object`, with the instance attributes of `object` in its `__dict__`,
 /// as the copy of a plain Python object has them: the attributes are shared by their values.
 pub(crate) fn copy_instance_dict(
@@ -65,22 +53,6 @@ pub(crate) fn copy_instance_dict(
             .call_method1("update", (attributes,))?;
     }
     Ok(())
-}
-
-/// The reduce `reduced`, the `(function, args)` pair of `state_reduce`, of `object`, with the
-/// instance attributes of `object` as the state of its pickle when there are some, as the reduce
-/// of a plain Python object gives them. Without attributes, `reduced` is returned as it is.
-pub(crate) fn reduce_with_instance_dict<'py>(
-    object: &Bound<'py, PyAny>,
-    reduced: Bound<'py, PyAny>,
-) -> PyResult<Bound<'py, PyAny>> {
-    let attributes = object.getattr("__dict__")?;
-    if attributes.len()? == 0 {
-        return Ok(reduced);
-    }
-    let reduced = reduced.cast::<PyTuple>()?;
-    let state = [reduced.get_item(0)?, reduced.get_item(1)?, attributes];
-    Ok(PyTuple::new(object.py(), state)?.into_any())
 }
 
 /// The reduce of `object`, which no copy but the shallow one copies, as PySpark's object of a
@@ -183,4 +155,3 @@ pub(crate) fn column_list<'py>(
         .collect::<PyResult<Vec<_>>>()?;
     PyList::new(py, items)
 }
-
