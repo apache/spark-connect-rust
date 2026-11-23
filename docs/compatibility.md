@@ -3843,16 +3843,17 @@ one holds, such as a `DecimalType` with an attribute that keeps the struct, is c
 functions of `foreachBatch` and `foreach` are kept as their pickles, as PySpark's stream writer
 keeps them, so a function that keeps its writer is freed with its last reference, and a copy or a
 pickle of the writer carries the pickle of the call. The registration of `dataSource` reports its
-session, and the builder of `pyspark.sql.connect.session.SparkSession` its channel builder and the
-list of its hook factories, which its shallow copies share, as PySpark's plain objects hold them, so
-a session that keeps its `dataSource`, or a channel builder or a hook factory that keeps its builder
-or a copy of it, is collected. The readers, the writers and the builder report the keys and the
-values of their options that are objects, which PySpark's dicts of options keep as they are, such as
-a key that is not a str, and the format, the save mode, the partitioning and clustering columns and
-the provider that the writers keep as they are, through one object of them that their shallow copies
-share, as PySpark's copies share the dict of their options and the `_write` of a writer: so a cycle
-through one, such as a key of an option that keeps its reader, is collected, also with a copy of the
-reader, and freed with the last of the copies.
+session, and the builder of `pyspark.sql.connect.session.SparkSession` holds the dict of its
+options, its channel builder and the list of its hook factories in its `__dict__`, which its shallow
+copies share, as PySpark's plain objects hold them, so a session that keeps its `dataSource`, or an
+option, a channel builder or a hook factory that keeps its builder or a copy of it, is collected.
+The readers and the writers report the keys and the values of their options that are objects, which
+PySpark's dicts of options keep as they are, such as a key that is not a str, and the format, the
+save mode, the partitioning and clustering columns and the provider that the writers keep as they
+are, through one object of them that their shallow copies share, as PySpark's copies share the dict
+of their options and the `_write` of a writer: so a cycle through one, such as a key of an option
+that keeps its reader, is collected, also with a copy of the reader, and freed with the last of the
+copies.
 
 The condition and the assignments of a clause of `mergeInto` are built, and the functions of their
 UDFs pickled, when the clause is added, which raises there, and the merge sends them as they were
@@ -3978,10 +3979,29 @@ the DataFrame, `Observation`, and the `SparkSession`, `Catalog`, `TableValuedFun
 `DataFrameReader(spark)`, `GroupedData(df, "groupby", [F.col("id")])`,
 `DataFrameNaFunctions(df)`), also a subclass of an
 `__init__` of its own, and whose setters, copies and pickles are of the subclass (but those of a
-session, which are the active session of its ID, as PySpark's); `SparkSession.Hook`,
-`StorageLevel` and `PythonEvalType`; and the data types, from `StringType` and `DecimalType` to
-`ArrayType`, `StructField` and `StructType` (see above). A session of a subclass is the session that
-its DataFrames, readers and catalogs give back, as in PySpark.
+session, which are the active session of its ID, as PySpark's); `SparkSession.Builder`,
+`SparkSession.Hook`, `StorageLevel` and `PythonEvalType`; and the data types, from `StringType` and
+`DecimalType` to `ArrayType`, `StructField` and `StructType` (see above). A session of a subclass is
+the session that its DataFrames, readers and catalogs give back, as in PySpark.
+
+The builder of `pyspark.sql.connect.session.SparkSession`, `SparkSession.Builder()`, which
+`SparkSession.builder` makes at each access, keeps its state in its `__dict__`, as PySpark's: its
+`_options`, a dict of the `to_str` of each value that `config` is given, of any key (`remote` and
+`appName` call the `config` of the builder, of a subclass too, of `spark.remote` and
+`spark.app.name`), its `_channel_builder` and its `_hook_factories`, a list that `_registerHook`
+appends to. `create` and `getOrCreate` read them at the call, as PySpark's do: a channel builder and
+a `spark.remote`, or neither, raise `SESSION_NEED_CONN_STR_OR_BUILDER`, a `spark.remote` of None
+fails PySpark's assertion, and a str that UTF-8 cannot encode raises the `UnicodeEncodeError` of its
+channel. Both call the `create` and the `_apply_options` of the builder, of a subclass too, which
+sets the options but `spark.remote` and `spark.master` on the session in one request, after the
+`spark.sql.` options of the last `PYSPARK_REMOTE_INIT_CONF_<i>` of the environment, of
+`PYSPARK_REMOTE_INIT_CONF_LEN` of them, as PySpark's `_apply_options` does; the first option that
+the request does not take, such as a key that is not a str, fails it before any option is set. So
+`vars(SparkSession.builder.remote("sc://h"))` is PySpark's, an assignment of `_options` or a
+subclass of the class changes what `create` reads, a builder whose `__init__` never ran raises the
+`AttributeError` of `_options` at its first `config`, as PySpark's, and the copies and pickles of a
+builder are those of its `__dict__`: a shallow copy shares the dict of its options and the list of
+its hook factories, and a deep copy and a pickle copy them.
 
 The catalog, the table-valued functions, the data source registration and the runtime
 configuration of a session keep their state in their `__dict__`, as PySpark's: their `__init__`
@@ -4114,18 +4134,11 @@ the cached schema of their input in PySpark copy that of `to` too: `alias`, `fil
 `repartitionById` and `coalesce`, `distinct` and `dropDuplicates`, `sample`, `randomSplit` and
 `observe`, as do the set operations of equal ones.
 
-The other objects of a session above and the Connect builder,
-`pyspark.sql.connect.session.SparkSession.builder`, keep the
-attributes that are set on them through copies and pickles, as PySpark's copy and pickle their
-`__dict__`: a shallow copy shares them, and a deep copy, a pickle and cloudpickle copy them, where
-they copy the object at all, and where PySpark's fail, the drop-in's fail with the same errors.
-Their `__dict__` holds only those attributes, where PySpark's holds the state of the object too, as
-the `_options` of a builder. A
-shallow copy of the builder of `pyspark.sql.connect.session.SparkSession` shares its options and
-its hook factories all the same, as PySpark's copy shares its `_options` dict and its
-`_hook_factories` list: a `remote`, a `config` or a `_registerHook` of either one is seen by both,
-while a `channelBuilder` sets the channel builder of the one that it is called on, as it rebinds an
-attribute of PySpark's.
+The other objects of a session above keep the attributes that are set on them through copies and
+pickles, as PySpark's copy and pickle their `__dict__`: a shallow copy shares them, and a deep copy,
+a pickle and cloudpickle copy them, where they copy the object at all, and where PySpark's fail, the
+drop-in's fail with the same errors. Their `__dict__` holds only those attributes, where PySpark's
+holds the state of the object too.
 
 A table name that is neither a str nor bytes, and bytes that are not UTF-8, give a DataFrame of
 `read.table`, `readStream.table` and `changes`, whose plan raises protobuf's `TypeError` or the

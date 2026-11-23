@@ -71,7 +71,7 @@ use dataframe::{
 };
 use datasource::PyDataSourceRegistration;
 use group::{PyCoGroupedData, PyGroupedData};
-pub(crate) use options::{coerce_option_value, str_argument, str_text};
+pub(crate) use options::{coerce_option_value, str_argument};
 use readwriter::PyDataFrameReader;
 use session::{PyHook, PySparkSession, PySparkSessionBuilder};
 use stat::PyStatFunctions;

@@ -705,11 +705,6 @@ pub(crate) fn property_entry(
 pub(crate) struct PySharedObjects(std::sync::Arc<dyn SharedObjects>);
 
 impl PySharedObjects {
-    /// The holder of `state`.
-    pub(crate) fn new(state: std::sync::Arc<dyn SharedObjects>) -> Self {
-        PySharedObjects(state)
-    }
-
     /// The Python object of `state`, for a new holder of it, or None when it cannot be made, which
     /// reports nothing of the state: its objects are kept alive then, rather than freed while
     /// reachable.
@@ -1068,7 +1063,7 @@ mod tests {
         Python::attach(|py| {
             let object = py.eval(c"object()", None, None).unwrap();
             let state = Arc::new(GilMutex::new(UnencodableOptions::default()));
-            let shared = Py::new(py, PySharedObjects::new(state.clone())).unwrap();
+            let shared = PySharedObjects::of(state.clone()).unwrap();
             let key = option_key(&object).unwrap();
             put(py, &state, &key, "v");
             // The key of the caller holds the object too, as the copy of a request does: the
