@@ -4196,52 +4196,56 @@ the system has an IPv6 loopback, the hosts file and DNS are looked up in the ord
 `/etc/nsswitch.conf`, the hosts file of the family of an entry, `localhost` and the names under it
 are the loopback, which DNS is not asked for, and DNS is asked for the `A` or the `AAAA` records of
 the name, over UDP, of recursion desired and no EDNS, and again over TCP of a truncated answer, of
-the search domains and `ndots` of `/etc/resolv.conf`, `LOCALDOMAIN` and `RES_OPTIONS` (the name
-first of `ndots` dots at least, alone of a last `.`), until an answer has an address: of `NXDOMAIN`
-or of no data, the next name is asked, of `SERVFAIL`, `REFUSED` or `NOTIMP` the query is sent again,
-and of its attempts (3, of `attempts`) the timeout of the first is that of `timeout` (2 s, 5 s at
-most) and that of each next one twice the previous one but a random part of a half at most. The
-addresses of both families are sorted as gRPC's resolver sorts them (RFC 6724) and tried of each
-family in turn, as gRPC's `pick_first` interleaves them; of none, each call fails of c-ares's error
-of the family that ended last (`errors resolving spark.example.com:15002: [field:hostname lookup
-error:address lookup failed for spark.example.com:15002: Domain name not found]`, `DNS server
-returned answer with no data`, `DNS server returned general failure`, `DNS server refused query`,
-`Timeout while contacting DNS servers`, `Could not contact DNS servers`), and a resolution that runs
-for 120 s, gRPC's timeout of it, or whose TCP connection fails to connect, is cancelled (`DNS query
-cancelled`). The addresses of `ipv4:` and `ipv6:`, separated by `,`, each an IP address of the
-family, of a zone of IPv6, and a port of 0 to 65535, are tried in turn as those of a host are, and
-the Unix sockets of `unix:` and `unix-abstract:`, of their paths or of their abstract names, of the
-bytes that their paths decode to (`unix:/tmp/%FF.sock`); of none, each call fails of `UNAVAILABLE`
-(`empty address list`). A target of `google-c2p` is its name of DNS, as gRPC's resolver of it on a
-machine that is not of Google's cloud, and each call of a target of `xds` fails of `UNAVAILABLE`, of
-no bootstrap of xDS in the environment of grpcio's text (`Failed to create XdsClient: Environment
-variables GRPC_XDS_BOOTSTRAP or GRPC_XDS_BOOTSTRAP_CONFIG not defined`). Of each target, the channel
-takes gRPC's names, and not the host of its connection string, which stands for the target only:
-gRPC's default authority of the target, its path of no first `/`, percent-encoded as an authority
-(`127.0.0.1:1,127.0.0.1:2`, `tmp%2Fa.sock`), is the `:authority` of the calls where HTTP can carry
-it, and of its host up to a `%` the name that TLS verifies (`::1` of `[::1%25lo]`, `tmp` of
-`tmp%2Fa.sock`), as gRPC checks it twice. Once the handshake is done, as its
-`HostNameCertificateVerifier`: a name of DNS of the certificate matches it of either case and of a
-wildcard of its first label alone (`*.localhost` of `xyz.localhost`, of `x*y.localhost` too), an IP
-address of the certificate as its text (`::1`, which `0:0:0:0:0:0:0:1` is not), and of a certificate
-of neither, its common name; of none, each attempt fails of gRPC's `Custom verification check failed
-with error: UNAUTHENTICATED: Hostname Verification Check failed.`, and nothing is sent. Then of the
-host of each call, as its `SslCheckCallHost`, of a wildcard of a rest of two labels at least
-(`*.spark.example`): of a certificate that is of the name but not of the host of the calls
-(`*.localhost` of `xyz.localhost`), each call fails of `UNAUTHENTICATED` (`call host does not match
-SSL server name`), which is not retried. Whether a token goes in plaintext is of the host of the
-authority (`localhost`) too. The proxy of the environment is chosen of the host of the path, of any
-target but one of `unix:`, which gRPC does not proxy, and its `CONNECT` names the `host:port` of the
-path, of the port 443 without one (`[127.0.0.1:1,127.0.0.1:2]:443`, `name:443` of
-`unix-abstract:name`), up to a NUL, as gRPC's argument of it is a C string (`localhost` of
-`localhost%00:15002`). A Unix socket is not of gRPC's local credentials of TCP, so a channel of them
-fails each call to it of `Endpoint is neither UDS or TCP loopback address.`; a socket of no file
-fails of gRPC's text of it (`FAILED_PRECONDITION: unix:/tmp/a.sock: connect failed: addr:
-unix:/tmp/a.sock error: No such file or directory`). A target that gRPC does not take fails each
-call of its `UNKNOWN` (`Failed to create channel to '127.0.0.1:15002?':the target uri is not valid:
-dns:///127.0.0.1:15002?`), which PySpark's retry policies do not retry, as they retry `UNAVAILABLE`.
-The connection string of the channel takes the host and the port of the target, and nothing else of
-the endpoint.
+the search domains and `ndots` of `/etc/resolv.conf` (on macOS, as c-ares reads them there, of the
+resolvers of no domain, reachable and of a name server of the system's configuration of DNS, their
+search lists joined, and `/etc/resolv.conf` only of no configuration to read; on Windows, of the
+search list of the registry, the `SearchList` and the `Domain` of TCP/IP, the `SearchList` and the
+`PrimaryDNSSuffix` of the policies of its DNS client, and the `SearchList`, the `Domain` and the
+`DhcpDomain` of each interface), `LOCALDOMAIN` and `RES_OPTIONS` (the name first of `ndots` dots at
+least, alone of a last `.`), until an answer has an address: of `NXDOMAIN` or of no data, the next
+name is asked, of `SERVFAIL`, `REFUSED` or `NOTIMP` the query is sent again, and of its attempts (3,
+of `attempts`) the timeout of the first is that of `timeout` (2 s, 5 s at most) and that of each
+next one twice the previous one but a random part of a half at most. The addresses of both families
+are sorted as gRPC's resolver sorts them (RFC 6724) and tried of each family in turn, as gRPC's
+`pick_first` interleaves them; of none, each call fails of c-ares's error of the family that ended
+last (`errors resolving spark.example.com:15002: [field:hostname lookup error:address lookup failed
+for spark.example.com:15002: Domain name not found]`, `DNS server returned answer with no data`,
+`DNS server returned general failure`, `DNS server refused query`, `Timeout while contacting DNS
+servers`, `Could not contact DNS servers`), and a resolution that runs for 120 s, gRPC's timeout of
+it, or whose TCP connection fails to connect, is cancelled (`DNS query cancelled`). The addresses of
+`ipv4:` and `ipv6:`, separated by `,`, each an IP address of the family, of a zone of IPv6, and a
+port of 0 to 65535, are tried in turn as those of a host are, and the Unix sockets of `unix:` and
+`unix-abstract:`, of their paths or of their abstract names, of the bytes that their paths decode to
+(`unix:/tmp/%FF.sock`); of none, each call fails of `UNAVAILABLE` (`empty address list`). A target
+of `google-c2p` is its name of DNS, as gRPC's resolver of it on a machine that is not of Google's
+cloud, and each call of a target of `xds` fails of `UNAVAILABLE`, of no bootstrap of xDS in the
+environment of grpcio's text (`Failed to create XdsClient: Environment variables GRPC_XDS_BOOTSTRAP
+or GRPC_XDS_BOOTSTRAP_CONFIG not defined`). Of each target, the channel takes gRPC's names, and not
+the host of its connection string, which stands for the target only: gRPC's default authority of the
+target, its path of no first `/`, percent-encoded as an authority (`127.0.0.1:1,127.0.0.1:2`,
+`tmp%2Fa.sock`), is the `:authority` of the calls where HTTP can carry it, and of its host up to a
+`%` the name that TLS verifies (`::1` of `[::1%25lo]`, `tmp` of `tmp%2Fa.sock`), as gRPC checks it
+twice. Once the handshake is done, as its `HostNameCertificateVerifier`: a name of DNS of the
+certificate matches it of either case and of a wildcard of its first label alone (`*.localhost` of
+`xyz.localhost`, of `x*y.localhost` too), an IP address of the certificate as its text (`::1`, which
+`0:0:0:0:0:0:0:1` is not), and of a certificate of neither, its common name; of none, each attempt
+fails of gRPC's `Custom verification check failed with error: UNAUTHENTICATED: Hostname Verification
+Check failed.`, and nothing is sent. Then of the host of each call, as its `SslCheckCallHost`, of a
+wildcard of a rest of two labels at least (`*.spark.example`): of a certificate that is of the name
+but not of the host of the calls (`*.localhost` of `xyz.localhost`), each call fails of
+`UNAUTHENTICATED` (`call host does not match SSL server name`), which is not retried. Whether a
+token goes in plaintext is of the host of the authority (`localhost`) too. The proxy of the
+environment is chosen of the host of the path, of any target but one of `unix:`, which gRPC does not
+proxy, and its `CONNECT` names the `host:port` of the path, of the port 443 without one
+(`[127.0.0.1:1,127.0.0.1:2]:443`, `name:443` of `unix-abstract:name`), up to a NUL, as gRPC's
+argument of it is a C string (`localhost` of `localhost%00:15002`). A Unix socket is not of gRPC's
+local credentials of TCP, so a channel of them fails each call to it of `Endpoint is neither UDS or
+TCP loopback address.`; a socket of no file fails of gRPC's text of it (`FAILED_PRECONDITION:
+unix:/tmp/a.sock: connect failed: addr: unix:/tmp/a.sock error: No such file or directory`). A
+target that gRPC does not take fails each call of its `UNKNOWN` (`Failed to create channel to
+'127.0.0.1:15002?':the target uri is not valid: dns:///127.0.0.1:15002?`), which PySpark's retry
+policies do not retry, as they retry `UNAVAILABLE`. The connection string of the channel takes the
+host and the port of the target, and nothing else of the endpoint.
 
 As grpcio's, a channel connects to the addresses of its host, or of its proxy, as the system's
 resolver gives them, within the connect deadline, but those of `localhost` and of the names under

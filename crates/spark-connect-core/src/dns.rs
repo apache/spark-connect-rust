@@ -52,10 +52,15 @@
 //! replaces that module, and another resolver [`lookup`].
 
 mod config;
+#[cfg(target_os = "macos")]
+mod macos;
 mod message;
 mod sort;
+mod system;
 #[cfg(test)]
 pub(crate) mod tests;
+#[cfg(windows)]
+mod windows;
 
 pub(crate) use config::Config;
 use config::Source;
