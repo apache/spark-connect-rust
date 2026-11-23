@@ -635,7 +635,7 @@ mod tests {
         };
         let obs = Observation::used("first");
         let plan = crate::plan::LogicalPlan::Observe {
-            input: Arc::new(crate::plan::range(0, 3, 1)),
+            input: Arc::new(crate::plan::range(0, 3, 1)).into(),
             name: "first".to_string(),
             exprs: vec![crate::expression::Expression::column("id")],
             observation: Some(obs.clone()),

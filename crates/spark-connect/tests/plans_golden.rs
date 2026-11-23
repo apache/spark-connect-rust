@@ -573,7 +573,7 @@ fn build(name: &str) -> Option<proto::Relation> {
             // numbers are literals, as `DataFrame::replace_literals` sends them.
             use spark_connect::expression::LiteralExpression;
             plan::LogicalPlan::NAReplace {
-                input: std::sync::Arc::new(plan::range(0, 10, 1)),
+                input: std::sync::Arc::new(plan::range(0, 10, 1)).into(),
                 replacements: vec![(
                     LiteralExpression::double(0.0),
                     LiteralExpression::double(100.0),

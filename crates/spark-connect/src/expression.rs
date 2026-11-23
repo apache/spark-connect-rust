@@ -537,8 +537,22 @@ fn with_expression_levels_and_unbuildable<T>(
 /// Inspect expressions with [`Expression::node`]. An expression keeps the origin in user code
 /// of its construction, if any, as PySpark's does (see [`crate::origin`]).
 pub struct Expression {
-    node: Arc<ExpressionNode>,
+    node: Arc<Node>,
     origin: Option<Arc<crate::origin::Origin>>,
+}
+
+/// The node of an expression, with whether an object of a binding is below it, which the binding
+/// needs not to look for below a node of none (see [`crate::gc`]): of its fields, as it is made.
+struct Node {
+    node: ExpressionNode,
+    objects: bool,
+}
+
+impl Node {
+    fn new(node: ExpressionNode) -> Arc<Node> {
+        let objects = crate::gc::expression_holds_objects(&node);
+        Arc::new(Node { node, objects })
+    }
 }
 
 /// A handle of the same node, of which the check of the clones of a binding is told (see
@@ -568,8 +582,8 @@ impl PartialEq for Expression {
 
 /// The node that a dropped expression holds once its own node has gone, which has no levels
 /// below it.
-static DROPPED_NODE: std::sync::LazyLock<Arc<ExpressionNode>> =
-    std::sync::LazyLock::new(|| Arc::new(ExpressionNode::SQLExpression(String::new())));
+static DROPPED_NODE: std::sync::LazyLock<Arc<Node>> =
+    std::sync::LazyLock::new(|| Node::new(ExpressionNode::SQLExpression(String::new())));
 
 impl Drop for Expression {
     /// The last owner of a node drops the levels below it, each in turn: give them the stack
@@ -842,6 +856,17 @@ impl SentSubqueries {
     pub(crate) fn plans(&self) -> impl Iterator<Item = &Arc<LogicalPlan>> {
         self.0.iter().map(|(plan, _)| plan)
     }
+
+    /// The subqueries of `plans`, each of plan IDs of its own, for the tests.
+    #[cfg(test)]
+    pub(crate) fn of_plans(plans: Vec<Arc<LogicalPlan>>) -> Self {
+        SentSubqueries(
+            plans
+                .into_iter()
+                .map(|plan| (plan, Arc::new(crate::plan::PlanIds::new())))
+                .collect(),
+        )
+    }
 }
 
 impl PartialEq for SentSubqueries {
@@ -1064,7 +1089,7 @@ impl Expression {
     /// `Expression.__init__` takes it.
     pub fn new(node: ExpressionNode) -> Self {
         Self {
-            node: Arc::new(node),
+            node: Node::new(node),
             origin: crate::origin::current(),
         }
     }
@@ -1105,7 +1130,13 @@ impl Expression {
 
     /// Borrow this expression's node without exposing mutable shared state.
     pub fn node(&self) -> &ExpressionNode {
-        self.node.as_ref()
+        &self.node.node
+    }
+
+    /// Whether an object of a binding is below the node of this expression, or the node holds
+    /// one: a pickler or an owner, which may hold one (see [`crate::gc::PartRef::holds_objects`]).
+    pub fn holds_objects(&self) -> bool {
+        self.node.objects
     }
 
     /// The address of the node of this expression, which the expressions that share it have too.
@@ -1122,7 +1153,7 @@ impl Expression {
     /// The expression of `node`, of the origin of this one.
     pub(crate) fn of_node(&self, node: ExpressionNode) -> Expression {
         Expression {
-            node: Arc::new(node),
+            node: Node::new(node),
             origin: self.origin.clone(),
         }
     }

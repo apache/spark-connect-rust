@@ -137,7 +137,7 @@ impl DataFrameReader {
         if self.schema.starts_with('{') {
             if let Some(error) = parse_schema_error(&self.schema) {
                 let plan = LogicalPlan::Parse {
-                    input: Arc::clone(&input.plan),
+                    input: input.shared_plan(),
                     format,
                     schema: None,
                     options: self.options,
@@ -153,7 +153,7 @@ impl DataFrameReader {
             Some(self.session.parse_ddl(&self.schema)?)
         };
         let plan = LogicalPlan::Parse {
-            input: Arc::clone(&input.plan),
+            input: input.shared_plan(),
             format,
             schema,
             options: self.options,

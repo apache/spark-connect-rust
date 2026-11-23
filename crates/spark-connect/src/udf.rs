@@ -348,7 +348,14 @@ impl<'c> PicklerRebuild<'c> {
             let mut rebuilt = false;
             for part in node.parts_mut() {
                 rebuilt |= match part {
-                    PlanPart::Input(input) => self.replace_plan(input, ids),
+                    PlanPart::Input(input) => match self.plan(input.arc(), ids) {
+                        Some(rebuilt) => {
+                            *input = rebuilt.into();
+                            true
+                        }
+                        None => false,
+                    },
+                    PlanPart::ArcInput(input) => self.replace_plan(input, ids),
                     PlanPart::Expression(expression) => self.replace_expression(expression),
                     PlanPart::Udf(udf) => self.udf(udf),
                     PlanPart::Pickler(pickler) => self.pickler(pickler),
@@ -1445,11 +1452,11 @@ mod tests {
         // Of a plan: of the expressions and functions of its nodes, of the inputs that it shares
         // with another holder too, and of a UDTF.
         let input = Arc::new(LogicalPlan::Project {
-            input: Arc::new(crate::plan::range(0, 1, 1)),
+            input: Arc::new(crate::plan::range(0, 1, 1)).into(),
             columns: vec![crate::column::Column::new(udf_expression("project"))],
         });
         let mapped = Arc::new(LogicalPlan::MapPartitions {
-            input: Arc::clone(&input),
+            input: Arc::clone(&input).into(),
             func: udf_of("map"),
             is_barrier: false,
             profile_id: None,
@@ -1608,11 +1615,11 @@ mod tests {
         // copies of, and the others shared.
         let ids = PlanIds::new();
         let input = Arc::new(LogicalPlan::Project {
-            input: Arc::new(crate::plan::range(0, 1, 1)),
+            input: Arc::new(crate::plan::range(0, 1, 1)).into(),
             columns: vec![crate::column::Column::new(udf_expression("c"))],
         });
         let plan = Arc::new(LogicalPlan::Filter {
-            input: Arc::clone(&input),
+            input: Arc::clone(&input).into(),
             condition: crate::column::Column::new(Expression::column("x")),
         });
         let (input_id, plan_id) = (ids.id_of(&input), ids.id_of(&plan));
@@ -1631,7 +1638,7 @@ mod tests {
         else {
             panic!("a filter");
         };
-        assert_eq!(ids.id_of(copied_input), input_id);
+        assert_eq!(ids.id_of(copied_input.arc()), input_id);
         let LogicalPlan::Project {
             input: range,
             columns,
@@ -1647,7 +1654,7 @@ mod tests {
         else {
             panic!("a project");
         };
-        assert!(Arc::ptr_eq(range, original_range));
+        assert!(Arc::ptr_eq(range.arc(), original_range.arc()));
     }
 
     #[test]

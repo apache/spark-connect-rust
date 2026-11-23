@@ -29,16 +29,16 @@ fn plan_helpers_accept_shared_nodes_without_cloning_them() {
     let LogicalPlan::Project { input, .. } = projected.as_ref() else {
         panic!("expected projection");
     };
-    assert!(Arc::ptr_eq(input, &source));
+    assert!(Arc::ptr_eq(input.arc(), &source));
     let LogicalPlan::Limit { input, .. } = &limited else {
         panic!("expected limit");
     };
-    assert!(Arc::ptr_eq(input, &projected));
+    assert!(Arc::ptr_eq(input.arc(), &projected));
     let LogicalPlan::Join { left, right, .. } = &joined else {
         panic!("expected join");
     };
-    assert!(Arc::ptr_eq(left, &projected));
-    assert!(Arc::ptr_eq(right, &projected));
+    assert!(Arc::ptr_eq(left.arc(), &projected));
+    assert!(Arc::ptr_eq(right.arc(), &projected));
     assert_eq!(
         limited.to_proto(),
         plan::limit(plan::project(base(), vec![col("id")]), 3).to_proto()

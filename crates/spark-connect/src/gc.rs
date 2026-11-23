@@ -21,7 +21,7 @@ use std::sync::{Arc, OnceLock};
 
 use crate::column::Column;
 use crate::expression::{Expression, ExpressionNode, SubqueryExpression};
-use crate::plan::LogicalPlan;
+use crate::plan::{LogicalPlan, SharedPlan};
 use crate::udf::{CommandPickler, CommonInlineUserDefinedFunctionExpression};
 
 /// The check of the clones of the parts that a binding set, if any (see [`check_clones_with`]).
@@ -29,12 +29,13 @@ static CLONE_CHECK: OnceLock<fn(usize)> = OnceLock::new();
 
 /// Have the core call `check` with the address of a part each time that it makes a new reference
 /// to one, as the tests of a binding do to find a reference that the binding does not expect. The
-/// core tells it of the clones of the handles of expressions, of picklers, of DataFrames, of owners
-/// and of [`Part`]s; of the plans and the owners that the plan of a new DataFrame holds, of which
-/// it was made, also below the nodes made for it alone; of the plans of the subqueries of a
-/// relation that it serializes; and of the plans that a lookup of a plan ID or of a placeholder
-/// finds. A clone of a plan node that ends in none of these is not told. Set once for the process:
-/// false if a check is set already. Not a stable API.
+/// core tells it of the clones of the handles of expressions, of picklers, of DataFrames, of owners,
+/// of the inputs of plan nodes ([`SharedPlan`]) and of [`Part`]s; of the plans and the owners that
+/// the plan of a new DataFrame holds, of which it was made, also below the nodes made for it alone;
+/// of the plans of the subqueries of a relation that it serializes; and of the plans that a lookup
+/// of a plan ID or of a placeholder finds. A clone of an `Arc` of a plan node that ends in none of
+/// these, as of the plan of a DataFrame or of the input of an ML transform, is not told. Set once
+/// for the process: false if a check is set already. Not a stable API.
 #[doc(hidden)]
 pub fn check_clones_with(check: fn(usize)) -> bool {
     CLONE_CHECK.set(check).is_ok()
@@ -60,11 +61,13 @@ pub(crate) fn cloned_into(plan: &LogicalPlan) {
     plan_parts(plan, &mut pending);
     while let Some(reference) = pending.pop() {
         match reference {
-            PartRef::Plan(node) if Arc::strong_count(node) == 1 => plan_parts(node, &mut pending),
+            PartRef::Plan(node) | PartRef::Node(node, _) if Arc::strong_count(node) == 1 => {
+                plan_parts(node, &mut pending)
+            }
             PartRef::Expression(expression) if expression.node_strong_count() == 1 => {
                 expression_parts(expression.node(), &mut pending)
             }
-            PartRef::Plan(_) | PartRef::Owner(_) => cloned(reference.address()),
+            PartRef::Plan(_) | PartRef::Node(..) | PartRef::Owner(_) => cloned(reference.address()),
             PartRef::Expression(_) | PartRef::Pickler(_) => {}
         }
     }
@@ -77,7 +80,11 @@ pub(crate) fn cloned_into(plan: &LogicalPlan) {
 #[doc(hidden)]
 #[derive(Clone, Copy)]
 pub enum PartRef<'a> {
+    /// A plan node, of whether an object of a binding is at or below it, which its fields tell.
     Plan(&'a Arc<LogicalPlan>),
+    /// A plan node, of whether an object of a binding is at or below it as its holder keeps it:
+    /// an input of a node ([`SharedPlan`]) or the plan of a DataFrame.
+    Node(&'a Arc<LogicalPlan>, bool),
     Expression(&'a Expression),
     Pickler(&'a CommandPickler),
     Owner(&'a Arc<dyn Any + Send + Sync>),
@@ -102,7 +109,7 @@ impl<'a> PartRef<'a> {
     /// The address of the part, which all its references have.
     pub fn address(self) -> usize {
         match self {
-            PartRef::Plan(plan) => Arc::as_ptr(plan) as usize,
+            PartRef::Plan(plan) | PartRef::Node(plan, _) => Arc::as_ptr(plan) as usize,
             PartRef::Expression(expression) => expression.node_address(),
             PartRef::Pickler(pickler) => pickler.address(),
             PartRef::Owner(owner) => Arc::as_ptr(owner) as *const () as usize,
@@ -112,7 +119,7 @@ impl<'a> PartRef<'a> {
     /// The number of the references to the part, of its holders and of any other code.
     pub fn strong_count(self) -> usize {
         match self {
-            PartRef::Plan(plan) => Arc::strong_count(plan),
+            PartRef::Plan(plan) | PartRef::Node(plan, _) => Arc::strong_count(plan),
             PartRef::Expression(expression) => expression.node_strong_count(),
             PartRef::Pickler(pickler) => pickler.strong_count(),
             PartRef::Owner(owner) => Arc::strong_count(owner),
@@ -122,7 +129,7 @@ impl<'a> PartRef<'a> {
     /// The part, which a reference more keeps alive.
     pub fn to_part(self) -> Part {
         match self {
-            PartRef::Plan(plan) => {
+            PartRef::Plan(plan) | PartRef::Node(plan, _) => {
                 cloned(self.address());
                 Part::Plan(Arc::clone(plan))
             }
@@ -174,9 +181,106 @@ impl Part {
     }
 }
 
+/// What a walk of the references that a part holds does with each ([`plan_parts`],
+/// [`expression_parts`]): a list of them takes them, and [`Objects`] tells whether they reach an
+/// object of a binding.
+pub(crate) trait Held<'a> {
+    /// A reference that the part holds.
+    fn part(&mut self, part: PartRef<'a>);
+
+    /// The input of a plan node, which is a reference to its node.
+    fn input(&mut self, input: &'a SharedPlan) {
+        self.part(PartRef::Node(input.arc(), input.holds_objects()));
+    }
+
+    /// The references `parts` that the part holds, in order.
+    fn parts(&mut self, parts: impl IntoIterator<Item = PartRef<'a>>) {
+        for part in parts {
+            self.part(part);
+        }
+    }
+}
+
+impl<'a> Held<'a> for Vec<PartRef<'a>> {
+    fn part(&mut self, part: PartRef<'a>) {
+        self.push(part);
+    }
+}
+
+/// Whether the references that a node holds reach an object of a binding: a pickler or an owner,
+/// directly or below an input or an expression, each of which tells it of its own. A plan node
+/// that a node holds as an `Arc`, of an ML transform and of a subquery, tells it by its fields,
+/// which are walked in turn ([`Objects::of_plan`]).
+#[derive(Default)]
+struct Objects<'a> {
+    found: bool,
+    plans: Vec<&'a LogicalPlan>,
+}
+
+impl<'a> Held<'a> for Objects<'a> {
+    fn part(&mut self, part: PartRef<'a>) {
+        match part {
+            PartRef::Plan(plan) => self.plans.push(plan),
+            PartRef::Node(_, objects) => self.found |= objects,
+            PartRef::Expression(expression) => self.found |= expression.holds_objects(),
+            PartRef::Pickler(_) | PartRef::Owner(_) => self.found = true,
+        }
+    }
+}
+
+impl<'a> Objects<'a> {
+    /// Whether the plan node `plan` holds an object of a binding, directly or below it.
+    fn of_plan(plan: &'a LogicalPlan) -> bool {
+        let mut objects = Objects::default();
+        objects.plans.push(plan);
+        objects.walk()
+    }
+
+    /// Whether the expression node `node` holds an object of a binding, directly or below it.
+    fn of_expression(node: &'a ExpressionNode) -> bool {
+        let mut objects = Objects::default();
+        expression_parts(node, &mut objects);
+        objects.walk()
+    }
+
+    /// Whether what was met, and the fields of the plan nodes met as `Arc`s, reach an object.
+    fn walk(mut self) -> bool {
+        while !self.found {
+            let Some(plan) = self.plans.pop() else {
+                break;
+            };
+            plan_parts(plan, &mut self);
+        }
+        self.found
+    }
+}
+
+/// Whether the expression node `node` holds an object of a binding, directly or below it, of the
+/// expressions and the inputs that it holds, each of which tells it: for the node of a new
+/// expression.
+pub(crate) fn expression_holds_objects(node: &ExpressionNode) -> bool {
+    Objects::of_expression(node)
+}
+
+impl PartRef<'_> {
+    /// Whether an object of a binding may be below the part, or the part be one: a pickler or an
+    /// owner is (its object may be one of a binding), and a plan node or an expression is of any
+    /// of them that it holds, directly or below it, which each node tells of the nodes that it
+    /// holds as it is made. A part of none holds no part that a binding needs to see, so the
+    /// binding needs not walk it. Not a stable API.
+    pub fn holds_objects(self) -> bool {
+        match self {
+            PartRef::Plan(plan) => Objects::of_plan(plan),
+            PartRef::Node(_, objects) => objects,
+            PartRef::Expression(expression) => expression.holds_objects(),
+            PartRef::Pickler(_) | PartRef::Owner(_) => true,
+        }
+    }
+}
+
 /// The references of `columns` to the nodes of their expressions.
-fn columns<'a>(columns: &'a [Column], held: &mut Vec<PartRef<'a>>) {
-    held.extend(
+fn columns<'a>(columns: &'a [Column], held: &mut impl Held<'a>) {
+    held.parts(
         columns
             .iter()
             .map(|column| PartRef::Expression(column.expression())),
@@ -184,26 +288,26 @@ fn columns<'a>(columns: &'a [Column], held: &mut Vec<PartRef<'a>>) {
 }
 
 /// The references of `expressions` to their nodes.
-fn expressions<'a>(expressions: &'a [Expression], held: &mut Vec<PartRef<'a>>) {
-    held.extend(expressions.iter().map(PartRef::Expression));
+fn expressions<'a>(expressions: &'a [Expression], held: &mut impl Held<'a>) {
+    held.parts(expressions.iter().map(PartRef::Expression));
 }
 
 /// The references of a UDF: its arguments and its pickler.
-fn udf_parts<'a>(udf: &'a CommonInlineUserDefinedFunctionExpression, held: &mut Vec<PartRef<'a>>) {
+fn udf_parts<'a>(udf: &'a CommonInlineUserDefinedFunctionExpression, held: &mut impl Held<'a>) {
     expressions(&udf.arguments, held);
-    held.extend(udf.python_udf.pickler.iter().map(PartRef::Pickler));
+    held.parts(udf.python_udf.pickler.iter().map(PartRef::Pickler));
 }
 
 /// The references of a subquery: its plan, and its partitioning, ordering and values.
-pub(crate) fn subquery_parts<'a>(subquery: &'a SubqueryExpression, held: &mut Vec<PartRef<'a>>) {
-    held.push(PartRef::Plan(&subquery.plan));
+pub(crate) fn subquery_parts<'a>(subquery: &'a SubqueryExpression, held: &mut impl Held<'a>) {
+    held.part(PartRef::Plan(&subquery.plan));
     expressions(&subquery.partition_spec, held);
     expressions(&subquery.order_spec, held);
     expressions(&subquery.in_subquery_values, held);
 }
 
 /// The references that the plan node `plan` holds, each of its fields once.
-fn plan_parts<'a>(plan: &'a LogicalPlan, held: &mut Vec<PartRef<'a>>) {
+fn plan_parts<'a>(plan: &'a LogicalPlan, held: &mut impl Held<'a>) {
     use PartRef::{Expression as Of, Owner, Pickler, Plan};
     match plan {
         LogicalPlan::Range { .. }
@@ -219,18 +323,18 @@ fn plan_parts<'a>(plan: &'a LogicalPlan, held: &mut Vec<PartRef<'a>>) {
             ..
         } => {
             expressions(pos_args, held);
-            held.extend(named_args.values().map(Of));
+            held.parts(named_args.values().map(Of));
         }
         LogicalPlan::Project { input, columns: of }
         | LogicalPlan::WithColumns {
             input, columns: of, ..
         } => {
-            held.push(Plan(input));
+            held.input(input);
             columns(of, held);
         }
         LogicalPlan::Filter { input, condition } => {
-            held.push(Plan(input));
-            held.push(Of(condition.expression()));
+            held.input(input);
+            held.part(Of(condition.expression()));
         }
         LogicalPlan::Aggregate {
             input,
@@ -241,10 +345,10 @@ fn plan_parts<'a>(plan: &'a LogicalPlan, held: &mut Vec<PartRef<'a>>) {
             grouping_sets,
             ..
         } => {
-            held.push(Plan(input));
+            held.input(input);
             expressions(grouping_expressions, held);
             expressions(aggregate_expressions, held);
-            held.extend(pivot_col.iter().map(Of));
+            held.parts(pivot_col.iter().map(Of));
             expressions(pivot_values, held);
             for set in grouping_sets {
                 expressions(set, held);
@@ -256,11 +360,13 @@ fn plan_parts<'a>(plan: &'a LogicalPlan, held: &mut Vec<PartRef<'a>>) {
         | LogicalPlan::LateralJoin {
             left, right, on, ..
         } => {
-            held.extend([Plan(left), Plan(right)]);
-            held.extend(on.iter().map(|on| Of(on.expression())));
+            held.input(left);
+            held.input(right);
+            held.parts(on.iter().map(|on| Of(on.expression())));
         }
         LogicalPlan::SetOperation { left, right, .. } | LogicalPlan::Zip { left, right } => {
-            held.extend([Plan(left), Plan(right)]);
+            held.input(left);
+            held.input(right);
         }
         LogicalPlan::Raw {
             owner,
@@ -268,14 +374,14 @@ fn plan_parts<'a>(plan: &'a LogicalPlan, held: &mut Vec<PartRef<'a>>) {
             holes,
             ..
         } => {
-            held.extend(owner.iter().map(|owner| Owner(&owner.0)));
-            held.extend(
+            held.parts(owner.iter().map(|owner| Owner(&owner.0)));
+            held.parts(
                 observations
                     .iter()
                     .filter_map(|(_, observation)| observation.owner())
                     .map(Owner),
             );
-            held.extend(
+            held.parts(
                 holes
                     .0
                     .iter()
@@ -310,36 +416,38 @@ fn plan_parts<'a>(plan: &'a LogicalPlan, held: &mut Vec<PartRef<'a>>) {
             input,
             index_columns: of,
         } => {
-            held.push(Plan(input));
+            held.input(input);
             expressions(of, held);
         }
         LogicalPlan::WithColumnMetadata { input, column, .. } => {
-            held.push(Plan(input));
-            held.push(Of(column));
+            held.input(input);
+            held.part(Of(column));
         }
         LogicalPlan::ToSchema {
             input,
             schema_reader,
             ..
         } => {
-            held.push(Plan(input));
-            held.extend(schema_reader.iter().map(Pickler));
+            held.input(input);
+            held.parts(schema_reader.iter().map(Pickler));
         }
         LogicalPlan::Unpivot {
             input, ids, values, ..
         } => {
-            held.push(Plan(input));
+            held.input(input);
             columns(ids, held);
             if let Some(values) = values {
                 columns(values, held);
             }
         }
         LogicalPlan::WithRelations { root, references } => {
-            held.push(Plan(root));
-            held.extend(references.iter().map(Plan));
+            held.input(root);
+            references
+                .iter()
+                .for_each(|reference| held.input(reference));
         }
         LogicalPlan::CachedRemoteRelation { owner, .. } => {
-            held.extend(owner.iter().map(|owner| Owner(&owner.0)));
+            held.parts(owner.iter().map(|owner| Owner(&owner.0)));
         }
         LogicalPlan::StatSampleBy {
             input,
@@ -347,9 +455,9 @@ fn plan_parts<'a>(plan: &'a LogicalPlan, held: &mut Vec<PartRef<'a>>) {
             fractions,
             ..
         } => {
-            held.push(Plan(input));
-            held.push(Of(col));
-            held.extend(fractions.iter().map(|(stratum, _)| Of(stratum)));
+            held.input(input);
+            held.part(Of(col));
+            held.parts(fractions.iter().map(|(stratum, _)| Of(stratum)));
         }
         LogicalPlan::Observe {
             input,
@@ -357,16 +465,16 @@ fn plan_parts<'a>(plan: &'a LogicalPlan, held: &mut Vec<PartRef<'a>>) {
             observation,
             ..
         } => {
-            held.push(Plan(input));
+            held.input(input);
             expressions(exprs, held);
-            held.extend(observation.iter().filter_map(|o| o.owner()).map(Owner));
+            held.parts(observation.iter().filter_map(|o| o.owner()).map(Owner));
         }
         LogicalPlan::UnresolvedTableValuedFunction { arguments, .. } => {
             expressions(arguments, held);
         }
         LogicalPlan::MlTransform { input, owner, .. } => {
-            held.push(Plan(input));
-            held.extend(owner.iter().map(|owner| Owner(&owner.0)));
+            held.part(Plan(input));
+            held.parts(owner.iter().map(|owner| Owner(&owner.0)));
         }
         LogicalPlan::MapPartitions {
             input,
@@ -374,9 +482,9 @@ fn plan_parts<'a>(plan: &'a LogicalPlan, held: &mut Vec<PartRef<'a>>) {
             profile_id_reader,
             ..
         } => {
-            held.push(Plan(input));
+            held.input(input);
             udf_parts(func, held);
-            held.extend(profile_id_reader.iter().map(Pickler));
+            held.parts(profile_id_reader.iter().map(Pickler));
         }
         LogicalPlan::GroupMap {
             input,
@@ -387,11 +495,11 @@ fn plan_parts<'a>(plan: &'a LogicalPlan, held: &mut Vec<PartRef<'a>>) {
             initial_grouping_expressions,
             ..
         } => {
-            held.push(Plan(input));
+            held.input(input);
             expressions(grouping_expressions, held);
             udf_parts(func, held);
             expressions(sorting_expressions, held);
-            held.extend(initial_input.iter().map(Plan));
+            initial_input.iter().for_each(|input| held.input(input));
             expressions(initial_grouping_expressions, held);
         }
         LogicalPlan::ApplyInPandasWithState {
@@ -400,7 +508,7 @@ fn plan_parts<'a>(plan: &'a LogicalPlan, held: &mut Vec<PartRef<'a>>) {
             func,
             ..
         } => {
-            held.push(Plan(input));
+            held.input(input);
             expressions(grouping_expressions, held);
             udf_parts(func, held);
         }
@@ -411,7 +519,8 @@ fn plan_parts<'a>(plan: &'a LogicalPlan, held: &mut Vec<PartRef<'a>>) {
             other_grouping_expressions,
             func,
         } => {
-            held.extend([Plan(input), Plan(other)]);
+            held.input(input);
+            held.input(other);
             expressions(input_grouping_expressions, held);
             expressions(other_grouping_expressions, held);
             udf_parts(func, held);
@@ -425,9 +534,10 @@ fn plan_parts<'a>(plan: &'a LogicalPlan, held: &mut Vec<PartRef<'a>>) {
             tolerance,
             ..
         } => {
-            held.extend([Plan(left), Plan(right)]);
-            held.extend([Of(left_as_of.expression()), Of(right_as_of.expression())]);
-            held.extend(on.iter().chain(tolerance).map(|c| Of(c.expression())));
+            held.input(left);
+            held.input(right);
+            held.parts([Of(left_as_of.expression()), Of(right_as_of.expression())]);
+            held.parts(on.iter().chain(tolerance).map(|c| Of(c.expression())));
         }
         LogicalPlan::NearestByJoin {
             left,
@@ -435,14 +545,15 @@ fn plan_parts<'a>(plan: &'a LogicalPlan, held: &mut Vec<PartRef<'a>>) {
             ranking_expression,
             ..
         } => {
-            held.extend([Plan(left), Plan(right)]);
-            held.push(Of(ranking_expression));
+            held.input(left);
+            held.input(right);
+            held.part(Of(ranking_expression));
         }
         LogicalPlan::CommonInlineUdtf {
             arguments, pickler, ..
         } => {
             expressions(arguments, held);
-            held.extend(pickler.iter().map(Pickler));
+            held.parts(pickler.iter().map(Pickler));
         }
         LogicalPlan::Limit { input, .. }
         | LogicalPlan::Offset { input, .. }
@@ -469,12 +580,12 @@ fn plan_parts<'a>(plan: &'a LogicalPlan, held: &mut Vec<PartRef<'a>>) {
         | LogicalPlan::StatFreqItems { input, .. }
         | LogicalPlan::StatApproxQuantile { input, .. }
         | LogicalPlan::StatCorr { input, .. }
-        | LogicalPlan::StatCov { input, .. } => held.push(Plan(input)),
+        | LogicalPlan::StatCov { input, .. } => held.input(input),
     }
 }
 
 /// The references that the expression node `node` holds, each of its fields once.
-fn expression_parts<'a>(node: &'a ExpressionNode, held: &mut Vec<PartRef<'a>>) {
+pub(crate) fn expression_parts<'a>(node: &'a ExpressionNode, held: &mut impl Held<'a>) {
     use PartRef::{Expression as Of, Owner, Pickler, Plan};
     match node {
         ExpressionNode::Literal(_)
@@ -484,54 +595,54 @@ fn expression_parts<'a>(node: &'a ExpressionNode, held: &mut Vec<PartRef<'a>>) {
         | ExpressionNode::SQLExpression(_)
         | ExpressionNode::UnresolvedNamedLambdaVariable(_) => {}
         ExpressionNode::UnresolvedFunction(function) => expressions(&function.args, held),
-        ExpressionNode::Alias(alias) => held.push(Of(&alias.child)),
+        ExpressionNode::Alias(alias) => held.part(Of(&alias.child)),
         ExpressionNode::Cast(cast) => {
-            held.push(Of(&cast.child));
+            held.part(Of(&cast.child));
             if let crate::expression::CastTarget::Read(read) = &cast.target {
-                held.extend(read.type_reader.iter().map(Pickler));
-                held.extend(read.shown_reader.iter().map(Pickler));
+                held.parts(read.type_reader.iter().map(Pickler));
+                held.parts(read.shown_reader.iter().map(Pickler));
             }
         }
-        ExpressionNode::DirectShufflePartitionId(child) => held.push(Of(child)),
-        ExpressionNode::SortOrder(sort) => held.push(Of(&sort.child)),
+        ExpressionNode::DirectShufflePartitionId(child) => held.part(Of(child)),
+        ExpressionNode::SortOrder(sort) => held.part(Of(&sort.child)),
         ExpressionNode::CaseWhen(case_when) => {
             for (condition, value) in &case_when.branches {
-                held.extend([Of(condition), Of(value)]);
+                held.parts([Of(condition), Of(value)]);
             }
-            held.extend(case_when.else_expr.iter().map(Of));
+            held.parts(case_when.else_expr.iter().map(Of));
         }
         ExpressionNode::UnresolvedExtractValue(extract) => {
-            held.extend([Of(&extract.child), Of(&extract.extraction)]);
+            held.parts([Of(&extract.child), Of(&extract.extraction)]);
         }
         ExpressionNode::UpdateFields(update) => {
-            held.push(Of(&update.struct_expression));
-            held.extend(update.value_expression.iter().map(Of));
+            held.part(Of(&update.struct_expression));
+            held.parts(update.value_expression.iter().map(Of));
         }
         ExpressionNode::CallFunction(call) => expressions(&call.arguments, held),
         ExpressionNode::WindowExpression(window) => {
-            held.push(Of(&window.window_function));
+            held.part(Of(&window.window_function));
             expressions(&window.partition_spec, held);
-            held.extend(window.order_spec.iter().map(|sort| Of(&sort.child)));
+            held.parts(window.order_spec.iter().map(|sort| Of(&sort.child)));
         }
-        ExpressionNode::LambdaFunction(lambda) => held.push(Of(&lambda.function)),
+        ExpressionNode::LambdaFunction(lambda) => held.part(Of(&lambda.function)),
         ExpressionNode::CommonInlineUserDefinedFunction(udf) => udf_parts(udf, held),
-        ExpressionNode::NamedArgument(argument) => held.push(Of(&argument.value)),
+        ExpressionNode::NamedArgument(argument) => held.part(Of(&argument.value)),
         ExpressionNode::Subquery(subquery) => subquery_parts(subquery, held),
         ExpressionNode::Sent(sent) => {
-            held.extend(
+            held.parts(
                 sent.holes
                     .0
                     .iter()
                     .filter_map(|hole| hole.pickler.as_ref())
                     .map(Pickler),
             );
-            held.extend(sent.subqueries.plans().map(Plan));
+            held.parts(sent.subqueries.plans().map(Plan));
         }
         ExpressionNode::Unbuildable(unbuildable) => {
-            held.push(Of(&unbuildable.expression));
-            held.extend(unbuildable.owner.iter().map(|owner| Owner(&owner.0)));
+            held.part(Of(&unbuildable.expression));
+            held.parts(unbuildable.owner.iter().map(|owner| Owner(&owner.0)));
         }
-        ExpressionNode::PlanBuildOrigin(made) => held.push(Of(&made.expression)),
+        ExpressionNode::PlanBuildOrigin(made) => held.part(Of(&made.expression)),
     }
 }
 
@@ -572,6 +683,64 @@ pub(crate) mod tests {
     /// A Column of `udf(tag)`.
     fn udf_column(tag: &'static str) -> Column {
         Column::new(ExpressionNode::CommonInlineUserDefinedFunction(Box::new(udf(tag))).into())
+    }
+
+    /// A relation built outside the core, of no owner, whose hole's pickler's object is `tag`, or
+    /// of no hole.
+    fn raw(tag: Option<&'static str>) -> Arc<LogicalPlan> {
+        Arc::new(LogicalPlan::Raw {
+            relation: Box::default(),
+            owner: None,
+            depth: 1,
+            observations: Vec::new(),
+            holes: crate::udf::SentHoles(
+                tag.into_iter()
+                    .map(|tag| crate::udf::SentHole {
+                        marker: tag.as_bytes().to_vec(),
+                        kind: crate::udf::SentHoleKind::PythonUdf,
+                        pickler: Some(pickler(tag)),
+                    })
+                    .collect(),
+            ),
+        })
+    }
+
+    /// A Column of an expression as it was sent, as a pickled Column unpickles, whose subquery
+    /// refers to `plan`.
+    fn sent_over(plan: Arc<LogicalPlan>) -> Column {
+        Column::new(
+            ExpressionNode::Sent(Box::new(crate::expression::SentExpression {
+                expression: spark_connect_proto::Expression::default(),
+                rendered: String::new(),
+                levels: 1,
+                subqueries: crate::expression::SentSubqueries::of_plans(vec![plan]),
+                holes: crate::udf::SentHoles(Vec::new()),
+            }))
+            .into(),
+        )
+    }
+
+    /// A group map over `input` whose function has a command of its own, of no pickler, of the
+    /// initial state `initial`.
+    fn group_map(input: SharedPlan, initial: SharedPlan) -> LogicalPlan {
+        LogicalPlan::GroupMap {
+            input,
+            grouping_expressions: vec![Expression::column("id")],
+            func: CommonInlineUserDefinedFunctionExpression::new(
+                "g".to_string(),
+                true,
+                Vec::new(),
+                PythonUDFPayload::new(DataType::Long, 200, vec![1], "3.11".into()),
+            ),
+            sorting_expressions: Vec::new(),
+            initial_input: Some(initial),
+            initial_grouping_expressions: vec![Expression::column("id")],
+            is_map_groups_with_state: None,
+            output_mode: None,
+            timeout_conf: None,
+            state_schema: None,
+            transform_with_state_info: None,
+        }
     }
 
     /// The tags of the objects of the picklers and of the owners of `&str` that `roots` reach.
@@ -658,16 +827,16 @@ pub(crate) mod tests {
                 )]),
             }),
             plan(LogicalPlan::WithRelations {
-                root: input(),
-                references: vec![input(), Arc::clone(&other.plan)],
+                root: input().into(),
+                references: vec![input().into(), other.shared_plan()],
             }),
             plan(LogicalPlan::ToSchema {
-                input: input(),
+                input: input().into(),
                 schema: DataType::Long,
                 schema_reader: Some(pickler("schema")),
             }),
             plan(LogicalPlan::StatSampleBy {
-                input: input(),
+                input: input().into(),
                 col: udf_column("sample by").expression().clone(),
                 fractions: vec![(udf_column("stratum").expression().clone(), 0.5)],
                 seed: None,
@@ -705,6 +874,11 @@ pub(crate) mod tests {
                     pickler: Some(pickler("hole")),
                 }]),
             }),
+            base.select([sent_over(raw(Some("sent subquery")))]),
+            plan(group_map(
+                base.shared_plan(),
+                base.select([udf_column("initial")]).shared_plan(),
+            )),
         ];
         drop(observation);
         let mut roots = vec![PartRef::Expression(c.expression())];
@@ -715,6 +889,7 @@ pub(crate) mod tests {
             roots.extend(frame.held_parts());
         }
         assert_exact(&roots);
+        assert_objects(&roots);
         let found = tags(&roots);
         for tag in [
             "c",
@@ -745,8 +920,115 @@ pub(crate) mod tests {
             "raw",
             "raw obs",
             "hole",
+            "sent subquery",
+            "initial",
         ] {
             assert!(found.contains(&tag), "{tag} is not reached: {found:?}");
+        }
+    }
+
+    /// Plans and expressions of no pickler and no owner below them hold no object of a binding,
+    /// as their nodes tell, and those of one do: of their inputs, their expressions, the plans of
+    /// their subqueries and of their ML transforms, which hold their inputs as `Arc`s.
+    #[test]
+    fn a_part_holds_an_object_of_a_binding_when_a_pickler_or_an_owner_is_below_it() {
+        let spark = session();
+        let base = spark.range(3).unwrap();
+        let plan = |plan: LogicalPlan| DataFrame::new(spark.clone(), plan);
+        let ml = |input: &DataFrame, owner: Option<crate::plan::RelationOwner>| {
+            plan(LogicalPlan::MlTransform {
+                ml_relation: spark_connect_proto::Relation::default(),
+                input: Arc::clone(&input.plan),
+                owner,
+            })
+        };
+        let plain = vec![
+            base.filter(col("id")),
+            base.join(&base, Some(col("id").eq(col("id"))), JoinType::Inner),
+            base.select([base.select([max(col("id"))]).scalar(), base.exists()]),
+            base.group_by([col("id")]).agg([max(col("id"))]),
+            base.union(&base).limit(1).alias("a"),
+            ml(&ml(&base.filter(col("id")), None), None),
+            base.select([sent_over(raw(None))]),
+            plan(group_map(
+                base.shared_plan(),
+                base.filter(col("id")).shared_plan(),
+            )),
+        ];
+        let of_udf = base.select([udf_column("u"), col("id")]);
+        let owned = crate::plan::RelationOwner(Arc::new("owner"));
+        let with = vec![
+            of_udf.filter(col("id")).limit(2),
+            base.join(&of_udf, None, JoinType::Cross),
+            base.select([of_udf.select([max(col("id"))]).scalar()]),
+            base.filter(col("id").isin_subquery(&of_udf)),
+            ml(&ml(&of_udf, None), None).limit(1),
+            ml(&base, Some(owned)).filter(col("id")),
+            base.map_in_pandas(udf("map"), false),
+            base.select([sent_over(raw(Some("sent")))]),
+            plan(group_map(base.shared_plan(), of_udf.shared_plan())),
+        ];
+        for frame in &plain {
+            assert!(
+                !PartRef::Plan(&frame.plan).holds_objects(),
+                "{:?}",
+                frame.plan
+            );
+        }
+        for frame in &with {
+            assert!(
+                PartRef::Plan(&frame.plan).holds_objects(),
+                "{:?}",
+                frame.plan
+            );
+        }
+        assert!(
+            !PartRef::Expression(col("id").eq(crate::column::lit(1)).expression()).holds_objects()
+        );
+        assert!(PartRef::Expression(udf_column("e").alias("a").expression()).holds_objects());
+        let roots: Vec<PartRef<'_>> = plain
+            .iter()
+            .chain(&with)
+            .flat_map(|frame| frame.held_parts())
+            .collect();
+        assert_objects(&roots);
+    }
+
+    /// Assert that whether each part that `roots` reach holds an object of a binding, as its node
+    /// tells, is whether a pickler or an owner is at or below it.
+    #[track_caller]
+    pub(crate) fn assert_objects(roots: &[PartRef<'_>]) {
+        fn below(part: &Part, memo: &mut HashMap<usize, bool>) -> bool {
+            let address = part.as_ref().address();
+            if let Some(found) = memo.get(&address) {
+                return *found;
+            }
+            let found = match part {
+                Part::Pickler(_) | Part::Owner(_) => true,
+                Part::Plan(_) | Part::Expression(_) => part
+                    .held()
+                    .into_iter()
+                    .any(|held| below(&held.to_part(), memo)),
+            };
+            memo.insert(address, found);
+            found
+        }
+        let mut memo = HashMap::new();
+        for root in roots {
+            // A plan node of the bit that its holder keeps: the bit of its fields.
+            assert_eq!(
+                root.holds_objects(),
+                root.to_part().as_ref().holds_objects(),
+                "the root at {:#x}",
+                root.address()
+            );
+        }
+        for (address, (_, part)) in references(roots) {
+            assert_eq!(
+                part.as_ref().holds_objects(),
+                below(&part, &mut memo),
+                "the part at {address:#x}"
+            );
         }
     }
 
@@ -810,8 +1092,9 @@ pub(crate) mod tests {
 
     /// Each new reference to a part that the core makes tells the check of the clones of its
     /// address first: of the clone of a handle of an expression, a pickler, a DataFrame, an owner,
-    /// an Observation of one and a part, of the plans of the node of a new DataFrame, which were
-    /// cloned to make it, and of a lookup of a plan ID.
+    /// an Observation of one and a part, of the input of a plan node, also as a node is cloned, of
+    /// the plans of the node of a new DataFrame, which were cloned to make it, and of a lookup of a
+    /// plan ID.
     #[test]
     fn the_check_of_the_clones_is_told_of_each_new_reference_to_a_part() {
         // The one check of the tests of this crate.
@@ -832,12 +1115,25 @@ pub(crate) mod tests {
         assert_eq!(told(), vec![root]);
         let derived = base.filter(col("id"));
         assert_eq!(told(), vec![root]);
+        // Of a clone of the input of a plan node, and of the inputs of a clone of a node.
+        let LogicalPlan::Filter { input, .. } = derived.plan.as_ref() else {
+            unreachable!("a filter")
+        };
+        drop(input.clone());
+        assert_eq!(told(), vec![root]);
+        let node: LogicalPlan = derived.plan.as_ref().clone();
+        let condition = match &node {
+            LogicalPlan::Filter { condition, .. } => PartRef::Expression(condition.expression()),
+            _ => unreachable!("a filter"),
+        };
+        assert_eq!(told(), vec![root, condition.address()]);
+        drop(node);
         // Of a plan of a node made for it alone over the shared plan: the shared plan, below it.
         let nested = DataFrame::new(
             spark.clone(),
             LogicalPlan::Limit {
-                input: Arc::new(LogicalPlan::Limit {
-                    input: Arc::clone(&base.plan),
+                input: SharedPlan::new(LogicalPlan::Limit {
+                    input: base.shared_plan(),
                     limit: 2,
                 }),
                 limit: 1,
