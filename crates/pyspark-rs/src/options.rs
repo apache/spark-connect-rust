@@ -1,27 +1,18 @@
-//! The options of the readers, the writers and the catalog, as PySpark converts them.
+//! The options of the writers, the session builder and the catalog, as PySpark converts them, and
+//! those of the plans of the reads of PySpark's readers (see `reader_plans`).
 //!
-//! PySpark treats an option of `None` in two ways, and each helper here is named after the one
-//! it implements:
+//! PySpark's writers leave an option of `None` out, and whatever the builder already holds under
+//! that key stays (**skip**): `OptionUtils._set_opts`, which the format methods (`csv`, `json`,
+//! ...) pass their keyword arguments to, and the `option` and `options` of the writers.
 //!
-//! - **skip**: the `None` is left out, and whatever the builder already holds under that key
-//!   stays. This is `OptionUtils._set_opts`, which the format methods (`csv`, `json`, ...) pass
-//!   their keyword arguments to, and the `option` and `options` of the writers and of the
-//!   stream reader.
-//! - **unset**: the `None` removes the key from the builder. This is `DataFrameReader.option`,
-//!   `options` and `load`.
-//!
-//! Every other value goes through [`coerce_option_value`], or through [`stream_option_text`] for
-//! the option and the format methods of the stream reader, which PySpark converts differently.
+//! Every other value goes through [`coerce_option_value`], as PySpark's `to_str` converts it.
 
 use std::collections::HashMap;
 
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyBytes, PyDict, PyList, PyString, PyTuple};
-use spark_connect::readwriter::{DataFrameReader, DataFrameWriter, DataFrameWriterV2};
-use spark_connect::streaming::DataStreamReader;
+use spark_connect::readwriter::{DataFrameWriter, DataFrameWriterV2};
 use spark_connect_core::error::SparkError;
-
-use crate::dataframe::WriterState;
 
 /// Coerce a Python option value the way reference pyspark's `to_str` does:
 /// `None` -> `None` (the option is left unset, NOT the literal string "None"), a
@@ -149,11 +140,6 @@ impl OptionText {
                 .collect(),
             text: Some(name.to_string()),
         }
-    }
-
-    /// The text that the core reader takes, None for a str that UTF-8 cannot encode.
-    pub(crate) fn into_text(self) -> Option<String> {
-        self.text
     }
 
     /// The text of the value, as a Python str.
@@ -368,6 +354,26 @@ fn entry_error(key: &OptionKey, value: Option<&OptionKey>) -> Option<SparkError>
     }
 }
 
+/// The pair of an entry of `key` and `value` of the options of a plan, which PySpark sets in the map
+/// of its message when it sends the plan, as the core takes it, or the error that the map raises, of
+/// the key and then of the value: of a str that UTF-8 cannot encode, bytes that are not UTF-8, or
+/// another object, None included.
+pub(crate) fn plan_entry(
+    key: &Bound<'_, PyAny>,
+    value: &Bound<'_, PyAny>,
+) -> PyResult<Result<(String, String), SparkError>> {
+    let key = option_object(key)?;
+    let value = option_object(value)?;
+    if let Some(error) = entry_error(&key, Some(&value)) {
+        return Ok(Err(error));
+    }
+    let text = |option: &OptionKey| option.core_text().and_then(|text| text.text.clone());
+    Ok(match (text(&key), text(&value)) {
+        (Some(key), Some(value)) => Ok((key, value)),
+        _ => Err(builtin_type_error()),
+    })
+}
+
 /// The entries of the options of a reader, writer, builder or table properties that the core
 /// cannot take, in the order of PySpark's dict: a key that is not a str that encodes, or a value
 /// that the core does not take, which is a str that does not encode, or an object that is not
@@ -440,31 +446,6 @@ impl UnencodableOptions {
             Some(position) => self.0[position] = (key.clone_ref(py), value),
             None => self.0.push((key.clone_ref(py), value)),
         }
-    }
-
-    /// Whether an entry has a key that is not a str, which a reader's `DataSource` asserts.
-    pub(crate) fn has_object_key(&self) -> bool {
-        self.0
-            .iter()
-            .any(|(key, _)| matches!(key, OptionKey::Object { .. }))
-    }
-
-    /// The options of the bytes keys that are UTF-8, with their values, which PySpark's plan
-    /// sends as the text of the key, for the values that encode.
-    pub(crate) fn decodable_pairs(&self) -> Vec<(String, String)> {
-        self.0
-            .iter()
-            .filter_map(|(key, value)| match (key, value) {
-                (
-                    OptionKey::Object {
-                        kind: ObjectKind::Bytes(name),
-                        ..
-                    },
-                    Some(value),
-                ) => Some((name.text.clone()?, value.core_text()?.text.clone()?)),
-                _ => None,
-            })
-            .collect()
     }
 
     /// The error of the plan for the first entry, or None when every entry encodes.
@@ -605,41 +586,6 @@ pub(crate) fn change_options<T, R>(
     }
 }
 
-/// The entry of the option `key` of a reader, set to `value`, or unset when it is None, as a
-/// reader's `option` sets it: `unencodable` keeps the entries that the core reader does not take,
-/// and the change of the options of the core reader is returned, which takes only a str key that
-/// encodes: its value, None for a value that is None or does not encode, which unsets it; and None
-/// of another key.
-fn reader_entry(
-    py: Python<'_>,
-    unencodable: &mut UnencodableOptions,
-    key: &OptionKey,
-    value: Option<&OptionText>,
-) -> Option<(String, Option<String>)> {
-    match value {
-        Some(value) => unencodable.set(py, key, Some(OptionKey::Text(value.clone()))),
-        None => unencodable.remove(py, key),
-    }
-    match key {
-        OptionKey::Text(OptionText {
-            text: Some(name), ..
-        }) => Some((name.clone(), value.and_then(|value| value.text.clone()))),
-        _ => None,
-    }
-}
-
-/// `builder` with the change of its options that [`reader_entry`] gives.
-fn with_reader_change<B: ReaderOptionBuilder>(
-    builder: B,
-    change: Option<(String, Option<String>)>,
-) -> B {
-    match change {
-        Some((name, Some(value))) => builder.with_option(&name, &value),
-        Some((name, None)) => builder.without_option(&name),
-        None => builder,
-    }
-}
-
 /// The entry of the option `key` of a writer, set to `value`, as a writer's `option` sets it:
 /// `unencodable` keeps the entries that the core writer does not take, and the option that the
 /// core writer takes is returned, of a key that is a str, or bytes that are UTF-8, with a value
@@ -728,137 +674,6 @@ impl PySharedObjects {
     }
 }
 
-/// A reader that takes its options one at a time, and unsets one of them.
-pub(crate) trait ReaderOptionBuilder: OptionBuilder {
-    fn without_option(self, key: &str) -> Self;
-}
-
-impl ReaderOptionBuilder for DataFrameReader {
-    fn without_option(self, key: &str) -> Self {
-        self.unset_option(key)
-    }
-}
-
-impl ReaderOptionBuilder for DataStreamReader {
-    fn without_option(self, key: &str) -> Self {
-        self.unset_option(key)
-    }
-}
-
-/// `builder` with the option `key` set to `value`, or unset when `value` is None, on a reader whose
-/// entries that the core reader does not take its copies share, `shared`, as a reader's `option`
-/// sets it ([`reader_entry`]): the keys are compared with no lock held ([`change_options`]).
-pub(crate) fn put_shared_option<B: ReaderOptionBuilder>(
-    py: Python<'_>,
-    builder: B,
-    shared: &crate::gc::GilMutex<UnencodableOptions>,
-    key: &OptionKey,
-    value: Option<&OptionText>,
-) -> B {
-    let change = change_options(
-        py,
-        shared,
-        |options| options,
-        |options| reader_entry(py, options, key, value),
-        |_, _| {},
-    );
-    with_reader_change(builder, change)
-}
-
-/// Set the option `key` to `value`, or unset it when it is None, on the options that a reader and
-/// its shallow copies share, as PySpark's `option` sets the dict of its options: `options`, the
-/// options of the core reader, takes the option of a str key whose value encodes, and `shared`
-/// keeps the other entries ([`reader_entry`]). The keys are compared with no lock held
-/// ([`change_options`]), and the caller holds no borrow of the reader meanwhile, so that a key
-/// whose `__eq__` releases the GIL, or sets an option of the reader again, stops no call of the
-/// reader, as PySpark's dict stops none.
-pub(crate) fn put_reader_option_of_copies(
-    py: Python<'_>,
-    options: &WriterState<HashMap<String, String>>,
-    shared: &crate::gc::GilMutex<UnencodableOptions>,
-    key: &OptionKey,
-    value: Option<&OptionText>,
-) {
-    let change = change_options(
-        py,
-        shared,
-        |options| options,
-        |options| reader_entry(py, options, key, value),
-        |_, _| {},
-    );
-    if let Some((name, value)) = change {
-        // As the core reader's `option` and `unset_option`, of the map that its copies share.
-        options.update(|mut options| {
-            match value {
-                Some(value) => {
-                    options.insert(name, value);
-                }
-                None => {
-                    options.remove(&name);
-                }
-            }
-            options
-        });
-    }
-}
-
-/// `builder` with the option `key` set to `value`, converted by `to_text`, **skipping** a `value`
-/// that is absent or None, as [`set_option_skip_none`] does, on a reader whose entries that the
-/// core reader does not take its copies share, as [`put_shared_option`] sets them.
-pub(crate) fn put_option_skip_none<B: ReaderOptionBuilder>(
-    py: Python<'_>,
-    builder: B,
-    shared: &crate::gc::GilMutex<UnencodableOptions>,
-    key: &OptionKey,
-    value: Option<&Bound<'_, PyAny>>,
-    to_text: fn(&Bound<'_, PyAny>) -> PyResult<Option<OptionText>>,
-) -> PyResult<B> {
-    let Some(value) = value else {
-        return Ok(builder);
-    };
-    match to_text(value)? {
-        Some(text) => Ok(put_shared_option(py, builder, shared, key, Some(&text))),
-        None => Ok(builder),
-    }
-}
-
-/// `builder` with each of `options` set, **skipping** those that are None, as
-/// [`put_option_skip_none`] does for each one, on a reader whose entries that the core reader does
-/// not take its copies share: the values are converted first, in order, as Python code, so the
-/// first one that fails raises before any of them is set; their keys are strs.
-pub(crate) fn skip_none_shared<B: ReaderOptionBuilder>(
-    py: Python<'_>,
-    builder: B,
-    shared: &crate::gc::GilMutex<UnencodableOptions>,
-    options: &[(&str, Option<&Bound<'_, PyAny>>)],
-    to_text: fn(&Bound<'_, PyAny>) -> PyResult<Option<OptionText>>,
-) -> PyResult<B> {
-    let mut entries = Vec::new();
-    for (name, value) in options {
-        if let Some(value) = value {
-            if let Some(text) = to_text(value)? {
-                entries.push((OptionKey::Text(OptionText::literal(name)), text));
-            }
-        }
-    }
-    if entries.is_empty() {
-        return Ok(builder);
-    }
-    let changes = change_options(
-        py,
-        shared,
-        |options| options,
-        |options| {
-            entries
-                .iter()
-                .map(|(key, value)| reader_entry(py, options, key, Some(value)))
-                .collect::<Vec<_>>()
-        },
-        |_, _| {},
-    );
-    Ok(changes.into_iter().fold(builder, with_reader_change))
-}
-
 /// The text of the value of a `DataFrameReader` option, as its `option` takes it: None for None,
 /// a bool lowercased, and else the `str()` of the value.
 pub(crate) fn reader_option_text(value: &Bound<'_, PyAny>) -> PyResult<Option<OptionText>> {
@@ -886,12 +701,6 @@ pub(crate) trait OptionBuilder: Sized {
     fn with_option(self, key: &str, value: &str) -> Self;
 }
 
-impl OptionBuilder for DataFrameReader {
-    fn with_option(self, key: &str, value: &str) -> Self {
-        self.option(key, value)
-    }
-}
-
 impl OptionBuilder for DataFrameWriter {
     fn with_option(self, key: &str, value: &str) -> Self {
         self.option(key, value)
@@ -899,12 +708,6 @@ impl OptionBuilder for DataFrameWriter {
 }
 
 impl OptionBuilder for DataFrameWriterV2 {
-    fn with_option(self, key: &str, value: &str) -> Self {
-        self.option(key, value)
-    }
-}
-
-impl OptionBuilder for DataStreamReader {
     fn with_option(self, key: &str, value: &str) -> Self {
         self.option(key, value)
     }
@@ -1045,14 +848,14 @@ mod tests {
     }
 
     /// Set the entry of `key` to the text `value` in the options of `state`, as an option of a
-    /// reader is set.
+    /// writer is set.
     fn put(py: Python<'_>, state: &GilMutex<UnencodableOptions>, key: &OptionKey, value: &str) {
         let value = OptionText::literal(value);
         change_options(
             py,
             state,
             |options| options,
-            |options| reader_entry(py, options, key, Some(&value)),
+            |options| writer_entry(py, options, key, &value),
             |_, _| {},
         );
     }
@@ -1160,18 +963,18 @@ mod tests {
             .unwrap();
             let class = namespace.get_item("Key").unwrap().unwrap();
             let state = GilMutex::new(UnencodableOptions::default());
-            // A str key of a value that UTF-8 cannot encode is kept, next to an object key; the
-            // core reader unsets it.
+            // A str key of a value that UTF-8 cannot encode is kept, next to an object key, which
+            // the core writer does not take.
             let key = option_key(&PyString::new(py, "a")).unwrap();
             let unencodable = OptionText::of(&py.eval(c"'\\udcff'", None, None).unwrap()).unwrap();
             let change = change_options(
                 py,
                 &state,
                 |options| options,
-                |options| reader_entry(py, options, &key, Some(&unencodable)),
+                |options| writer_entry(py, options, &key, &unencodable),
                 |_, _| {},
             );
-            assert_eq!(change, Some(("a".to_string(), None)));
+            assert_eq!(change, None);
             put(
                 py,
                 &state,
@@ -1180,16 +983,16 @@ mod tests {
             );
             assert_eq!(state.lock(py).0.len(), 2);
             // Set to a value that encodes, the str key leaves the kept options, which compare it
-            // with the object key of no Python code, and the core reader takes it.
+            // with the object key of no Python code, and the core writer takes it.
             let encodable = OptionText::literal("x");
             let change = change_options(
                 py,
                 &state,
                 |options| options,
-                |options| reader_entry(py, options, &key, Some(&encodable)),
+                |options| writer_entry(py, options, &key, &encodable),
                 |_, _| {},
             );
-            assert_eq!(change, Some(("a".to_string(), Some("x".to_string()))));
+            assert_eq!(change, Some(("a".to_string(), "x".to_string())));
             assert_eq!(state.lock(py).0.len(), 1);
             let compared: usize = class.getattr("compared").unwrap().extract().unwrap();
             assert_eq!(compared, 0);

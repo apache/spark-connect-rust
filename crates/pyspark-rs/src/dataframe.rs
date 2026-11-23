@@ -7306,15 +7306,6 @@ pub(crate) struct WriterState<T> {
 type HeldParts<T> = for<'a> fn(&'a T) -> Vec<spark_connect::gc::PartRef<'a>>;
 
 impl<T: Clone> WriterState<T> {
-    pub(crate) fn new(state: T) -> Self {
-        WriterState {
-            state: std::sync::Mutex::new(state),
-            generation: std::sync::atomic::AtomicU64::new(0),
-            parts: std::sync::Mutex::new((0, crate::gc::Parts::none())),
-            held: None,
-        }
-    }
-
     /// The state of a writer of a plan, of the parts that `held` gives of it.
     pub(crate) fn of_parts(state: T, held: HeldParts<T>) -> Self {
         let parts = Python::attach(|py| crate::gc::Parts::of(py, held(&state)));

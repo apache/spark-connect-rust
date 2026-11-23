@@ -2877,10 +2877,8 @@ pysparkfuncs.col.__doc__`), which the test compares with those of `pyspark-clien
   `pyspark.sql.types`.
 - A few names that PySpark's annotations need are declared, which the drop-in does not have at run
   time: `DataFrame.rdd`, which PySpark defines when not `is_remote_only()`, so that type checkers
-  of `pyspark-client` see it too, and neither client has it; and the classes of PySpark Connect
-  that the drop-in implements natively in another way, `OptionUtils`, the base of its readers and
-  writers (`TYPE_ONLY` of the test lists them with their reasons). `pyspark.sql.types` has
-  `DataTypeSingleton`, the metaclass
+  of `pyspark-client` see it too, and neither client has it (`TYPE_ONLY` of the test lists them
+  with their reasons). `pyspark.sql.types` has `DataTypeSingleton`, the metaclass
   of the singleton types of the stubs, at run time too, of which the native classes are not. The
   `SparkContext`, `RDD` and the other names of classic PySpark that PySpark's `pyspark` module
   imports of `pyspark.core` when not `is_remote_only()`, which `pyspark-client` does not ship,
@@ -3732,8 +3730,9 @@ object that is not a mapping the `AttributeError` of its `items`.
 
 A str that a later call unsets or replaces is no longer in the request, in the same cases as in
 PySpark. A stream reader's option of None leaves its option as it was, as PySpark's does. A batch
-reader's removes the option, which PySpark's plans of `table` and `changes` set, failing their
-requests (see `dev/parity/known-differences.md`). An option
+reader's keeps it as None, which its `load` leaves out of its plan, and which the plans of its
+`table` and `changes` set, which fails their requests with protobuf's `TypeError`, as PySpark's
+do. An option
 key, a table property or a config key that is not a str fails at the same call as PySpark's, with
 the same error: an `AssertionError` at a reader's load of a path, and protobuf's `TypeError` where
 the request is built otherwise.
@@ -4004,11 +4003,9 @@ of `abc.ABCMeta`, where PySpark's are of `type`; and of a data descriptor withou
 patched over such an attribute of the objects of a Column, a WindowSpec or a TableArg, PySpark's
 `__init__` of a Connect object raises its `AttributeError`, where the drop-in's object reads the
 patch (the `__init__` of `na` and `stat` sets their `df`, and raises it as PySpark's). The readers
-and writers of
-PySpark Connect are
-subclasses of the `OptionUtils` of `pyspark.sql.connect.readwriter`, a class of private methods
-only, of which the drop-in's native readers and writers are not: their MRO is their class and
-`object`, and `pyspark.sql.connect.readwriter` has no `OptionUtils`.
+and writers of PySpark Connect are subclasses of the `OptionUtils` of
+`pyspark.sql.connect.readwriter`, a class of private methods only: so are the drop-in's readers,
+PySpark's classes, and not its native writers, whose MRO is their class and `object`.
 
 PySpark's classes are plain Python classes, which a user subclasses. So are these of the drop-in:
 the DataFrame, `Observation`, and the `SparkSession`, `Catalog`, `TableValuedFunction`,
@@ -4135,23 +4132,30 @@ of grouped data makes, a value of the core, of the state at the call: a later ch
 of the state, such as `gd._grouping_cols.clear()` after `agg = gd.count()`, is not of `agg`, where
 PySpark's plan holds the list and builds its message of it at each request.
 
-The `__init__` of a reader gives it its session, as PySpark's `__init__` sets it: the session of its
-argument, which must be a session, where PySpark's keeps any object until it is used, which raises
-its `AttributeError` then. Until it runs, as for a subclass whose `__init__` does not call it, a
-reader is of a session of no server, whose requests raise `NO_ACTIVE_SESSION`, where PySpark's raise
-the `AttributeError` of the first attribute that the method reads, `_options`, `_schema` or
-`_format` (a reader is of the first session among the arguments of a subclass, if any, which then
-works). So a pickle of PySpark, which makes an object of its class without arguments and then sets
-its `__dict__`, loads in the drop-in: a reader, of the `_client`, `_format`, `_schema` and
-`_options` (and `_source_name`) of its state, which it sets as its setters do, a catalog of its
-`_sparkSession` and a registration of its `sparkSession`; and the drop-in's pickles of them load in
-PySpark, of their classes, as PySpark's own do: where the session of their ID is active. The other
-native classes, of which the Connect `Column`, `WindowSpec` and `TableArg` are, cannot be subclassed
-(`TypeError: type 'Column' is not an acceptable base type`), and do not construct (`TypeError:
-cannot create '...' instances`): their objects are made of the state of the Rust core, a plan, an
-expression or a query, which the arguments of PySpark's constructors, the Python objects of its
-client, do not give, as the drop-in does not have them, so a subclass would have no `__init__` to
-call:
+The `DataFrameReader` and the `DataStreamReader` of `pyspark.sql.connect` are PySpark Connect's
+classes, adapted from the source of PySpark 4.3.0 (`pyspark/sql/connect/readwriter.py` and
+`pyspark/sql/connect/streaming/readwriter.py`), whose code is PySpark's but for the plans of their
+reads, which are the Rust core's: the state of a reader is its `__dict__`, of the `_client`,
+`_format`, `_schema` and `_options` (and `_source_name`) of its `__init__`, which keeps any object,
+and its setters, its format methods, `_set_opts`, its errors, its copies and its pickles are
+PySpark's. A plan of a read checks its arguments as PySpark's `DataSource`, `Read`,
+`RelationChanges` and `Parse` do when they are made, with their bare `AssertionError`s (of a format,
+a schema, a path or a predicate that is not a str, and of an option of a key or a value that is
+not one, but of a value of None, which it leaves out), and fails the requests of its DataFrame with
+the errors of the arguments that it cannot send, as PySpark's plan raises them when it is sent: a
+str that UTF-8 cannot encode, and an option of None, or of a key or a value that is not a str or
+bytes, of `table` and `changes`. The DataFrame of a read is of the session of the reader's
+`_client`, which the read resolves (see `dev/parity/known-differences.md`).
+
+A pickle of PySpark, which makes an object of its class without arguments and then sets its
+`__dict__`, loads in the drop-in: a reader, a catalog and a registration, of their `__dict__`; and
+the drop-in's pickles of them load in PySpark, of their classes, as PySpark's own do: where the
+session of their ID is active. The other native classes, of which the Connect `Column`, `WindowSpec`
+and `TableArg` are, cannot be subclassed (`TypeError: type 'Column' is not an acceptable base
+type`), and do not construct (`TypeError: cannot create '...' instances`): their objects are made of
+the state of the Rust core, a plan, an expression or a query, which the arguments of PySpark's
+constructors, the Python objects of its client, do not give, as the drop-in does not have them, so a
+subclass would have no `__init__` to call:
 - `Column` takes an `Expression` of `pyspark.sql.connect.expressions`; the drop-in's expressions
   are the Rust core's.
 - `DataFrameWriter`, `DataFrameWriterV2`, `DataStreamWriter` and `MergeIntoWriter` take the

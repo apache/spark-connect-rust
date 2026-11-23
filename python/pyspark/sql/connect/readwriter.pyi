@@ -19,9 +19,10 @@
 
 from typing import Dict
 from typing import Optional, Union, List, overload, Tuple, Callable
-from pyspark.sql.connect.plan import LogicalPlan, WriteOperation, WriteOperationV2
-from pyspark.sql.types import StructType
-from pyspark.errors import PySparkTypeError
+from pyspark.sql.connect.plan import LogicalPlan as LogicalPlan, WriteOperation, WriteOperationV2
+from pyspark.sql.types import StructType as StructType
+from pyspark.sql.utils import to_str as to_str
+from pyspark.errors import AnalysisException as AnalysisException, PySparkAttributeError as PySparkAttributeError, PySparkTypeError as PySparkTypeError
 from pyspark.sql.connect.dataframe import DataFrame
 from pyspark.sql.connect._typing import ColumnOrName, OptionalPrimitiveType
 from pyspark.sql.connect.session import SparkSession

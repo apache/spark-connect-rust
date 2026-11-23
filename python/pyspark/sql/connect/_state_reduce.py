@@ -14,8 +14,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""The ``__reduce__`` of the readers, the writers and the stream readers and writers of the
-drop-in, of their state.
+"""The ``__reduce__`` of the writers, the stream writers and the session builder of the
+drop-in, of their state. The readers are PySpark's classes, which pickle as PySpark's plain
+objects.
 
 Each ``*_reduce`` function gives the reduce of an object of its state: a function, which
 cloudpickle pickles by value, and the state. On the drop-in, the function gives back the
@@ -71,53 +72,6 @@ def _state_reduce(
     # the error of a plain pickle names the same function.
     creator.__qualname__ = "SparkSession.__reduce__.<locals>.creator"
     return creator, args
-
-
-def _worker_reader(
-    session: Any,
-    format: Optional[str],
-    schema: str,
-    options: dict[str, str],
-    unsent: Any,
-    unencodable: Any,
-) -> Any:
-    """PySpark's DataFrameReader of ``session`` with the format, the schema and the options, as
-    the drop-in's reader of that state. A format that is kept (``unsent``) is given to PySpark
-    as it is, which fails it at the load, as the drop-in's reader does. The schema and the options
-    that UTF-8 cannot encode (``unencodable``) are set after the others, and fail the plan."""
-    reader = session.read
-    source = format if unsent is None else unsent
-    if source is not None:
-        reader = reader.format(source)
-    if schema:
-        reader = reader.schema(schema)
-    if options:
-        reader = reader.options(**options)
-    unencodable_schema, unencodable_options = unencodable
-    if unencodable_schema is not None:
-        reader = reader.schema(unencodable_schema)
-    for key, value in unencodable_options:
-        reader = reader.option(key, value)
-    return reader
-
-
-def reader_reduce(
-    session: Any,
-    format: Optional[str],
-    schema: str,
-    options: dict[str, str],
-    unsent: Any,
-    unencodable: Any,
-    cls: Any = None,
-) -> tuple[Callable[..., Any], tuple[Any, ...]]:
-    """The reduce of a DataFrameReader of ``session``, of the state that ``_of_state`` takes, of
-    the subclass ``cls`` if it is one."""
-    return _state_reduce(
-        "DataFrameReader",
-        _worker_reader,
-        (session, format, schema, options, unsent, unencodable),
-        cls,
-    )
 
 
 def _worker_writer(
@@ -288,57 +242,6 @@ def writer_v2_reduce(
             kept_options,
             kept_properties,
         ),
-    )
-
-
-def _worker_stream_reader(
-    session: Any,
-    format: Optional[str],
-    schema: str,
-    options: dict[str, str],
-    source_name: Optional[str],
-    unsent: Any,
-    unencodable: Any,
-) -> Any:
-    """PySpark's DataStreamReader of ``session`` with the format, the schema, the options and the
-    source name, as the drop-in's reader of that state. A format that is kept (``unsent``) is
-    given to PySpark as it is. The schema and the options that UTF-8 cannot encode
-    (``unencodable``) are set after the others, and fail the plan."""
-    reader = session.readStream
-    source = format if unsent is None else unsent
-    if source is not None:
-        reader = reader.format(source)
-    if schema:
-        reader = reader.schema(schema)
-    if options:
-        reader = reader.options(**options)
-    if source_name is not None:
-        reader = reader.name(source_name)
-    unencodable_schema, unencodable_options = unencodable
-    if unencodable_schema is not None:
-        reader = reader.schema(unencodable_schema)
-    for key, value in unencodable_options:
-        reader = reader.option(key, value)
-    return reader
-
-
-def stream_reader_reduce(
-    session: Any,
-    format: Optional[str],
-    schema: str,
-    options: dict[str, str],
-    source_name: Optional[str],
-    unsent: Any,
-    unencodable: Any,
-    cls: Any = None,
-) -> tuple[Callable[..., Any], tuple[Any, ...]]:
-    """The reduce of a DataStreamReader of ``session``, of the state that ``_of_state`` takes, of
-    the subclass ``cls`` if it is one."""
-    return _state_reduce(
-        "DataStreamReader",
-        _worker_stream_reader,
-        (session, format, schema, options, source_name, unsent, unencodable),
-        cls,
     )
 
 

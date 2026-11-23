@@ -40,24 +40,6 @@ pub(crate) fn new_of_class<'py, T: pyo3::PyClass>(
     }
 }
 
-/// The arguments `args` of the reducer of [`state_reduce`] of `object`, an object of the native
-/// class `native`, with the class of `object` after them when it is a Python subclass of it,
-/// which the reducer names, so that the unpickled object is of that class (see `_of_state`). Of
-/// the native class itself, the arguments, and so the pickle, are as they are.
-pub(crate) fn with_subclass<'py>(
-    object: &Bound<'py, PyAny>,
-    native: Bound<'py, pyo3::types::PyType>,
-    args: Bound<'py, PyTuple>,
-) -> PyResult<Bound<'py, PyTuple>> {
-    let cls = object.get_type();
-    if cls.is(&native) {
-        return Ok(args);
-    }
-    let mut items: Vec<Bound<'py, PyAny>> = args.iter().collect();
-    items.push(cls.into_any());
-    PyTuple::new(object.py(), items)
-}
-
 /// The reduce of an object of its state `args`, through the reconstructor `name` of
 /// `pyspark.sql.connect._state_reduce`: a function of the state, which gives back the function
 /// that rebuilds the object, which cloudpickle pickles by value, and the arguments of it.
