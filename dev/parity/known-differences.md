@@ -1537,6 +1537,15 @@ requests of the unpickled object pickle as it is then. This case still differs:
     attribute, a closure) stays, as do the messages that it made, which the runtime's fields take
     as they are, and equal the runtime's of the same contents.
 
+- **A pickle of the runtime's `Any` or `Timestamp`** (inherent; upb's methods take messages of
+  their own class only). The classes of `Any` and `Timestamp` are the runtime's own, and a message
+  of one pickles as upb's, of `protobuf`'s class, so that the pickle loads wherever `protobuf`
+  does (the Python worker of the server; see `docs/compatibility.md`). So a round trip gives a
+  message of another class than PySpark's round trip, which keeps `protobuf`'s: it equals the
+  runtime's message, and the runtime's `MergeFrom` and `CopyFrom` take it, but its own refuse the
+  runtime's message, of upb's `TypeError` ("Parameter to MergeFrom() must be instance of same
+  class"): `b = pickle.loads(pickle.dumps(a)); b.MergeFrom(a)` fails, `a.MergeFrom(b)` merges.
+
 - **Copies into a message that the value holds** (intentional; upb ends its process). A copy of a
   message into a message below it copies the message first, as of a copy of it taken before, where
   upb's copy recurses until its process ends (SIGSEGV): `r = proto.Relation(limit={"limit": 1});

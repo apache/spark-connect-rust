@@ -2330,7 +2330,13 @@ errors are the runtime's `DecodeError` and `EncodeError`. The differences:
   one pickles as upb's, of `protobuf`'s class (`google.protobuf.any_pb2.Any`), of the same bytes,
   so the pickle loads wherever `protobuf` does, as in the Python worker of the server that runs a
   UDF that holds one, and in the drop-in as a message of `protobuf`'s class, which the runtime's
-  fields take as they are, as one of PySpark's does; `copy.copy` keeps the runtime's class.
+  fields take as they are, as one of PySpark's does; `copy.copy` keeps the runtime's class. So a
+  message of such a pickle is of another class than the runtime's message that it was of
+  (inherent: upb's methods take messages of their own class only, and the runtime's `Any` is a
+  message of the runtime): it equals the runtime's, and the runtime's `MergeFrom` and `CopyFrom`
+  take it, but its own refuse the runtime's, of upb's `TypeError` of a message of another class
+  (`pickle.loads(pickle.dumps(a)).MergeFrom(a)`, where `a.MergeFrom(pickle.loads(pickle.dumps(a)))`
+  merges).
   Without `protobuf`, a pickle of protocol 4 or later names the class by the name that the module
   of the first proto of Spark Connect that imports its file binds it to, which is the class's own
   (`pyspark.sql.connect.proto.base_pb2` and `google_dot_protobuf_dot_any__pb2.Any`, whose `repr`
