@@ -3111,13 +3111,15 @@ up both clients load each other's.
 So it is for the data types. PySpark's are plain classes, which pickle as their class and their
 `__dict__`: at the protocols 2 and up the drop-in makes its type of the class, without arguments,
 and sets the attributes, so a pickled `df.schema` loads with its fields, names, metadata,
-collations, nullable flags and parameters, as PySpark's types of them. The private `_crs` and
-`_alg` of PySpark's spatial types, which its constructors set of the SRID, are not attributes of
-the drop-in's. At protocol 0 or 1 the drop-in raises `TypeError: object.__new__(DecimalType) is not
-safe, use DecimalType.__new__()`. The drop-in's own types pickle, copy and deep-copy as
-`_parse_datatype_json_string` of their JSON, or, with a user-defined type, a nullable flag that is
-not a bool or a field of metadata, of the types and flags they are made of, which the Python
-workers of the server load at every protocol. So the copies of a struct, and of an array or a map
+collations, nullable flags and parameters, as PySpark's types of them. At protocol 0 or 1 the
+drop-in raises `TypeError: object.__new__(DecimalType) is not safe, use DecimalType.__new__()`. A
+type of parameters (a decimal, a string, a char, a varchar, a time, an interval of fields or a
+spatial type) pickles, copies and deep-copies as PySpark's plain class does, as
+`copyreg.__newobj__(cls)` and its `__dict__`, which holds its parameters (see below), also at the
+protocols 0 and 1: its pickle is PySpark's own, byte for byte. The drop-in's other types pickle,
+copy and deep-copy as `_parse_datatype_json_string` of their JSON, or, with a user-defined type,
+a nullable flag that is not a bool or a field of metadata, of the types and flags they are made of,
+which the Python workers of the server load at every protocol. So the copies of a struct, and of an array or a map
 of one, keep the metadata dicts of its fields as they are, which JSON does not (a tuple, a key that
 is not a str, the order of the keys), and are equal to it, as PySpark's pickle of the `__dict__`
 is, and `toNullable()` makes each field of the dict of the field, as PySpark's
@@ -3219,15 +3221,23 @@ the object in upper case as it is when it renders, of the error of that then, as
 `catalog.createTable` read the `json()` or the elements of the object at the call, as PySpark's. A struct whose fields hold the struct itself has levels that no walk ends, and its uses
 raise `RecursionError` as PySpark's do (see "A type that holds itself" above).
 
-The parameters of a type are its attributes, as PySpark's: `t.scale = 3` makes a
-`DecimalType(10, 2)` a `DecimalType(10, 3)`, as its repr, JSON, `==` and hash show, also in the
-struct, array or map that holds it. A drop-in type holds only the values that its constructor
-makes, so the assignment of another raises the constructor's error, where PySpark keeps it, of
-which its repr or JSON may fail later, as a field that an interval does not have
-(`DayTimeIntervalType().startField = 9`). So do the constructors: they refuse values that
-PySpark's keep, with a `TypeError`, such as `DecimalType(10.0)`, `TimeType(6.0)` and
-`StringType(None)`, and hold the ints of those they take, so the `precision`
-of `DecimalType(np.int64(12))` is an `int`, where PySpark's is the NumPy int. The assertions of
+The parameters of a type of parameters, a `DecimalType`, `StringType`, `CharType`, `VarcharType`,
+`TimeType`, `DayTimeIntervalType`, `YearMonthIntervalType`, `GeometryType` or `GeographyType`, are
+entries of its `__dict__`, as PySpark's `__init__` sets them, of any value: `t.scale = 3`, or
+`t.__dict__["scale"] = 3`, makes a `DecimalType(10, 2)` a `DecimalType(10, 3)`, as its repr,
+JSON, `==` and hash show, also in the struct, array or map that holds it, `vars(t)` holds them,
+and `==` compares the `__dict__`s, as PySpark's. Its methods read them where PySpark's read them,
+so a value that PySpark's methods fail of fails the same: `%d` of a str (`%d format: a real number
+is required, not str`), and the `KeyError` of a field that an interval does not have
+(`DayTimeIntervalType().startField = 9`); the plan of the type raises the error of protobuf's int
+field of a parameter that it refuses, as of a bool (`Field spark.connect.DataType.Decimal.scale:
+Expected an int, got a boolean.`) or an int out of its range (`Value out of range`). The
+constructors take any value, as PySpark's: `DecimalType(10.0)` is `DecimalType(10,0)`, and the
+`precision` of `DecimalType(np.int64(12))` is the NumPy int. A type of a Python subclass whose
+`__init__` does not call that of its class has none of its parameters, and raises the
+`AttributeError` of the first that a method reads, as PySpark's. A set `srid` of a spatial type
+shows in its repr and simple string, and its JSON stays that of the `_crs` that its constructor
+set, of which it is equal to no type of that SRID, as PySpark's. The assertions of
 PySpark's constructors (`field name 1 should be a string`, `elementType string should be an
 instance of ...`) are made under `python -O` too, which skips PySpark's, whose types are then made.
 The parameters that are types, the `elementType` of an `ArrayType`, the `keyType` and the
@@ -3236,9 +3246,9 @@ which they parse, where the constructors take a DataType only, as PySpark's asse
 `ArrayType(LongType()).elementType = "string"` makes it an `ArrayType(StringType(), True)`, a DDL
 string that does not parse raises a `ValueError` and another value, None included, a `TypeError`,
 where PySpark keeps the value as it is given, which its repr shows (`ArrayType(string, True)`) and
-its `json()` fails of. A set `srid` of a spatial type is of its JSON too, where PySpark's JSON
-stays that of the CRS of its constructor. The parameters are not entries of the `__dict__` of a
-type, so `vars(t)` is empty, where PySpark's has them. The type objects that an `ArrayType`, a
+its `json()` fails of. The parameters of an `ArrayType`, a `MapType`, a `StructField` and a
+`StructType` are not entries of the `__dict__` of the type, so `vars(t)` is empty, where PySpark's
+has them (tracked: SPARK-62251). The type objects that an `ArrayType`, a
 `MapType`, a `StructField` and a `StructType` are given, by their constructors, `add` and the
 setters, are kept as they are, as PySpark's keep them, so a `UserDefinedType` whose `module()` or
 `sqlType()` is not implemented, such as `UserDefinedType()` itself, makes them: their repr,
@@ -3370,36 +3380,46 @@ read it by `isinstance`, and the methods of its class are PySpark's, of the meth
   (`CAST(id AS SUB)`), and so does one to a user-defined type of its own `simpleString()`
   (`CAST(id AS SCALE2)`), also in an array, a map or a struct, while the plan is of the core type.
 
+A subclass of `__slots__` of no `__getstate__` of its own raises `TypeError: a class that defines
+__slots__ without defining __getstate__ cannot be pickled` at the protocols 0 and 1, as PySpark's,
+and pickles of its slots at the protocols 2 and up, as PySpark's.
+
 What differs:
-- The parameters are not entries of the `__dict__` of the type, as for the class's own types
-  (`vars(t)` holds the attributes that a user set), and a subclass whose `__init__` does not call
-  the `__init__` of its class has the parameters of `cls.__new__(cls)`, of the defaults of the
-  class (`StringType()`, `DecimalType(10, 0)`, an array of `NullType()`), where PySpark's has none
-  of them and raises the `AttributeError` of each that a method reads. The native `__init__` sets
-  them, and not through the attributes of the class, as PySpark's assigns them (SPARK-62231), so a
-  property of a subclass whose getter reads the state that its setter writes reads it unwritten,
-  and a class attribute over a parameter (`nullable = False`) is what reads it, where PySpark's
-  `__init__` shadows it with the instance's own (SPARK-62251); `json()` and the conversions read
-  them so, as Python does. A struct whose `fields`, of a class that defines `names` or `fields`,
-  raise or are not as many as its `names`, as Python reads them, is of the fields that its
-  `__init__` was given, of its JSON and its relations. `simpleString()`, `repr()` and
-  `treeString()` read the native values of the attributes that a subclass overrides with a
-  property, where PySpark's read the property (until SPARK-62251).
+- The parameters of an array, a map, a field and a struct are not entries of the `__dict__` of the
+  type, as for the class's own types (`vars(t)` holds the attributes that a user set), and a
+  subclass of them whose `__init__` does not call the `__init__` of its class has the parameters of
+  `cls.__new__(cls)`, of the defaults of the class (an array of `NullType()`), where PySpark's has
+  none of them and raises the `AttributeError` of each that a method reads (tracked:
+  SPARK-62251). Their native `__init__` sets them, and not through the attributes of the class, as
+  PySpark's assigns them (SPARK-62231), so a property of a subclass whose getter reads the state
+  that its setter writes reads it unwritten, and a class attribute over a parameter
+  (`nullable = False`) is what reads it, where PySpark's `__init__` shadows it with the instance's
+  own (SPARK-62251); `json()` and the conversions read them so, as Python does. A struct whose
+  `fields`, of a class that defines `names` or `fields`, raise or are not as many as its `names`,
+  as Python reads them, is of the fields that its `__init__` was given, of its JSON and its
+  relations. Their `simpleString()`, `repr()` and `treeString()` read the native values of the
+  attributes that a subclass overrides with a property, where PySpark's read the property (until
+  SPARK-62251).
 - Python calls the `__init__` of a subclass of a singleton type at each call of the class, which
   returns the one instance, where PySpark's metaclass calls it on the first call, as the
   drop-in's `DataTypeSingleton` does of a class of it, such as of PySpark's cloudpickle of such a
   subclass of `__main__` (see above). Copies and pickles of the instance are the instance, as for
-  the class's own.
-- A subclass of `__slots__` pickles at the protocols 0 and 1 too, as `copyreg.__newobj__(cls)` of
-  its state, where PySpark's raises `TypeError: a class that defines __slots__ without defining
-  __getstate__ cannot be pickled`.
+  the class's own, where PySpark's `copyreg.__newobj__` makes another object, and a subclass of
+  another metaclass is made, where PySpark's raises its `TypeError: metaclass conflict`. This is
+  inherent: PySpark's `DataTypeSingleton.__call__` returns the one instance without calling
+  `__init__`, and a native class is of the metaclass `type`, whose `__call__` calls the `__init__`
+  each time the `__new__` gives an instance of the class: the extension makes its classes with
+  `PyType_FromSpec`, of the stable ABI of Python 3.9, which has no `PyType_FromMetaclass` to make a
+  class of another metaclass (see `dev/parity/known-differences.md`).
 - The repr of an array, a map, a field or a struct that holds a type whose repr has a str that
   UTF-8 cannot encode, such as one of a lone surrogate, raises its `UnicodeEncodeError`, and so do
   their `str()` and hash, of the repr, where PySpark's make them.
 - A class of type classes of two branches of their hierarchy, such as
-  `class X(StringType, IntegerType)`, raises
-  `TypeError: multiple bases have instance lay-out conflict`, as CPython raises of bases of
-  conflicting layouts, where PySpark makes the class.
+  `class X(StringType, IntegerType)` or `class Y(ArrayType, MapType)`, raises
+  `TypeError: multiple bases have instance lay-out conflict` when it is made, where PySpark makes
+  the class (`X()` is `StringType()`). This is inherent: an object of such a class would be of the
+  native layout of one branch, which the native methods of the other read as theirs, as CPython
+  raises of bases of conflicting layouts.
 - `createDataFrame` of data sends the JSON of the core types of its schema, where PySpark sends the
   `json()` of the schema object, which names a type of a subclass by its `typeName()`
   (`"subinteger"`) and which the server then fails to parse (`PARSE_SYNTAX_ERROR`), so sending it
