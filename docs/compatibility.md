@@ -2280,11 +2280,17 @@ errors are the runtime's `DecodeError` and `EncodeError`. The differences:
   them in upb's order of the keys of its text, and `text_format` in its own, as of upb's messages.
   upb's orders take the keys of a signed integer type as unsigned numbers, so that a negative key
   comes after the others;
-- it makes a Python object of each message that it parses or copies, where upb makes one when the
-  message is read, so the parse, the copy and the release of a message of many messages take
-  several times as long as upb's (of CPU time, of a message of a million messages: 0.3 s for the
-  parse, upb's 0.04 s, 0.3 s for `CopyFrom` and `copy.deepcopy`, upb's 0.1 s, and 0.3 s for
-  `MergeFrom`, upb's 0.07 s). The parse, the constructor (of lists and mappings too),
+- it makes a Python object of each message that it parses or merges, where upb makes one when the
+  message is read. A copy (of a message of the runtime given to a constructor, of `CopyFrom`,
+  `copy.copy` and `copy.deepcopy`) holds what it copies natively, of no Python object, and makes
+  the object of a message, a repeated field or a map of it, of one level, when Python first reads
+  it, as upb makes its objects; what a copy holds natively, a copy of the copy shares, so
+  `proto.Expression(merge_action=action)` copies an action of any size at once. So the parse, the
+  copy of a message that a parse made and the release of a message of many messages take several
+  times as long as upb's (of CPU time, of a message of a million messages: 0.3 s for the parse,
+  upb's 0.05 s, 0.25 s for `CopyFrom` and `copy.deepcopy`, upb's 0.1 s, and 0.3 s for `MergeFrom`,
+  upb's 0.09 s), and a read of every message of a copy takes as long as the copy of each message
+  as an object took before. The parse, the constructor (of lists and mappings too),
   the copies (`CopyFrom`, and `copy.deepcopy` of a message or of a repeated field of messages), the
   merges (`MergeFrom`), the `extend` of a repeated field of messages and the `update` and
   `MergeFrom` of a map let another thread take the GIL, and a signal interrupt them with the
@@ -2295,9 +2301,9 @@ errors are the runtime's `DecodeError` and `EncodeError`. The differences:
   it of a value that is not a dict), so another thread can use a message that one of them reads
   meanwhile. `SerializeToString`, `==` of two messages of the runtime and the release of a message
   hold the GIL until they end, as upb's do: 0.09 s, 0.07 s and 0.08 s for a million messages, where
-  upb's take 0.03 s, 0.13 s and 3 ms. The messages that a parse or a copy makes within the
-  message that it parses or copies into, those of `copy.deepcopy`, and that of a read of an unset
-  field are not tracked by the garbage collector (`gc.is_tracked`), as they make no reference
+  upb's take 0.03 s, 0.13 s and 3 ms. The messages that a parse makes within the message that it
+  parses into, those that Python reads of a copy (of `copy.deepcopy` too), and that of a read of an
+  unset field are not tracked by the garbage collector (`gc.is_tracked`), as they make no reference
   cycles, so that a collection does not go through the messages of a large message; the message of
   a constructor, of `FromString` and of `copy.copy`, and that `ParseFromString` or `CopyFrom`
   fills, are tracked, as upb's;

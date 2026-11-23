@@ -16,6 +16,7 @@ mod codec;
 mod containers;
 mod descriptors;
 pub(crate) mod message;
+mod native;
 pub(crate) mod pool;
 mod scalar;
 mod text;

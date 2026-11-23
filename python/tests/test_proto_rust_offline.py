@@ -2406,7 +2406,10 @@ def _large_operation(operation):
     # code) take one budget, not one of each message.
     elements = list(literal.array.elements) + [5]
     if operation == "constructor of a list":
-        return lambda: literal_class.Array(elements=elements), TypeError, made
+        # The constructor copies the messages natively, making no object of them: it is in
+        # progress while it holds the list, of its iteration, beyond the keyword argument.
+        in_list = _References(elements, lambda extra: extra >= 2)
+        return lambda: literal_class.Array(elements=elements), TypeError, in_list
     if operation == "extend":
         return lambda: literal_class.Array().elements.extend(elements), TypeError, made
     if operation == "map constructor":
@@ -6842,3 +6845,760 @@ def test_parses_follow_the_limit_of_protobufs_parsers_of_a_function_bound_before
     assert _run_script(
         wrapped.replace("{{", "{").replace("}}", "}"), PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION="python"
     ) == ["DecodeError", True]
+
+
+# The copies of the messages of a constructor (SPARK-62264): a message of the runtime given for a
+# message field, a repeated message field or the value of a map of messages is copied natively, and
+# its objects are made when Python reads them, of what upb's copy of its bytes would hold.
+
+
+def _copy_sources(cls):
+    """Messages of `cls` (the classes of a runtime, by full name), of every kind of field below
+    them: a message of a message, a repeated message, a map of messages, a repeated scalar and a
+    map of scalars field, and of a oneof."""
+    relation = cls("spark.connect.Relation")()
+    relation.read.data_source.format = "csv"
+    relation.read.data_source.paths.extend(["a", "b"])
+    relation.read.data_source.options["k"] = "v"
+    relation.common.plan_id = 7
+    expression = cls("spark.connect.Expression")()
+    function = expression.unresolved_function
+    function.function_name = "f"
+    function.arguments.add().unresolved_attribute.unparsed_identifier = "x"
+    function.arguments.add().literal.integer = 1
+    sql = cls("spark.connect.SQL")(query="select 1")
+    sql.named_arguments["n"].literal.string = "s"
+    return relation, expression, sql
+
+
+def _snapshot(*messages):
+    """What a test compares of messages: their bytes and their text."""
+    return [(m.SerializeToString(deterministic=True), str(m)) for m in messages]
+
+
+def _independence_cases(cls):
+    """The changes of constructor copies and of their sources, of each kind of field, and the
+    messages after each, which upb's and the runtime's agree on: a copy keeps the fields that its
+    source had when it was made, and its source keeps its own, whichever of them changes."""
+    out = []
+    relation, expression, sql = _copy_sources(cls)
+    plan = cls("spark.connect.Plan")(root=relation)
+    out.append(_snapshot(relation, plan))
+    relation.read.data_source.paths.append("c")
+    relation.read.data_source.options["k"] = "w"
+    relation.common.plan_id = 8
+    out.append(_snapshot(relation, plan))
+    plan.root.read.data_source.paths[0] = "z"
+    plan.root.read.data_source.options["j"] = "u"
+    plan.root.common.ClearField("plan_id")
+    plan.root.read.data_source.format = "json"
+    out.append(_snapshot(relation, plan))
+    # A repeated message field takes copies of its messages, each its own.
+    references = cls("spark.connect.WithRelations")(references=[relation, relation])
+    relation.read.data_source.paths.extend(["d"])
+    references.references[0].read.data_source.paths.append("e")
+    references.references[1].common.plan_id = 9
+    out.append(_snapshot(relation, references))
+    # The messages of a map of messages, and of a repeated field of a message held in a field.
+    held = cls("spark.connect.SQL")(named_arguments={"a": expression, "b": expression})
+    expression.unresolved_function.arguments[0].unresolved_attribute.unparsed_identifier = "y"
+    held.named_arguments["a"].unresolved_function.arguments.add().literal.integer = 2
+    held.named_arguments["b"].unresolved_function.function_name = "g"
+    out.append(_snapshot(expression, held))
+    # A member of a oneof: setting another member clears it, of the copy only.
+    alias = cls("spark.connect.Expression")(unresolved_function=expression.unresolved_function)
+    alias.literal.integer = 3
+    out.append(_snapshot(expression, alias) + [alias.WhichOneof("expr_type")])
+    expression.unresolved_function.ClearField("arguments")
+    out.append(_snapshot(expression, alias, sql, held))
+    # A copy of a copy is a copy of its own: the copies of the fields it shares with its source
+    # are its own too.
+    action = cls("spark.connect.MergeAction")(condition=expression, assignments=[
+        cls("spark.connect.MergeAction.Assignment")(key=expression, value=expression)
+    ])
+    first = cls("spark.connect.Expression")(merge_action=action)
+    second = cls("spark.connect.Expression")(merge_action=action)
+    first.merge_action.assignments[0].key.unresolved_function.function_name = "first"
+    action.condition.unresolved_function.function_name = "action"
+    second.merge_action.condition.unresolved_function.arguments.add().literal.integer = 4
+    out.append(_snapshot(action, first, second))
+    command = cls("spark.connect.Command")(sql_command={"sql": "s", "input": relation})
+    copied = cls("spark.connect.Command")(sql_command=command.sql_command)
+    command.sql_command.input.read.data_source.paths.append("f")
+    copied.sql_command.input.read.data_source.options.clear()
+    out.append(_snapshot(command, copied))
+    return out
+
+
+def test_constructor_copies_are_independent_of_their_sources_as_upbs(upb):
+    # A message given to a constructor is copied, as upb copies it by its bytes: a change of the
+    # copy, of a message field, a nested message, a repeated field of messages or of scalars, a
+    # map of messages or of scalars, or a oneof, is not one of its source, nor the other way, nor of
+    # another copy of the same message or of the copy.
+    assert _independence_cases(ours) == _independence_cases(upb)
+
+
+def _identity_cases(cls):
+    """Whether the objects that the fields of constructor copies give are the same object at each
+    read, and not the objects of their sources."""
+    relation, expression, sql = _copy_sources(cls)
+    plan = cls("spark.connect.Plan")(root=relation)
+    references = cls("spark.connect.WithRelations")(references=[relation])
+    held = cls("spark.connect.SQL")(named_arguments={"a": expression})
+    return {
+        "field": plan.root is plan.root,
+        "nested": plan.root.read.data_source is plan.root.read.data_source,
+        "not the source": plan.root is not relation,
+        "nested not the source": plan.root.read is not relation.read,
+        "repeated scalars": plan.root.read.data_source.paths is plan.root.read.data_source.paths,
+        "map of scalars": plan.root.read.data_source.options is plan.root.read.data_source.options,
+        "container": references.references is references.references,
+        "item": references.references[0] is references.references[0],
+        "item not the source": references.references[0] is not relation,
+        "map": held.named_arguments is held.named_arguments,
+        "map value": held.named_arguments["a"] is held.named_arguments["a"],
+        "map value not the source": held.named_arguments["a"] is not expression,
+        "listed": [v for _, v in plan.ListFields()][0] is plan.root,
+    }
+
+
+def test_constructor_copies_keep_their_identity_as_upbs(upb):
+    # The field of a constructor copy gives one object, at every read, as it does once it is set:
+    # of a message, of its messages, of its containers, of their items and of the values of its
+    # maps, and of ListFields. A weak reference of it lives as long as the message that holds it.
+    import weakref
+
+    mine = _identity_cases(ours)
+    assert mine == _identity_cases(upb)
+    assert all(mine.values()), mine
+    relation, expression, sql = _copy_sources(ours)
+    plan = ours("spark.connect.Plan")(root=relation)
+    read = weakref.ref(plan.root.read)
+    assert read() is plan.root.read
+    del plan
+    assert read() is None
+    # As the copies of the runtime were made before, the objects of a copy are not tracked by
+    # the garbage collector, and a message reports none of its own.
+    import gc
+
+    plan = ours("spark.connect.Plan")(root=relation)
+    assert not gc.is_tracked(plan.root) and not gc.is_tracked(plan.root.read)
+    assert gc.get_referents(plan) == [type(plan)]
+
+
+def _operation_cases(cls):
+    """The operations of upb's messages on messages of copies whose fields no object was made of
+    yet, each on a copy of its own: what each gives, and the messages after it."""
+    relation, expression, sql = _copy_sources(cls)
+    unknown = cls("spark.connect.Relation").FromString(relation.SerializeToString() + _UNKNOWN)
+
+    def plan():
+        return cls("spark.connect.Plan")(root=unknown)
+
+    def references():
+        return cls("spark.connect.WithRelations")(references=[relation, unknown])
+
+    def held():
+        return cls("spark.connect.SQL")(named_arguments={"a": expression}, pos_arguments=[expression])
+
+    import copy as copying
+
+    operations = {
+        "bytes": lambda m: m.SerializeToString(deterministic=True),
+        "ByteSize": lambda m: m.ByteSize(),
+        "str": str,
+        "repr": repr,
+        "==": lambda m: m == type(m).FromString(m.SerializeToString()),
+        "!= of a change": lambda m: m != type(m)(),
+        "ListFields": lambda m: [(f.name, _comparable(v)) for f, v in m.ListFields()],
+        "HasField": lambda m: [m.HasField(f.name) for f in m.DESCRIPTOR.fields if f.has_presence],
+        "deepcopy": lambda m: copying.deepcopy(m).SerializeToString(deterministic=True),
+        "copy": lambda m: copying.copy(m).SerializeToString(deterministic=True),
+        "CopyFrom": lambda m: _copied_from(m).SerializeToString(deterministic=True),
+        "MergeFrom": lambda m: (m.MergeFrom(type(m)(**{})), m.MergeFrom(m))[1],
+        "Clear": lambda m: m.Clear(),
+        "DiscardUnknownFields": lambda m: m.DiscardUnknownFields(),
+        "IsInitialized": lambda m: m.IsInitialized(),
+        "ParseFromString": lambda m: m.ParseFromString(m.SerializeToString()),
+        "MergeFromString": lambda m: m.MergeFromString(m.SerializeToString()),
+    }
+    out = {}
+    for name, make in {"plan": plan, "references": references, "held": held}.items():
+        for label, operation in operations.items():
+            message = make()
+            result = _outcome(lambda: operation(message))
+            out[f"{name} {label}"] = (result, message.SerializeToString(deterministic=True))
+    return out
+
+
+def _copied_from(message):
+    copied = type(message)()
+    copied.CopyFrom(message)
+    return copied
+
+
+def test_operations_on_constructor_copies_are_upbs(upb):
+    # The operations of a message read its constructor copies as they read their objects: its
+    # bytes, size, text, equality, fields, presence, pickle, copies, merges, clears and parses.
+    mine, theirs = _operation_cases(ours), _operation_cases(upb)
+    for label in theirs:
+        assert mine[label] == theirs[label], label
+    # (upb's classes of the tests are of the names of the package's, so do not pickle.)
+    relation, expression, sql = _copy_sources(ours)
+    for message in (
+        ours("spark.connect.Plan")(root=relation),
+        ours("spark.connect.SQL")(named_arguments={"a": expression}, pos_arguments=[expression]),
+    ):
+        assert pickle.loads(pickle.dumps(message)) == message
+
+
+def _chain(cls, additions):
+    """The Expression of `additions` additions of 1 to a column of an origin, as PySpark's
+    `c + 1 + 1 ...` of a Column of its origin builds it: of 2 * additions + 3 levels below it."""
+    expression = cls("spark.connect.Expression")
+    current = expression(unresolved_attribute={"unparsed_identifier": "id"})
+    current.common.origin.python_origin.fragment = "col"
+    for _ in range(additions):
+        outer = expression()
+        outer.unresolved_function.function_name = "+"
+        outer.unresolved_function.arguments.add().CopyFrom(current)
+        outer.unresolved_function.arguments.add().literal.integer = 1
+        current = outer
+    return current
+
+
+def _merge_of(cls, deep, where):
+    """Where PySpark's merge of `deep` at `where` (an assignment, the condition of a clause or the
+    condition of the merge) fails, of its constructors (`_build_merge_action` and `merge()`):
+    the constructor that raises, and its error, or None."""
+    expression = cls("spark.connect.Expression")
+    column = expression(unresolved_attribute={"unparsed_identifier": "c"})
+    steps = []
+    try:
+        steps.append("Assignment")
+        value = deep if where == "assignment" else column
+        assignment = cls("spark.connect.MergeAction.Assignment")(key=column, value=value)
+        steps.append("MergeAction")
+        condition = deep if where == "clause condition" else None
+        action = cls("spark.connect.MergeAction")(
+            action_type=1, condition=condition, assignments=[assignment]
+        )
+        steps.append("Expression")
+        clause = expression(merge_action=action)
+        steps.append("MergeIntoTableCommand")
+        merge_condition = deep if where == "merge condition" else column
+        merge = cls("spark.connect.MergeIntoTableCommand")(
+            target_table_name="t", merge_condition=merge_condition, match_actions=[clause]
+        )
+        steps.append("Command")
+        command = cls("spark.connect.Command")(merge_into_table_command=merge)
+        plan = cls("spark.connect.Plan")()
+        plan.command.CopyFrom(command)
+        return None, len(plan.SerializeToString())
+    except Exception as e:  # noqa: BLE001
+        return steps[-1], type(e).__name__, str(e)
+
+
+def test_constructor_copies_fail_from_the_depths_of_upbs(upb):
+    # As upb's copies of a constructor's message by its bytes: a copy of a message of more than
+    # 100 levels below it fails, of upb's DecodeError, from the same depths as PySpark's merge, of
+    # its constructors (of a chain of additions, of an origin): an assignment of 47 additions, a
+    # clause condition of 48, the condition of the merge of 49; and copy.copy, as upb's of its
+    # bytes. The copies that pass are of the same bytes.
+    for additions in (46, 47, 48, 49, 100, 120):
+        deep = {"ours": _chain(ours, additions), "upb": _chain(upb, additions)}
+        for where in ("assignment", "clause condition", "merge condition"):
+            mine = _merge_of(ours, deep["ours"], where)
+            assert mine == _merge_of(upb, deep["upb"], where), (additions, where)
+            fails = additions >= {"assignment": 47, "clause condition": 48, "merge condition": 49}[where]
+            assert (mine[0] is not None) == fails, (additions, where, mine)
+            if fails:
+                assert mine[1] == "DecodeError", (additions, where, mine)
+                assert mine[2].endswith(": Exceeded upb_DecodeOptions_MaxDepth"), mine
+            if additions >= 100:
+                # The first constructor fails, of the copy of the expression.
+                assert mine[0] == {
+                    "assignment": "Assignment",
+                    "clause condition": "MergeAction",
+                    "merge condition": "MergeIntoTableCommand",
+                }[where], mine
+        assert _outcome(lambda: copy.copy(deep["ours"])) == _outcome(
+            lambda: copy.copy(deep["upb"])
+        ), additions
+
+
+# For a message type of the lockstep, fields of other types that take a message of it: a message
+# field, a repeated message field, the value of a map of messages.
+_COPY_HOLDERS = {
+    "spark.connect.Relation": [
+        ("spark.connect.Plan", "root", "single"),
+        ("spark.connect.WithRelations", "references", "repeated"),
+    ],
+    "spark.connect.Expression": [
+        ("spark.connect.Expression.Alias", "expr", "single"),
+        ("spark.connect.Expression.UnresolvedFunction", "arguments", "repeated"),
+        ("spark.connect.SQL", "named_arguments", "map"),
+    ],
+    "spark.connect.Command": [("spark.connect.Plan", "command", "single")],
+    "spark.connect.Expression.Literal": [
+        ("spark.connect.Expression", "literal", "single"),
+        ("spark.connect.Expression.Literal.Array", "elements", "repeated"),
+        ("spark.connect.SQL", "args", "map"),
+    ],
+    "spark.connect.MlParams": [("spark.connect.MlCommand.Fit", "params", "single")],
+}
+
+
+@pytest.mark.parametrize("seed", range(6))
+def test_random_operations_on_constructor_copies_agree_with_upb(upb, seed):
+    # Random operations on messages, on the copies that constructors make of them (of a message
+    # field, a repeated field and a map of messages, of copies of the copies too), and then on
+    # each again, of upb's and of the runtime's in step: the messages agree after each, so a
+    # change of a copy or of its source is of that message only, as upb's.
+    lockstep = _Lockstep(upb, seed)
+    rng = lockstep.rng
+    for full_name, holders in _COPY_HOLDERS.items():
+        a, b = upb(full_name)(), ours(full_name)()
+        log = []
+        for _ in range(15):
+            lockstep.step(a, b, log)
+        for holder, field, shape in holders:
+
+            def hold(cls, message):
+                value = {"single": message, "repeated": [message, message]}.get(
+                    shape, {"k": message, "j": message}
+                )
+                return cls(holder)(**{field: value})
+
+            def held(m, at):
+                value = getattr(m, field)
+                if shape == "single":
+                    return value
+                return value[at] if shape == "repeated" else value["kj"[at]]
+
+            pairs = [(full_name, a, b)]
+            holders_of = [(hold(upb, a), hold(ours, b))]
+            log.append(f"{holder}({field}=...)")
+            for _ in range(24):
+                kind = rng.random()
+                at = rng.randrange(2)
+                if kind < 0.35:
+                    lockstep.step(a, b, log)
+                elif kind < 0.85:
+                    wa, wb = rng.choice(holders_of)
+                    log.append(f"in {holder}.{field}[{at}]")
+                    lockstep.step(held(wa, at), held(wb, at), log)
+                else:
+                    # A copy of a copy: of the message that a holder holds, which is copied again.
+                    wa, wb = rng.choice(holders_of)
+                    log.append(f"{holder}({field}={holder}.{field}[{at}])")
+                    holders_of.append((hold(upb, held(wa, at)), hold(ours, held(wb, at))))
+                for name, x, y in pairs:
+                    lockstep.compare(name, x, y, log)
+                for wa, wb in holders_of:
+                    lockstep.compare(holder, wa, wb, log)
+
+
+def _error_cases(cls):
+    """What constructors raise of values of message fields beside the messages that they copy, in
+    the order of their keyword arguments, and what they build of well-known types of values of
+    other types (a Timestamp of a datetime, of `_internal_assign`)."""
+    relation = cls("spark.connect.Relation")(range={"end": 1})
+    expression = cls("spark.connect.Expression")(literal={"integer": 1})
+    timestamp = cls("google.protobuf.Timestamp")(seconds=5, nanos=6)
+
+    def init_again():
+        plan = cls("spark.connect.Plan")(root=relation)
+        plan.__init__(root={"range": {"start": 2}})
+        return plan
+
+    cases = {
+        "a message of another type": lambda: cls("spark.connect.Plan")(root=expression),
+        "an int": lambda: cls("spark.connect.Plan")(root=5),
+        "a list of a message of another type": lambda: cls("spark.connect.WithRelations")(
+            references=[relation, expression]
+        ),
+        "a list of an int": lambda: cls("spark.connect.WithRelations")(references=[relation, 5]),
+        "a message for a list": lambda: cls("spark.connect.WithRelations")(references=relation),
+        "a map value of another type": lambda: cls("spark.connect.SQL")(
+            named_arguments={"a": relation}
+        ),
+        "a field of no name after a copy": lambda: cls("spark.connect.Plan")(root=relation, nope=1),
+        "a copy after a field of no name": lambda: cls("spark.connect.Plan")(nope=1, root=relation),
+        "a bad enum then a copy": lambda: cls("spark.connect.MergeAction")(
+            action_type="NOPE", condition=expression
+        ),
+        "a copy then a bad enum": lambda: cls("spark.connect.MergeAction")(
+            condition=expression, action_type="NOPE"
+        ),
+        "a copy then a bad copy": lambda: cls("spark.connect.MergeAction")(
+            condition=expression, assignments=[expression]
+        ),
+        "a copy of a mapping of a copy": lambda: cls("spark.connect.Plan")(
+            root={"limit": {"input": relation, "limit": 2}}
+        ),
+        "a Timestamp of a datetime": lambda: cls("spark.connect.PipelineEvent")(
+            timestamp=datetime.datetime(2020, 1, 2, 3, 4, 5, 678000)
+        ),
+        "a Timestamp of a str": lambda: cls("spark.connect.PipelineEvent")(timestamp="x"),
+        "a Timestamp of a Timestamp": lambda: cls("spark.connect.PipelineEvent")(
+            timestamp=timestamp
+        ),
+        "a copy and a Timestamp of a datetime": lambda: cls("spark.connect.PipelineEvent")(
+            timestamp=datetime.datetime(2021, 1, 1), message="m"
+        ),
+        "the constructor of a message of a field set": init_again,
+    }
+    return {label: _outcome(case) for label, case in cases.items()}
+
+
+def test_constructors_raise_the_errors_of_upbs_beside_the_copies(upb):
+    # The values of the message fields of a constructor that are not messages of the runtime of
+    # the type take the paths that they took, of upb's errors, in the order of the keyword
+    # arguments, and of the Timestamp of a datetime of `_internal_assign`.
+    mine, theirs = _error_cases(ours), _error_cases(upb)
+    differ = {label for label in theirs if mine[label] != theirs[label]}
+    # (As before: upb's constructor merges a mapping into the message of a field that the message
+    # holds, where the runtime's sets the field anew; the copies change neither.)
+    assert differ <= {"the constructor of a message of a field set"}, {
+        label: (mine[label], theirs[label]) for label in differ
+    }
+
+
+def _shared_cases(cls):
+    """Copies of copies, which the runtime shares the native values of, changed one at a time:
+    each change is of one message only, as upb's."""
+    data = _relation_bytes(4, lambda level: True)
+    source = cls("spark.connect.Relation").FromString(data)
+    first = cls("spark.connect.Plan")(root=source)
+    second = copy.deepcopy(first)
+    third = cls("spark.connect.Plan")()
+    third.CopyFrom(second)
+    fourth = cls("spark.connect.Plan")(root=third.root)
+    out = [_snapshot(source, first, second, third, fourth)]
+    first.DiscardUnknownFields()
+    out.append(_snapshot(source, first, second, third, fourth))
+    second.root.limit.input.limit.limit = 9
+    out.append(_snapshot(source, first, second, third, fourth))
+    third.root.limit.input.DiscardUnknownFields()
+    out.append(_snapshot(source, first, second, third, fourth))
+    fourth.root.limit.input.limit.input.ClearField("limit")
+    out.append(_snapshot(source, first, second, third, fourth))
+    second.MergeFrom(fourth)
+    out.append(_snapshot(source, first, second, third, fourth))
+    return out
+
+
+def test_copies_of_copies_change_alone_as_upbs(upb):
+    # The copies of copies (a constructor's, CopyFrom's and copy.deepcopy's of a copy) are each
+    # their own: discarding the unknown fields of one of them, or changing it, changes no other.
+    assert _shared_cases(ours) == _shared_cases(upb)
+
+
+def test_copies_are_of_the_classes_registered_when_they_were_made():
+    # The objects that a copy of a constructor makes when its fields are read are of the class that
+    # the copy would have made them of when it was made, the class registered of their type then,
+    # even if a class of the type is registered since; a copy made after is of the new class.
+    script = """
+        import json
+
+        import pyspark.sql.connect.proto as proto
+        from pyspark import _pyspark
+        from pyspark.sql.connect.proto import _rust
+
+        relation = proto.Relation(limit={"limit": 1, "input": {"range": {"end": 2}}})
+        before = proto.Plan(root=relation)
+        listed = proto.WithRelations(references=[relation])
+        held = proto.SQL(named_arguments={"a": {"literal": {"integer": 1}}})
+        held_before = proto.Command(sql_command={"named_arguments": held.named_arguments})
+        other = type(
+            "Relation",
+            (_pyspark.ProtoMessage, _rust._MessageBase),
+            {"__slots__": (), "DESCRIPTOR": proto.Relation.DESCRIPTOR},
+        )
+        _pyspark._proto_register_classes({"spark.connect.Relation": other})
+        try:
+            after = proto.Plan(root=relation)
+            out = [
+                type(before.root) is proto.Relation,
+                type(before.root.limit.input) is proto.Relation,
+                type(listed.references[0]) is proto.Relation,
+                type(after.root) is other,
+                type(after.root.limit.input) is other,
+            ]
+        finally:
+            _pyspark._proto_register_classes({"spark.connect.Relation": proto.Relation})
+        again = proto.Plan(root=relation)
+        out += [type(again.root) is proto.Relation, type(after.root) is other]
+        print(json.dumps(out))
+        """
+    assert _run_script(script) == [True] * 7
+
+
+def test_deep_copies_build_compare_and_drop_on_a_small_stack():
+    # The copies of a message of tens of thousands of levels (copy.deepcopy, CopyFrom, a
+    # constructor of a copy of it), their comparisons, encodings, discards of unknown fields,
+    # reads of their fields to the bottom and their drops finish on a thread of a small stack, as
+    # those of its objects do; a constructor's copy of it fails at upb's limit.
+    script = textwrap.dedent(
+        """
+        import copy
+        import json
+        import threading
+
+        import pyspark.sql.connect.proto as proto
+        from pyspark import _pyspark
+        from pyspark.sql.connect.proto._rust import DecodeError
+        from tests.test_proto_rust_offline import _relation_bytes
+
+        LEVELS = 30000
+        results = []
+
+
+        def run():
+            data = _relation_bytes(LEVELS, lambda level: level % 7 == 0)
+            deep = _pyspark._proto_parse_deep(proto.Relation, data)
+            copied = copy.deepcopy(deep)
+            results.append(copied == deep and copied.SerializeToString() == data)
+            again = proto.Relation()
+            again.CopyFrom(copied)
+            results.append(again == copied and again.ByteSize() == len(data))
+            try:
+                proto.Plan(root=again)
+            except DecodeError:
+                results.append(True)
+            copied.DiscardUnknownFields()
+            kept = _relation_bytes(LEVELS, lambda level: level % 7 == 0 and 2 * level >= 64)
+            results.append(copied.SerializeToString() == kept and again.SerializeToString() == data)
+            walk = again
+            for _ in range(LEVELS):
+                walk = walk.limit.input
+            # (The Relation at the bottom, of the level 30000, holds no unknown field.)
+            results.append(walk.ByteSize() == 0 and not walk.HasField("limit"))
+            del deep, copied, again, walk
+
+
+        threading.stack_size(512 * 1024)
+        thread = threading.Thread(target=run)
+        thread.start()
+        thread.join()
+        print(json.dumps(results))
+        """
+    )
+    assert _run_script(script) == [True] * 5
+
+
+def _materialization_cases(cls):
+    """Operations on constructor copies that make the objects of their fields as they change them
+    (an unset child that a copy fills, a merge into an unset child, a parse into a copy, a second
+    constructor of a copy, a cleared field, a oneof, the methods of their containers and maps, a
+    merge of copies, `ListFields`, a Timestamp), and what upb's give: the bytes of the messages and
+    the identity of the objects that they give."""
+    relation = cls("spark.connect.Relation")(
+        read={"data_source": {"format": "csv", "paths": ["a"], "options": {"k": "v"}}}
+    )
+    relation.limit.limit = 3
+
+    def b(m):
+        return m.SerializeToString(deterministic=True)
+
+    def unset_child_copied_into():
+        plan = cls("spark.connect.Plan")()
+        root = plan.root
+        plan.CopyFrom(cls("spark.connect.Plan")(root=relation))
+        return [plan.root is root, b(plan), b(root), root.HasField("limit")]
+
+    def merge_into_unset_child():
+        plan = cls("spark.connect.Plan")()
+        root = plan.root
+        root.MergeFrom(cls("spark.connect.Plan")(root=relation).root)
+        return [plan.root is root, b(plan)]
+
+    def parse_into_copy():
+        plan = cls("spark.connect.Plan")(root=relation)
+        other = cls("spark.connect.Plan")(root={"limit": {"limit": 7, "input": {"range": {"end": 2}}}})
+        plan.MergeFromString(other.SerializeToString())
+        return [b(plan), plan.root.limit.input.range.end]
+
+    def constructor_again():
+        references = cls("spark.connect.WithRelations")(references=[relation])
+        references.__init__(references=[relation, {"range": {"end": 1}}])
+        first = references.references[0]
+        references.__init__(references=[relation])
+        return [len(references.references), references.references[0] is first, b(references)]
+
+    def map_constructor_again():
+        expression = cls("spark.connect.Expression")
+        sql = cls("spark.connect.SQL")(named_arguments={"a": expression(literal={"integer": 1})})
+        sql.__init__(named_arguments={"b": expression(literal={"integer": 2})})
+        return [sorted(sql.named_arguments), b(sql)]
+
+    def cleared():
+        plan = cls("spark.connect.Plan")(root=relation)
+        root = plan.root
+        plan.ClearField("root")
+        return [plan.HasField("root"), root.HasField("limit"), b(root), plan.root is root]
+
+    def oneof():
+        expression = cls("spark.connect.Expression")
+        function = expression(unresolved_function={"function_name": "f"})
+        other = expression(unresolved_function=function.unresolved_function)
+        other.literal.integer = 1
+        return [other.WhichOneof("expr_type"), other.HasField("unresolved_function"), b(other)]
+
+    def repeated():
+        references = cls("spark.connect.WithRelations")(references=[relation, relation])
+        container = references.references
+        container[0].limit.limit = 1
+        del container[1]
+        container.add().range.end = 5
+        again = cls("spark.connect.WithRelations")(references=list(references.references))
+        container.sort(key=lambda m: m.ByteSize())
+        return [b(references), b(again), references.references is container]
+
+    def maps():
+        expression = cls("spark.connect.Expression")
+        sql = cls("spark.connect.SQL")(
+            named_arguments={"a": expression(literal={"integer": 1}), "b": expression(literal={})}
+        )
+        held = sql.named_arguments
+        held["a"].literal.integer = 5
+        del held["b"]
+        held["c"].literal.boolean = True
+        again = cls("spark.connect.SQL")(named_arguments=sql.named_arguments)
+        return [b(sql), b(again), sorted(held), held is sql.named_arguments]
+
+    def merges():
+        target = cls("spark.connect.Plan")(root={"limit": {"input": {"range": {"end": 1}}}})
+        target.MergeFrom(cls("spark.connect.Plan")(root=relation))
+        references = cls("spark.connect.WithRelations")(references=[relation])
+        references.MergeFrom(cls("spark.connect.WithRelations")(references=[relation, relation]))
+        expression = cls("spark.connect.Expression")
+        sql = cls("spark.connect.SQL")(named_arguments={"a": expression(literal={"integer": 1})})
+        sql.MergeFrom(cls("spark.connect.SQL")(named_arguments={"b": expression(literal={})}))
+        return [b(target), b(references), b(sql)]
+
+    def listed():
+        plan = cls("spark.connect.Plan")(root=relation)
+        fields = plan.ListFields()
+        return [[f.name for f, _ in fields], fields[0][1] is plan.root, b(fields[0][1])]
+
+    def timestamps():
+        event = cls("spark.connect.PipelineEvent")(
+            timestamp=datetime.datetime(2020, 1, 2, 3, 4, 5, 678000)
+        )
+        again = cls("spark.connect.PipelineEvent")(timestamp=event.timestamp)
+        event.timestamp.seconds = 1
+        return [b(event), b(again), again.timestamp.ToJsonString()]
+
+    cases = [
+        unset_child_copied_into,
+        merge_into_unset_child,
+        parse_into_copy,
+        constructor_again,
+        map_constructor_again,
+        cleared,
+        oneof,
+        repeated,
+        maps,
+        merges,
+        listed,
+        timestamps,
+    ]
+    return {case.__name__: _outcome(case) for case in cases}
+
+
+def test_fields_of_constructor_copies_change_as_upbs(upb):
+    # The operations that change a field of a constructor copy, or read it to change it, make its
+    # object first and change that: of an unset child that CopyFrom fills, MergeFrom, a parse, a
+    # second constructor of the message, ClearField, a member of a oneof, the methods of the
+    # containers and the maps of a copy, and ListFields, as upb's change them.
+    assert _materialization_cases(ours) == _materialization_cases(upb)
+
+
+def _kind_copy_cases(cls):
+    """Constructor copies, CopyFrom and copy.deepcopy of the messages of the plugin's files of
+    proto2 and editions, of required fields, groups, delimited messages, closed enums and maps of
+    messages, and what each reads of them: the required fields that they lack, their bytes, their
+    text and their JSON."""
+    from google.protobuf import json_format
+
+    legacy, required = cls("thirdparty.legacy.Legacy"), cls("thirdparty.legacy.Required")
+    featured, strict = cls("thirdparty.editions.Featured"), cls("thirdparty.editions.Strict")
+
+    def source():
+        message = legacy(id="x", colors=[1, 2], packed_colors=[3])
+        message.required.next.next.SetInParent()
+        message.many_required.add(a=1)
+        message.many_required.add()
+        message.item.x, message.item.label = 7, "l"
+        message.entry.add(key=1).value.sql.query = "q"
+        message.by_name["k"].count = 3
+        message.defaults.SetInParent()
+        message.tint = 2
+        return message
+
+    def copied():
+        s = source()
+        return legacy(
+            id="y",
+            required=s.required,
+            many_required=list(s.many_required),
+            item=s.item,
+            entry=list(s.entry),
+            by_name={"k": s.by_name["k"], "j": s.defaults},
+            defaults=s.defaults,
+        )
+
+    def deep():
+        return copy.deepcopy(source())
+
+    def copied_from():
+        target = legacy()
+        target.CopyFrom(source())
+        return target
+
+    def editions():
+        inner = featured(required="r", packed=[1, 2], expanded=[3, 4], implicit=0, explicit=0)
+        inner.delimited.value = 5
+        inner.delimited_values.add(value=6)
+        return featured(
+            required="s",
+            delimited=inner.delimited,
+            delimited_values=list(inner.delimited_values),
+        ), strict(inner=inner.delimited), strict(inner=featured.Inner())
+
+    out = []
+    for make in (copied, deep, copied_from):
+        out += [
+            make().IsInitialized(),
+            make().FindInitializationErrors(),
+            _outcome(lambda: make().SerializeToString(deterministic=True)),
+            make().SerializePartialToString(deterministic=True),
+            _outcome(lambda: make().ByteSize()),
+            str(make()),
+            # (Of the order of its keys, as a map iterates them in another order of upb's.)
+            json.loads(json_format.MessageToJson(make())),
+            make() == legacy.FromString(make().SerializePartialToString()),
+        ]
+    for message in editions():
+        out += [
+            message.FindInitializationErrors(),
+            message.SerializePartialToString(deterministic=True),
+            str(message),
+            json.loads(json_format.MessageToJson(message)),
+        ]
+    nested = required(a=1, next=required(next=required()))
+    out += [
+        nested.FindInitializationErrors(),
+        _outcome(lambda: nested.SerializeToString(deterministic=True)),
+    ]
+    return out
+
+
+def test_copies_of_messages_of_proto2_and_editions_are_upbs(kinds):
+    # The copies of messages of proto2 and editions are read as upb's: the required fields that
+    # they and their messages lack (also of LEGACY_REQUIRED), the EncodeError of their bytes, their
+    # groups and delimited messages, their closed enums and maps of messages, their text and JSON.
+    *_, upb = kinds
+    assert _kind_copy_cases(ours) == _kind_copy_cases(upb)
