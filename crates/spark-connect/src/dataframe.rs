@@ -986,7 +986,7 @@ impl DataFrame {
     pub fn union_by_name_unbuildable(&self, other: &DataFrame, error: SparkError) -> DataFrame {
         let plan = LogicalPlan::Unbuildable {
             input: Arc::new(self.union_by_name_plan(other, false)).into(),
-            error,
+            error: Box::new(error),
         };
         self.with_merged_schema(other, plan)
     }
@@ -1197,7 +1197,7 @@ impl DataFrame {
         let schema = func.python_udf.output_type.clone();
         let plan = LogicalPlan::MapPartitions {
             input: self.shared_plan(),
-            func,
+            func: Box::new(func),
             is_barrier,
             profile_id,
             profile_id_reader,
@@ -3623,7 +3623,7 @@ impl DataFrame {
     pub fn unbuildable(&self, error: SparkError) -> DataFrame {
         let plan = LogicalPlan::Unbuildable {
             input: self.shared_plan(),
-            error,
+            error: Box::new(error),
         };
         DataFrame::new(self.session.clone(), plan)
     }
@@ -3637,7 +3637,7 @@ impl DataFrame {
     pub fn unbuildable_with_cached_schema(&self, error: SparkError) -> DataFrame {
         let plan = LogicalPlan::Unbuildable {
             input: self.shared_plan(),
-            error,
+            error: Box::new(error),
         };
         self.with_cached_schema(plan)
     }

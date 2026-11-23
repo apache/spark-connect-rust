@@ -140,14 +140,14 @@ fn repartition_by_range_without_a_count_sends_none() {
 #[test]
 fn read_datasource_to_proto() {
     let p = LogicalPlan::Read {
-        read_type: ReadType::DataSource {
+        read_type: Box::new(ReadType::DataSource {
             format: Some("parquet".to_string()),
             schema: Some("a INT, b STRING".to_string()),
             options: HashMap::new(),
             paths: vec!["/tmp/data".to_string()],
             predicates: vec![],
             source_name: Some("src".to_string()),
-        },
+        }),
         is_streaming: false,
     };
     assert!(p.to_proto().rel_type.is_some());

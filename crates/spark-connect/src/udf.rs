@@ -1329,7 +1329,7 @@ mod tests {
                 function_name: "t".to_string(),
                 deterministic: false,
                 arguments: vec![Expression::column("x")],
-                return_type,
+                return_type: return_type.map(Box::new),
                 eval_type: eval_type::SQL_TABLE_UDF,
                 command: Vec::new(),
                 python_ver: "3.11".to_string(),
@@ -1457,7 +1457,7 @@ mod tests {
         });
         let mapped = Arc::new(LogicalPlan::MapPartitions {
             input: Arc::clone(&input).into(),
-            func: udf_of("map"),
+            func: Box::new(udf_of("map")),
             is_barrier: false,
             profile_id: None,
             profile_id_reader: Some(CommandPickler::new("profile", |_| Ok(Vec::new()))),

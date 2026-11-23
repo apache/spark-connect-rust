@@ -359,7 +359,7 @@ impl GroupedData {
         let plan = LogicalPlan::GroupMap {
             input: self.dataframe.shared_plan(),
             grouping_expressions: self.grouping_expressions(),
-            func,
+            func: Box::new(func),
             sorting_expressions: vec![],
             initial_input: None,
             initial_grouping_expressions: vec![],
@@ -410,7 +410,7 @@ impl GroupedData {
         let plan = LogicalPlan::ApplyInPandasWithState {
             input: self.dataframe.shared_plan(),
             grouping_expressions: self.grouping_expressions(),
-            func,
+            func: Box::new(func),
             output_schema: output_schema.to_string(),
             state_schema: state_schema.to_string(),
             output_mode: output_mode.to_string(),
@@ -481,7 +481,7 @@ impl GroupedData {
         let plan = LogicalPlan::GroupMap {
             input: self.dataframe.shared_plan(),
             grouping_expressions: self.grouping_expressions(),
-            func,
+            func: Box::new(func),
             sorting_expressions: vec![],
             initial_input,
             initial_grouping_expressions,
@@ -489,11 +489,11 @@ impl GroupedData {
             output_mode: Some(output_mode.to_string()),
             timeout_conf: None,
             state_schema: None,
-            transform_with_state_info: Some(crate::plan::TransformWithStateInfo {
+            transform_with_state_info: Some(Box::new(crate::plan::TransformWithStateInfo {
                 time_mode: time_mode.to_string(),
                 event_time_column_name: event_time_column_name.map(|s| s.to_string()),
                 output_schema,
-            }),
+            })),
         };
         DataFrame::new(self.dataframe.session.clone(), plan)
     }
@@ -1078,7 +1078,7 @@ impl CoGroupedData {
             input_grouping_expressions: self.left.grouping_expressions(),
             other: self.right.dataframe.shared_plan(),
             other_grouping_expressions: self.right.grouping_expressions(),
-            func,
+            func: Box::new(func),
         };
         DataFrame::new_with_schema(self.left.dataframe.session.clone(), plan, Some(schema))
     }

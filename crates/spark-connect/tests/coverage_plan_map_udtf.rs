@@ -39,7 +39,7 @@ fn udf() -> CommonInlineUserDefinedFunctionExpression {
 fn map_partitions_to_proto() {
     let p = LogicalPlan::MapPartitions {
         input: Arc::new(base()).into(),
-        func: udf(),
+        func: Box::new(udf()),
         is_barrier: true,
         profile_id: None,
         profile_id_reader: None,
@@ -56,7 +56,7 @@ fn map_partitions_reads_the_id_of_its_profile_reader_when_it_is_built() {
     let sent_id = |reader: spark_connect::udf::CommandPickler| {
         let p = LogicalPlan::MapPartitions {
             input: Arc::new(base()).into(),
-            func: udf(),
+            func: Box::new(udf()),
             is_barrier: false,
             profile_id: Some(1),
             profile_id_reader: Some(reader),
@@ -80,7 +80,7 @@ fn group_map_to_proto_plain_and_stateful() {
     let plain = LogicalPlan::GroupMap {
         input: Arc::new(base()).into(),
         grouping_expressions: vec![col_expr("g")],
-        func: udf(),
+        func: Box::new(udf()),
         sorting_expressions: vec![],
         initial_input: None,
         initial_grouping_expressions: vec![],
@@ -97,19 +97,19 @@ fn group_map_to_proto_plain_and_stateful() {
     let stateful = LogicalPlan::GroupMap {
         input: Arc::new(base()).into(),
         grouping_expressions: vec![col_expr("g")],
-        func: udf(),
+        func: Box::new(udf()),
         sorting_expressions: vec![col_expr("s")],
         initial_input: Some(Arc::new(base()).into()),
         initial_grouping_expressions: vec![col_expr("ig")],
         is_map_groups_with_state: Some(true),
         output_mode: Some("append".to_string()),
         timeout_conf: Some("NoTimeout".to_string()),
-        state_schema: Some(DataType::Struct { fields: vec![] }),
-        transform_with_state_info: Some(TransformWithStateInfo {
+        state_schema: Some(Box::new(DataType::Struct { fields: vec![] })),
+        transform_with_state_info: Some(Box::new(TransformWithStateInfo {
             time_mode: "None".to_string(),
             event_time_column_name: Some("ts".to_string()),
             output_schema: Some(DataType::Struct { fields: vec![] }),
-        }),
+        })),
     };
     assert!(stateful.to_proto().rel_type.is_some());
 }
@@ -121,7 +121,7 @@ fn co_group_map_to_proto() {
         input_grouping_expressions: vec![col_expr("a")],
         other: Arc::new(base()).into(),
         other_grouping_expressions: vec![col_expr("b")],
-        func: udf(),
+        func: Box::new(udf()),
     };
     assert!(p.to_proto().rel_type.is_some());
 }
@@ -146,7 +146,7 @@ fn common_inline_udtf_to_proto_with_and_without_return_type() {
         function_name: "my_udtf".to_string(),
         deterministic: true,
         arguments: vec![col_expr("x")],
-        return_type: Some(DataType::Struct { fields: vec![] }),
+        return_type: Some(Box::new(DataType::Struct { fields: vec![] })),
         eval_type: 200,
         command: vec![1, 2, 3],
         python_ver: "3.11".to_string(),
@@ -191,7 +191,7 @@ fn common_inline_udtf_preserves_return_schema() {
             function_name: "echo".to_string(),
             deterministic: false,
             arguments: vec![col_expr("x")],
-            return_type,
+            return_type: return_type.map(Box::new),
             eval_type: 300,
             command: vec![1, 2, 3],
             python_ver: "3.12".to_string(),

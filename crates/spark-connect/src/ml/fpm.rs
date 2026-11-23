@@ -211,7 +211,7 @@ impl PrefixSpan {
         Ok(DataFrame::new(
             dataset.session.clone(),
             LogicalPlan::MlTransform {
-                ml_relation: relation,
+                ml_relation: Box::new(relation),
                 input: dataset.plan.clone(),
                 owner: None,
             },
