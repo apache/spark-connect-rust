@@ -894,6 +894,158 @@ fn a_call_that_the_end_of_its_connection_fails_is_a_removed_stream_in_grpcio_s_d
     );
 }
 
+/// A connection whose reads wait, and whose writes and flushes fail of `errno`, as of a connection
+/// that its peer closed or reset.
+struct FailingWrites(i32);
+
+impl AsyncRead for FailingWrites {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+        _: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Poll::Pending
+    }
+}
+
+impl AsyncWrite for FailingWrites {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+        _: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Poll::Ready(Err(std::io::Error::from_raw_os_error(self.0)))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Poll::Ready(Err(std::io::Error::from_raw_os_error(self.0)))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
+#[tokio::test]
+async fn a_failed_write_of_a_connection_is_a_removed_stream_in_grpcio_s_dialect() {
+    // As gRPC's core, whose call that a failed write of its connection ends is `Stream removed
+    // (sendmsg: Broken pipe (32))`, or of `Connection reset by peer (104)` (30 calls of grpcio 1.85.1
+    // to a server that closes each connection once it sent its settings: 9 and 1 of them, the
+    // others of a read): the writes and the flushes of the connection that hyper is given fail of
+    // grpcio's text of the error in its dialect, of its kind, where tonic's message of them was
+    // `transport error`, and of the error of the system in the Rust client's.
+    let removed = |error: std::io::Error| {
+        stream_removed_in(
+            &tonic::Status::from_error(Box::new(Transport(Box::new(error)))),
+            true,
+        )
+    };
+    for (errno, text) in [
+        (libc::EPIPE, "sendmsg: Broken pipe (32)"),
+        (libc::ECONNRESET, "sendmsg: Connection reset by peer (104)"),
+    ] {
+        for grpcio in [true, false] {
+            let ready = Ready {
+                io: Box::new(FailingWrites(errno)),
+                replay: EMPTY_SETTINGS.to_vec(),
+            };
+            let mut handover = Handover::new(ready).in_the_dialect(grpcio);
+            // The preface, which the connector sent, is not written.
+            handover.write_all(PREFACE).await.unwrap();
+            let system = std::io::Error::from_raw_os_error(errno).to_string();
+            let expected = if grpcio { text } else { system.as_str() };
+            // hyper's settings, a frame after them, and a flush.
+            let settings = handover.write_all(&EMPTY_SETTINGS).await.unwrap_err();
+            assert_eq!(settings.to_string(), expected);
+            let frames = [std::io::IoSlice::new(&EMPTY_SETTINGS)];
+            let vectored = handover.write_vectored(&frames).await.unwrap_err();
+            assert_eq!(vectored.to_string(), expected);
+            handover.settings_written = None;
+            let frame = handover.write_all(&EMPTY_SETTINGS).await.unwrap_err();
+            assert_eq!(frame.to_string(), expected);
+            let vectored = handover.write_vectored(&frames).await.unwrap_err();
+            assert_eq!(vectored.to_string(), expected);
+            let flush = handover.flush().await.unwrap_err();
+            assert_eq!(flush.to_string(), expected);
+            assert_eq!(
+                flush.kind(),
+                std::io::Error::from_raw_os_error(errno).kind()
+            );
+            assert_eq!(
+                removed(flush),
+                grpcio.then(|| format!("Stream removed ({text})"))
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn the_end_of_a_connection_of_no_cause_that_h2_or_hyper_kept_is_a_closed_socket() {
+    // As grpcio, whose call that the end of its connection fails is `Stream removed (...)` of the
+    // socket call that saw it, of the timing (30 calls of grpcio 1.85.1 to a server that closes
+    // each connection once it sent its settings: `recvmsg:Connection reset by peer (104)` 16
+    // times, `sendmsg: Broken pipe (32)` 9, `Socket closed` 4, `sendmsg: Connection reset by peer
+    // (104)` once): the end that h2 gives the streams still open as hyper drops the connection, and
+    // a request that hyper did not send as its connection closed, of which neither keeps the
+    // cause, are `Stream removed (Socket closed)` in the dialect of grpcio, still of `UNAVAILABLE`,
+    // where their details were tonic's `transport error` and hyper's `operation was canceled`.
+    let ended =
+        |error: std::io::Error| tonic::Status::from_error(Box::new(Transport(Box::new(error))));
+    for text in H2_ENDS_OF_A_CONNECTION {
+        let status = ended(std::io::Error::new(std::io::ErrorKind::BrokenPipe, text));
+        assert_eq!(
+            stream_removed_in(&status, true).as_deref(),
+            Some("Stream removed (Socket closed)")
+        );
+        assert_eq!(stream_removed_in(&status, false), None);
+        // Of h2's error of that kind only.
+        assert_eq!(
+            stream_removed_in(&ended(std::io::Error::other(text)), true),
+            None
+        );
+    }
+    // A request queued on a connection whose task ends before it sent it.
+    let (io, _server) = tokio::io::duplex(1 << 16);
+    let (mut sender, connection) = hyper::client::conn::http2::handshake(
+        hyper_util::rt::TokioExecutor::new(),
+        TokioIo::new(io),
+    )
+    .await
+    .unwrap();
+    let response = sender.send_request(tonic::codegen::http::Request::new(
+        tonic::body::Body::empty(),
+    ));
+    drop(connection);
+    let error = response.await.expect_err("the connection closed");
+    assert!(error.is_canceled(), "{error:?}");
+    let unsent = tonic::Status::from_error(Box::new(error));
+    assert_eq!(unsent.code(), tonic::Code::Cancelled);
+    assert_eq!(
+        crate::retries::grpc_python_code(&unsent),
+        tonic::Code::Unavailable
+    );
+    assert_eq!(
+        stream_removed_in(&unsent, true).as_deref(),
+        Some("Stream removed (Socket closed)")
+    );
+    assert_eq!(stream_removed_in(&unsent, false), None);
+    // A cancellation that the client makes keeps its code and its text: of the close of its
+    // channel (a session's `stop()`), of a stream of it, of its deadline, and one of the server.
+    for status in [
+        tonic::Status::cancelled(crate::client::CLOSED_CHANNEL),
+        tonic::Status::cancelled(crate::client::STREAM_OF_A_CLOSED_CHANNEL),
+        tonic::Status::from_error(Box::new(tonic::TimeoutExpired(()))),
+        tonic::Status::cancelled("operation was canceled"),
+    ] {
+        assert_eq!(stream_removed_in(&status, true), None, "{status:?}");
+        assert_eq!(
+            crate::retries::grpc_python_code(&status),
+            tonic::Code::Cancelled,
+            "{status:?}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn a_channel_that_failed_fails_its_calls_at_once_and_connects_again_in_the_background() {
     // As gRPC's channel in TRANSIENT_FAILURE: the calls after a failure fail at once with its

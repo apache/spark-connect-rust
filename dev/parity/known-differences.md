@@ -871,7 +871,8 @@ requests of the unpickled object pickle as it is then. This case still differs:
   that does not resolve (`errors resolving ...: [field:hostname lookup error:address lookup failed
   for ...: Domain name not found]`), a call that the end of its connection fails (`Stream
   removed (Socket closed)`, `Stream removed (recvmsg:Connection reset by peer (104))`, `Stream
-  removed (ping timeout)`), and a call whose stream the server resets, of the code of its reason as
+  removed (sendmsg: Broken pipe (32))` of a write of it that fails, `Stream removed (ping
+  timeout)`), and a call whose stream the server resets, of the code of its reason as
   gRPC's core gives it (`INTERNAL`, `Stream removed (RST_STREAM (Received RST_STREAM with error code
   1))`). What stays different: the TLS handshake is rustls's, so its failure has
   BoringSSL's text of the same cause, a certificate that fails its verification, an alert of the
@@ -899,14 +900,21 @@ requests of the unpickled object pickle as it is then. This case still differs:
   system's resolver, which gives the addresses of both families of the file, where c-ares, grpcio's,
   gives those of the family of its first line; the keepalive pings are hyper's, at the time and the
   timeout of the parameters, where gRPC's core paces its pings itself, so a connection that stops
-  answering does not end at the same time; a TLS channel trusts the system's store too, besides the
-  bundle of grpcio, where grpcio trusts its bundle alone, so that a CA that the administrator of the
-  system installs is trusted (see `docs/configuration.md`); of a roots file without a certificate,
-  the client writes to stderr two lines of each attempt, `Handshaker factory creation failed with
-  TSI_INVALID_ARGUMENT` and `Update handshaker factory failed.`, where gRPC's core writes those and
-  the errors of BoringSSL's load of the roots, of each channel that it makes; and of a
-  `GRPC_VERBOSITY` of `INFO` or `DEBUG`, the client writes to stderr the lines that it writes by
-  default, without the other lines of gRPC's core, whose code it has not.
+  answering does not end at the same time; a call that the end of its connection fails is `Stream
+  removed (Socket closed)`, `(recvmsg:...)` or `(sendmsg:...)` of the socket call that saw the
+  failure, as grpcio's, whose own choice depends on the timing (of 30 calls of grpcio 1.85.1 to a
+  server that closes each connection once it sent its settings, 16 `recvmsg:Connection reset by peer
+  (104)`, 9 `sendmsg: Broken pipe (32)`, 4 `Socket closed`, 1 `sendmsg: Connection reset by peer
+  (104)`), but `Socket closed` where h2 dropped the cause, of the streams that it ends as hyper
+  drops the connection after its first failure and of a request that hyper did not send as the
+  connection closed (inherent: h2 0.4 keeps no cause there); a TLS channel trusts the system's store
+  too, besides the bundle of grpcio, where grpcio trusts its bundle alone, so that a CA that the
+  administrator of the system installs is trusted (see `docs/configuration.md`); of a roots file
+  without a certificate, the client writes to stderr two lines of each attempt, `Handshaker factory
+  creation failed with TSI_INVALID_ARGUMENT` and `Update handshaker factory failed.`, where gRPC's
+  core writes those and the errors of BoringSSL's load of the roots, of each channel that it makes;
+  and of a `GRPC_VERBOSITY` of `INFO` or `DEBUG`, the client writes to stderr the lines that it
+  writes by default, without the other lines of gRPC's core, whose code it has not.
 - **Messages over the size limit of a call** (intentional; the transport is native). A response or a
   request over 128 MiB fails its call with grpcio's `RESOURCE_EXHAUSTED` and the details of gRPC's
   core (see `docs/compatibility.md`). What stays different: tonic checks the length of a response

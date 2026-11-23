@@ -4531,7 +4531,8 @@ connect to all addresses; last error: UNKNOWN: ipv4:127.0.0.1:1: Failed to conne
 Connection refused`, of the last error of its addresses, such as a TLS handshake of BoringSSL's
 error or a proxy that refuses the tunnel (`HTTP proxy returned response code 403`), of a name that
 does not resolve, `errors resolving ...`, and of a call that the end of its connection fails,
-`Stream removed (Socket closed)`. The errors of `copyFromLocalToFs` and `cloneSession`, which
+`Stream removed (Socket closed)`, or `Stream removed (sendmsg: Broken pipe (32))` of a write of it
+that fails. The errors of `copyFromLocalToFs` and `cloneSession`, which
 PySpark leaves to grpc, are grpcio's `RpcError`, as there (see
 [SparkSession.client](#sparksessionclient)).
 

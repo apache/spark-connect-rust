@@ -2263,8 +2263,8 @@ fn random_fraction() -> f64 {
 /// that the connector read are given first, and the server's acknowledgment of the connector's
 /// own settings, its first SETTINGS frame with the ACK flag, is dropped, as hyper sent no
 /// settings that it acknowledges. The end of the connection, or an error of its reads, is an
-/// I/O error of grpcio's text of it, which the errors of the calls that it ends give (see
-/// [`stream_removed_in`]).
+/// I/O error of grpcio's text of it, and so is an error of its writes in the dialect of grpcio,
+/// which the errors of the calls that it ends give (see [`stream_removed_in`]).
 ///
 /// hyper's settings, the frame that it writes after its preface, advertise the size of a header
 /// list of grpcio's channel, gRPC's hard limit of the metadata of a call, in the place of hyper's
@@ -2291,6 +2291,9 @@ pub(crate) struct Handover {
     end: Option<subchannel::ConnectionEnd>,
     /// The frames that hyper is given, of which a GOAWAY is looked for.
     frames: FrameWatch,
+    /// Whether the connection is of the dialect of grpcio, whose failed writes are of grpcio's
+    /// text (see [`Handover::of_a_write`]).
+    grpcio: bool,
 }
 
 /// Where the bytes that hyper is given are in the frames of the server (RFC 9113, section 4.1),
@@ -2344,6 +2347,7 @@ impl Handover {
             settings_written: Some(Vec::new()),
             end: None,
             frames: FrameWatch::default(),
+            grpcio: false,
         };
         handover.scan();
         handover
@@ -2353,6 +2357,26 @@ impl Handover {
     fn ending(mut self, end: subchannel::ConnectionEnd) -> Self {
         self.end = Some(end);
         self
+    }
+
+    /// This connection, in the dialect of grpcio if `grpcio` (see [`Handover::of_a_write`]).
+    fn in_the_dialect(mut self, grpcio: bool) -> Self {
+        self.grpcio = grpcio;
+        self
+    }
+
+    /// `written`, the outcome of a write of the connection, whose error is of grpcio's text of it
+    /// in its dialect (`sendmsg: Broken pipe (32)`), of its kind, as gRPC's core gives the calls
+    /// that a failed write of their connection ends (`Stream removed (sendmsg: Broken pipe (32))`,
+    /// see [`stream_removed_in`]); a Rust client's keeps the error of the system.
+    fn of_a_write<T>(&self, written: Poll<std::io::Result<T>>) -> Poll<std::io::Result<T>> {
+        match written {
+            Poll::Ready(Err(error)) if self.grpcio => Poll::Ready(Err(std::io::Error::new(
+                error.kind(),
+                IoFailure::of(&error).sendmsg(),
+            ))),
+            written => written,
+        }
     }
 
     /// Follow the bytes of the server that hyper is given, `bytes`, of `frames`: a GOAWAY ends the
@@ -2554,10 +2578,12 @@ impl AsyncWrite for Handover {
             this.preface_left -= count;
             return Poll::Ready(Ok(count));
         }
-        if this.settings_written.is_some() {
-            return this.poll_write_settings(cx, buf);
-        }
-        Pin::new(&mut this.io).poll_write(cx, buf)
+        let written = if this.settings_written.is_some() {
+            this.poll_write_settings(cx, buf)
+        } else {
+            Pin::new(&mut this.io).poll_write(cx, buf)
+        };
+        this.of_a_write(written)
     }
 
     fn poll_write_vectored(
@@ -2572,7 +2598,8 @@ impl AsyncWrite for Handover {
                 None => Poll::Ready(Ok(0)),
             };
         }
-        Pin::new(&mut self.io).poll_write_vectored(cx, bufs)
+        let written = Pin::new(&mut self.io).poll_write_vectored(cx, bufs);
+        self.of_a_write(written)
     }
 
     fn is_write_vectored(&self) -> bool {
@@ -2580,7 +2607,8 @@ impl AsyncWrite for Handover {
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.io).poll_flush(cx)
+        let flushed = Pin::new(&mut self.io).poll_flush(cx);
+        self.of_a_write(flushed)
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
@@ -2590,10 +2618,15 @@ impl AsyncWrite for Handover {
 
 /// The details of a call that the end of its connection or of its stream failed, as grpcio gives
 /// them in its dialect, `grpcio`: `Stream removed (Socket closed)`, `Stream removed
-/// (recvmsg:Connection reset by peer (104))`, `Stream removed (ping timeout)` of a keepalive that
-/// timed out, and `Stream removed (RST_STREAM (Received RST_STREAM with error code 1))` of a
-/// stream that the server reset, of the code of its reason. None for any other status, or out of
-/// the dialect of grpcio.
+/// (recvmsg:Connection reset by peer (104))`, `Stream removed (sendmsg: Broken pipe (32))` of a
+/// write of the connection that failed, `Stream removed (ping timeout)` of a keepalive that timed
+/// out, and `Stream removed (RST_STREAM (Received RST_STREAM with error code 1))` of a stream that
+/// the server reset, of the code of its reason. The end of a connection of which h2 or hyper kept
+/// no cause is `Stream removed (Socket closed)`: of the streams that h2 ends as hyper drops the
+/// connection after its first failure (see [`H2_ENDS_OF_A_CONNECTION`]), and of a request that
+/// hyper did not send as its connection closed, where grpcio gives the text of the socket call
+/// that saw the failure, of a read, a write or the end. None for any other status, a cancellation
+/// of the client too, or out of the dialect of grpcio.
 pub(crate) fn stream_removed_in(status: &tonic::Status, grpcio: bool) -> Option<String> {
     if !grpcio {
         return None;
@@ -2604,6 +2637,13 @@ pub(crate) fn stream_removed_in(status: &tonic::Status, grpcio: bool) -> Option<
         if let Some(error) = error.downcast_ref::<hyper::Error>() {
             if error.is_timeout() {
                 return Some("Stream removed (ping timeout)".to_string());
+            }
+            // A request that hyper did not send as its connection closed (of its dispatch, which
+            // keeps no cause), not one that the client cancels, which hyper does not.
+            let closed = std::error::Error::source(error)
+                .is_some_and(|cause| cause.to_string() == HYPER_CONNECTION_CLOSED);
+            if error.is_canceled() && closed {
+                return Some(format!("Stream removed ({SOCKET_CLOSED})"));
             }
         }
         if let Some(error) = error.downcast_ref::<h2::Error>() {
@@ -2621,10 +2661,28 @@ pub(crate) fn stream_removed_in(status: &tonic::Status, grpcio: bool) -> Option<
             .downcast_ref::<std::io::Error>()
             .or_else(|| error.downcast_ref::<h2::Error>()?.get_io())?;
         let text = io.to_string();
-        (text == SOCKET_CLOSED || text.starts_with("recvmsg:"))
+        if io.kind() == std::io::ErrorKind::BrokenPipe
+            && H2_ENDS_OF_A_CONNECTION.contains(&text.as_str())
+        {
+            return Some(format!("Stream removed ({SOCKET_CLOSED})"));
+        }
+        (text == SOCKET_CLOSED || text.starts_with("recvmsg:") || text.starts_with("sendmsg:"))
             .then(|| format!("Stream removed ({text})"))
     })
 }
+
+/// The errors of h2 (0.4) of the end of a connection of no cause that it keeps, of kind
+/// `BrokenPipe` (`Streams::recv_eof`), which it gives the connection and the streams still open as
+/// hyper drops the connection after its first failure, of the read, the write or the end that it
+/// saw (see [`stream_removed_in`]).
+const H2_ENDS_OF_A_CONNECTION: [&str; 2] = [
+    "connection closed because of a broken pipe",
+    "stream closed because of a broken pipe",
+];
+
+/// The cause of the error of hyper of a request that its dispatch did not send as its connection
+/// closed, which it cancels (see [`stream_removed_in`]).
+const HYPER_CONNECTION_CLOSED: &str = "connection closed";
 
 #[cfg(test)]
 mod tests;

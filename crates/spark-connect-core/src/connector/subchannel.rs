@@ -228,7 +228,10 @@ impl Subchannel {
             // The worker of the channel of tonic runs on the runtime of the subchannel.
             let channel = {
                 let _runtime = runtime.enter();
-                endpoint.connect_with_connector_lazy(SubchannelConnector(weak.clone()))
+                endpoint.connect_with_connector_lazy(SubchannelConnector {
+                    subchannel: weak.clone(),
+                    grpcio: target.grpcio,
+                })
             };
             Subchannel {
                 address,
@@ -524,8 +527,8 @@ struct Awaited {
     connections: u64,
 }
 
-/// The connection of the subchannel of `weak`, of its number, for its channel of tonic, which asks
-/// for one at its first call and once the one that it had ended (as at a GOAWAY, or of a call that
+/// The connection of the subchannel of `weak`, of its number, for its channel of tonic of the
+/// dialect of grpcio if `grpcio`, which asks for one at its first call and once the one that it had ended (as at a GOAWAY, or of a call that
 /// tonic sent as it ended): the connection that the subchannel holds, if it is still open; else the
 /// connection of one attempt, which the connector makes, or waits for while one is in progress, as
 /// hyper's even if it ended since, so that the call fails of its end, or the failure of that
@@ -534,11 +537,10 @@ struct Awaited {
 /// attempt, in transient failure too, as gRPC's calls fail once the channel's attempts failed. The
 /// connector holds the subchannel only while it reads its state, so that a subchannel that no
 /// channel holds any more is freed as its connector waits, which then fails.
-async fn connection(weak: Weak<Subchannel>) -> Result<(Ready, u64), ConnectError> {
+async fn connection(weak: Weak<Subchannel>, grpcio: bool) -> Result<(Ready, u64), ConnectError> {
     let Some(subchannel) = weak.upgrade() else {
-        return Err(connection_closed(grpcio_dialect()));
+        return Err(connection_closed(grpcio));
     };
-    let grpcio = subchannel.target.grpcio;
     let wake = Arc::new(tokio::sync::Notify::new());
     subchannel.watch(&wake);
     let _watching = Watching {
@@ -604,11 +606,14 @@ impl Subchannel {
     pub(super) async fn hand_over(self: &Arc<Self>) -> Result<Handover, String> {
         use tonic::codegen::Service;
         let uri = tonic::codegen::http::Uri::from_static("http://localhost");
-        SubchannelConnector(Arc::downgrade(self))
-            .call(uri)
-            .await
-            .map(TokioIo::into_inner)
-            .map_err(|error| error.to_string())
+        SubchannelConnector {
+            subchannel: Arc::downgrade(self),
+            grpcio: self.target.grpcio,
+        }
+        .call(uri)
+        .await
+        .map(TokioIo::into_inner)
+        .map_err(|error| error.to_string())
     }
 
     /// How many failures and connections it had, of the tests.
@@ -649,9 +654,13 @@ impl Drop for ConnectionEnd {
 const SUBCHANNEL_GONE_GRPCIO: &str = SOCKET_CLOSED;
 const SUBCHANNEL_GONE_RUST: &str = "the connection was closed";
 
-/// The connector of the channel of tonic of a subchannel (see [`connection`]).
+/// The connector of the channel of tonic of a subchannel (see [`connection`]), in the dialect of
+/// grpcio if `grpcio`.
 #[derive(Clone)]
-struct SubchannelConnector(Weak<Subchannel>);
+struct SubchannelConnector {
+    subchannel: Weak<Subchannel>,
+    grpcio: bool,
+}
 
 impl tonic::codegen::Service<tonic::codegen::http::Uri> for SubchannelConnector {
     type Response = TokioIo<Handover>;
@@ -663,13 +672,17 @@ impl tonic::codegen::Service<tonic::codegen::http::Uri> for SubchannelConnector 
     }
 
     fn call(&mut self, _: tonic::codegen::http::Uri) -> Self::Future {
-        let weak = self.0.clone();
+        let (weak, grpcio) = (self.subchannel.clone(), self.grpcio);
         Box::pin(async move {
-            let (ready, connection) = connection(weak.clone()).await?;
-            Ok(TokioIo::new(Handover::new(ready).ending(ConnectionEnd {
-                subchannel: weak,
-                connection,
-            })))
+            let (ready, connection) = connection(weak.clone(), grpcio).await?;
+            Ok(TokioIo::new(
+                Handover::new(ready)
+                    .in_the_dialect(grpcio)
+                    .ending(ConnectionEnd {
+                        subchannel: weak,
+                        connection,
+                    }),
+            ))
         })
     }
 }
