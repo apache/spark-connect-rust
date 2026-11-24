@@ -617,10 +617,11 @@ def _del_of(official):
     of the object's `_java_obj`: of a model of a `RemoteModelRef` that its constructor or an
     assignment of its `_java_obj` gave, the release of the native object (see `_ml_finalize` of the
     native module), whose error Python reports as unraisable in this `__del__`, as in PySpark's,
-    and the AttributeError of a deleted `_java_obj`; the native object of a fit or a load releases
-    its server-side objects itself, at its drop, and the training summary's `_remote_model_obj`,
-    which this client does not count (see `remote_model_ref` of the native module), is not
-    released. A function of the name, qualified name, module, docstring, signature and annotations
+    and the AttributeError of a deleted `_java_obj`; of a model of a fit or a load, of its copies
+    and of its training summary, the release of their hold of the model's server-side object, the
+    last of which deletes it, as the last release of PySpark's `RemoteModelRef` does (see `Holders`
+    of the native module), where the training summary's `_remote_model_obj`, which this client does
+    not count (see `remote_model_ref` of the native module), is not released. A function of the name, qualified name, module, docstring, signature and annotations
     of PySpark's (see `_function`)."""
     _, pysparks = _member_of(official, "__del__")
     return _function(

@@ -6411,6 +6411,88 @@ def test_the_cycles_through_a_udf_of_the_training_dataset_of_a_model_are_collect
     assert [m() for m in refs] == [None] * 3
 
 
+def test_the_object_of_a_model_is_deleted_when_python_finalizes_it_as_pysparks(ml_mock):
+    # As PySpark's `JavaWrapper.__del__` (of `try_remote_del`), which releases a reference of the
+    # `RemoteModelRef` of a model, and of its training summary (`_remote_model_obj`), when Python
+    # finalizes the object, the last of which deletes the object: of a model of a training summary
+    # and of one of none, in a reference cycle that the collector finalizes before it breaks it,
+    # whose finalizer saves (resurrects) the model, the object is deleted while the model lives,
+    # once, and not again when it goes; an explicit `__del__` of a model of no summary deletes it
+    # at once, once. A plain drop deletes it once, and the summary, a transform and a
+    # `Params.copy` of a model that live keep the object until they go, as PySpark's keep the
+    # model or a reference of it.
+    import pyspark.ml.connect as connect
+    from pyspark.ml.linalg import Vectors
+
+    spark, service = ml_mock
+    frame = spark.createDataFrame([(1.0, Vectors.dense(0.0, 1.0))], ["label", "features"])
+    saved = []
+
+    class Resurrect:
+        def __del__(self):
+            saved.append(self.model)
+
+    def fit(make, ref):
+        estimator = make()
+        _answer_fit(service, estimator, ref=ref)
+        return estimator.fit(frame)
+
+    def deletes(ref, wait=1):
+        # The Deletes of `ref` once one arrived, or after `wait` seconds.
+        return _deleted_ids(service, [ref], wait=wait).count(ref)
+
+    def late_deletes(ref):
+        # The Deletes of `ref` after a while, of one sent late too.
+        return _deleted_ids(service, [ref, "no-such-object"], wait=0.5).count(ref)
+
+    regression = lambda: connect.regression.LinearRegression(maxIter=2)  # noqa: E731
+    scaler = lambda: connect.feature.StandardScaler(inputCol="features", outputCol="s")  # noqa: E731
+    gc.collect()
+    for name, make in [("lr", regression), ("scaler", scaler)]:
+        ref = f"resurrected-{name}"
+        model = fit(make, ref)
+        job = Resurrect()
+        job.model = model
+        model.job = job
+        if name == "lr":
+            summary = model.summary
+            summary.model = model
+            del summary
+        del model, job
+        gc.collect()
+        assert len(saved) == 1 and deletes(ref) == 1, name
+        del saved[:]
+        gc.collect()
+        assert late_deletes(ref) == 1, name
+    # An explicit `__del__` of a model of no summary, as PySpark's releases its only reference.
+    model = fit(scaler, "explicit-del")
+    model.__del__()
+    assert deletes("explicit-del") == 1
+    del model
+    gc.collect()
+    assert late_deletes("explicit-del") == 1
+    # A plain drop, and the summary, a transform and a copy that outlive the model.
+    model = fit(regression, "plain-drop")
+    del model
+    assert deletes("plain-drop") == 1
+    for shape in ["summary", "transform", "copy"]:
+        ref = f"kept-by-{shape}"
+        model = fit(regression, ref)
+        if shape == "summary":
+            kept = model.summary
+        elif shape == "transform":
+            kept = model.transform(frame)
+        else:
+            kept = model.copy()
+        del model
+        gc.collect()
+        assert late_deletes(ref) == 0, shape
+        del kept
+        gc.collect()
+        assert deletes(ref) == 1, shape
+        assert late_deletes(ref) == 1, shape
+
+
 def test_the_native_ml_objects_traversed_while_they_are_created_do_not_crash(ml_mock):
     # As test_objects_traversed_while_they_are_created_do_not_crash of test_dropin_offline.py, of
     # the native ML classes of a `__traverse__` of their own: a collection at every second

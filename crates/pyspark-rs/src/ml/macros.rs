@@ -839,6 +839,7 @@ macro_rules! native_model {
                 finalize: Some(<$ty>::__ml_finalize),
                 copy: Some(<$ty>::__ml_copy),
                 make_java_obj: Some(<$ty>::__ml_make_java_obj),
+                join: None,
             };
         }
 
@@ -1121,6 +1122,10 @@ macro_rules! native_summary {
             /// `crate::gc::Parts`), as PySpark's summary holds its `_summary_dataset`.
             parts: $crate::gc::Parts,
             object: $crate::ml::object::SummaryObject,
+            /// The training summary of a fit as a holder of the object of its model, which its
+            /// `__del__` releases, as PySpark's releases its `_remote_model_obj` (see
+            /// `object::Holders`); unset of another summary.
+            holding: std::sync::OnceLock<$crate::ml::object::Holding>,
             /// Whether the value is written, which `__traverse__` checks first (see
             /// `crate::gc::GcReady`).
             gc_ready: $crate::gc::GcReady,
@@ -1130,6 +1135,8 @@ macro_rules! native_summary {
         impl $crate::ml::object::NativeClass for $ty {
             const HELPERS: $crate::ml::object::NativeHelpers = $crate::ml::object::NativeHelpers {
                 java_obj: Some(<$ty>::__ml_java_obj),
+                finalize: Some(<$ty>::__ml_finalize),
+                join: Some(<$ty>::__ml_join),
                 ..$crate::ml::object::NativeHelpers::NONE
             };
         }
@@ -1140,6 +1147,7 @@ macro_rules! native_summary {
                 Self {
                     parts: $crate::gc::Parts::of(py, target.held_parts()),
                     object: $crate::ml::object::SummaryObject::Target(Box::new(target)),
+                    holding: std::sync::OnceLock::new(),
                     gc_ready: $crate::gc::GcReady::new(),
                 }
             }
@@ -1149,8 +1157,40 @@ macro_rules! native_summary {
                 Self {
                     parts: $crate::gc::Parts::none(),
                     object: $crate::ml::object::SummaryObject::Given,
+                    holding: std::sync::OnceLock::new(),
                     gc_ready: $crate::gc::GcReady::new(),
                 }
+            }
+
+            /// Make the training summary `obj` of a fit a holder of the object of its model, of
+            /// `holding`, the model's (see `object::Holders`): of the owner of the object of its
+            /// target (`"<id>.summary"`).
+            fn __ml_join(
+                obj: &Bound<'_, PyAny>,
+                holding: &$crate::ml::object::Holding,
+            ) -> PyResult<()> {
+                let summary = obj.cast::<Self>()?.try_borrow()?;
+                if let $crate::ml::object::SummaryObject::Target(target) = &summary.object {
+                    let held = $crate::ml::object::owner_of(target.root(), holding.object());
+                    if held > 0 {
+                        let _ = summary.holding.set(holding.join(held));
+                    }
+                }
+                Ok(())
+            }
+
+            /// What PySpark's `__del__` of the summary `obj` does (`try_remote_del`): the release
+            /// of its reference of the `RemoteModelRef` of its model (`_remote_model_obj`), of a
+            /// training summary of a fit (see `object::Holding::finalize`).
+            fn __ml_finalize(obj: &Bound<'_, PyAny>) -> PyResult<()> {
+                // A summary that is borrowed mutably (never, as only `__clear__` borrows it so)
+                // releases nothing, of no error of the `__del__`.
+                if let Ok(summary) = obj.cast::<Self>()?.try_borrow() {
+                    if let Some(holding) = summary.holding.get() {
+                        holding.finalize();
+                    }
+                }
+                Ok(())
             }
 
             /// The `_java_obj` of PySpark's summary `obj` of this client's fit or evaluation: the

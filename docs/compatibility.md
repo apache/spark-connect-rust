@@ -302,8 +302,11 @@ warning that the server sends with the model of a fit, and
 [Native ML objects](#native-ml-objects-fetch-summaries-save-and-load-rust-api)).
 `MlRef::of_reference` (not a stable API) is an object of the ML cache that the client does not
 own, whose last owner runs a release of its owner in place of its deletion, `MlRef::keep` keeps an
-object on the server at the drop of its last owner, and `MlRef::is_unshared` tells an owner of no
-clone (not stable APIs either), and `PickleReach`, `pickle_reach_with` and
+object on the server at the drop of its last owner, `MlRef::is_unshared` tells an owner of no
+clone, `MlRef::release` deletes an object while its owners live, once, `MlRef::owners`, `MlRef::is`
+and `MlRef::is_owned` count its owners, tell a clone of one and an object of the client, and
+`Model::training_summary` gives the target of the training summary that a model holds (not stable
+APIs either), and `PickleReach`, `pickle_reach_with` and
 `expression_pickle_reach_with` of `spark_connect::ml` (not a stable API) give what PySpark's pickle
 of a DataFrame or of an expression reaches of the objects of `pyspark.ml` that its plans keep, and
 the functions of its UDFs before them, in PySpark's order, of the reach that a callback gives of
@@ -1006,7 +1009,13 @@ classes to build on:
   model's constructor: its last owner runs `release` in place of the deletion, which releases a
   reference of the `RemoteModelRef`. `MlRef::keep` (not a stable API) keeps the object on the
   server at the drop of its last owner, as the Python client keeps the object of a model whose
-  `_java_obj` is assigned another value.
+  `_java_obj` is assigned another value. `MlRef::release` (not a stable API) deletes an object of
+  the client on the server while its owners live, once, after which the drop of its last owner
+  deletes nothing, as the Python client deletes the object of a model when Python finalizes the
+  last of its Python objects (see "A model of a fit or a load" below), and `MlRef::owners`,
+  `MlRef::is` and `MlRef::is_owned` (not stable APIs) count its owners, tell a clone of an owner,
+  and tell an object of the client from one of `of_reference`; `Model::training_summary` (not a
+  stable API) gives the target of the training summary that a model holds.
 - `fetch(&MlTarget, method, args)` runs a method of an object, as `_call_java` of `pyspark.ml`
   does over Spark Connect (a `Fetch` command). `MlTarget::object(&model_ref).child("summary")`
   reaches the object of a method chain (`"<id>.summary"`), and `MlTarget::helper(&session)` the
@@ -1136,7 +1145,8 @@ modules stay PySpark's deprecated ones, unchanged. Each class has, where its PyS
   `__del__` of a Java wrapper (`JavaWrapper.__del__`, which releases a reference of the
   `RemoteModelRef` of a model of one, see "A model of a `RemoteModelRef`" below, and raises the
   `AttributeError` of a deleted `_java_obj`, which Python reports as unraisable in it, as
-  PySpark's; the native object of a fit or a load releases its server-side objects itself), of the
+  PySpark's; that of a model of a fit or a load, and of its training summary, releases the
+  model's object as PySpark's does, see "A model of a fit or a load" below), of the
   globals of PySpark's function, of which
   `typing.get_type_hints` resolves their annotations (`-> "LinearSVCModel"`). They are not
   PySpark's code, of which `inspect.getsource` gives none, nor wrappers of it: where PySpark's
@@ -1472,8 +1482,8 @@ modules stay PySpark's deprecated ones, unchanged. Each class has, where its PyS
   - A summary of PySpark's constructor (`LinearRegressionSummary("<id>.summary")`), of no
     server-side object, copies, copies deep and pickles, at every protocol, as PySpark's plain
     object: of its class and of its attributes (`_java_obj`).
-  - A shallow copy of a model keeps the server-side object while either object lives (the native
-    objects hold it, and its last owner deletes it). PySpark's `copy.copy` shares its
+  - A shallow copy of a model keeps the server-side object while either object lives (it holds
+    the object as a `Params.copy` does, see "A model of a fit or a load" below). PySpark's `copy.copy` shares its
     `RemoteModelRef` without a reference of its own, and the `__del__` of each object releases one,
     which deletes the server-side object at a count of 0: the collection of one copy of a model of
     no training summary deletes the object of the original (`CONNECT_ML.CACHE_INVALID` at its next
@@ -1482,6 +1492,21 @@ modules stay PySpark's deprecated ones, unchanged. Each class has, where its PyS
     original keeps working. A copy of a Python subclass of a reduce of its own, which copies as
     PySpark's of the attributes of the object (see above), holds the `RemoteModelRef` of its
     `_java_obj` as a model of it, and so releases it as PySpark's copy does.
+- **A model of a fit or a load**: as PySpark's `JavaWrapper.__del__` releases the reference of a
+  model, of each `Params.copy` of it and of its training summary (`_remote_model_obj`) of the
+  model's `RemoteModelRef` when Python finalizes the object, the `__del__` of each of these objects
+  releases its hold of the model's server-side object (and so of a tree of an ensemble and of
+  another object that a fetch returns), and that of the last of them deletes the object: when its
+  last reference goes, and when the garbage collector finalizes a reference cycle of them, before
+  it breaks the cycle. So a model or a summary that a finalizer of such a cycle saves (resurrects)
+  has lost its object, and its members, the members of its summary and its transforms raise
+  `CONNECT_ML.CACHE_INVALID` at their next requests, as PySpark's; an explicit `__del__` of a model
+  of no training summary deletes its object at once. The object is deleted once, and not again
+  when the objects go. A transform of the model, a DataFrame of a member of the model or of its
+  summary, the summary of an evaluation, a writer and a call that runs hold the object, as
+  PySpark's hold the model or its summary (`__source_transformer__`, `__source_instance__`): the
+  last of them deletes the object when it goes, if the objects of the model were finalized before
+  (see `dev/parity/known-differences.md`).
 - **A model of no server-side object**: a model class constructs as PySpark's
   `JavaModel(java_model=None)` (`KMeansModel()`, `LDAModel()`), of PySpark's `JavaModel.__init__`,
   a model of a new uid of its class and of its params, none set, whose Params API, `copy` and
