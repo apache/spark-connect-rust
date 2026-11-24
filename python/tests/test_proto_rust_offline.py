@@ -2366,9 +2366,9 @@ def test_deep_messages_discard_and_build_on_a_small_stack():
 
 
 # The messages of a large message of the tests of the checkpoints of its operations: steps enough
-# for another thread to wait for the GIL at the checkpoints, every 1,024 messages, for a few tens
-# of milliseconds at least.
-_LARGE = 262144
+# for an operation to hold checkpoints, every 1,024 messages, at which another thread reads it
+# (see `LocalDataConversionProbe`).
+_LARGE = 16384
 
 
 class _References:
@@ -2494,28 +2494,22 @@ def test_python_thread_runs_before_operations_on_large_messages_finish(operation
     from _local_data_conversion_probe import LocalDataConversionProbe
 
     action, failure, in_progress = _large_operation(operation)
-    # The other thread takes the GIL at the checkpoints that the operating system schedules it
-    # at: an operation in which it read none is run again, a few times, and so is one whose
-    # signal came only after it ended, as a read near its end leaves no checkpoint after it.
-    # With no checkpoint, it reads none.
-    for _ in range(5):
-        in_progress.arm()
-        probe = LocalDataConversionProbe(in_progress, in_progress, cancel=cancel)
-        interrupted = False
-        with probe:
-            try:
-                if failure is None:
+    # The other thread reads the operation at each of its checkpoints, where the operation waits
+    # for it (see `LocalDataConversionProbe`), of no scheduling of the operating system: with no
+    # checkpoint, it reads none.
+    in_progress.arm()
+    probe = LocalDataConversionProbe(in_progress, in_progress, cancel=cancel)
+    interrupted = False
+    with probe:
+        try:
+            if failure is None:
+                probe.convert(action)
+            else:
+                with pytest.raises(failure):
                     probe.convert(action)
-                else:
-                    with pytest.raises(failure):
-                        probe.convert(action)
-            except KeyboardInterrupt:
-                interrupted = True
-        assert not probe.failures, probe.failures
-        if "progress" in probe.observed and not (
-            cancel and "late_or_unproven_signal" in probe.observed
-        ):
-            break
+        except KeyboardInterrupt:
+            interrupted = True
+    assert not probe.failures, probe.failures
     progress = probe.observed.get("progress")
     assert progress is not None, probe.observed
     assert progress["captured_at"] < probe.observed["conversion_ended_at"], probe.observed
