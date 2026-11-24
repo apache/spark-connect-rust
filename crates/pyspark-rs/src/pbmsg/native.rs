@@ -3,7 +3,9 @@
 //! ([`Slot::Native`]) until Python reads the field, when the message makes the object of the value
 //! (see [`made_of`] and `PyMessage::materialize`): of all its levels at once, of a value of few
 //! messages ([`Whole`]), else of one level, a message of its fields, whose own values stay native
-//! until they are read, a container of its messages, a map of its entries.
+//! until they are read, a container of its messages, a map of its entries. The container of a
+//! repeated message field of a larger value holds its messages natively and makes their objects as
+//! they are read (`RepeatedComposite::of_native`).
 //!
 //! A copy of a message ([`copy_message`], [`copy_slots`]) is native: the constructor of a message
 //! given a message of the runtime (as `proto.MergeAction(condition=c)`), `CopyFrom`, `copy.copy`
@@ -14,8 +16,9 @@
 //! parse into a message that holds no field (`codec::NativeParse`), of `FromString`,
 //! `ParseFromString` and the drop-in's own parses (`Column.to_plan`).
 //! A native value is never changed (but by [`Value::discard_unknown`], which clones what it shares
-//! first, and by the objects of a value that no field holds any longer, which take its large values
-//! as they are, see [`object_parts`]), so a copy of a message that holds native values shares them.
+//! first), so a copy of a message that holds native values shares them. A native message is of a
+//! count of its references ([`NRef`], see `arena`), of a slab of the messages of its parse, or of
+//! an allocation of its own, of a copy.
 //!
 //! What Python reads of a native value is what it read of the objects of the copy before: the
 //! object that it makes of a value is of the class that the copy would have made then (see
@@ -26,6 +29,7 @@ use std::sync::Arc;
 
 use pyo3::prelude::*;
 
+use super::arena::{NRef, Releases};
 use super::containers::{
     Entries, MapContainer, MapEntries, MapValue, RepeatedComposite, RepeatedScalar,
 };
@@ -39,7 +43,7 @@ use crate::interrupt::ConversionBudget;
 /// field or a map field.
 #[derive(Clone)]
 pub(crate) enum Value {
-    Message(Arc<Native>),
+    Message(NRef),
     Scalars(Arc<Vec<Scalar>>),
     Messages(Arc<NativeMessages>),
     Map(Arc<NativeMap>),
@@ -65,7 +69,7 @@ pub(crate) struct Native {
 /// its container, which the objects of its messages are made of.
 pub(crate) struct NativeMessages {
     pub(crate) class: MessageClass,
-    pub(crate) items: Vec<Arc<Native>>,
+    pub(crate) items: Vec<NRef>,
     /// The levels of messages that the field adds below its message: one more than the deepest of
     /// its messages, none of no messages.
     pub(crate) depth: u32,
@@ -90,7 +94,7 @@ pub(crate) struct NativeMap {
 #[derive(Clone)]
 pub(crate) enum NativeValue {
     Scalar(Scalar),
-    Message(Arc<Native>),
+    Message(NRef),
 }
 
 /// Why a copy stopped: an error of Python (of a checkpoint of its budget), a message of more
@@ -202,7 +206,7 @@ impl Native {
 
     /// An empty native message of the type `desc`, made at `generation`, which a native parse
     /// fills (see `codec::NativeParse`).
-    pub(crate) fn empty(desc: Arc<MessageDesc>, generation: u64) -> Native {
+    pub(crate) fn empty(desc: &'static MessageDesc, generation: u64) -> Native {
         Native {
             fields: Fields {
                 desc,
@@ -233,15 +237,15 @@ impl Native {
 
     /// The message as a message of a copy made at `generation`: itself, if it was made then, else
     /// a clone of it of that generation (which a class registered since makes of another class).
-    pub(crate) fn at(self: &Arc<Native>, py: Python<'_>, generation: u64) -> Arc<Native> {
-        if self.generation == generation {
-            return self.clone();
+    pub(crate) fn at(this: &NRef, py: Python<'_>, generation: u64) -> NRef {
+        if this.generation == generation {
+            return this.clone();
         }
         grow(|| {
-            Arc::new(Native {
-                fields: self.fields.clone_native_at(py, generation),
-                depth: self.depth,
-                count: self.count,
+            NRef::new(Native {
+                fields: this.fields.clone_native_at(py, generation),
+                depth: this.depth,
+                count: this.count,
                 generation,
             })
         })
@@ -257,7 +261,7 @@ fn count_of(slots: &Slots) -> u32 {
 }
 
 impl NativeMessages {
-    pub(crate) fn new(class: MessageClass, items: Vec<Arc<Native>>, generation: u64) -> Self {
+    pub(crate) fn new(class: MessageClass, items: Vec<NRef>, generation: u64) -> Self {
         let depth = items
             .iter()
             .map(|item| item.depth.saturating_add(1))
@@ -278,7 +282,7 @@ impl NativeMessages {
 
 impl NativeMessages {
     /// Append `item`, a message that a native parse read, counting its levels.
-    pub(crate) fn push(&mut self, item: Arc<Native>) {
+    pub(crate) fn push(&mut self, item: NRef) {
         self.depth = self.depth.max(item.depth.saturating_add(1));
         self.count = self.count.saturating_add(item.count);
         self.items.push(item);
@@ -385,7 +389,7 @@ impl Value {
     /// Whether `self` and `other` are the same value (not equal values).
     pub(crate) fn same(&self, other: &Value) -> bool {
         match (self, other) {
-            (Value::Message(a), Value::Message(b)) => Arc::ptr_eq(a, b),
+            (Value::Message(a), Value::Message(b)) => NRef::ptr_eq(a, b),
             (Value::Scalars(a), Value::Scalars(b)) => Arc::ptr_eq(a, b),
             (Value::Messages(a), Value::Messages(b)) => Arc::ptr_eq(a, b),
             (Value::Map(a), Value::Map(b)) => Arc::ptr_eq(a, b),
@@ -397,12 +401,16 @@ impl Value {
     /// else a clone of it of that generation.
     pub(crate) fn at(&self, py: Python<'_>, generation: u64) -> Value {
         match self {
-            Value::Message(m) => Value::Message(m.at(py, generation)),
+            Value::Message(m) => Value::Message(Native::at(m, py, generation)),
             Value::Scalars(_) => self.clone(),
             Value::Messages(m) if m.generation != generation => grow(|| {
                 Value::Messages(Arc::new(NativeMessages {
                     class: m.class.clone_ref(py),
-                    items: m.items.iter().map(|item| item.at(py, generation)).collect(),
+                    items: m
+                        .items
+                        .iter()
+                        .map(|item| Native::at(item, py, generation))
+                        .collect(),
                     depth: m.depth,
                     count: m.count,
                     generation,
@@ -411,7 +419,7 @@ impl Value {
             Value::Map(m) if m.generation != generation => grow(|| {
                 let entries = m.entries.map(|value| match value {
                     NativeValue::Scalar(v) => NativeValue::Scalar(v.clone()),
-                    NativeValue::Message(m) => NativeValue::Message(m.at(py, generation)),
+                    NativeValue::Message(m) => NativeValue::Message(Native::at(m, py, generation)),
                 });
                 Value::Map(Arc::new(NativeMap {
                     map: m.map.clone(),
@@ -429,7 +437,9 @@ impl Value {
     /// does at `depth` (see `PyMessage::discard_unknown`), of a clone of what the value shares.
     pub(crate) fn discard_unknown(&mut self, py: Python<'_>, depth: u32) {
         match self {
-            Value::Message(m) => unique(m, |m| m.clone_native(py)).discard_unknown(py, depth),
+            Value::Message(m) => {
+                unique_native(m, |m| m.clone_native(py)).discard_unknown(py, depth)
+            }
             Value::Scalars(_) => {}
             Value::Messages(m) => {
                 let m = unique(m, |m| NativeMessages {
@@ -440,7 +450,7 @@ impl Value {
                     generation: m.generation,
                 });
                 for item in &mut m.items {
-                    unique(item, |m| m.clone_native(py)).discard_unknown(py, depth);
+                    unique_native(item, |m| m.clone_native(py)).discard_unknown(py, depth);
                 }
             }
             Value::Map(m) => {
@@ -453,7 +463,7 @@ impl Value {
                 });
                 for value in m.entries.values_mut() {
                     if let NativeValue::Message(child) = value {
-                        unique(child, |m| m.clone_native(py)).discard_unknown(py, depth);
+                        unique_native(child, |m| m.clone_native(py)).discard_unknown(py, depth);
                     }
                 }
             }
@@ -469,9 +479,36 @@ fn unique<T>(arc: &mut Arc<T>, clone: impl FnOnce(&T) -> T) -> &mut T {
     Arc::get_mut(arc).expect("a value of its own")
 }
 
+/// The messages of the native value `value` of a repeated message field, of its own: of a clone of
+/// one level of it first, if another holds it too.
+pub(crate) fn unique_messages<'v>(
+    py: Python<'_>,
+    value: &'v mut Arc<NativeMessages>,
+) -> &'v mut NativeMessages {
+    unique(value, |m| NativeMessages {
+        class: m.class.clone_ref(py),
+        items: m.items.clone(),
+        depth: m.depth,
+        count: m.count,
+        generation: m.generation,
+    })
+}
+
+/// The native message of `message`, of its own: of a clone of it (`clone`) first, if another holds
+/// it too.
+pub(crate) fn unique_native(
+    message: &mut NRef,
+    clone: impl FnOnce(&Native) -> Native,
+) -> &mut Native {
+    if NRef::get_mut(message).is_none() {
+        *message = NRef::new(clone(message));
+    }
+    NRef::get_mut(message).expect("a message of its own")
+}
+
 impl Native {
     /// A clone of the message, of one level: its values are shared.
-    fn clone_native(&self, py: Python<'_>) -> Native {
+    pub(crate) fn clone_native(&self, py: Python<'_>) -> Native {
         Native {
             fields: self.fields.clone_native_at(py, self.generation),
             depth: self.depth,
@@ -482,7 +519,7 @@ impl Native {
 
     /// Discard the unknown fields of the message and of its messages, as upb's
     /// `_upb_Message_DiscardUnknown` does at `depth` (see `PyMessage::discard_unknown`).
-    fn discard_unknown(&mut self, py: Python<'_>, depth: u32) {
+    pub(crate) fn discard_unknown(&mut self, py: Python<'_>, depth: u32) {
         let depth = depth.saturating_sub(1);
         if depth == 0 {
             return;
@@ -503,7 +540,7 @@ impl Fields {
     /// `generation`: the scalars cloned and the values shared (or cloned at `generation`).
     pub(crate) fn clone_native_at(&self, py: Python<'_>, generation: u64) -> Fields {
         Fields {
-            desc: self.desc.clone(),
+            desc: self.desc,
             slots: self.slots.map(|slot| match slot {
                 Slot::Scalar(v) => Slot::Scalar(v.clone()),
                 Slot::Native(value) => Slot::Native(value.at(py, generation)),
@@ -531,7 +568,7 @@ impl Drop for Native {
             }
             match value {
                 Value::Message(m) => {
-                    if let Ok(mut m) = Arc::try_unwrap(m) {
+                    if let Ok(mut m) = NRef::try_unwrap(m) {
                         take_own_values(&mut m.fields.slots, &mut values);
                     }
                 }
@@ -565,7 +602,7 @@ const SHALLOW: u32 = 64;
 fn take_own_values(slots: &mut Slots, values: &mut Vec<Value>) {
     for (_, slot) in slots.iter_mut() {
         let own = match slot {
-            Slot::Native(Value::Message(m)) => Arc::strong_count(m) == 1,
+            Slot::Native(Value::Message(m)) => NRef::strong_count(m) == 1,
             Slot::Native(Value::Messages(m)) => Arc::strong_count(m) == 1,
             Slot::Native(Value::Map(m)) => Arc::strong_count(m) == 1,
             _ => false,
@@ -596,7 +633,7 @@ pub(crate) fn copy_message(
         let (slots, unknown, desc) = copy_parts(py, message, at, generation, budget, true)?;
         let desc = match desc {
             Some(desc) => desc,
-            None => message.borrow().desc.clone(),
+            None => message.borrow().desc,
         };
         let fields = Fields {
             desc,
@@ -611,7 +648,7 @@ pub(crate) fn copy_message(
 pub(crate) type Parts = (Slots, Vec<u8>);
 
 /// The fields of a copy of a message, with its type when it was asked for (see [`copy_parts`]).
-type PartsOfType = (Slots, Vec<u8>, Option<Arc<MessageDesc>>);
+type PartsOfType = (Slots, Vec<u8>, Option<&'static MessageDesc>);
 
 /// A native copy of the set fields and the unknown fields of `message` (see [`copy_parts`]), for an
 /// object of the message's type, which has the type already.
@@ -644,7 +681,8 @@ fn copy_parts(
     let levels = at.levels;
     enum Held {
         Message(Py<PyMessage>),
-        Composite(MessageClass, Vec<Py<PyMessage>>),
+        /// The class, the objects and the messages held natively that follow them.
+        Composite(MessageClass, Vec<Py<PyMessage>>, Vec<NRef>),
         Map(MapEntries),
     }
     // The messages, containers of messages and maps that the message holds, copied after its
@@ -663,7 +701,7 @@ fn copy_parts(
                 Slot::Scalar(v) => Slot::Scalar(v.clone()),
                 _ => HELD,
             });
-            return Ok((slots, m.unknown.clone(), with_desc.then(|| m.desc.clone())));
+            return Ok((slots, m.unknown.clone(), with_desc.then(|| m.desc)));
         }
         // A slot for each of the message's, in their order, written in its place: of a held
         // value, `HELD`, until its copy is made.
@@ -689,7 +727,19 @@ fn copy_parts(
                 Slot::Composite(c) => {
                     let c = c.bind(py).borrow();
                     let items = c.items.iter().map(|m| m.clone_ref(py)).collect();
-                    Held::Composite(c.class.clone_ref(py), items)
+                    let pending = c.pending_natives();
+                    let depth = pending.iter().map(|m| m.depth.saturating_add(1)).max();
+                    if levels
+                        .zip(depth)
+                        .is_some_and(|(levels, depth)| depth > levels)
+                    {
+                        return Err(CopyError::TooDeep);
+                    }
+                    let pending = pending
+                        .iter()
+                        .map(|m| Native::at(m, py, generation))
+                        .collect();
+                    Held::Composite(c.class.clone_ref(py), items, pending)
                 }
                 Slot::Map(c) => Held::Map(c.bind(py).borrow().entries_for_copy(py)),
             };
@@ -715,26 +765,27 @@ fn copy_parts(
                 Slots::Many(copies)
             }
         };
-        (slots, with_desc.then(|| m.desc.clone()), m.unknown.clone())
+        (slots, with_desc.then(|| m.desc), m.unknown.clone())
     };
     for (index, held) in first.into_iter().chain(rest) {
         let value = match held {
-            Held::Message(child) => Value::Message(Arc::new(copy_message(
+            Held::Message(child) => Value::Message(NRef::new(copy_message(
                 py,
                 child.bind(py),
                 at.below()?,
                 generation,
                 budget,
             )?)),
-            Held::Composite(class, items) => {
-                let mut copies = Vec::with_capacity(items.len());
+            Held::Composite(class, items, pending) => {
+                let mut copies = Vec::with_capacity(items.len() + pending.len());
                 if !items.is_empty() {
                     let at = at.below()?;
                     for item in &items {
                         let copy = copy_message(py, item.bind(py), at, generation, budget)?;
-                        copies.push(Arc::new(copy));
+                        copies.push(NRef::new(copy));
                     }
                 }
+                copies.extend(pending);
                 Value::Messages(Arc::new(NativeMessages::new(class, copies, generation)))
             }
             Held::Map(entries) => {
@@ -793,7 +844,7 @@ pub(crate) fn duplicate_native<'py>(
 /// that it made (see `message::Snapshot`).
 pub(crate) fn duplicate_owned<'py>(
     py: Python<'py>,
-    message: Arc<Native>,
+    message: NRef,
     class: Option<&MessageClass>,
     budget: &ConversionBudget,
 ) -> PyResult<Bound<'py, PyMessage>> {
@@ -810,7 +861,7 @@ pub(crate) fn duplicate_owned<'py>(
 /// The fields of the native message `message`, as fields of a copy made at `generation`: its own,
 /// moved, if no other value holds it and it was made then, else a copy of one level of them, at
 /// `generation` (see [`Fields::clone_native_at`]).
-pub(crate) fn fields_at(py: Python<'_>, message: Arc<Native>, generation: u64) -> Fields {
+pub(crate) fn fields_at(py: Python<'_>, message: NRef, generation: u64) -> Fields {
     if message.generation == generation {
         return own_fields(py, message);
     }
@@ -839,6 +890,9 @@ pub(crate) struct Made {
     /// The objects below the object of the slot, of a value made whole (see [`WHOLE`]), which take
     /// the fields of the value of all its levels.
     whole: Option<Whole>,
+    /// Whether the slot is a container that makes the objects of the messages of the value as they
+    /// are read (see `RepeatedComposite::of_native`).
+    lazy: bool,
 }
 
 /// The object of the native value `value` of `field`, of one level, empty (see [`Made`]): a
@@ -854,21 +908,25 @@ pub(crate) fn made_of(
     whole: bool,
 ) -> PyResult<Made> {
     let step = |py| budget.map_or(Ok(()), |budget| budget.step(py));
-    if whole && value.count() <= WHOLE {
-        let mut objects = Whole::default();
+    if whole && value.count() <= whole_limit() {
+        let mut objects = Whole {
+            messages: Vec::with_capacity(value.count() as usize),
+            ..Whole::default()
+        };
         let slot = objects.make(py, field, value, budget, 0)?;
         return Ok(Made {
             slot,
             messages: Vec::new(),
             scalars: None,
             whole: Some(objects),
+            lazy: false,
         });
     }
     let mut messages = Vec::new();
     let mut scalars = None;
     let slot = match value {
         Value::Message(m) => {
-            let object = new_message_at(py, &m.fields.desc, m.generation)?;
+            let object = new_message_at(py, m.fields.desc, m.generation)?;
             Slot::Message(object.unbind())
         }
         Value::Scalars(_) => {
@@ -884,6 +942,18 @@ pub(crate) fn made_of(
             )?;
             scalars = Some(container.clone_ref(py));
             Slot::Repeated(container)
+        }
+        Value::Messages(m) if whole => {
+            // Of a read of Python: the container makes the objects of the messages as they are
+            // read (see `RepeatedComposite::of_native`).
+            let container = RepeatedComposite::of_native(m.class.clone_ref(py), m.clone());
+            return Ok(Made {
+                slot: Slot::Composite(Py::new(py, container)?),
+                messages: Vec::new(),
+                scalars: None,
+                whole: None,
+                lazy: true,
+            });
         }
         Value::Messages(m) => {
             messages.reserve(m.items.len());
@@ -901,7 +971,7 @@ pub(crate) fn made_of(
                     NativeValue::Scalar(v) => MapValue::Scalar(v.clone()),
                     NativeValue::Message(m) => {
                         step(py)?;
-                        let object = new_message_at(py, &m.fields.desc, m.generation)?.unbind();
+                        let object = new_message_at(py, m.fields.desc, m.generation)?.unbind();
                         messages.push(object.clone_ref(py));
                         MapValue::Message(object)
                     }
@@ -916,6 +986,7 @@ pub(crate) fn made_of(
         messages,
         scalars,
         whole: None,
+        lazy: false,
     })
 }
 
@@ -924,21 +995,41 @@ pub(crate) fn made_of(
 /// ([`Whole`]), rather than of one level: the read of each level of a native value reads and sets
 /// the fields of its message, which the objects of a whole value take once, of all its levels.
 /// The objects of a larger value are made of one level, so that a read of a part of it makes the
-/// objects of that part.
+/// objects of that part; the tests read values of every size of each way (see [`whole_limit`]).
 const WHOLE: u32 = 256;
+
+/// The limit of [`WHOLE`] that a read of a native value takes: [`WHOLE`], or that of
+/// `_proto_whole_limit` of the tests.
+static WHOLE_LIMIT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(WHOLE);
+
+fn whole_limit() -> u32 {
+    WHOLE_LIMIT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Set the messages of a native value up to which a read of Python makes the objects of all its
+/// levels at once (see [`WHOLE`]), of none, as of a value of more than 256 messages, at 0, and give
+/// the limit that it replaces: of the tests, which read the values of their messages each way
+/// (`None` gives the runtime's own limit back).
+#[pyfunction]
+#[pyo3(signature = (limit=None))]
+pub(crate) fn _proto_whole_limit(limit: Option<u32>) -> u32 {
+    WHOLE_LIMIT.swap(limit.unwrap_or(WHOLE), std::sync::atomic::Ordering::Relaxed)
+}
 
 /// The objects of a native value made whole (see [`WHOLE`]), empty, in the order of a walk of the
 /// value that visits a message before the values of its fields, and a container of messages or a
 /// map after its messages: the messages, the containers of repeated scalar fields, those of
 /// repeated message fields and the maps, which hold the objects of their messages. They take the
 /// fields of the value of all its levels once the field holds the object of the value
-/// ([`Made::fill`]), as the objects of one level do (see [`object_parts`]).
+/// ([`Made::fill`]), moved where no other value holds them, as the objects of one level do.
 #[derive(Default)]
 struct Whole {
     messages: Vec<Py<PyMessage>>,
     scalars: Vec<Py<RepeatedScalar>>,
     composites: Vec<Py<RepeatedComposite>>,
     maps: Vec<Py<MapContainer>>,
+    /// The releases of the nodes of the messages whose fields the objects take.
+    releases: Releases,
 }
 
 impl Whole {
@@ -1029,7 +1120,7 @@ impl Whole {
         }
         let object = match class {
             Some(class) => class.new_message(py)?,
-            None => new_message_at(py, &message.fields.desc, message.generation)?,
+            None => new_message_at(py, message.fields.desc, message.generation)?,
         };
         self.messages.push(object.clone().unbind());
         for (index, slot) in message.fields.slots.iter() {
@@ -1042,43 +1133,31 @@ impl Whole {
     }
 
     /// Give the objects the fields of `value`, the value that they were made of, in the order
-    /// that [`Whole::make`] made them (see [`object_parts`]): the object of the value, as its
-    /// field's slot holds it.
-    fn fill(&mut self, py: Python<'_>, value: &mut Value, level: u32) -> Slot {
+    /// that [`Whole::make`] made them, moved where no other value holds them (see [`own_parts`]):
+    /// the object of the value, as its field's slot holds it.
+    fn fill(&mut self, py: Python<'_>, value: Value, level: u32) -> Slot {
         match value {
             Value::Message(m) => Slot::Message(self.fill_message(py, m, level)),
             Value::Scalars(items) => {
                 let container = take(&mut self.scalars);
-                container.bind(py).borrow_mut().items = scalars_of(items);
+                let items = Arc::try_unwrap(items).unwrap_or_else(|items| (*items).clone());
+                container.bind(py).borrow_mut().items = items;
                 Slot::Repeated(container)
             }
             Value::Messages(m) => {
-                match Arc::get_mut(m) {
-                    Some(m) => m.items.iter_mut().for_each(|item| {
+                match Arc::try_unwrap(m) {
+                    Ok(m) => m.items.into_iter().for_each(|item| {
                         drop(self.fill_message(py, item, level).into_bound(py));
                     }),
-                    None => m.items.iter().for_each(|item| {
-                        drop(
-                            self.fill_message(py, &mut item.clone(), level)
-                                .into_bound(py),
-                        );
+                    Err(m) => m.items.iter().cloned().for_each(|item| {
+                        drop(self.fill_message(py, item, level).into_bound(py));
                     }),
                 }
                 Slot::Composite(take(&mut self.composites))
             }
             Value::Map(m) => {
-                match Arc::get_mut(m) {
-                    Some(m) => m.entries.values_mut().for_each(|value| {
-                        if let NativeValue::Message(message) = value {
-                            drop(self.fill_message(py, message, level).into_bound(py));
-                        }
-                    }),
-                    None => m.entries.iter().for_each(|(_, value)| {
-                        if let NativeValue::Message(message) = value {
-                            let mut message = message.clone();
-                            drop(self.fill_message(py, &mut message, level).into_bound(py));
-                        }
-                    }),
+                for message in map_messages(m) {
+                    drop(self.fill_message(py, message, level).into_bound(py));
                 }
                 Slot::Map(take(&mut self.maps))
             }
@@ -1088,12 +1167,7 @@ impl Whole {
     /// Give the object of the native message `message` its fields, of the objects of the native
     /// values of its fields: the object. The message is at the level `level` below the value (see
     /// [`Whole::make_message`]).
-    fn fill_message(
-        &mut self,
-        py: Python<'_>,
-        message: &mut Arc<Native>,
-        level: u32,
-    ) -> Py<PyMessage> {
+    fn fill_message(&mut self, py: Python<'_>, message: NRef, level: u32) -> Py<PyMessage> {
         if level > 0 && level.is_multiple_of(16) {
             return grow(|| self.fill_message_here(py, message, level));
         }
@@ -1101,14 +1175,16 @@ impl Whole {
     }
 
     /// [`Whole::fill_message`] on the stack that it runs on.
-    fn fill_message_here(
-        &mut self,
-        py: Python<'_>,
-        message: &mut Arc<Native>,
-        level: u32,
-    ) -> Py<PyMessage> {
+    fn fill_message_here(&mut self, py: Python<'_>, message: NRef, level: u32) -> Py<PyMessage> {
         let object = take(&mut self.messages);
-        let (slots, unknown) = object_parts(message, |value| self.fill(py, value, level + 1));
+        let (mut slots, unknown) = own_parts(py, message, &mut self.releases);
+        for (_, slot) in slots.iter_mut() {
+            if matches!(slot, Slot::Native(_)) {
+                if let Slot::Native(value) = std::mem::replace(slot, HELD) {
+                    *slot = self.fill(py, value, level + 1);
+                }
+            }
+        }
         object.bind(py).borrow_mut().take_parts(slots, unknown);
         object
     }
@@ -1124,9 +1200,9 @@ fn take<T>(objects: &mut Vec<Py<T>>) -> Py<T> {
 
 impl Made {
     /// Give the objects the fields of `value`, the value that they were made of (see
-    /// [`made_of`]), which the field no longer holds, of one level, as [`object_parts`] gives
-    /// them: the value is released once they all take them. It runs no Python code.
-    pub(crate) fn fill(self, py: Python<'_>, mut value: Value) {
+    /// [`made_of`]), which the field no longer holds: moved where no other value holds them
+    /// (see [`own_parts`]), else copied, of one level. It runs no Python code.
+    pub(crate) fn fill(self, py: Python<'_>, value: Value) {
         // The references of the objects are released as `Bound`'s, which know that the thread is
         // attached, with no read of a thread local.
         let Made {
@@ -1134,6 +1210,7 @@ impl Made {
             messages,
             scalars,
             whole,
+            lazy,
         } = self;
         if let Some(mut objects) = whole {
             // The objects in the order that they were made, of which `take` takes the last.
@@ -1141,120 +1218,102 @@ impl Made {
             objects.scalars.reverse();
             objects.composites.reverse();
             objects.maps.reverse();
-            objects.fill(py, &mut value, 0).release(py);
+            objects.fill(py, value, 0).release(py);
             debug_assert!(objects.messages.is_empty() && objects.composites.is_empty());
             slot.release(py);
             return;
         }
         let mut objects = messages.into_iter().map(|m| m.into_bound(py));
-        let fill = |object: &Bound<'_, PyMessage>, message: &mut Arc<Native>| {
-            let (slots, unknown) = object_parts(message, |value| Slot::Native(value.clone()));
+        let mut releases = Releases::default();
+        let mut fill = |object: &Bound<'_, PyMessage>, message: NRef| {
+            let (slots, unknown) = own_parts(py, message, &mut releases);
             object.borrow_mut().take_parts(slots, unknown);
         };
-        let mut fill_next = |message: &mut Arc<Native>| {
+        let fill_next = |message: NRef| {
             if let Some(object) = objects.next() {
                 fill(&object, message);
             }
         };
-        match &mut value {
-            Value::Message(m) => {
-                if let Slot::Message(object) = &slot {
-                    fill(object.bind(py), m);
-                }
-            }
+        match value {
+            Value::Message(m) => match slot {
+                Slot::Message(object) => fill(&object.into_bound(py), m),
+                slot => slot.release(py),
+            },
             Value::Scalars(items) => {
                 if let Some(container) = scalars {
-                    container.into_bound(py).borrow_mut().items = scalars_of(items);
+                    let items = Arc::try_unwrap(items).unwrap_or_else(|items| (*items).clone());
+                    container.into_bound(py).borrow_mut().items = items;
+                }
+                slot.release(py);
+            }
+            Value::Messages(m) => {
+                match (slot, lazy) {
+                    // A container of the messages held natively (see `made_of`), of the value as
+                    // its own once the field's reference is released.
+                    (Slot::Composite(container), true) => {
+                        drop(m);
+                        container.into_bound(py).borrow_mut().own_pending();
+                    }
+                    (slot, _) => {
+                        match Arc::try_unwrap(m) {
+                            Ok(m) => m.items.into_iter().for_each(fill_next),
+                            Err(m) => m.items.iter().cloned().for_each(fill_next),
+                        }
+                        slot.release(py);
+                    }
                 }
             }
-            Value::Messages(m) => match Arc::get_mut(m) {
-                Some(m) => m.items.iter_mut().for_each(fill_next),
-                None => m.items.iter().for_each(|item| fill_next(&mut item.clone())),
-            },
-            Value::Map(m) => match Arc::get_mut(m) {
-                Some(m) => m.entries.values_mut().for_each(|value| {
-                    if let NativeValue::Message(message) = value {
-                        fill_next(message);
-                    }
-                }),
-                None => m.entries.iter().for_each(|(_, value)| {
-                    if let NativeValue::Message(message) = value {
-                        fill_next(&mut message.clone());
-                    }
-                }),
-            },
-        }
-        slot.release(py);
-    }
-}
-
-/// The size of a string or bytes of a native message, of its unknown fields, and of the values of
-/// a native repeated scalar field, from which its object takes it as it is, moved from a value
-/// that no other holds; it copies a smaller one (see [`object_parts`]).
-const MOVED: usize = 1024;
-
-/// The set fields and the unknown fields that the object of the native message `message` takes,
-/// of one level, the slot of each native value of its fields of `value`: copies of its scalars and
-/// its unknown fields, but those of [`MOVED`] bytes or more, which are moved from a message that no
-/// other holds. Its object copies them, rather than taking them, so that the memory that the native
-/// message took of the parse or the copy that made it (its own, and its values') is released at
-/// once, once the objects of the value take their fields: of the values moved, the memory that the
-/// native messages took between them was released in holes, of which many slowed every allocation
-/// of the process down (of a parse of a million messages, read whole, by three times).
-fn object_parts(
-    message: &mut Arc<Native>,
-    mut value: impl FnMut(&mut Value) -> Slot,
-) -> (Slots, Vec<u8>) {
-    let large = |bytes: usize| bytes >= MOVED;
-    match Arc::get_mut(message) {
-        Some(native) => {
-            let unknown = if large(native.fields.unknown.len()) {
-                std::mem::take(&mut native.fields.unknown)
-            } else {
-                native.fields.unknown.clone()
-            };
-            let slots = native.fields.slots.map_mut(|slot| match slot {
-                Slot::Scalar(Scalar::Str(v)) if large(v.len()) => {
-                    Slot::Scalar(Scalar::Str(std::mem::take(v)))
-                }
-                Slot::Scalar(Scalar::Bytes(v)) if large(v.len()) => {
-                    Slot::Scalar(Scalar::Bytes(std::mem::take(v)))
-                }
-                Slot::Scalar(v) => Slot::Scalar(v.clone()),
-                Slot::Native(v) => value(v),
-                _ => unreachable!("a native message holds no object"),
-            });
-            (slots, unknown)
-        }
-        None => {
-            let slots = message.fields.slots.map(|slot| match slot {
-                Slot::Scalar(v) => Slot::Scalar(v.clone()),
-                Slot::Native(v) => value(&mut v.clone()),
-                _ => unreachable!("a native message holds no object"),
-            });
-            (slots, message.fields.unknown.clone())
+            Value::Map(m) => {
+                map_messages(m).into_iter().for_each(fill_next);
+                slot.release(py);
+            }
         }
     }
 }
 
-/// The values that the container of the native repeated scalar field `items` takes: copies, but
-/// of [`MOVED`] bytes or more, which are moved from a field that no other holds (see
-/// [`object_parts`]).
-fn scalars_of(items: &mut Arc<Vec<Scalar>>) -> Vec<Scalar> {
-    if items.len() * std::mem::size_of::<Scalar>() >= MOVED {
-        if let Some(items) = Arc::get_mut(items) {
-            return std::mem::take(items);
+/// The native messages of the values of the map `map`, in the order of its entries, of the map's
+/// own references released first, so that a message of a map that no other holds is moved.
+fn map_messages(map: Arc<NativeMap>) -> Vec<NRef> {
+    match Arc::try_unwrap(map) {
+        Ok(map) => map
+            .entries
+            .into_entries()
+            .filter_map(|(_, value)| match value {
+                NativeValue::Message(m) => Some(m),
+                NativeValue::Scalar(_) => None,
+            })
+            .collect(),
+        Err(map) => map
+            .entries
+            .iter()
+            .filter_map(|(_, value)| match value {
+                NativeValue::Message(m) => Some(m.clone()),
+                NativeValue::Scalar(_) => None,
+            })
+            .collect(),
+    }
+}
+
+/// The set fields and the unknown fields of the native message `message` for its object: its own,
+/// moved, if no other holds it (its node released of `releases`), else a copy of one level of
+/// them. The messages of a parse are of slabs (see `arena`), so that the values moved leave no
+/// small hole behind them.
+fn own_parts(py: Python<'_>, message: NRef, releases: &mut Releases) -> (Slots, Vec<u8>) {
+    match NRef::into_parts_releasing(message, releases) {
+        Ok(parts) => parts,
+        Err(message) => {
+            let fields = message.fields.clone_native_at(py, message.generation);
+            (fields.slots, fields.unknown)
         }
     }
-    (**items).clone()
 }
 
 /// The fields of the native message `message`: its own, moved, if no other holds it, else a copy
 /// of one level of them.
-fn own_fields(py: Python<'_>, message: Arc<Native>) -> Fields {
-    match Arc::try_unwrap(message) {
+fn own_fields(py: Python<'_>, message: NRef) -> Fields {
+    match NRef::try_unwrap(message) {
         Ok(mut message) => Fields {
-            desc: message.fields.desc.clone(),
+            desc: message.fields.desc,
             slots: std::mem::take(&mut message.fields.slots),
             unknown: std::mem::take(&mut message.fields.unknown),
         },
@@ -1268,7 +1327,7 @@ pub(crate) fn message_object<'py>(
     py: Python<'py>,
     message: &Native,
 ) -> PyResult<Bound<'py, PyMessage>> {
-    let object = new_message_at(py, &message.fields.desc, message.generation)?;
+    let object = new_message_at(py, message.fields.desc, message.generation)?;
     fill(&object, message, py);
     Ok(object)
 }
@@ -1280,18 +1339,15 @@ mod tests {
 
     /// A native message of the fields `fields` of `index` of the type `full_name`, holding `child`.
     fn holding(full_name: &str, field: &str, child: Native) -> Native {
-        let desc = pool()
-            .message(full_name)
-            .expect("a type of the pool")
-            .clone();
+        let desc = pool().message(full_name).expect("a type of the pool");
         let index = desc.by_name[field];
         let mut fields = Fields {
-            desc: desc.clone(),
+            desc,
             slots: Slots::default(),
             unknown: Vec::new(),
         };
-        let value = Slot::Native(Value::Message(Arc::new(child)));
-        fields.slots.set(&desc, index, value);
+        let value = Slot::Native(Value::Message(NRef::new(child)));
+        fields.slots.set(desc, index, value);
         Native::new(fields, 0)
     }
 
@@ -1300,10 +1356,7 @@ mod tests {
     /// parse counts them.
     #[test]
     fn deep_native_messages_drop_a_level_at_a_time() {
-        let relation = pool()
-            .message("spark.connect.Relation")
-            .expect("Relation")
-            .clone();
+        let relation = pool().message("spark.connect.Relation").expect("Relation");
         let mut message = Native::new(
             Fields {
                 desc: relation,
@@ -1317,6 +1370,6 @@ mod tests {
             message = holding("spark.connect.Relation", "limit", limit);
         }
         assert_eq!(message.depth, 1_000_000);
-        assert_eq!(Value::Message(Arc::new(message)).depth(), 1_000_001);
+        assert_eq!(Value::Message(NRef::new(message)).depth(), 1_000_001);
     }
 }

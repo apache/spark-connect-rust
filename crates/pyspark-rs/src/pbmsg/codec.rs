@@ -10,9 +10,10 @@ use std::sync::{Arc, Mutex};
 
 use pyo3::prelude::*;
 
+use super::arena::Arena;
 use super::containers::{Entries, MapValue, RepeatedComposite, RepeatedScalar};
 use super::message::{generation, new_instance, EntryRef, Fields, MessageClass, PyMessage, Slot};
-use super::native::{Native, NativeMap, NativeMessages, NativeValue, Value};
+use super::native::{unique_native, Native, NativeMap, NativeMessages, NativeValue, Value};
 use super::pool::{FieldDesc, Kind, MapDesc, MessageDesc};
 use super::scalar::Scalar;
 use super::text::upb_wire_key_order;
@@ -187,9 +188,8 @@ fn measure(py: Python<'_>, message: &Fields, sizes: &mut Vec<usize>) -> PyResult
                     total += measure_scalars(field, items, sizes);
                 }
                 Slot::Composite(container) => {
-                    for child in &container.bind(py).borrow().items {
-                        total += measure_child(py, field, &child.bind(py).borrow(), sizes)?;
-                    }
+                    let container = container.bind(py).borrow();
+                    total += measure_composite(py, field, &container, sizes)?;
                 }
                 Slot::Native(Value::Messages(items)) => {
                     for child in &items.items {
@@ -207,6 +207,25 @@ fn measure(py: Python<'_>, message: &Fields, sizes: &mut Vec<usize>) -> PyResult
         }
         Ok(total + message.unknown.len())
     })
+}
+
+/// The length of the messages of the container `container` of `field`, of their objects and of the
+/// messages that it holds natively after them, as [`measure_child`] measures each.
+#[inline(never)]
+fn measure_composite(
+    py: Python<'_>,
+    field: &FieldDesc,
+    container: &RepeatedComposite,
+    sizes: &mut Vec<usize>,
+) -> PyResult<usize> {
+    let mut total = 0;
+    for child in &container.items {
+        total += measure_child(py, field, &child.bind(py).borrow(), sizes)?;
+    }
+    for child in container.pending_natives() {
+        total += measure_child(py, field, &child.fields, sizes)?;
+    }
+    Ok(total)
 }
 
 /// The length of `child` as a value of `field`, its tags (and size) included: of a group, between
@@ -327,9 +346,8 @@ fn write(
                     write_scalars(field, items, sizes, next, out)
                 }
                 Slot::Composite(container) => {
-                    for child in &container.bind(py).borrow().items {
-                        write_child(py, field, &child.bind(py).borrow(), sizes, next, out)?;
-                    }
+                    let container = container.bind(py).borrow();
+                    write_composite(py, field, &container, sizes, next, out)?;
                 }
                 Slot::Native(Value::Messages(items)) => {
                     for child in &items.items {
@@ -348,6 +366,26 @@ fn write(
         out.extend_from_slice(&message.unknown);
         Ok(())
     })
+}
+
+/// Write the messages of the container `container` of `field`, of their objects and of the
+/// messages that it holds natively after them, as [`write_child`] writes each.
+#[inline(never)]
+fn write_composite(
+    py: Python<'_>,
+    field: &FieldDesc,
+    container: &RepeatedComposite,
+    sizes: &[usize],
+    next: &mut usize,
+    out: &mut Vec<u8>,
+) -> PyResult<()> {
+    for child in &container.items {
+        write_child(py, field, &child.bind(py).borrow(), sizes, next, out)?;
+    }
+    for child in container.pending_natives() {
+        write_child(py, field, &child.fields, sizes, next, out)?;
+    }
+    Ok(())
 }
 
 fn take_size(sizes: &[usize], next: &mut usize) -> usize {
@@ -987,17 +1025,19 @@ fn merge_with(
     // other member are read into it).
     let empty = {
         let m = message.try_borrow()?;
-        m.is_empty().then(|| m.desc.clone())
+        m.is_empty().then(|| m.desc)
     };
     let parsed = if let Some(desc) = empty {
+        let arena = Arena::new();
         let parse = NativeParse {
             py,
             budget,
+            arena: &arena,
             generation: generation(),
             level: 0,
         };
-        let mut native = Native::empty(desc.clone(), parse.generation);
-        let parsed = parse.message(&desc, &mut native, &mut reader, depth, None);
+        let mut native = Native::empty(desc, parse.generation);
+        let parsed = parse.message(desc, &mut native, &mut reader, depth, None);
         PyMessage::take_parsed(message, native, budget)?;
         parsed
     } else {
@@ -1115,7 +1155,7 @@ fn merge_inner(
     if let Some(budget) = budget {
         budget.step(py)?;
     }
-    let desc = message.borrow().desc.clone();
+    let desc = message.borrow().desc;
     let mut repeated = Repeated::default();
     // As upb's: the run of the fields of numbers that the message type has no field of, which the
     // message read since the tag of its last field of a number of its type, which it keeps at the
@@ -1132,7 +1172,7 @@ fn merge_inner(
             }
             return Err(decode_error("unexpected end of group"));
         }
-        let field = field_of_number(&desc, number);
+        let field = field_of_number(desc, number);
         if field.is_some() {
             keep_unknown_run(message, reader, unknown_from.take(), start);
         } else if number == 0 && !(desc.fields.is_empty() && matches!(wire_type, 0..=3 | 5)) {
@@ -1477,6 +1517,8 @@ fn merge_map_entry(
 struct NativeParse<'b, 'py> {
     py: Python<'py>,
     budget: Option<&'b ConversionBudget>,
+    /// The slabs of the messages that the parse makes (see `arena`).
+    arena: &'b Arena,
     /// The generation of the classes of the messages (see `message::generation`), which their
     /// objects are made of.
     generation: u64,
@@ -1597,9 +1639,9 @@ impl NativeParse<'_, '_> {
                 let messages = native_messages(self.py, fields, field, self.generation)?;
                 let mut len = len;
                 loop {
-                    let mut child = Native::empty(desc.clone(), self.generation);
+                    let mut child = Native::empty(desc, self.generation);
                     let parsed = self.child(desc, &mut child, field, len, reader, depth);
-                    messages.push(Arc::new(child));
+                    messages.push(self.arena.alloc(child));
                     parsed?;
                     reader.check_end()?;
                     if field.delimited || reader.done() {
@@ -1615,7 +1657,7 @@ impl NativeParse<'_, '_> {
                     }
                 }
             }
-            let child = native_child(fields, index, desc, self.generation);
+            let child = native_child(fields, index, desc, self.arena, self.generation);
             return self.child(desc, child, field, len, reader, depth);
         }
         if field.repeated {
@@ -1758,7 +1800,7 @@ impl NativeParse<'_, '_> {
                     let len = reader.size()?;
                     let desc = map_value_type_of(map)?;
                     if child.is_none() {
-                        child = Some(Native::empty(desc.clone(), self.generation));
+                        child = Some(Native::empty(desc, self.generation));
                     }
                     let mut sub = reader.sub(len)?;
                     // (A failure in the value leaves the entry unset, as of the parse into an
@@ -1810,9 +1852,9 @@ impl NativeParse<'_, '_> {
         let value = if map.value == Kind::Message {
             let child = match child {
                 Some(child) => child,
-                None => Native::empty(map_value_type_of(map)?.clone(), self.generation),
+                None => Native::empty(map_value_type_of(map)?, self.generation),
             };
-            NativeValue::Message(Arc::new(child))
+            NativeValue::Message(self.arena.alloc(child))
         } else {
             NativeValue::Scalar(scalar.unwrap_or_else(|| Scalar::default_of(map.value)))
         };
@@ -1822,14 +1864,14 @@ impl NativeParse<'_, '_> {
 }
 
 /// The message type of the message field `field`, as the parse into an object makes its message.
-fn message_type_of(field: &FieldDesc) -> PyResult<&Arc<MessageDesc>> {
+fn message_type_of(field: &FieldDesc) -> PyResult<&'static MessageDesc> {
     field.message_type().ok_or_else(|| {
         pyo3::exceptions::PyTypeError::new_err(format!("no message type named {}", field.type_name))
     })
 }
 
 /// The message type of the values of the map of messages `map`.
-fn map_value_type_of(map: &MapDesc) -> PyResult<&Arc<MessageDesc>> {
+fn map_value_type_of(map: &MapDesc) -> PyResult<&'static MessageDesc> {
     map.value_message().ok_or_else(|| {
         pyo3::exceptions::PyTypeError::new_err(format!("no message type named {}", map.value_type))
     })
@@ -1864,7 +1906,8 @@ fn set_native_scalar(fields: &mut Fields, index: usize, value: Scalar) {
 fn native_child<'f>(
     fields: &'f mut Fields,
     index: usize,
-    desc: &Arc<MessageDesc>,
+    desc: &'static MessageDesc,
+    arena: &Arena,
     generation: u64,
 ) -> &'f mut Native {
     if !matches!(
@@ -1872,14 +1915,14 @@ fn native_child<'f>(
         Some(Slot::Native(Value::Message(_)))
     ) {
         clear_oneof_of(fields, index);
-        let child = Arc::new(Native::empty(desc.clone(), generation));
+        let child = arena.alloc(Native::empty(desc, generation));
         let Fields { desc, slots, .. } = &mut *fields;
         slots.set(desc, index, Slot::Native(Value::Message(child)));
     }
     match fields.slots.get_mut(index) {
-        Some(Slot::Native(Value::Message(child))) => own(child, |m| Native {
+        Some(Slot::Native(Value::Message(child))) => unique_native(child, |m| Native {
             fields: Fields {
-                desc: m.fields.desc.clone(),
+                desc: m.fields.desc,
                 slots: m.fields.slots.map(|slot| match slot {
                     Slot::Scalar(v) => Slot::Scalar(v.clone()),
                     Slot::Native(v) => Slot::Native(v.clone()),

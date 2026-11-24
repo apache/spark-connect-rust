@@ -8483,8 +8483,9 @@ def test_threads_that_read_change_and_copy_the_same_copies_at_once_see_them_whol
 
 
 def test_a_signal_during_the_first_read_of_a_copy_leaves_it_whole():
-    # The first read of a repeated message field of a copy of many messages makes their objects
-    # of checkpoints, every 1,024 messages: a signal there raises the exception of its handler
+    # The read of the last message of a repeated message field of a copy of many messages makes
+    # the objects of the messages up to it, of checkpoints, every 1,024 messages (the field's
+    # container makes them as they are read): a signal there raises the exception of its handler
     # from the read, as from the other operations of many steps, and the message stays whole, its
     # field read again in full, of one object from then on.
     import signal
@@ -8507,7 +8508,7 @@ def test_a_signal_during_the_first_read_of_a_copy_leaves_it_whole():
             array = h.array  # of one level: its elements stay native
             signal.setitimer(signal.ITIMER_REAL, 0.0005 + attempt * 0.0002)
             try:
-                len(array.elements)
+                array.elements[-1]
                 outcomes.append("completed")
             except Stop:
                 outcomes.append("interrupted")
@@ -9070,10 +9071,10 @@ def test_a_collection_during_the_first_read_of_a_parse_finds_the_message():
 
 
 def test_a_signal_during_the_first_read_of_a_parse_leaves_it_whole():
-    # As of a copy (see test_a_signal_during_the_first_read_of_a_copy_leaves_it_whole): the first
-    # read of a repeated message field of a parse of many messages makes their objects of
-    # checkpoints, so a signal there raises the exception of its handler from the read, and the
-    # message stays whole, its field read again in full, of one object from then on.
+    # As of a copy (see test_a_signal_during_the_first_read_of_a_copy_leaves_it_whole): the read
+    # of the last message of a repeated message field of a parse of many messages makes the objects
+    # up to it of checkpoints, so a signal there raises the exception of its handler from the read,
+    # and the message stays whole, its field read again in full, of one object from then on.
     import signal
 
     count = 200_000
@@ -9094,7 +9095,7 @@ def test_a_signal_during_the_first_read_of_a_parse_leaves_it_whole():
             array = h.array  # of one level, of more than 256 messages: its elements stay native
             signal.setitimer(signal.ITIMER_REAL, 0.0005 + attempt * 0.0002)
             try:
-                len(array.elements)
+                array.elements[-1]
                 outcomes.append("completed")
             except Stop:
                 outcomes.append("interrupted")
@@ -9107,3 +9108,241 @@ def test_a_signal_during_the_first_read_of_a_parse_leaves_it_whole():
         signal.setitimer(signal.ITIMER_REAL, 0)
         signal.signal(signal.SIGALRM, previous)
     assert "interrupted" in outcomes, outcomes
+
+
+def _large_field_scenarios(cls):
+    """Reads and changes of a repeated message field of 600 messages of a parse and of a copy, whose
+    container makes the objects of its messages as they are read (see `RepeatedComposite::of_native`):
+    each scenario reads a part of the field first, then reads or changes the container or its
+    message, and gives what it read, of the identities of what it gave too."""
+    L = cls("spark.connect.Expression.Literal")
+    E = cls("spark.connect.Expression")
+    count = 600
+    source = L(array={"elements": [{"integer": i} for i in range(count)]})
+    data = source.SerializeToString()
+    extra = L(integer=-1)
+
+    def parsed():
+        return L.FromString(data)
+
+    def copied():
+        return L(array=L.FromString(data).array)
+
+    def read(make, then):
+        def scenario():
+            m = make()
+            c = m.array.elements
+            first, tenth = c[0], c[10]
+            out = then(m, c)
+            return (
+                out,
+                len(c),
+                c[0] is first and c[10] is tenth,
+                [e.integer for e in c[:3]],
+                m.SerializeToString(),
+            )
+
+        return scenario
+
+    cases = {
+        "len before a read": lambda m, c: len(L.FromString(data).array.elements),
+        "the last, of a negative index": lambda m, c: (c[-1].integer, c[-1] is c[count - 1]),
+        "an index past the end": lambda m, c: c[count],
+        "a slice": lambda m, c: [e.integer for e in c[595:]],
+        "a slice of a step": lambda m, c: [e.integer for e in c[1:20:7]],
+        "an iteration": lambda m, c: sum(e.integer for e in c),
+        "an iteration, of the same objects": lambda m, c: all(a is b for a, b in zip(c, c)),
+        "in": lambda m, c: c[5] in c,
+        "==": lambda m, c: (c == L.FromString(data).array.elements, m == L.FromString(data)),
+        "repr": lambda m, c: repr(c),
+        "str": lambda m, c: str(m),
+        "ByteSize": lambda m, c: m.ByteSize(),
+        "append": lambda m, c: (c.append(extra), c[-1].integer, c[count].integer),
+        "add": lambda m, c: (c.add(integer=7), len(c), c[-1].integer),
+        "extend": lambda m, c: (c.extend([extra, extra]), [e.integer for e in c[-3:]]),
+        "insert": lambda m, c: (c.insert(300, extra), c[300].integer, c[301].integer),
+        "pop": lambda m, c: (c.pop().integer, c.pop(0).integer, len(c)),
+        "remove": lambda m, c: (c.remove(L(integer=500)), len(c), c[500].integer),
+        "del of an index": lambda m, c: (c.__delitem__(400), c[400].integer),
+        "del of a slice": lambda m, c: (c.__delitem__(slice(100, 500)), [e.integer for e in c[99:102]]),
+        "sort": lambda m, c: (c.sort(key=lambda e: -e.integer), c[0].integer, c[-1].integer),
+        "reverse": lambda m, c: (c.reverse(), c[0].integer),
+        "clear": lambda m, c: (c.clear(), len(c), m.HasField("array")),
+        "MergeFrom of another": lambda m, c: (
+            c.MergeFrom(L.FromString(data).array.elements),
+            len(c),
+            c[count + 1].integer,
+        ),
+        "the message, CopyFrom": lambda m, c: (L().CopyFrom(m), m.array.elements[599].integer),
+        "the message, copied": lambda m, c: copy.deepcopy(m).array.elements[599].integer,
+        "the message, MergeFrom itself": lambda m, c: (m.MergeFrom(m), len(m.array.elements)),
+        "the message, MergeFromString of its bytes": lambda m, c: (
+            m.MergeFromString(m.SerializeToString()),
+            len(m.array.elements),
+        ),
+        "the message, ListFields": lambda m, c: [f.name for f, _ in m.array.ListFields()],
+        "the message, DiscardUnknownFields": lambda m, c: (
+            m.array.elements[599].MergeFromString(_UNKNOWN),
+            m.DiscardUnknownFields(),
+            m.array.elements[599].SerializeToString(),
+        ),
+        "the field cleared": lambda m, c: (m.array.ClearField("elements"), len(c), c[599].integer),
+        "a message of the field, read and changed": lambda m, c: (
+            c.__getitem__(450).MergeFrom(extra),
+            c[450].integer,
+        ),
+        "the elements in a constructor": lambda m, c: len(L.Array(elements=c).elements),
+        "a constructor of a list of them": lambda m, c: E(
+            unresolved_function={"arguments": [{"literal": e} for e in c[:3]]}
+        ).SerializeToString(),
+    }
+    out = {}
+    for name, then in cases.items():
+        for how, make in (("parse", parsed), ("copy", copied)):
+            out[f"{name}, of a {how}"] = _outcome(read(make, then))
+
+    # The unknown fields of the messages that have no object yet, discarded, of a parse and of a
+    # copy of messages that each hold one.
+    held = L(array={"elements": [{"integer": i} for i in range(count)]})
+    for e in held.array.elements:
+        e.MergeFromString(_UNKNOWN)
+    unknown_data = held.SerializeToString()
+
+    def discard(make):
+        def scenario():
+            m = make()
+            c = m.array.elements
+            first = c[0]
+            m.DiscardUnknownFields()
+            return m.SerializeToString(), c[0] is first, c[599].SerializeToString(), len(c)
+
+        return scenario
+
+    for how, make in (
+        ("parse", lambda: L.FromString(unknown_data)),
+        ("copy", lambda: L(array=L.FromString(unknown_data).array)),
+    ):
+        out[f"DiscardUnknownFields of the messages of no object, of a {how}"] = _outcome(discard(make))
+    return out
+
+
+def test_large_repeated_fields_of_parses_and_copies_are_upbs(upb):
+    # A repeated message field of a parse or a copy of more than 256 messages gives a container
+    # that makes the objects of its messages as they are read (`RepeatedComposite::of_native`),
+    # rather than of a pass of their own: what it gives, and what its operations and those of its
+    # message do, read it as upb's, of the same objects from one read to the next.
+    assert _large_field_scenarios(ours) == _large_field_scenarios(upb)
+
+
+def test_reads_of_any_size_are_upbs_of_either_way(upb):
+    # The runtime makes the objects of a native value of up to 256 messages at once, else of one
+    # level, and those of a repeated message field of a larger one as they are read: of the limit
+    # at 0 (`_proto_whole_limit`), every value is read a level at a time, of the same results.
+    previous = _pyspark._proto_whole_limit(0)
+    try:
+        lazily = _large_field_scenarios(ours), _parse_scenarios(ours)
+    finally:
+        _pyspark._proto_whole_limit(previous)
+    assert lazily == (_large_field_scenarios(upb), _parse_scenarios(upb))
+
+
+def test_a_large_repeated_field_extends_itself_as_a_list():
+    # The extend of a repeated message field of itself takes the messages that it had first, as a
+    # list's (see `extend_itself` of the alias cases; upb's takes those that it appends as well, of
+    # no end), of a container of a parse or a copy whose objects are made as they are read too,
+    # of either way of making them.
+    L = proto.Expression.Literal
+    count = 600
+    data = L(array={"elements": [{"integer": i} for i in range(count)]}).SerializeToString()
+    twice = L(array={"elements": [{"integer": i % count} for i in range(2 * count)]}).SerializeToString()
+    previous = _pyspark._proto_whole_limit()
+    try:
+        for limit in (previous, 0):
+            _pyspark._proto_whole_limit(limit)
+            for make in (lambda: L.FromString(data), lambda: L(array=L.FromString(data).array)):
+                m = make()
+                c = m.array.elements
+                tenth = c[10]
+                c.extend(c)
+                assert len(c) == 2 * count and c[10] is tenth and c[count + 10] is not tenth
+                assert [e.integer for e in c] == list(range(count)) * 2
+                assert m.SerializeToString() == twice
+    finally:
+        _pyspark._proto_whole_limit(previous)
+
+
+def test_a_collection_during_the_reads_of_a_large_repeated_field_finds_it_whole():
+    # The container of a repeated message field of a parse of many messages makes the objects of
+    # its messages as they are read, a chunk at a time, of no borrow of it held while it makes
+    # them: a collection at each allocation, whose callback reads the container (its length, its
+    # messages, an iteration of it) and serializes its message, finds it free and whole, and the
+    # reads give one object of each message.
+    count = 1000
+    data = proto.Expression.Literal(
+        array={"elements": [{"integer": i} for i in range(count)]}
+    ).SerializeToString()
+    message = proto.Expression.Literal.FromString(data)
+    container = message.array.elements
+    state = {"ran": 0, "errors": [], "sums": set()}
+
+    def callback(phase, info):
+        if phase == "start" and state["ran"] < 200:
+            state["ran"] += 1
+            try:
+                assert len(container) == count
+                assert container[count // 2].integer == count // 2
+                state["sums"].add(sum(e.integer for e in container))
+                assert message.SerializeToString() == data
+            except BaseException as e:  # noqa: BLE001 (a PanicException too)
+                state["errors"].append(f"{type(e).__name__}: {e}")
+
+    gc.collect()
+    gc.callbacks.append(callback)
+    threshold = gc.get_threshold()
+    gc.set_threshold(1)
+    try:
+        read = [e for e in container]
+    finally:
+        gc.set_threshold(*threshold)
+        gc.callbacks.remove(callback)
+    assert state["ran"] > 0 and state["errors"] == [], state["errors"][:3]
+    assert state["sums"] <= {sum(range(count))}
+    assert all(a is b for a, b in zip(read, container)) and len(read) == count
+    assert message.SerializeToString() == data
+
+
+def test_threads_that_read_the_same_large_repeated_field_see_it_whole():
+    # Threads that iterate and index the same container of a repeated message field of a parse of
+    # many messages at once, of a switch interval of a microsecond, so that one takes the GIL at
+    # the checkpoints of the making of a chunk of another, each see every message, of one object
+    # each.
+    count = 5000
+    data = proto.Expression.Literal(
+        array={"elements": [{"integer": i} for i in range(count)]}
+    ).SerializeToString()
+    interval = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+    try:
+        for _ in range(5):
+            container = proto.Expression.Literal.FromString(data).array.elements
+            seen = []
+            errors = []
+
+            def read(step):
+                try:
+                    got = [container[i] for i in range(0, count, step)]
+                    got += list(container)
+                    seen.append(got)
+                except BaseException as e:  # noqa: BLE001 (a PanicException too)
+                    errors.append(f"{type(e).__name__}: {e}")
+
+            threads = [threading.Thread(target=read, args=(step,)) for step in (1, 7, 13, 1)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+            assert errors == [], errors[:3]
+            assert all(x is container[x.integer] for got in seen for x in got)
+            assert [e.integer for e in container] == list(range(count))
+    finally:
+        sys.setswitchinterval(interval)
