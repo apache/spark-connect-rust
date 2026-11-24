@@ -143,3 +143,134 @@ assert pickle.loads(pickle.dumps(lr)).getMaxIter() == 3
 assert lr.write().overwrite().shouldOverwrite
 assert LogisticRegression.read()._clazz is LogisticRegression
 """)
+
+
+def _assert_native_params_match(instance):
+    # Read the native state directly; Python getters would hide a stale Rust snapshot.
+    values, defaults = _pyspark._ml_params(instance)
+    assert values == {p.name: v for p, v in instance._paramMap.items()}
+    assert defaults == {p.name: v for p, v in instance._defaultParamMap.items()}
+    assert _pyspark._ml_uid(instance) == instance.uid
+
+
+def test_constructor_and_parameter_mutations_update_native_estimator_immediately():
+    lr = LogisticRegression(maxIter=3, regParam=0.1)
+    _assert_native_params_match(lr)
+    assert lr.setMaxIter(20) is lr
+    _assert_native_params_match(lr)
+    assert lr.setParams(maxIter=21, regParam=0.2) is lr
+    _assert_native_params_match(lr)
+    assert lr.set(lr.maxIter, 22) is None
+    _assert_native_params_match(lr)
+    assert lr._setDefault(maxIter=23) is lr
+    _assert_native_params_match(lr)
+    assert lr.clear(lr.maxIter) is None
+    _assert_native_params_match(lr)
+    assert lr._resetUid("eager_lr") is lr
+    _assert_native_params_match(lr)
+
+
+@pytest.mark.parametrize("cls", [LogisticRegression, LogisticRegressionModel])
+def test_model_and_estimator_threshold_setters_update_native_params(cls):
+    instance = cls()
+    _assert_native_params_match(instance)
+    assert instance.setPredictionCol("predicted") is instance
+    _assert_native_params_match(instance)
+    assert instance.setThreshold(0.3) is instance
+    _assert_native_params_match(instance)
+    assert instance.setThresholds([0.7, 0.3]) is instance
+    _assert_native_params_match(instance)
+    # Python Params accepts None; synchronization must retain its deferred validation.
+    assert instance.setFeaturesCol(None) is instance
+    _assert_native_params_match(instance)
+
+
+def test_partial_mutation_keeps_native_state_and_original_conversion_error():
+    lr = LogisticRegression(maxIter=3, regParam=0.1)
+    with pytest.raises(TypeError, match='Invalid param value given for param "regParam"'):
+        lr._set(maxIter=9, regParam=object())
+    assert lr.getMaxIter() == 9 and lr.getRegParam() == 0.1
+    _assert_native_params_match(lr)
+    with pytest.raises(TypeError, match='Invalid default param value given for param "regParam"'):
+        lr._setDefault(maxIter=8, regParam=object())
+    _assert_native_params_match(lr)
+
+
+@pytest.mark.parametrize("cls", [LogisticRegression, LogisticRegressionModel])
+def test_copies_and_restored_state_have_current_native_params(cls):
+    instance = cls().setPredictionCol("predicted")
+    instance._setDefault(maxIter=8)
+    overridden = instance.copy({instance.predictionCol: "copied_prediction"})
+    assert overridden.getPredictionCol() == "copied_prediction"
+    assert instance.getPredictionCol() == "predicted"
+    _assert_native_params_match(overridden)
+    for copied in (copy.copy(instance), copy.deepcopy(instance)):
+        assert copied is not instance and copied.uid == instance.uid
+        _assert_native_params_match(copied)
+    for protocol in range(pickle.HIGHEST_PROTOCOL + 1):
+        _assert_native_params_match(pickle.loads(pickle.dumps(instance, protocol=protocol)))
+    _assert_native_params_match(instance)
+
+
+def test_default_only_copy_values_updates_native_target():
+    source = LogisticRegression()._setDefault(maxIter=41)
+    assert not source._paramMap
+    for target in (LogisticRegression(), LogisticRegressionModel()):
+        assert source._copyValues(target) is target
+        assert target.getMaxIter() == 41
+        _assert_native_params_match(target)
+    _assert_native_params_match(source.copy())
+
+
+def test_subclass_setters_and_fit_overrides_observe_current_native_params():
+    class RecordingLR(LogisticRegression):
+        def _set(self, **kwargs):
+            result = super()._set(**kwargs)
+            # During _copyValues, defaults are still being copied one by one.
+            assert _pyspark._ml_params(self)[0] == {
+                p.name: v for p, v in self._paramMap.items()
+            }
+            return result
+
+        def _fit(self, dataset):
+            _assert_native_params_match(self)
+            return self.getMaxIter()
+
+    lr = RecordingLR(maxIter=3)
+    assert lr.fit(object(), {lr.maxIter: 7}) == 7
+    assert lr.fit(object(), [{lr.maxIter: 2}, {lr.maxIter: 4}]) == [2, 4]
+    assert lr.getMaxIter() == 3
+    _assert_native_params_match(lr)
+
+
+def test_other_native_algorithms_keep_operation_time_synchronization():
+    from pyspark.ml.connect.classification import LinearSVC
+
+    svc = LinearSVC()
+    previous = _pyspark._ml_params(svc)
+    svc.setMaxIter(17)
+    assert svc.getMaxIter() == 17
+    assert _pyspark._ml_params(svc) == previous
+    svc.write()
+    _assert_native_params_match(svc)
+
+
+def test_direct_dictionary_mutations_still_sync_before_native_operations():
+    lr = LogisticRegression(maxIter=3)
+    lr._paramMap[lr.maxIter] = 17
+    assert _pyspark._ml_params(lr)[0]["maxIter"] == 3
+    lr.write()
+    _assert_native_params_match(lr)
+
+
+def test_eager_native_defaults_do_not_leak_reference_cycles():
+    import gc
+    import weakref
+
+    lr = LogisticRegression()
+    lr.maxIter.typeConverter = lambda value: value
+    lr._setDefault(maxIter=lr)
+    reference = weakref.ref(lr)
+    del lr
+    gc.collect()
+    assert reference() is None

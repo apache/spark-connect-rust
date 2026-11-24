@@ -54,6 +54,12 @@ def test_fit_transform_fetch_and_persistence(frame, tmp_path, native_operations_
     assert type(model) is LogisticRegressionModel
     assert model.uid == lr.uid and model.getMaxIter() == 20
     assert model.numClasses == 2 and model.numFeatures == 1
+    from pyspark import _pyspark
+
+    assert model.setPredictionCol("eager_prediction") is model
+    assert _pyspark._ml_params(model)[0]["predictionCol"] == "eager_prediction"
+    assert len(model.transform(frame).select("eager_prediction").collect()) == 4
+    model.setPredictionCol("prediction")
     assert model.coefficients[0] > 0
     summary = model.summary
     assert type(summary) is BinaryLogisticRegressionTrainingSummary

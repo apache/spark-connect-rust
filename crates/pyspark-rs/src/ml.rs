@@ -272,7 +272,7 @@ trait Native {
 }
 
 macro_rules! native {
-    ($($wrapper:ty => $core:ty),* $(,)?) => {$(
+    ($($wrapper:ty => $core:ty $({ defaults: $defaults:ident })?),* $(,)?) => {$(
         impl Native for $wrapper {
             type Core = $core;
             fn inner(&self) -> &$core {
@@ -293,6 +293,14 @@ macro_rules! native {
             fn unsendable_mut(&mut self) -> &mut Vec<&'static str> {
                 &mut self.unsendable
             }
+            $(
+            fn own_defaults(&self) -> Option<&params_api::OwnDefaults> {
+                Some(&self.$defaults)
+            }
+            fn own_defaults_mut(&mut self) -> Option<&mut params_api::OwnDefaults> {
+                Some(&mut self.$defaults)
+            }
+            )?
         }
     )*};
 }
@@ -784,6 +792,9 @@ impl PyMLModel {
 pub struct PyLogisticRegression {
     inner: LogisticRegression,
     unsendable: Vec<&'static str>,
+    own_defaults: params_api::OwnDefaults,
+    // Guard traversal until PyO3 has initialized the Rust payload.
+    gc_ready: crate::gc::GcReady,
 }
 
 /// The params of `pyspark.ml.classification.LogisticRegression`, in the order of its constructor,
@@ -874,6 +885,8 @@ native_pymethods! {
         let mut this = Self {
             inner: LogisticRegression::new(),
             unsendable: Vec::new(),
+            own_defaults: Vec::new(),
+            gc_ready: crate::gc::GcReady::new(),
         };
         init_params(
             &mut this,
@@ -886,6 +899,20 @@ native_pymethods! {
         classification_api::check_threshold_consistency(args.py(), &this)?;
         Ok(this)
     }
+
+    fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
+        if !self.gc_ready.get() {
+            return Ok(());
+        }
+        params_api::visit_values(&self.own_defaults, &visit)
+    }
+
+    fn __clear__(&mut self) {
+        if self.gc_ready.get() {
+            self.own_defaults.clear();
+        }
+    }
+
 
     /// `setParams` of PySpark's LogisticRegression: as its constructor, it sets the params that it
     /// is given (see [`set_params_of`]), then checks `threshold` and `thresholds`, whichever call
@@ -1133,6 +1160,8 @@ impl params_api::NativeInstance for PyLogisticRegression {
             Self {
                 inner: self.inner.clone(),
                 unsendable: self.unsendable.clone(),
+                own_defaults: params_api::clone_own_defaults(py, &self.own_defaults),
+                gc_ready: crate::gc::GcReady::new(),
             },
         )
     }
@@ -6955,7 +6984,7 @@ impl params_api::NativeInstance for PyBisectingKMeans {
 }
 
 native!(
-    PyLogisticRegression => LogisticRegression,
+    PyLogisticRegression => LogisticRegression { defaults: own_defaults },
     PyLinearSVC => LinearSVC,
     PyFMClassifier => FMClassifier,
     PyMultilayerPerceptronClassifier => MultilayerPerceptronClassifier,

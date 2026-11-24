@@ -56,7 +56,10 @@ def _load_classification():
         "BinaryLogisticRegressionTrainingSummary",
     )
     native = {name: getattr(_pyspark, name) for name in names}
-    publish(native, reference, public_module=__name__)
+    publish(
+        native, reference, public_module=__name__,
+        eager_params=("LogisticRegression", "LogisticRegressionModel"),
+    )
     vars(module).update(native)
 
 

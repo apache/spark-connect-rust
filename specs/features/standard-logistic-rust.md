@@ -8,7 +8,7 @@ created: 2026-11-19
 ## Intent
 
 Make the standard Python LogisticRegression API use the existing Rust ML operations.
-Demonstrate the migration with one estimator, its model, and its summaries in a draft PR.
+Scope the migration to one estimator, its model, and its summaries.
 Reuse the Rust ML implementation without adding Python runtime dependencies.
 
 ## Context
@@ -27,10 +27,15 @@ Rust for fit, transform, model access, and persistence, while retaining Python p
   gRPC, Py4J, zstandard, scipy, scikit-learn, or torch.
 - R7: Preserve composition with standard Pipeline and CrossValidator APIs. Reused upstream
   standard ML tests must import our package so they exercise shared Rust ML operations.
+- R8: Eagerly synchronize ordinary parameter mutations for LogisticRegression and
+  LogisticRegressionModel only, including construction, setters, defaults, copies, UID changes,
+  and state restoration. Preserve Python return values, signatures, and conversion errors.
+- R9: Keep operation-time synchronization for direct parameter-dictionary mutations and other
+  bypasses. Eager synchronization performs no server calls and adds no session requirement.
 
 ## Clarifications
 
-The draft covers standard ML over Spark Connect, excluding the deprecated upstream
+The change covers standard ML over Spark Connect, excluding the deprecated upstream
 pyspark.ml.connect public API. Existing fork-specific native imports remain aliases.
 
 ## Acceptance Criteria
@@ -51,17 +56,27 @@ pyspark.ml.connect public API. Existing fork-specific native imports remain alia
 - AC7: GIVEN a standard Pipeline and CrossValidator containing LogisticRegression WHEN fitting,
   transforming, and saving/loading the pipeline THEN it contains the native model and preserves
   predictions.
+- AC8: GIVEN a LogisticRegression estimator or model WHEN its parameters change through the
+  supported mutation methods THEN the native parameter snapshot immediately matches Python
+  before any fit, transform, writer, or native property access.
+- AC9: GIVEN defaults, parameter overrides, copying, pickling, or a subclass WHEN an updated
+  object is returned THEN its native parameters and UID match Python while the original
+  object remains unchanged where PySpark leaves it unchanged.
+- AC10: GIVEN another native ML class WHEN a setter changes its Python parameter map THEN its
+  existing operation-time synchronization behavior is unchanged.
 
 ## Constraints
 
-Keep Python parameter maps authoritative and synchronize before native operations.
+Keep Python parameter maps authoritative. For LogisticRegression and LogisticRegressionModel,
+synchronize after supported mutations as well as before native operations.
 Keep the existing Rust model lifetime and session handling. No new wire format or runtime flag.
 Upstream tests use the drop-in package, not upstream Python with only Rust transport injected.
 Python test dependencies do not become package runtime requirements.
 
 ## Out of Scope
 
-Other algorithms and migration of every Python setter to Rust.
+Eager synchronization of other algorithms, replacing Python parameter dictionaries, and
+rewriting upstream Python setters in Rust.
 
 ## Plan
 
@@ -69,6 +84,9 @@ Keep the upstream classification source under a private source directory. A main
 module loads those definitions with their original module name and replaces only the six
 LogisticRegression classes through the existing native-class adapter. Preserve class identity
 across both import paths. Update the vendor mapping and exercise standard public imports.
+Opt only the estimator and model into eager synchronization through the adapter's parameter
+mutation methods; preserve the upstream sources unchanged. Retain the existing operation-time
+sync for direct dictionary writes and subclass overrides that bypass those methods.
 
 ## Tasks
 
@@ -78,9 +96,37 @@ across both import paths. Update the vendor mapping and exercise standard public
 - [x] T4: Add fresh-process dependency guards and standard pipeline/tuning coverage.
 - [x] T5: Merge current master, preserving native parameter synchronization and model finalizers.
 - [x] T6: Fix mapped-vendor lint exclusions, offline coverage selection, and OneVsRest class checks.
-- [ ] T-val: Validate the updated revision with a matching extension and required Rust/parity gates.
+- [x] T7: Opt LogisticRegression and its model into eager parameter synchronization.
+- [x] T8: Verify immediate native state, mutation errors, copying, subclasses, pickle restoration,
+  and isolation from other ML classes.
+- [x] T-val: Validate the updated revision with a matching extension, required local Rust gates,
+  and affected upstream parity tests.
 
-### Verification of the November 24 update
+### Verification of eager synchronization (November 24)
+
+- Built the matching PyO3 extension locally with Rust 1.100.0 and Python 3.13. The temporary
+  toolchain and dependency cache are outside the repository; package dependencies are unchanged.
+- Offline API, subclass, and standard-import tests: 896 passed, 68 skipped. Tests inspect native
+  snapshots directly after mutations, including partial conversion failures, defaults, copies,
+  UID updates, pickle restoration, subclass overrides, and reference-cycle collection.
+- Live standard LogisticRegression and native golden tests: 6 passed against Spark 4.3.0,
+  covering fitted-model eager updates, persistence, lazy model lifetime, Pipeline/CrossValidator,
+  and execution with optional Python dependencies blocked.
+- The official-test runner in drop-in mode passed all 17 tests in Spark 4.3.0's standard
+  classification parity file, with no skips. These tests import our package and native ML core.
+  A separate LogisticRegression-focused selection passed 7 tests.
+- Affected typing/runtime-import/docstring checks: 3 passed, 1 skipped (pyright unavailable).
+  Ruff, generated type-stub drift, and whitespace checks passed.
+- The preserved upstream classification source matches Spark 4.3.0 byte-for-byte.
+- Rust library tests: 864 passed. All integration tests compiled with both the default
+  features and `wasm-udf`. `cargo fmt --all --check` and workspace clippy across all targets
+  passed; clippy ran with warnings denied.
+- Fresh comparison with official Spark 4.3.0 found no missing public names on either
+  LogisticRegression class.
+- All 18 CI checks passed on the preceding head `4bfeb76f`. The updated head still needs CI;
+  the complete project-wide official suites and coverage are delegated to those checks.
+
+### Historical validation of the November 24 master merge
 
 - Merged Apache master at `d90a730e79fe216dffa9bb66e6a2eff566530e2f`.
 - Offline API, subclass, and standard-import tests: 884 passed, 68 skipped, including the
@@ -96,7 +142,8 @@ across both import paths. Update the vendor mapping and exercise standard public
   by current master. The live tests,
   including the new pipeline/tuning and dependency tests, have not passed on this revision.
 - Cargo/rustc are unavailable locally. Required Rust compilation, fmt, clippy, full-project
-  parity, and coverage gates remain unverified. Keep the PR draft pending matching-build CI.
+  parity, and coverage gates were unverified locally. All 18 CI checks subsequently passed on
+  `4bfeb76f` before the eager-synchronization follow-up.
 
 ### Historical validation of the original November 19 draft
 

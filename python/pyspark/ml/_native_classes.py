@@ -834,7 +834,7 @@ def _has_training_summary(official):
     return issubclass(official, HasTrainingSummary)
 
 
-def _public_class(native, official, parents, public_module=None):
+def _public_class(native, official, parents, public_module=None, eager_types=()):
     """The public class of `native`, of PySpark's class `official` and of the public classes
     `parents` of its bases of the module (see `publish`)."""
     bases = (native,) + parents + (official,)
@@ -862,6 +862,8 @@ def _public_class(native, official, parents, public_module=None):
     _sign_constructor(__new__, official)
     if _has_params(native):
         _params_api(native, official, namespace)
+        if native in eager_types:
+            _eager_params_api(native, official, namespace, eager_types)
     elif _is_summary(official):
         _summary_api(native, official, namespace)
     public = meta(native.__name__, bases, namespace)
@@ -935,6 +937,43 @@ def _params_api(native, official, namespace):
         # The native reader, of PySpark's class method (`JavaMLReadable.read`, `Pipeline.read`).
         namespace["read"] = _class_member(_NativeMember(native, "read"), "read", official)
     _text_api(native, official, namespace)
+
+
+
+def _eager_params_api(native, official, namespace, eager_types):
+    """Sync opted-in classes after Python Params mutations, including copies and restoration.
+
+    Keep Python's method signatures, conversions and return values. The operation-time sync
+    remains necessary for direct dictionary writes and overrides that bypass these methods.
+    """
+    def sync(instance):
+        if isinstance(instance, eager_types):
+            attributes = vars(instance)
+            # Constructors and custom pickle states can have incomplete Python Params state.
+            if "_paramMap" in attributes and "_defaultParamMap" in attributes:
+                _sync(instance)
+
+    for name in ("set", "_set", "_setDefault", "clear", "_resetUid", "_copyValues", "copy",
+                 "__setstate__"):
+        if name == "__setstate__":
+            member = _NativeMember(native, name)
+            reference = member.member
+        else:
+            reference = _member_of(official, name)[1]
+            member = namespace.get(name, reference)
+        binding = _binding_of(reference)
+        parameters = list(binding.parameters.values())
+        call = f"__member({_forwarded(parameters)})"
+        if name == "copy":
+            body = f"result = {call}\n__sync(result)\nreturn result"
+        else:
+            target = "to" if name == "_copyValues" else parameters[0].name
+            # A multi-parameter mutation can update earlier values before conversion fails.
+            body = f"try:\n    return {call}\nfinally:\n    __sync({target})"
+        namespace[name] = _function(
+            reference, name, reference.__qualname__, body,
+            {"__member": member, "__sync": sync}, binding=binding,
+        )
 
 
 def _text_api(native, official, namespace):
@@ -1017,11 +1056,12 @@ def _method_of(member, name, official):
     return _synced(member, name, official, sync=False)
 
 
-def publish(namespace, official_module, *, public_module=None):
+def publish(namespace, official_module, *, public_module=None, eager_params=()):
     """Replace each native class of the module of the globals `namespace` by its public class, of
     PySpark's class of the same name of `official_module`. A reference namespace also works,
     so a public adapter can retain upstream definitions before publishing native classes under
-    `public_module` without importing itself recursively."""
+    `public_module` without importing itself recursively. Names in `eager_params` also sync
+    after Python parameter mutations; other classes keep operation-time synchronization."""
     official = (
         importlib.import_module(official_module)
         if isinstance(official_module, str)
@@ -1034,6 +1074,7 @@ def publish(namespace, official_module, *, public_module=None):
     ]
     # A native base class (LDA's `LDAModel`) before its subclasses.
     natives.sort(key=lambda item: len(item[1].__mro__))
+    eager_types = tuple(native for name, native in natives if name in eager_params)
     published = {}
     for name, native in natives:
         official_class = getattr(official, name, None)
@@ -1057,7 +1098,9 @@ def publish(namespace, official_module, *, public_module=None):
                 ours = published[base.__name__][1]
                 if not any(issubclass(parent, ours) for parent in parents):
                     parents.append(ours)
-        public = _public_class(native, official_class, tuple(parents), public_module)
+        public = _public_class(
+            native, official_class, tuple(parents), public_module, eager_types
+        )
         published[name] = (official_class, public)
         namespace[name] = public
     return {name: public for name, (_, public) in published.items()}
