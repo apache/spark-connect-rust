@@ -251,9 +251,10 @@ difference is intentional or tracked for a fix.
   the last DataFrame of a checkpoint sends one ExecutePlan of the removal, which is not
   reattachable and goes to no hook, with the tags and the user context extensions of the thread
   that drops it. As PySpark's `RemoteModelRef`, whose `_delete_ml_cache` runs an
-  `execute_command`, the drop of the last reference to a model of the native ML classes (and of
-  the Rust API) sends the deletion of the model from the ML cache of the server as an execution of
-  the thread that drops it: of its tags and its user context extensions, reattachable, and through
+  `execute_command`, the `__del__` of the last Python object of a model of the native ML classes
+  (see "A model of a fit or a load" in `docs/compatibility.md`), or else the drop of the last
+  reference to it (and to a model of the Rust API), sends the deletion of the model from the ML
+  cache of the server as an execution of the thread that finalizes or drops it: of its tags and its user context extensions, reattachable, and through
   the hooks of the executions. PySpark's finalizers wait for the server; this client sends both
   without waiting, as a drop may run on a thread of the transport's runtime, or in a finalizer
   that holds the GIL, which another thread may need to read the responses of the same
@@ -272,6 +273,26 @@ difference is intentional or tracked for a fix.
   as PySpark's does; a model whose transforms still hold its object leaves the release to the last
   of them, on the thread that drops it, and a drop on a thread of the transport's runtime, which has
   no active session (the active session of Spark Connect is of its thread), deletes nothing then.
+- **A model that a finalizer saves while other holders keep its object** (intentional; the native
+  holders of a model's object are not its Python objects). PySpark deletes the server-side object
+  of a model of a fit or a load when Python finalizes the last of the model, its `Params.copy`
+  copies and its training summary, also when the garbage collector finalizes a reference cycle of
+  them, so that a model that a finalizer of the cycle saves raises `CONNECT_ML.CACHE_INVALID` at its
+  next use; this client does too (see "A model of a fit or a load" in `docs/compatibility.md`),
+  when no other holder keeps the object then. A transform of the model, a DataFrame of a member of
+  the model or of its summary, the summary of an evaluation and a writer hold the object here,
+  where PySpark's hold the Python model or summary (`__source_transformer__`,
+  `__source_instance__`), which is then not finalized. So when such a holder lives as the last of
+  the objects of the model is finalized, also one in the same cycle that the collector finalizes,
+  the object is deleted when the last holder goes, and a model or a summary that a finalizer of the
+  cycle saved keeps working until then, where PySpark's has lost its object. So does a clustering
+  model whose training summary dataset is a transform of the model (`KMeansModel`,
+  `BisectingKMeansModel`, `GaussianMixtureModel`): the plan of the summary dataset holds the object,
+  and DataFrames that Python code derives from the summary's `_summary_dataset` share that plan,
+  which the counts of the holders cannot tell from those of the model's own objects. A shallow
+  copy (`copy.copy`) holds the object as a `Params.copy` does (see the shallow copies in
+  `docs/compatibility.md`), and an explicit `__del__` of a model or a summary releases its hold
+  once, where PySpark's releases a reference at each call.
 - **An exception of the `&` of a join's list of conditions that is not of a class that the plan
   carries** (intentional; a plan of the core carries the errors of these classes, not any Python
   exception: it could hold a Python callback that raises it, as the plans of UDFs and of `to` hold

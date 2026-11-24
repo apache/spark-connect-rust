@@ -46,6 +46,7 @@ impl MlRef {
             fit_warning: None,
             release: None,
             kept: Default::default(),
+            released: Default::default(),
         }))
     }
 
@@ -69,6 +70,7 @@ impl MlRef {
             fit_warning: None,
             release: Some(Box::new(release)),
             kept: Default::default(),
+            released: Default::default(),
         }))
     }
 
@@ -85,6 +87,49 @@ impl MlRef {
     #[doc(hidden)]
     pub fn is_unshared(&self) -> bool {
         Arc::strong_count(&self.0) == 1
+    }
+
+    /// The number of the owners of the object: this one and its clones, of the values and the
+    /// DataFrames that hold it. Not a stable API.
+    #[doc(hidden)]
+    pub fn owners(&self) -> usize {
+        Arc::strong_count(&self.0)
+    }
+
+    /// Whether `other` is this object, of a clone of this owner (not another owner of the same
+    /// id, of [`MlRef::of_reference`]). Not a stable API.
+    #[doc(hidden)]
+    pub fn is(&self, other: &MlRef) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+
+    /// Whether the object is this client's, which the drop of its last owner deletes: not one of
+    /// [`MlRef::of_reference`], whose owner releases it. Not a stable API.
+    #[doc(hidden)]
+    pub fn is_owned(&self) -> bool {
+        self.0.release.is_none()
+    }
+
+    /// Delete the object of this client ([`MlRef::is_owned`]) on the server now, as the drop of
+    /// its last owner does, without waiting, while its owners live, as PySpark's `RemoteModelRef`
+    /// deletes the object when the `__del__` of the last Python object that holds a reference of
+    /// it releases it, whatever then uses the object, whose next requests fail on the server
+    /// (`CONNECT_ML.CACHE_INVALID`). Once: the drop of its last owner then deletes nothing. Of an
+    /// object that is kept ([`MlRef::keep`]), deleted before, or not this client's, nothing.
+    /// Returns whether it deleted the object. Not a stable API.
+    #[doc(hidden)]
+    pub fn release(&self) -> bool {
+        use std::sync::atomic::Ordering;
+        if !self.is_owned() || self.0.kept.load(Ordering::SeqCst) {
+            return false;
+        }
+        if self.0.released.swap(true, Ordering::SeqCst) {
+            return false;
+        }
+        self.0
+            .session
+            .release_ml_objects(vec![self.0.model_ref.clone()]);
+        true
     }
 
     pub(crate) fn object_ref(&self) -> proto::ObjectRef {
@@ -1623,6 +1668,36 @@ pub fn read_model(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_release_deletes_an_object_of_the_client_once_and_not_another() {
+        // gRPC connects lazily: the deletions are sent without waiting, of no server.
+        let session = SparkSession::builder()
+            .remote("sc://127.0.0.1:1")
+            .get_or_create()
+            .expect("session");
+        let object = MlRef::from_id(&session, "owned");
+        let clone = object.clone();
+        assert!(object.is_owned() && object.is(&clone) && object.owners() == 2);
+        assert!(!object.is(&MlRef::from_id(&session, "owned")));
+        // Once, whichever owner releases it, and the drop of the last then deletes nothing.
+        assert!(clone.release());
+        assert!(!object.release() && !clone.release());
+        drop(clone);
+        assert_eq!(object.owners(), 1);
+        let kept = MlRef::from_id(&session, "kept");
+        kept.keep();
+        assert!(!kept.release());
+        // An object of another owner is released by its owner, at the drop of its last owner.
+        let released = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = Arc::clone(&released);
+        let other = MlRef::of_reference(&session, "other", move || {
+            count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
+        assert!(!other.is_owned() && !other.release());
+        drop(other);
+        assert_eq!(released.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
 
     #[test]
     #[allow(deprecated)] // The element and struct types of the literals of PySpark.

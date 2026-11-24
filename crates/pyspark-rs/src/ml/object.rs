@@ -214,6 +214,8 @@ pub(crate) type FinalizeOf = for<'py> fn(&Bound<'py, PyAny>) -> PyResult<()>;
 pub(crate) type CopyOf = for<'py> fn(&Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>>;
 /// The uid of the native object of an object.
 pub(crate) type UidOf = for<'py> fn(&Bound<'py, PyAny>) -> PyResult<String>;
+/// Make an object a holder of the object of the ML cache of the holding `holding`.
+pub(crate) type JoinOf = for<'py> fn(&Bound<'py, PyAny>, &Holding) -> PyResult<()>;
 
 /// What a native ML class gives the functions of the native module over its objects (`_ml_params`,
 /// `_ml_sync`, `_ml_uid`, `_ml_java_obj`, `_ml_finalize`, `_ml_copy`), by which the public class of
@@ -233,6 +235,9 @@ pub(crate) struct NativeHelpers {
     pub(crate) copy: Option<CopyOf>,
     /// Make the `_java_obj` attribute of an object that this client made (see [`new_object`]).
     pub(crate) make_java_obj: Option<FinalizeOf>,
+    /// Make the training summary object of a model a holder of the model's object, of the
+    /// holders of the model's (see [`Holding`]).
+    pub(crate) join: Option<JoinOf>,
 }
 
 impl NativeHelpers {
@@ -246,6 +251,7 @@ impl NativeHelpers {
         finalize: None,
         copy: None,
         make_java_obj: None,
+        join: None,
     };
 
     fn is_none(&self) -> bool {
@@ -1106,7 +1112,7 @@ fn object_block(
 /// PySpark's `RemoteModelRef` of the server-side object of the id `id`, as PySpark's fit makes the
 /// `_java_obj` of its model, which the `_remote_model_obj` of its training summary is too (see
 /// [`ModelCore::java_obj`]): a holder of the id, which this client never releases through it, as
-/// the native object releases itself.
+/// the native objects release the server-side object themselves (see [`Holders`]).
 pub(crate) fn remote_model_ref<'py>(py: Python<'py>, id: &str) -> PyResult<Bound<'py, PyAny>> {
     py.import("pyspark.ml.util")?
         .getattr("RemoteModelRef")?
@@ -1175,6 +1181,15 @@ fn training_summary_object(
                 reference.call_method0(py, pyo3::intern!(py, "add_ref"))?;
                 attributes.set_item("_remote_model_obj", reference)?;
             }
+        }
+    }
+    // A holder of the model's object, as PySpark's summary holds a reference of the model's
+    // `RemoteModelRef` (`_remote_model_obj`), which its `__del__` releases.
+    if let Some(holding) = &core.holding {
+        let summary = object.bind(py);
+        if let Some(join) = helpers_of_class(&summary.get_type())?.and_then(|helpers| helpers.join)
+        {
+            join(summary, holding)?;
         }
     }
     Ok(object)
@@ -1686,6 +1701,9 @@ pub(super) struct ModelCore {
     /// Whether the object's attributes had the `_java_obj` attribute (see
     /// [`ModelCore::java_obj_change`]): an attribute of none then was deleted.
     java_obj_made: std::sync::atomic::AtomicBool,
+    /// The model as a holder of its object of the ML cache of this client (of a fit, a load or a
+    /// fetch), which its `__del__` releases (see [`Holders`]); None of another model.
+    holding: Option<Holding>,
     /// Whether the value is written, which `__traverse__` checks first (see `crate::gc::GcReady`).
     pub(super) gc_ready: crate::gc::GcReady,
 }
@@ -1805,6 +1823,122 @@ impl Drop for HeldReference {
     }
 }
 
+/// The Python objects of this client that hold an object of the ML cache that this client owns
+/// (an `MlRef` of a fit, a load or a fetch, see `MlRef::is_owned`): a model, its copies and its
+/// training summary, which hold a reference each of PySpark's `RemoteModelRef` of the object
+/// (`Params.copy` adds one, the summary's `_remote_model_obj` another), which their `__del__`
+/// release, and the last release deletes the object, when Python finalizes them: when their last
+/// reference goes, or when the garbage collector finalizes a reference cycle of them, before it
+/// breaks the cycle, so that an object that a finalizer of the cycle saves (resurrects) has lost
+/// its object, whose next requests fail on the server (`CONNECT_ML.CACHE_INVALID`), as PySpark's.
+///
+/// The object is deleted at the `__del__` of the last of these objects (see [`Holding::finalize`])
+/// when nothing else holds it: of no transform, DataFrame of a member, summary of an evaluation,
+/// writer, call or copy of a summary, which hold the object here where PySpark's hold the Python
+/// object of the model or the summary (`__source_transformer__`, `__source_instance__`), which
+/// would not be finalized then. Else, as of an object that no `__del__` released (of a class of
+/// none, or of a `__del__` that does not run PySpark's), the drop of its last owner deletes it, as
+/// before. So the holders count the owners of the object that they hold themselves (in their
+/// fields, see [`ModelCore::held_of`]), which change with the GIL held only, and the object is
+/// deleted when every owner of it is one of theirs: its owners that other code holds, which may
+/// drop without the GIL, only make that less likely, and none is made without the GIL of a value
+/// that no holder holds. The deletion is the one of the drop, without waiting (see
+/// `MlRef::release`), once: the drop of its last owner deletes nothing more.
+pub(crate) struct Holders {
+    /// The object, of one owner of it, which [`Holders::held`] counts.
+    object: MlRef,
+    /// The holders that were not finalized, of no `__del__` yet, and not freed.
+    open: std::sync::atomic::AtomicUsize,
+    /// The owners of the object that the holders that live hold, and this one's.
+    held: std::sync::atomic::AtomicUsize,
+}
+
+/// A holder of an object of the ML cache of this client (see [`Holders`]): of the owners of the
+/// object that it holds, and of whether its `__del__` ran.
+pub(crate) struct Holding {
+    holders: std::sync::Arc<Holders>,
+    held: std::sync::atomic::AtomicUsize,
+    finalized: std::sync::atomic::AtomicBool,
+}
+
+impl Holding {
+    /// The first holder of `object`, of the `held` owners of it that it holds; None of an object
+    /// of another owner (`MlRef::of_reference`), which releases it itself.
+    fn first(object: &MlRef, held: usize) -> Option<Self> {
+        if !object.is_owned() {
+            return None;
+        }
+        let holders = std::sync::Arc::new(Holders {
+            object: object.clone(),
+            open: std::sync::atomic::AtomicUsize::new(0),
+            held: std::sync::atomic::AtomicUsize::new(1),
+        });
+        Some(Self::of(holders, held))
+    }
+
+    fn of(holders: std::sync::Arc<Holders>, held: usize) -> Self {
+        use std::sync::atomic::Ordering;
+        holders.open.fetch_add(1, Ordering::SeqCst);
+        holders.held.fetch_add(held, Ordering::SeqCst);
+        Self {
+            holders,
+            held: std::sync::atomic::AtomicUsize::new(held),
+            finalized: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// The object that the holders hold.
+    pub(crate) fn object(&self) -> &MlRef {
+        &self.holders.object
+    }
+
+    /// Another holder of the object, of the `held` owners of it that it holds.
+    pub(crate) fn join(&self, held: usize) -> Self {
+        Self::of(std::sync::Arc::clone(&self.holders), held)
+    }
+
+    /// The holder holds `held` owners of the object now.
+    pub(crate) fn recount(&self, held: usize) {
+        use std::sync::atomic::Ordering;
+        let before = self.held.swap(held, Ordering::SeqCst);
+        self.holders.held.fetch_add(held, Ordering::SeqCst);
+        self.holders.held.fetch_sub(before, Ordering::SeqCst);
+    }
+
+    /// What the `__del__` of the holder does, as PySpark's releases its reference of the
+    /// `RemoteModelRef` (see [`Holders`]): the holder is finalized, once, and the last of them
+    /// deletes the object if every owner of it is one that the holders hold.
+    pub(crate) fn finalize(&self) {
+        use std::sync::atomic::Ordering;
+        if self.finalized.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let holders = &self.holders;
+        if holders.open.fetch_sub(1, Ordering::SeqCst) == 1
+            && holders.object.owners() == holders.held.load(Ordering::SeqCst)
+        {
+            holders.object.release();
+        }
+    }
+}
+
+impl Drop for Holding {
+    fn drop(&mut self) {
+        use std::sync::atomic::Ordering;
+        if !*self.finalized.get_mut() {
+            self.holders.open.fetch_sub(1, Ordering::SeqCst);
+        }
+        self.holders
+            .held
+            .fetch_sub(*self.held.get_mut(), Ordering::SeqCst);
+    }
+}
+
+/// Whether `owner`, if any, is `object`, as a count of owners.
+pub(crate) fn owner_of(owner: Option<&MlRef>, object: &MlRef) -> usize {
+    usize::from(owner.is_some_and(|owner| owner.is(object)))
+}
+
 /// The maker of the training summary object of a model, of the model and of the target of its
 /// summary (`model._summaryCls(...)` of `try_remote_fit`, which may fetch, as of `numClasses`).
 pub(super) type SummaryMaker = fn(Python<'_>, &ModelCore, MlTarget) -> PyResult<Py<PyAny>>;
@@ -1914,7 +2048,7 @@ impl ModelCore {
                 Some(spark_connect::ml::training_summary(object, &dataset))
             }
         };
-        let core = Self {
+        let mut core = Self {
             summary_parts: crate::gc::Parts::of(py, summary.iter().flat_map(MlTarget::held_parts)),
             model_parts: crate::gc::Parts::of(py, model.held_parts()),
             model,
@@ -1928,8 +2062,10 @@ impl ModelCore {
             reference: None,
             deleted_java_obj: None,
             java_obj_made: Default::default(),
+            holding: None,
             gc_ready: crate::gc::GcReady::new(),
         };
+        core.hold();
         // The summary object, of the fit, as `try_remote_fit` sets `_summary` right after it.
         if let (Some(make), Some(target)) = (make_summary, core.summary.clone()) {
             let object = training_summary_object(py, make, &core, target)?;
@@ -1952,6 +2088,34 @@ impl ModelCore {
             object, operator, params,
         ));
         self.java_obj = Default::default();
+        self.hold();
+    }
+
+    /// The model as the first holder of its object of the ML cache of this client, if it has one
+    /// (see [`Holders`]), of the owners of it that it holds.
+    fn hold(&mut self) {
+        self.holding = self
+            .model
+            .ml_ref()
+            .and_then(|object| Holding::first(object, self.held_of(object)));
+    }
+
+    /// The owners of `object` that the model holds in its fields: its model's, of the training
+    /// summary of its model and of its training summary (the targets of `"<id>.summary"`). Not
+    /// those of the plans of its summary datasets, which DataFrames of the summary that others
+    /// hold share (see [`Holders`]).
+    fn held_of(&self, object: &MlRef) -> usize {
+        let summary = |target: Option<&MlTarget>| owner_of(target.and_then(MlTarget::root), object);
+        owner_of(self.model.ml_ref(), object)
+            + summary(self.model.training_summary())
+            + summary(self.summary.as_ref())
+    }
+
+    /// Count the owners of its object that the model holds again, after a change of its fields.
+    fn recount_held(&self) {
+        if let Some(holding) = &self.holding {
+            holding.recount(self.held_of(holding.object()));
+        }
     }
 
     /// The model that a `Read` loads: of its object, the model's JVM class `jvm_class`, its uid and
@@ -1969,7 +2133,7 @@ impl ModelCore {
         })?;
         let session_id = object.session().session_id().to_string();
         let operator = MlOperator::with_uid(jvm_class, &read.uid, OperatorType::Model);
-        Ok(Self {
+        let mut core = Self {
             summary_parts: crate::gc::Parts::none(),
             model_parts: crate::gc::Parts::none(),
             model: Box::new(spark_connect::ml::ObjectModel::new(
@@ -1987,8 +2151,11 @@ impl ModelCore {
             reference: None,
             deleted_java_obj: None,
             java_obj_made: Default::default(),
+            holding: None,
             gc_ready: crate::gc::GcReady::new(),
-        })
+        };
+        core.hold();
+        Ok(core)
     }
 
     /// The model of no server-side object, as PySpark's `JavaModel(java_model=None)` makes one:
@@ -2028,6 +2195,7 @@ impl ModelCore {
             reference: None,
             deleted_java_obj: None,
             java_obj_made: Default::default(),
+            holding: None,
             gc_ready: crate::gc::GcReady::new(),
         })
     }
@@ -2179,6 +2347,7 @@ impl ModelCore {
         if let Some(object) = self.model.ml_ref() {
             object.keep();
         }
+        self.holding = None;
         if !self.is_unbound() {
             let operator = self.model.operator().clone();
             let params = self.model.params().clone();
@@ -2232,10 +2401,13 @@ impl ModelCore {
     /// caller releases it of no borrow of the model, as the release may wait for the server. A
     /// model that others hold the object of leaves the release to the last of them, which releases
     /// one if no `__del__` did (see [`HeldReference`]). A model of a fit or a load releases its
-    /// object at its drop, of its last holder.
+    /// hold of its object, once, the last of whose holders deletes it (see [`Holders`]).
     pub(super) fn finalize<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
         if let Some(class) = &self.deleted_java_obj {
             return Err(deleted_java_obj_error(class));
+        }
+        if let Some(holding) = &self.holding {
+            holding.finalize();
         }
         let Some(held) = self.exclusive_reference() else {
             return Ok(None);
@@ -2288,7 +2460,8 @@ impl ModelCore {
 
     /// Break a reference cycle that the garbage collector found unreachable: the model drops the
     /// Python objects that [`ModelCore::traverse`] reported, and its summary datasets. Its
-    /// `__del__` ran before, which released the reference of its `RemoteModelRef`.
+    /// `__del__` ran before, which released the reference of its `RemoteModelRef`, or its hold of
+    /// its object (see [`Holders`]), whose owners that it holds it counts again.
     pub(super) fn clear(&mut self) {
         if !self.gc_ready.get() {
             return;
@@ -2309,6 +2482,7 @@ impl ModelCore {
         self.model_parts.release();
         self.summary = None;
         self.model.clear_held_parts();
+        self.recount_held();
     }
 
     /// Make the model of [`ModelCore::of_reference`] the model of the object of the id of its
@@ -2371,7 +2545,7 @@ impl ModelCore {
     pub(super) fn duplicate(&self, py: Python<'_>) -> Self {
         let model = self.model.clone_box();
         let summary = self.summary.clone();
-        Self {
+        let mut copy = Self {
             summary_parts: crate::gc::Parts::of(py, summary.iter().flat_map(MlTarget::held_parts)),
             model_parts: crate::gc::Parts::of(py, model.held_parts()),
             model,
@@ -2407,8 +2581,18 @@ impl ModelCore {
             deleted_java_obj: self.deleted_java_obj.clone(),
             // The attributes of a copy are of none until it is made of them.
             java_obj_made: Default::default(),
+            holding: None,
             gc_ready: crate::gc::GcReady::new(),
-        }
+        };
+        // A copy holds the object too, as PySpark's `JavaParams.copy` adds a reference of the
+        // `RemoteModelRef` that the copy shares, which its `__del__` releases.
+        copy.holding = self.holding.as_ref().and_then(|holding| {
+            let object = copy.model.ml_ref()?;
+            object
+                .is(holding.object())
+                .then(|| holding.join(copy.held_of(object)))
+        });
+        copy
     }
 
     /// The copy of the model that a copy of it makes (see [`ModelCore::duplicate`]): of a model of

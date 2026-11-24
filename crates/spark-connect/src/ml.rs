@@ -1230,6 +1230,15 @@ pub trait Model: Transformer + AsAny {
     #[doc(hidden)]
     fn clear_held_parts(&mut self) {}
 
+    /// The target of the training summary that the model holds, of the object of the model (see
+    /// [`training_summary`]), if it holds one: the field of the model of the
+    /// [`Model::held_parts`] of its training summary. None of a model of none, such as a loaded
+    /// one. Not a stable API.
+    #[doc(hidden)]
+    fn training_summary(&self) -> Option<&MlTarget> {
+        None
+    }
+
     /// The server-side object of the model, whose methods [`fetch`] reads (see
     /// [`MlTarget::object`]), of a model that the server holds. None of a model that holds no
     /// single object, such as a pipeline model.
@@ -1292,6 +1301,10 @@ macro_rules! training_summary_parts {
 
         fn clear_held_parts(&mut self) {
             self.$field = None;
+        }
+
+        fn training_summary(&self) -> Option<&MlTarget> {
+            self.$field.as_ref()
         }
     };
 }
@@ -2054,6 +2067,9 @@ struct CachedModelRef {
     release: Option<Box<dyn FnOnce() + Send + Sync>>,
     /// Whether the drop keeps the object on the server (see [`MlRef::keep`]).
     kept: std::sync::atomic::AtomicBool,
+    /// Whether the object was deleted before the drop, which then deletes nothing (see
+    /// [`MlRef::release`]).
+    released: std::sync::atomic::AtomicBool,
 }
 
 impl std::fmt::Debug for CachedModelRef {
@@ -2066,7 +2082,7 @@ impl std::fmt::Debug for CachedModelRef {
 
 impl Drop for CachedModelRef {
     fn drop(&mut self) {
-        if *self.kept.get_mut() {
+        if *self.kept.get_mut() || *self.released.get_mut() {
             return;
         }
         if let Some(release) = self.release.take() {
@@ -2096,6 +2112,7 @@ impl CachedModel {
                     fit_warning: fit_warning_of(info).map(str::to_string),
                     release: None,
                     kept: Default::default(),
+                    released: Default::default(),
                 })))
             }
             _ => Err(spark_connect_core::error::SparkError::connect_msg(format!(

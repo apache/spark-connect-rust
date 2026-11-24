@@ -110,6 +110,92 @@ def test_a_model_of_a_remote_model_ref_is_of_its_object_and_releases_it_as_pyspa
         fitted.numFeatures  # noqa: B018
 
 
+def test_a_model_that_a_finalizer_saves_from_a_collected_cycle_lost_its_object_as_pyspark_mls(
+    session, tmp_path
+):
+    # PySpark's `JavaWrapper.__del__` releases the reference of a model (and of its training
+    # summary) of its `RemoteModelRef` when Python finalizes the object, also in a reference cycle
+    # that the collector finalizes before it breaks it, and the last release deletes the object: a
+    # model that a finalizer of the cycle saves then raises CONNECT_ML.CACHE_INVALID at its
+    # members, its summary's and its transforms, of a fit (of a training summary, in a cycle
+    # through a function of a UDF of its training dataset, and of none) and of a load. The objects
+    # of the cycle that the collector does not finalize (a model that a variable keeps, whose copy
+    # the finalizer saves) keep working.
+    import gc
+    import time
+
+    from pyspark.errors.exceptions.connect import SparkException
+    from pyspark.ml.linalg import Vectors
+    from pyspark.sql import functions as F
+
+    def cls(module, name):
+        return native_class(f"pyspark.ml.connect.{module}", name, f"pyspark.ml.{module}")
+
+    rows = [(float(i % 2), Vectors.dense([float(i), float(i % 3)]), "ab"[i % 2]) for i in range(12)]
+    df = session.createDataFrame(rows, ["label", "features", "s"]).coalesce(1)
+    saved = []
+
+    class Resurrect:
+        def f(self, x):
+            return 1.0
+
+        def __del__(self):
+            saved.append(self.model)
+
+    def lost(use):
+        # The CONNECT_ML.CACHE_INVALID of `use`, of a deletion that this client sends without
+        # waiting for it.
+        deadline = time.monotonic() + 10
+        while True:
+            try:
+                use()
+            except SparkException as e:
+                assert "CONNECT_ML.CACHE_INVALID" in str(e)
+                return True
+            if time.monotonic() > deadline:
+                return False
+            time.sleep(0.2)
+
+    path = str(tmp_path / "model")
+    cls("regression", "LinearRegression")(maxIter=2).fit(df).write().overwrite().save(path)
+    shapes = {
+        "summary": lambda job: cls("regression", "LinearRegression")(maxIter=2).fit(
+            df.withColumn("w", F.udf(job.f, "double")("label"))
+        ),
+        "no summary": lambda job: cls("feature", "StringIndexer")(inputCol="s", outputCol="i").fit(df),
+        "load": lambda job: cls("regression", "LinearRegressionModel").load(path),
+    }
+    for shape, make in shapes.items():
+        job = Resurrect()
+        model = make(job)
+        job.model = model
+        model.job = job
+        if shape == "summary":
+            summary = model.summary
+            summary.model = model
+            del summary
+        del model, job
+        gc.collect()
+        assert len(saved) == 1, shape
+        (model,) = saved
+        assert lost(lambda: model.transform(df).count()), shape
+        if shape == "summary":
+            assert model.hasSummary
+            assert lost(lambda: model.summary.r2), shape
+        del saved[:], model
+        gc.collect()
+    # A copy that the finalizer saves, of a model that lives.
+    model = cls("regression", "LinearRegression")(maxIter=2).fit(df)
+    job = Resurrect()
+    job.model = model.copy()
+    job.model.job = job
+    del job
+    gc.collect()
+    assert len(saved) == 1
+    assert saved[0].transform(df).count() == 12 and model.transform(df).count() == 12
+    del saved[:]
+
+
 def test_objects_of_this_client_are_of_the_classes_of_pyspark_mls_modules(session, tmp_path):
     # Every object that this client makes, as PySpark's do, is of the class of its module, of every
     # base of PySpark's class (test_ml_api_offline.py): of a fit (of a param map, of fitMultiple),
