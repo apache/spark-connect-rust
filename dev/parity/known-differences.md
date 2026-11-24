@@ -630,9 +630,11 @@ requests of the unpickled object pickle as it is then. This case still differs:
   the repr of an object`, ` in __instancecheck__` (of the type checks of the UDFs and the pandas
   conversions), and ` while decoding a JSON object from a unicode string` (of Python's `json`
   module, of the JSON of a pandas conversion). Of the uses of a fixed text in PySpark, the drop-in
-  gives it: none of `simpleString()` of a struct, an array, a map or a field, and ` while calling a
-  Python object` of `json()` of an array. The levels at which a type of many levels, which does not
-  hold itself, raises it differ too (see above).
+  gives it: none of `simpleString()` of a struct, an array, a map or a field, and of
+  `needConversion()` of an array, a map or a field (whose calls of the methods of the types that
+  they hold cross CPython's check of a C call first, of the text that the drop-in gives as
+  PySpark's, SPARK-62310), and ` while calling a Python object` of `json()` of an array. The levels
+  at which a type of many levels, which does not hold itself, raises it differ too (see above).
 
 - **The groups of a response, of protobuf's pure-Python implementation** (intentional; one count of
   the levels). With `PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python`, the drop-in reads the
