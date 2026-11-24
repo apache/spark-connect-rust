@@ -2416,7 +2416,7 @@ errors are the runtime's `DecodeError` and `EncodeError`. The differences:
   fields, the message as the merge has set it so far, a field at a time. A parse that the exception
   of the handler of a signal interrupts leaves the message with what it read until then, as a parse
   that fails does. `SerializeToString`, `==` of two messages of the runtime and the release of a
-  message hold the GIL until they end, as upb's do: 0.07 s, 0.06 s and 0.02 s for a million messages
+  message hold the GIL until they end, as upb's do: 0.07 s, 0.06 s and 0.01 s for a million messages
   (0.03 s for the release of a copy), where upb's take 0.04 s, 0.11 s and 2 ms. The messages that
   Python reads of a parse or a copy (of `copy.deepcopy` too), those that a parse makes within a
   message that holds fields, and that of a read of an unset field are not tracked by the garbage

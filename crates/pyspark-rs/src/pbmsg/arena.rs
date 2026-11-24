@@ -345,20 +345,48 @@ impl Deref for NRef {
 
 impl Drop for NRef {
     fn drop(&mut self) {
-        // The only reference, which no other can copy meanwhile (an `NRef` has no weak
-        // references), of no atomic write; else as `Arc`.
-        let refs = &self.node().refs;
-        if refs.load(Ordering::Acquire) != 1 {
-            if refs.fetch_sub(1, Ordering::Release) != 1 {
-                return;
-            }
-            fence(Ordering::Acquire);
+        if !self.release_reference() {
+            return;
         }
         // SAFETY: this was the last reference of the message, which is dropped once, and its
         // node released.
         unsafe {
             ManuallyDrop::drop(&mut (*self.0.as_ptr()).native);
             release_node(self.0);
+        }
+    }
+}
+
+impl NRef {
+    /// Release this reference of the message: whether it was the last. The only reference, which
+    /// no other can copy meanwhile (an `NRef` has no weak references), is of no atomic write;
+    /// else as `Arc`.
+    #[inline]
+    fn release_reference(&self) -> bool {
+        let refs = &self.node().refs;
+        if refs.load(Ordering::Acquire) != 1 {
+            if refs.fetch_sub(1, Ordering::Release) != 1 {
+                return false;
+            }
+            fence(Ordering::Acquire);
+        }
+        true
+    }
+
+    /// Release `this`, as its drop does, but of its node released with `releases` (see
+    /// [`Releases`]), of the releases of the messages of a list that it is one of (see the drop
+    /// of `NativeMessages`), so that the nodes of a slab of the messages of the list released in a
+    /// row are released of one atomic operation.
+    #[inline]
+    pub(crate) fn release_with(this: NRef, releases: &mut Releases) {
+        let this = ManuallyDrop::new(this);
+        if this.release_reference() {
+            // SAFETY: this was the last reference of the message, which is dropped once, and its
+            // node released, of no drop of `this`.
+            unsafe {
+                ManuallyDrop::drop(&mut (*this.0.as_ptr()).native);
+                releases.release(this.0);
+            }
         }
     }
 }
@@ -674,6 +702,63 @@ mod tests {
         NRef::rebox(&mut refs[1]);
         assert!(!NRef::in_slab(&refs[1]));
         drop(refs);
+    }
+
+    /// A list of messages of a parse of no level below them releases them of each slab at once
+    /// (`NRef::release_with`, the drop of `NativeMessages`): the slabs of the messages that the
+    /// list alone held are released, and a message that another reference holds stays, of its
+    /// slab, and reads as it did; a short list, or a list of a copy, releases its messages as
+    /// they are.
+    #[test]
+    fn a_list_of_a_parse_releases_its_messages_of_each_slab_at_once() {
+        use crate::pbmsg::message::MessageClass;
+        use crate::pbmsg::native::NativeMessages;
+        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let literal = pool()
+            .message("spark.connect.Expression.Literal")
+            .expect("Literal");
+        let arena = Arena::new();
+        let items: Vec<NRef> = (0..200)
+            .map(|i| arena.alloc(native(vec![i as u8])))
+            .collect();
+        drop(arena);
+        let kept = items[150].clone();
+        let other = items[3].clone();
+        let (slab, first) = (slab_of(&kept), slab_of(&items[0]));
+        let list = NativeMessages::new(MessageClass::of_no_class(literal), items, 0);
+        assert_eq!((list.depth, list.items.len()), (1, 200));
+        drop(list);
+        assert_eq!(kept.fields.unknown, [150]);
+        assert_eq!(
+            (NRef::strong_count(&kept), NRef::strong_count(&other)),
+            (1, 1)
+        );
+        // The slab of the kept message counts it alone; that of the first ones, the other.
+        assert_eq!((live(slab), live(first)), (1, 1));
+        drop((kept, other));
+
+        // A short list, and a list of messages of their own (of a copy).
+        for count in [3, 20] {
+            let arena = Arena::new();
+            let items: Vec<NRef> = (0..count).map(|i| arena.alloc(native(vec![i]))).collect();
+            drop(arena);
+            let kept = items[1].clone();
+            let slab = slab_of(&kept);
+            drop(NativeMessages::new(
+                MessageClass::of_no_class(literal),
+                items,
+                0,
+            ));
+            assert_eq!((live(slab), kept.fields.unknown[0]), (1, 1));
+        }
+        let boxed: Vec<NRef> = (0..20).map(|i| NRef::new(native(vec![i]))).collect();
+        let kept = boxed[7].clone();
+        drop(NativeMessages::new(
+            MessageClass::of_no_class(literal),
+            boxed,
+            0,
+        ));
+        assert_eq!((NRef::strong_count(&kept), kept.fields.unknown[0]), (1, 7));
     }
 
     /// A message of its own ([`NRef::new`]) is of no slab, and is released with its last
