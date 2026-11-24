@@ -2353,25 +2353,32 @@ errors are the runtime's `DecodeError` and `EncodeError`. The differences:
   them in upb's order of the keys of its text, and `text_format` in its own, as of upb's messages.
   upb's orders take the keys of a signed integer type as unsigned numbers, so that a negative key
   comes after the others;
-- it makes a Python object of each message that it parses or merges into, where upb makes one when
-  the message is read. A copy (of a message of the runtime given to a constructor, of `CopyFrom`,
-  `copy.copy` and `copy.deepcopy`) holds what it copies natively, of no Python object, and makes
-  the object of a message, a repeated field or a map of it, of one level, when Python first reads
-  it, as upb makes its objects; what a copy holds natively, a copy of the copy shares, so
-  `proto.Expression(merge_action=action)` copies an action of any size at once. `MergeFrom` copies
-  its argument so first, as upb serializes it first, and merges the copy, of which a field that the
-  message does not hold takes the value as it is (so `append` and `extend`, which merge each value
-  into a new message, make no object of it either). So the parse, the copy of a message that a
-  parse made and the release of a message of many messages take several times as long as upb's
-  (of CPU time, of a message of a million messages: 0.3 s for the parse, upb's 0.05 s, 0.25 s for
-  `CopyFrom`, `copy.deepcopy` and `MergeFrom`, upb's 0.1 s (0.09 s of `MergeFrom`), and 0.33 s for
-  a `MergeFrom` into a message that has the repeated field already, whose objects it makes of the
-  copy, upb's 0.08 s), and a read of every message of a copy takes as long as the copy of each
-  message as an object took before. The parse, the constructor (of lists and mappings too),
+- it makes a Python object of each message that it merges into a message that holds fields, where
+  upb makes one when the message is read. A parse into a message that holds no field (of
+  `FromString`, `ParseFromString`, a `MergeFromString` of an empty message, and the drop-in's own
+  parses, as of `Column.to_plan`) and a copy (of a message of the runtime given to a constructor,
+  of `CopyFrom`, `copy.copy` and `copy.deepcopy`) hold what they read natively, of no Python
+  object, and make the object of a message, a repeated field or a map of it when Python first
+  reads it, as upb makes its objects: of all its levels at once, of a value of up to 256 messages,
+  else of one level; what a parse or a copy holds natively, a copy of it shares, so
+  `proto.Expression(merge_action=action)` copies an action of any size at once, and so does a copy
+  of a parse that Python has not read. `MergeFrom` copies its argument so first, as upb serializes
+  it first, and merges the copy, of which a field that the message does not hold takes the value as
+  it is (so `append` and `extend`, which merge each value into a new message, make no object of it
+  either). So the parse, the first read of what a parse or a copy holds natively, the copy of a
+  message that Python read and the release of a message of many messages take several times as
+  long as upb's (of CPU time, of a message of a million messages: 0.17 s for the parse, upb's
+  0.05 s, 0.21 s for the first read of its repeated field, of a million objects, which upb makes as
+  each is read, so 0.58 s for the parse and a read of every message, upb's 0.17 s; 0.2 s for
+  `CopyFrom`, `copy.deepcopy` and `MergeFrom` of a message that Python read, upb's 0.1 s (0.09 s
+  of `MergeFrom`), none for a copy of a parse that it did not read, and 0.24 s for a `MergeFrom` into
+  a message that has the repeated field already, whose objects it makes of the copy, upb's
+  0.09 s). The parse, the constructor (of lists and mappings too),
   the copies (`CopyFrom`, and `copy.deepcopy` of a message or of a repeated field of messages), the
   merges (`MergeFrom`), the `extend` of a repeated field of messages, the `update` and `MergeFrom`
-  of a map, and the first read of a repeated message field or a map of messages of a copy, which
-  makes the objects of its messages (of 1,024 messages or more), let another thread take the GIL,
+  of a map, and the first read of a repeated message field or a map of messages of a parse or a
+  copy, which makes the objects of its messages (of 1,024 messages or more), let another thread
+  take the GIL,
   and a signal interrupt them with the exception of its handler, every 1,024 steps of the operation
   (a message that it reads, makes or copies, an entry of a map, or a value of a repeated field that
   the constructor takes; the read, interrupted, leaves the field as it was), where upb
@@ -2379,13 +2386,13 @@ errors are the runtime's `DecodeError` and `EncodeError`. The differences:
   a map of scalars, which run `MutableMapping.update` in Python, as the runtime's constructor runs
   it of a value that is not a dict), so another thread can use a message that one of them reads
   meanwhile. `SerializeToString`, `==` of two messages of the runtime and the release of a message
-  hold the GIL until they end, as upb's do: 0.09 s, 0.07 s and 0.08 s for a million messages, where
-  upb's take 0.03 s, 0.13 s and 3 ms. The messages that a parse makes within the message that it
-  parses into, those that Python reads of a copy (of `copy.deepcopy` too), and that of a read of an
-  unset field are not tracked by the garbage collector (`gc.is_tracked`), as they make no reference
-  cycles, so that a collection does not go through the messages of a large message; the message of
-  a constructor, of `FromString` and of `copy.copy`, and that `ParseFromString` or `CopyFrom`
-  fills, are tracked, as upb's;
+  hold the GIL until they end, as upb's do: 0.07 s, 0.05 s and 0.07 s for a million messages, where
+  upb's take 0.04 s, 0.12 s and 2 ms. The messages that Python reads of a parse or a copy (of
+  `copy.deepcopy` too), those that a parse makes within a message that holds fields, and that of a
+  read of an unset field are not tracked by the garbage collector (`gc.is_tracked`), as they make
+  no reference cycles, so that a collection does not go through the messages of a large message;
+  the message of a constructor, of `FromString` and of `copy.copy`, and that `ParseFromString` or
+  `CopyFrom` fills, are tracked, as upb's;
 - the classes of `Any` and `Timestamp` are the runtime's own, of its modules
   (`pyspark.sql.connect.proto._rust.any_pb2` and `timestamp_pb2`), where `protobuf`'s modules
   (`google.protobuf.any_pb2`) keep `protobuf`'s classes. Where `protobuf` imports, a message of

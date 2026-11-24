@@ -57,6 +57,18 @@ pub(crate) enum Slot {
 }
 
 impl Slot {
+    /// Release the slot, its object as a `Bound`, which knows that the thread is attached (as a
+    /// `Py` reads a thread local to know it).
+    pub(crate) fn release(self, py: Python<'_>) {
+        match self {
+            Slot::Message(m) => drop(m.into_bound(py)),
+            Slot::Repeated(c) => drop(c.into_bound(py)),
+            Slot::Composite(c) => drop(c.into_bound(py)),
+            Slot::Map(m) => drop(m.into_bound(py)),
+            Slot::Scalar(_) | Slot::Native(_) => {}
+        }
+    }
+
     /// The slot of the same object, of an object (of a message, container or map).
     pub(crate) fn clone_slot(&self, py: Python<'_>) -> Slot {
         match self {
@@ -146,6 +158,17 @@ impl Slots {
             Slots::Many(entries) => entries,
         };
         entries.iter_mut().map(|(i, slot)| (*i, slot))
+    }
+
+    /// The slots of the values of `slot` of each slot, which it may change, of the same fields.
+    pub(crate) fn map_mut(&mut self, mut slot: impl FnMut(&mut Slot) -> Slot) -> Slots {
+        match self {
+            Slots::Empty => Slots::Empty,
+            Slots::One((i, s)) => Slots::One((*i, slot(s))),
+            Slots::Many(entries) => {
+                Slots::Many(entries.iter_mut().map(|(i, s)| (*i, slot(s))).collect())
+            }
+        }
     }
 
     /// The slots of the values of `slot` of each, of the same fields.
@@ -362,6 +385,10 @@ pub(crate) fn _proto_register_classes(classes_by_name: &Bound<'_, PyDict>) -> Py
             .map(|r| r.class.clone_ref(classes_by_name.py()));
         if previous.as_ref().is_none_or(|p| !p.is(&class)) {
             changed = true;
+            // Before the generation begins, so that a read of the class that the type keeps of
+            // the generation finds it changed (see `kept_class`).
+            desc.class_changed
+                .store(next, std::sync::atomic::Ordering::Release);
             registered
                 .replaced
                 .entry(name.clone())
@@ -485,12 +512,51 @@ impl MessageClass {
         Ok(MessageClass { class: None, desc })
     }
 
+    /// The maker of the messages of the type `desc`, as [`MessageClass::of`] gives it: of the
+    /// class that `desc` keeps of the [`generation`] now (see `MessageDesc::class`), which the
+    /// registry gives once a generation, rather than of the lookup of the name of the type in the
+    /// registry, under its lock, that each message of a parse would take.
+    pub(crate) fn now(py: Python<'_>, desc: &Arc<MessageDesc>) -> PyResult<MessageClass> {
+        if let Some(class) = kept_class(desc, generation()) {
+            return Ok(MessageClass {
+                class: class.map(|c| c.clone_ref(py)),
+                desc: desc.clone(),
+            });
+        }
+        // A type that is not the pool's type of its name, which no message has, is made as `of`
+        // makes it, kept by no type.
+        if !pool()
+            .message(&desc.full_name)
+            .is_some_and(|d| Arc::ptr_eq(d, desc))
+        {
+            return MessageClass::of(py, &desc.full_name);
+        }
+        // The class and the generation of one read of the registry, which a registration changes
+        // under its lock (and registers the pool's type of the name with the class).
+        let (at, class) = {
+            let registry = classes().lock().unwrap_or_else(|e| e.into_inner());
+            let class = registry
+                .by_name
+                .get(&desc.full_name)
+                .map(|r| r.class.clone_ref(py));
+            (generation(), class)
+        };
+        // The type keeps the class of its first read (see `MessageDesc::class`).
+        let _ = desc
+            .class
+            .set((at, class.as_ref().map(|c| c.clone_ref(py))));
+        Ok(MessageClass {
+            class,
+            desc: desc.clone(),
+        })
+    }
+
     /// The maker of the messages of the type `desc` of the [`generation`] `at`: as
-    /// [`MessageClass::of`] gives it now, of the class registered of the type then, which a later
+    /// [`MessageClass::now`] gives it now, of the class registered of the type then, which a later
     /// registration may have replaced since (see `Registry::replaced`).
     pub(crate) fn at(py: Python<'_>, desc: &Arc<MessageDesc>, at: u64) -> PyResult<MessageClass> {
         if at == generation() {
-            return MessageClass::of(py, &desc.full_name);
+            return MessageClass::now(py, desc);
         }
         let registry = classes().lock().unwrap_or_else(|e| e.into_inner());
         let replaced = registry.replaced.get(&desc.full_name).and_then(|changes| {
@@ -523,25 +589,82 @@ impl MessageClass {
     /// all of them, which took more than half of a parse. (A message that Python code makes by
     /// calling its class is tracked, as Python makes it.)
     pub(crate) fn new_message<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyMessage>> {
-        let message = PyMessage::empty(self.desc.clone());
-        let Some(class) = &self.class else {
-            return Bound::new(py, message);
-        };
-        // SAFETY: `class` is a subclass of `PyMessage` (see `_proto_register_classes`), of which
-        // PyO3's `tp_new_impl`, the `tp_new` of a `#[new]`, makes an object of an initializer.
-        // The object is untracked once, before any Python code sees it; its deallocation
-        // untracks it only if it is tracked.
-        unsafe {
-            let ptr = pyo3::impl_::pymethods::tp_new_impl::<
-                PyClassInitializer<PyMessage>,
-                PyMessage,
-            >(py, message.into(), class.bind(py).as_type_ptr())?;
-            if pyo3::ffi::PyObject_GC_IsTracked(ptr) != 0 {
-                pyo3::ffi::PyObject_GC_UnTrack(ptr.cast());
-            }
-            Ok(Bound::from_owned_ptr(py, ptr).cast_into_unchecked())
-        }
+        new_message_of(py, &self.desc, self.class.as_ref())
     }
+}
+
+/// The class of the message type `desc` of the [`generation`] `at` (none, of no class), if it is
+/// the one that `desc` keeps (see `MessageDesc::class`): of no registration that gave the type
+/// another class since the earlier of the generation that it was kept of and `at`.
+fn kept_class(desc: &MessageDesc, at: u64) -> Option<Option<&Py<PyType>>> {
+    let (kept, class) = desc.class.get()?;
+    let changed = desc
+        .class_changed
+        .load(std::sync::atomic::Ordering::Acquire);
+    (changed <= *kept && changed <= at).then_some(class.as_ref())
+}
+
+/// A new, empty message of the type `desc` of the [`generation`] `at`, as
+/// [`MessageClass::at`] makes it, of the class that the type keeps (see `MessageDesc::class`)
+/// when that is the class of the generation, of no lookup of the registry.
+pub(crate) fn new_message_at<'py>(
+    py: Python<'py>,
+    desc: &Arc<MessageDesc>,
+    at: u64,
+) -> PyResult<Bound<'py, PyMessage>> {
+    if let Some(class) = kept_class(desc, at) {
+        return new_message_of(py, desc, class);
+    }
+    MessageClass::at(py, desc, at)?.new_message(py)
+}
+
+/// A new, empty message of the type `desc`, of `class` (see [`MessageClass::new_message`]), or of
+/// the runtime's class of messages when it has none.
+fn new_message_of<'py>(
+    py: Python<'py>,
+    desc: &Arc<MessageDesc>,
+    class: Option<&Py<PyType>>,
+) -> PyResult<Bound<'py, PyMessage>> {
+    let message = PyMessage::empty(desc.clone());
+    let Some(class) = class else {
+        return Bound::new(py, message);
+    };
+    // SAFETY: `class` is a subclass of `PyMessage` (see `_proto_register_classes`), of which
+    // PyO3's `tp_new_impl`, the `tp_new` of a `#[new]`, makes an object of an initializer.
+    // The object is untracked once, before any Python code sees it; its deallocation
+    // untracks it only if it is tracked.
+    unsafe {
+        let ptr = pyo3::impl_::pymethods::tp_new_impl::<PyClassInitializer<PyMessage>, PyMessage>(
+            py,
+            message.into(),
+            class.bind(py).as_type_ptr(),
+        )?;
+        if pyo3::ffi::PyObject_GC_IsTracked(ptr) != 0 {
+            pyo3::ffi::PyObject_GC_UnTrack(ptr.cast());
+        }
+        Ok(Bound::from_owned_ptr(py, ptr).cast_into_unchecked())
+    }
+}
+
+/// A new, empty message of `class`, as its `FromString` makes one (tracked by the garbage
+/// collector, as of a call of its class), if `class` is a class of a message type of the runtime;
+/// else none.
+pub(crate) fn new_message_of_class<'py>(
+    class: &Bound<'py, PyAny>,
+) -> PyResult<Option<Bound<'py, PyMessage>>> {
+    let Ok(class) = class.cast::<PyType>() else {
+        return Ok(None);
+    };
+    if !class.is_subclass_of::<PyMessage>()? {
+        return Ok(None);
+    }
+    let maker = MessageClass {
+        class: Some(class.clone().unbind()),
+        desc: message_type_of(class)?,
+    };
+    let message = maker.new_message(class.py())?;
+    track(&message);
+    Ok(Some(message))
 }
 
 /// Make the garbage collector track `message`, a message that [`MessageClass::new_message`] made,
@@ -1470,6 +1593,37 @@ impl PyMessage {
         }
     }
 
+    /// Whether the message holds no field and no unknown field (of the unset children that it
+    /// gave out too): what a parse of its bytes then sets, it sets of a native parse (see
+    /// `codec::merge_with`).
+    pub(crate) fn is_empty(&self) -> bool {
+        self.slots.len() == 0 && self.unknown.is_empty()
+    }
+
+    /// Set the fields of `parsed`, a native parse of bytes into an empty message of the type of
+    /// `message` (see `codec::merge_with`), in `message`, as the parse into its object sets them,
+    /// also of a parse that failed, of what it read: an unset child that the message gave out of a
+    /// field that the parse set takes the parsed message, of every level (see
+    /// [`PyMessage::adopt`]), as upb's parse makes its unset children the messages of the fields
+    /// that it sets (`SyncSubobjs`). A message that Python code changed meanwhile (a checkpoint of
+    /// the parse lets another thread take the GIL) merges them, as `MergeFrom` merges a message.
+    pub(crate) fn take_parsed(
+        message: &Bound<'_, Self>,
+        mut parsed: Native,
+        budget: Option<&ConversionBudget>,
+    ) -> PyResult<()> {
+        let py = message.py();
+        let mut m = message.try_borrow_mut()?;
+        if m.is_empty() {
+            let slots = std::mem::take(&mut parsed.fields.slots);
+            let unknown = std::mem::take(&mut parsed.fields.unknown);
+            return m.replace_slots(py, slots, unknown);
+        }
+        drop(m);
+        let full = ConversionBudget::full();
+        merge_native(py, message, Arc::new(parsed), budget.unwrap_or(&full))
+    }
+
     pub(crate) fn empty(desc: Arc<MessageDesc>) -> Self {
         PyMessage {
             fields: Fields {
@@ -1567,6 +1721,11 @@ impl PyMessage {
     /// when the copy sets that field (see [`PyMessage::adopt`]), and stays unset (and the field's)
     /// when it does not.
     fn replace_slots(&mut self, py: Python<'_>, slots: Slots, unknown: Vec<u8>) -> PyResult<()> {
+        if self.lazy.is_empty() {
+            self.fields.slots = slots;
+            self.fields.unknown = unknown;
+            return Ok(());
+        }
         let mut replaced = Vec::with_capacity(slots.len());
         for (index, slot) in slots.into_vec() {
             let slot = match (slot, self.take_lazy_child(index)) {
@@ -1747,7 +1906,7 @@ impl PyMessage {
                 }
             };
             let budget = ConversionBudget::full();
-            let made = native::made_of(py, &desc.fields[index], &value, Some(&budget))?;
+            let made = native::made_of(py, &desc.fields[index], &value, Some(&budget), true)?;
             let taken = {
                 let mut m = message.try_borrow_mut()?;
                 match m.slots.get_mut(index) {
@@ -1758,9 +1917,10 @@ impl PyMessage {
                     _ => None,
                 }
             };
-            // The objects take the fields of the value once the message is no longer borrowed,
-            // moved if no other message holds them (of this reference released first), running no
-            // Python code meanwhile; the objects that the field no longer takes are dropped.
+            // The objects take the fields of the value once the message is no longer borrowed
+            // (copies of one level, but of the large values that no other message holds, of this
+            // reference released first, see `native::object_parts`), running no Python code
+            // meanwhile; the objects that the field no longer takes are dropped.
             if let Some(Slot::Native(taken)) = taken {
                 drop(value);
                 made.fill(py, taken);
@@ -1797,7 +1957,7 @@ impl PyMessage {
             return Ok(());
         };
         let value = value.clone();
-        let made = native::made_of(py, &self.desc.fields[index], &value, None)?;
+        let made = native::made_of(py, &self.desc.fields[index], &value, None, false)?;
         let object = made.slot.clone_slot(py);
         if let Some(Slot::Native(taken)) = self.set_slot(index, object) {
             drop(value);

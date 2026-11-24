@@ -2411,9 +2411,9 @@ def _large_operation(operation):
     # Each message holds a reference to its class while it lives: those that an operation makes.
     made = _References(literal_class, lambda extra: extra >= 1024)
     if operation in ("parse", "map parse"):
-        # The data ends with a corrupt tag, so that the parse fails once it has made its messages,
-        # which it releases before it returns, running no Python code: each message holds a
-        # reference to its class until then. A map of SQL.args has a Literal of each entry.
+        # The data ends with a corrupt tag, so that the parse fails once it has read its messages.
+        # The parse reads them natively, of no object, so it is in progress while its call holds
+        # the data, its argument. A map of SQL.args has a Literal of each entry.
         if operation == "map parse":
             value = _field(2, literal_class(string="w").SerializeToString())
             data = b"".join(_field(2, _field(1, b"k%d" % i) + value) for i in range(_LARGE))
@@ -2421,7 +2421,8 @@ def _large_operation(operation):
         else:
             parsed = literal_class
         corrupt = data + b"\xff"
-        return lambda: parsed.FromString(corrupt), _rust.DecodeError, made
+        in_call = _References(corrupt, lambda extra: extra >= 1)
+        return lambda: parsed.FromString(corrupt), _rust.DecodeError, in_call
     if operation == "map of scalars constructor":
         # The constructor takes the pairs of a map of scalars through MutableMapping.update, in
         # Python, as upb's does, which holds them while it runs.
@@ -8824,3 +8825,285 @@ def test_another_thread_during_the_first_read_of_a_container_finds_the_message()
         out[case] = seen["errors"]
         assert all(read(t) is read(t) for t in targets)
     assert out == {case: {} for case in _first_reads_of_containers()}, out
+
+
+def _parse_scenarios(cls):
+    """Parses into messages of the classes of ``cls``: into an unset child (of two levels too),
+    into a message that gave out unset children of fields that the parse sets and does not set,
+    into a message of a container and of a map, of no bytes and of bytes that fail; and reads,
+    clears, merges and parses again of what a parse made, of the identities of what they give."""
+    R, L, E = cls("spark.connect.Relation"), cls("spark.connect.Limit"), cls("spark.connect.Expression")
+    S = cls("spark.connect.SQL")
+    limit = R(limit={"limit": 5, "input": {"sql": {"query": "q"}}}).SerializeToString()
+    unknown = R(limit={"limit": 5}).SerializeToString()[:-2] + _field(2, _UNKNOWN + _tag(2, 0) + _varint(5))
+
+    def stub_parsed(method, data):
+        r = R()
+        s = r.limit
+        try:
+            getattr(s, method)(data)
+            failure = None
+        except Exception as e:  # noqa: BLE001
+            failure = type(e).__name__
+        return failure, r.HasField("limit"), r.limit is s, r.SerializeToString()
+
+    def stub_of_a_stub_parsed():
+        r = R()
+        s = r.limit.input
+        try:
+            s.ParseFromString(R(sql={"query": "q"}).SerializeToString()[:-1])
+        except Exception as e:  # noqa: BLE001
+            failure = type(e).__name__
+        return failure, r.HasField("limit"), r.limit.input is s, r.SerializeToString()
+
+    def parent_parsed(method):
+        r = R()
+        x, y = r.limit.input, r.limit
+        getattr(r, method)(limit)
+        return r.limit is y, r.limit.input is x, x.sql.query, y.limit, r.SerializeToString()
+
+    def unset_member_stays_unset():
+        r = R()
+        z = r.project
+        r.MergeFromString(limit)
+        z.SetInParent()
+        return r.WhichOneof("rel_type"), r.HasField("limit"), r.SerializeToString()
+
+    def container_item():
+        p = R(project={})
+        c = p.project.expressions.add()
+        c.ParseFromString(E(literal={"integer": 3}).SerializeToString())
+        return p.project.expressions[0] is c, p.SerializeToString()
+
+    def map_value():
+        q = S(query="x")
+        v = q.named_arguments["k"]
+        v.ParseFromString(E(literal={"string": "s"}).SerializeToString())
+        return q.named_arguments["k"] is v, q.SerializeToString(deterministic=True)
+
+    def reads():
+        r = R.FromString(limit)
+        a = r.limit
+        listed = [v for _, v in r.ListFields()]
+        return a is r.limit, listed[0] is a, a.input is r.limit.input, r.limit.input.sql.query
+
+    def read_then_changed(change):
+        r = R.FromString(limit)
+        child = r.limit
+        grandchild = child.input
+        change(r, child)
+        return child.SerializeToString(), grandchild.sql.query, r.SerializeToString(), r.limit is child
+
+    def merged_into_a_descendant():
+        r = R.FromString(limit)
+        below = r.limit.input
+        below.MergeFromString(r.SerializeToString())
+        return below.WhichOneof("rel_type"), r.SerializeToString()
+
+    def discard_unknown():
+        r = R.FromString(unknown)
+        r.DiscardUnknownFields()
+        return r.SerializeToString(), r.limit.SerializeToString()
+
+    def depth(levels):
+        data = b""
+        for _ in range(levels):
+            data = _field(R.LIMIT_FIELD_NUMBER, _field(1, data))
+        try:
+            R.FromString(data)
+            return None
+        except Exception as e:  # noqa: BLE001
+            return type(e).__name__, str(e)
+
+    cases = {
+        "an unset child, ParseFromString": lambda: stub_parsed("ParseFromString", L(limit=5).SerializeToString()),
+        "an unset child, MergeFromString": lambda: stub_parsed("MergeFromString", L(limit=5).SerializeToString()),
+        "an unset child, of no bytes": lambda: stub_parsed("ParseFromString", b""),
+        "an unset child, MergeFromString of no bytes": lambda: stub_parsed("MergeFromString", b""),
+        "an unset child, of a failure": lambda: stub_parsed("ParseFromString", L(limit=5).SerializeToString() + b"\xff"),
+        "an unset child of an unset child, of a failure": stub_of_a_stub_parsed,
+        "a message of unset children, ParseFromString": lambda: parent_parsed("ParseFromString"),
+        "a message of unset children, MergeFromString": lambda: parent_parsed("MergeFromString"),
+        "an unset child of a field that the parse does not set": unset_member_stays_unset,
+        "a message of a container": container_item,
+        "a message of a map": map_value,
+        "reads of a parse": reads,
+        "a read child, cleared": lambda: read_then_changed(lambda r, c: r.ClearField("limit")),
+        "a read child, parsed again": lambda: read_then_changed(
+            lambda r, c: r.ParseFromString(R(sql={"query": "z"}).SerializeToString())
+        ),
+        "a read child, merged into": lambda: read_then_changed(lambda r, c: c.MergeFromString(L(limit=7).SerializeToString())),
+        "a merge into a descendant of the bytes of its ancestor": merged_into_a_descendant,
+        "DiscardUnknownFields": discard_unknown,
+        "100 levels": lambda: depth(50),
+        "101 levels": lambda: depth(51),
+    }
+    return {name: _outcome(case) for name, case in cases.items()}
+
+
+def test_parses_into_unset_children_and_held_messages_are_upbs(upb):
+    # A parse into a message that holds no field reads its bytes natively, of no Python object for
+    # each message (`codec::merge_with`), and gives what upb's gives: an unset child that it parses
+    # into is set in its parent, of any level, an unset child that the message gave out of a field
+    # that the parse sets is the parsed message (upb's `SyncSubobjs`), of every level, and one of a
+    # field that it does not set stays the field's; a message of a container or a map is the
+    # container's; a failure keeps what it read; and what the parse read gives one object of each
+    # message from then on, which a clear, a merge and a parse again of the message keep, as upb's.
+    # The levels of a parse are upb's, of its `DecodeError` of the limit.
+    assert _parse_scenarios(ours) == _parse_scenarios(upb)
+
+
+def _parse_again(lockstep, generator, a, b, log, depth=0):
+    """A parse, of `MergeFromString`, of the bytes of a random message into the messages `a`
+    (upb's) and `b`, or into a message of a message field of them (set or unset), as of each
+    runtime alike. The objects that the lockstep keeps are released first, as upb's merge into a
+    message of more than two unset children given out takes the parsed messages as some of them in
+    an order of their addresses (its `SyncSubobjs` skips one after each it takes). Its bytes are
+    whole: upb's parse that fails in a message that holds fields reads memory that it does not
+    hold (see `failed_string_value` of `codec.rs`), and may end the process."""
+    rng = lockstep.rng
+    fields = [f for f in a.DESCRIPTOR.fields if f.type == f.TYPE_MESSAGE and not f.is_repeated]
+    if fields and depth < 2 and rng.random() < 0.5:
+        f = rng.choice(fields)
+        log.append(f"in {f.name}")
+        _parse_again(lockstep, generator, getattr(a, f.name), getattr(b, f.name), log, depth + 1)
+        return
+    source = lockstep.upb(a.DESCRIPTOR.full_name)()
+    generator.fill(source, depth=rng.randint(0, 2))
+    data = source.SerializeToString(deterministic=True)
+    log.append(f"MergeFromString({data.hex()})")
+    lockstep.kept.clear()
+    lockstep.both(log[-1], a, b, lambda m: m.MergeFromString(data))
+
+
+@pytest.mark.parametrize("seed", range(6))
+def test_random_operations_on_parsed_messages_agree_with_upb(upb, seed):
+    # The random operations of the lockstep on messages that FromString, ParseFromString and
+    # MergeFromString parse natively (whose objects a read makes, of all the levels of a value of
+    # few messages at once, else of one level), and parses again into them and into their
+    # messages, agree with upb's, of the identities of the objects that they give too.
+    lockstep = _Lockstep(upb, seed)
+    generator = _Generator(upb, seed)
+    rng = lockstep.rng
+    for full_name in _LOCKSTEP_TYPES:
+        for _ in range(3):
+            source = upb(full_name)()
+            generator.fill(source, depth=rng.randint(1, 3))
+            data = source.SerializeToString(deterministic=True)
+            how = rng.choice(["FromString", "ParseFromString", "MergeFromString"])
+            if how == "FromString":
+                a, b = upb(full_name).FromString(data), ours(full_name).FromString(data)
+            else:
+                a, b = upb(full_name)(), ours(full_name)()
+                getattr(a, how)(data)
+                getattr(b, how)(data)
+            log = [f"{how}({data.hex()})"]
+            lockstep.kept.clear()
+            lockstep.compare(full_name, a, b, log)
+            for _ in range(30):
+                if rng.random() < 0.15:
+                    _parse_again(lockstep, generator, a, b, log)
+                else:
+                    lockstep.step(a, b, log)
+                lockstep.compare(full_name, a, b, log)
+
+
+def _parsed_projects(count):
+    """The bytes of a relation of a projection of `count` expressions of three levels each, whose
+    projection is of `count * 7 + 3` messages (of its input and the range of the input)."""
+    expression = proto.Expression(
+        unresolved_function={
+            "function_name": "+",
+            "arguments": [{"unresolved_attribute": {"unparsed_identifier": "a"}}, {"literal": {"integer": 1}}],
+        }
+    )
+    return proto.Relation(project={"input": {"range": {"end": 1}}, "expressions": [expression] * count}).SerializeToString()
+
+
+def test_a_collection_during_the_first_read_of_a_parse_finds_the_message():
+    # The first read of a field of a parse makes the objects of its value with no borrow of the
+    # message held, of all its levels at once of a value of up to 256 messages (see
+    # `native::WHOLE`), else of one level: a collection that their allocation starts, whose
+    # callback reads the whole message, finds it free and reads it whole, and the field gives the
+    # objects of the read from then on.
+    out = {}
+    for count in (2, 36, 37, 300):
+        data = _parsed_projects(count)
+        message = proto.Relation.FromString(data)
+        state = {"ran": 0, "errors": []}
+
+        def walk(m):
+            for f, v in m.ListFields():
+                if f.message_type is not None:
+                    for x in (v if f.is_repeated else [v]):
+                        walk(x)
+
+        def callback(phase, info, message=message, state=state):
+            if phase == "start" and state["ran"] < 50:
+                state["ran"] += 1
+                try:
+                    walk(message)
+                except BaseException as e:  # noqa: BLE001 (a PanicException too)
+                    state["errors"].append(f"{type(e).__name__}: {e}")
+
+        gc.collect()
+        gc.callbacks.append(callback)
+        threshold = gc.get_threshold()
+        gc.set_threshold(1)
+        try:
+            project = message.project
+            expressions = list(project.expressions)
+            arguments = [list(e.unresolved_function.arguments) for e in expressions]
+        finally:
+            gc.set_threshold(*threshold)
+            gc.callbacks.remove(callback)
+        same = (
+            message.project is project
+            and all(x is y for x, y in zip(project.expressions, expressions))
+            and all(
+                all(x is y for x, y in zip(e.unresolved_function.arguments, args))
+                for e, args in zip(project.expressions, arguments)
+            )
+        )
+        out[count] = [state["ran"] > 0, state["errors"], same, message.SerializeToString() == data]
+    assert out == {count: [True, [], True, True] for count in (2, 36, 37, 300)}, out
+
+
+def test_a_signal_during_the_first_read_of_a_parse_leaves_it_whole():
+    # As of a copy (see test_a_signal_during_the_first_read_of_a_copy_leaves_it_whole): the first
+    # read of a repeated message field of a parse of many messages makes their objects of
+    # checkpoints, so a signal there raises the exception of its handler from the read, and the
+    # message stays whole, its field read again in full, of one object from then on.
+    import signal
+
+    count = 200_000
+    source = proto.Expression.Literal.Array(elements=[proto.Expression.Literal(integer=1)] * count)
+    data = proto.Expression.Literal(array=source).SerializeToString()
+
+    class Stop(Exception):
+        pass
+
+    def handler(signum, frame):
+        raise Stop()
+
+    previous = signal.signal(signal.SIGALRM, handler)
+    outcomes = []
+    try:
+        for attempt in range(10):
+            h = proto.Expression.Literal.FromString(data)
+            array = h.array  # of one level, of more than 256 messages: its elements stay native
+            signal.setitimer(signal.ITIMER_REAL, 0.0005 + attempt * 0.0002)
+            try:
+                len(array.elements)
+                outcomes.append("completed")
+            except Stop:
+                outcomes.append("interrupted")
+            finally:
+                signal.setitimer(signal.ITIMER_REAL, 0)
+            again = array.elements
+            assert len(again) == count and again is array.elements, attempt
+            assert h.SerializeToString() == data, attempt
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+    assert "interrupted" in outcomes, outcomes
