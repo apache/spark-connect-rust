@@ -1,5 +1,6 @@
 # The pyspark.sql.types module of the Spark Connect client: the DataType classes of the Rust
 # extension, and the conversion functions. As PySpark's module, it has no docstring.
+import os  # noqa: F401  (PySpark's global, of YearMonthIntervalType.needConversion)
 import re
 from typing import cast  # noqa: F401  (upstream leaks typing.cast from this module)
 
