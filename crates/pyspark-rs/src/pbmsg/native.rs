@@ -34,7 +34,9 @@ use super::containers::{
     Entries, MapContainer, MapEntries, MapValue, RepeatedComposite, RepeatedScalar,
 };
 use super::grow;
-use super::message::{generation, new_message_at, Fields, MessageClass, PyMessage, Slot, Slots};
+use super::message::{
+    self, generation, new_message_at, Fields, MessageClass, PyMessage, Slot, Slots,
+};
 use super::pool::{FieldDesc, MapDesc, MessageDesc};
 use super::scalar::Scalar;
 use crate::interrupt::ConversionBudget;
@@ -950,6 +952,9 @@ fn copy_parts(
     // borrow, each with the index of its field: the first apart, as most hold one or none.
     let mut first: Option<(usize, Held)> = None;
     let mut rest: Vec<(usize, Held)> = Vec::new();
+    // Whether the copy shares native values of messages of the message, which the message that
+    // takes the copy then holds too (see `message::CLEAN_EPOCH`).
+    let mut shares = false;
     let (mut slots, desc, unknown) = {
         let m = message.borrow();
         // A message of scalars only, as most of the messages of a large message are, is copied
@@ -976,6 +981,7 @@ fn copy_parts(
                     if levels.is_some_and(|levels| value.depth() > levels) {
                         return Err(CopyError::TooDeep);
                     }
+                    shares |= !matches!(value, Value::Scalars(_));
                     *out = Slot::Native(value.at(py, generation));
                     return Ok(());
                 }
@@ -996,6 +1002,7 @@ fn copy_parts(
                     {
                         return Err(CopyError::TooDeep);
                     }
+                    shares |= !pending.is_empty();
                     let pending = pending
                         .iter()
                         .map(|m| Native::at(m, py, generation))
@@ -1028,6 +1035,11 @@ fn copy_parts(
         };
         (slots, with_desc.then(|| m.desc), m.unknown.clone())
     };
+    if shares {
+        // The messages that take the copy hold values of the message's parse below them, which
+        // their marks, and those of the messages above them, do not see.
+        message::unmark_all();
+    }
     for (index, held) in first.into_iter().chain(rest) {
         let value = match held {
             Held::Message(child) => Value::Message(NRef::new(copy_message(

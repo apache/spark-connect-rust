@@ -273,11 +273,12 @@ pub(crate) struct OneofDesc {
 }
 
 /// The class that a message type keeps of a read of the registry of the classes (see
-/// [`MessageDesc::class`]): the generation of the classes of the read, and the class registered of
-/// the type then (none, of a type that has none).
+/// [`MessageDesc::class`]): the class registered of the type at a read (none, of a type that has
+/// none), and the last generation of the classes of a read that kept it, which a later read of the
+/// same class sets as it keeps the record again (see `keep_class` of `message.rs`).
 #[derive(Debug)]
 pub(crate) struct KeptClass {
-    pub(crate) at: u64,
+    pub(crate) at: AtomicU64,
     pub(crate) class: Option<Py<PyType>>,
 }
 
@@ -317,9 +318,10 @@ pub(crate) struct MessageDesc {
     /// the registry of the classes of the runtime, and the generation of the classes then, which
     /// the messages of the type are made of, of any generation that the class of the type is the
     /// same at (see `kept_class` of `message.rs`); null before the first read. A read of the
-    /// registry after a registration that gave the type another class keeps a new one (see
-    /// `keep_class`), and the one before stays, never released, as the registry keeps the classes
-    /// that it replaced.
+    /// registry after a registration that gave the type another class keeps the record of the
+    /// class then (see `keep_class`): of a class that the type had before, the record that it kept
+    /// of it, of the later generation. The records are never released, one of each class of the
+    /// type, as the registry keeps the classes that it replaced.
     pub(crate) class: AtomicPtr<KeptClass>,
     /// The generation of the classes that the last registration that gave the type another class
     /// began (none, of a type of the class it had at first), which a registration sets before it
