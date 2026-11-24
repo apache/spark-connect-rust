@@ -1277,7 +1277,7 @@ impl RepeatedComposite {
         };
         self.pending = Some(match Arc::try_unwrap(value) {
             Ok(value) => {
-                let mut items = value.items.into_iter();
+                let mut items = value.items.into_vec().into_iter();
                 for _ in 0..next {
                     items.next();
                 }
@@ -2861,6 +2861,7 @@ impl MessageMapContainer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pbmsg::scalar::Str;
 
     fn scalar(value: &MapValue) -> &Scalar {
         match value {
@@ -2893,7 +2894,7 @@ mod tests {
             (state >> 33) % bound
         };
         for step in 0..20_000i64 {
-            let key = Scalar::Str(format!("k{}", next(32)));
+            let key = Scalar::Str(Str::from(format!("k{}", next(32))));
             let value = Scalar::I64(step);
             if next(10) < 6 {
                 let replaced = entries.insert(key.clone(), MapValue::Scalar(value.clone()));
@@ -2939,6 +2940,6 @@ mod tests {
         assert!(order
             .iter()
             .all(|(k, v)| copied.get(k).map(scalar) == Some(v)));
-        assert!(copied.get(&Scalar::Str("missing".to_string())).is_none());
+        assert!(copied.get(&Scalar::Str(Str::new("missing"))).is_none());
     }
 }

@@ -69,7 +69,7 @@ pub(crate) struct Native {
 /// its container, which the objects of its messages are made of.
 pub(crate) struct NativeMessages {
     pub(crate) class: MessageClass,
-    pub(crate) items: Vec<NRef>,
+    pub(crate) items: Items,
     /// The levels of messages that the field adds below its message: one more than the deepest of
     /// its messages, none of no messages.
     pub(crate) depth: u32,
@@ -260,6 +260,149 @@ fn count_of(slots: &Slots) -> u32 {
     })
 }
 
+/// The messages of the native value of a repeated message field: up to two in place, more of a
+/// vector, as most repeated message fields of a plan hold one or two (the arguments of a
+/// function), of no allocation of their own then. Of the slice of the messages, in their order.
+#[derive(Clone, Default)]
+pub(crate) enum Items {
+    #[default]
+    Empty,
+    One([NRef; 1]),
+    Two([NRef; 2]),
+    Many(Vec<NRef>),
+}
+
+impl Items {
+    pub(crate) fn push(&mut self, item: NRef) {
+        *self = match std::mem::take(self) {
+            Items::Empty => Items::One([item]),
+            Items::One([a]) => Items::Two([a, item]),
+            Items::Two([a, b]) => {
+                let mut items = Vec::with_capacity(4);
+                items.extend([a, b, item]);
+                Items::Many(items)
+            }
+            Items::Many(mut items) => {
+                items.push(item);
+                Items::Many(items)
+            }
+        };
+    }
+}
+
+impl From<Vec<NRef>> for Items {
+    fn from(items: Vec<NRef>) -> Items {
+        match items.len() {
+            0 => Items::Empty,
+            1 | 2 => {
+                let mut items = items.into_iter();
+                let mut out = Items::Empty;
+                for item in items.by_ref() {
+                    out.push(item);
+                }
+                out
+            }
+            _ => Items::Many(items),
+        }
+    }
+}
+
+impl std::ops::Deref for Items {
+    type Target = [NRef];
+
+    fn deref(&self) -> &[NRef] {
+        match self {
+            Items::Empty => &[],
+            Items::One(items) => items,
+            Items::Two(items) => items,
+            Items::Many(items) => items,
+        }
+    }
+}
+
+impl std::ops::DerefMut for Items {
+    fn deref_mut(&mut self) -> &mut [NRef] {
+        match self {
+            Items::Empty => &mut [],
+            Items::One(items) => items,
+            Items::Two(items) => items,
+            Items::Many(items) => items,
+        }
+    }
+}
+
+/// The messages of [`Items`], by value, in their order.
+pub(crate) enum ItemsIntoIter {
+    Small(std::iter::Chain<std::array::IntoIter<NRef, 1>, std::option::IntoIter<NRef>>),
+    Many(std::vec::IntoIter<NRef>),
+}
+
+impl Iterator for ItemsIntoIter {
+    type Item = NRef;
+
+    fn next(&mut self) -> Option<NRef> {
+        match self {
+            ItemsIntoIter::Small(items) => items.next(),
+            ItemsIntoIter::Many(items) => items.next(),
+        }
+    }
+}
+
+impl IntoIterator for Items {
+    type Item = NRef;
+    type IntoIter = ItemsIntoIter;
+
+    fn into_iter(self) -> ItemsIntoIter {
+        let small = |first: [NRef; 1], second: Option<NRef>| {
+            ItemsIntoIter::Small(first.into_iter().chain(second))
+        };
+        match self {
+            Items::Empty => ItemsIntoIter::Many(Vec::new().into_iter()),
+            Items::One(first) => small(first, None),
+            Items::Two([a, b]) => small([a], Some(b)),
+            Items::Many(items) => ItemsIntoIter::Many(items.into_iter()),
+        }
+    }
+}
+
+impl<'a> IntoIterator for &'a Items {
+    type Item = &'a NRef;
+    type IntoIter = std::slice::Iter<'a, NRef>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a mut Items {
+    type Item = &'a mut NRef;
+    type IntoIter = std::slice::IterMut<'a, NRef>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter_mut()
+    }
+}
+
+impl FromIterator<NRef> for Items {
+    fn from_iter<I: IntoIterator<Item = NRef>>(iter: I) -> Items {
+        let mut items = Items::Empty;
+        for item in iter {
+            items.push(item);
+        }
+        items
+    }
+}
+
+impl Items {
+    /// The messages, of a vector (of no allocation of the messages of a vector).
+    pub(crate) fn into_vec(self) -> Vec<NRef> {
+        match self {
+            Items::Many(items) => items,
+            items => items.into_iter().collect(),
+        }
+    }
+}
+
 impl NativeMessages {
     pub(crate) fn new(class: MessageClass, items: Vec<NRef>, generation: u64) -> Self {
         let depth = items
@@ -272,7 +415,7 @@ impl NativeMessages {
             .fold(0u32, |count, item| count.saturating_add(item.count));
         NativeMessages {
             class,
-            items,
+            items: Items::from(items),
             depth,
             count,
             generation,
@@ -1439,6 +1582,57 @@ mod tests {
         let value = Slot::Native(Value::Message(NRef::new(child)));
         fields.slots.set(desc, index, value);
         Native::new(fields, 0)
+    }
+
+    /// The messages of a native repeated message field are held in place up to two, of a vector
+    /// from the third, in their order, of a push, a collection and a vector alike, and give
+    /// themselves back of each way of reading them.
+    #[test]
+    fn the_messages_of_a_repeated_field_keep_their_order_of_each_size() {
+        let literal = pool()
+            .message("spark.connect.Expression.Literal")
+            .expect("Literal");
+        let native = |i: u8| {
+            NRef::new(Native::new(
+                Fields {
+                    desc: literal,
+                    slots: Slots::default(),
+                    unknown: vec![i],
+                },
+                0,
+            ))
+        };
+        let tags = |items: &Items| {
+            items
+                .iter()
+                .map(|m| m.fields.unknown[0])
+                .collect::<Vec<_>>()
+        };
+        for count in 0..6u8 {
+            let mut pushed = Items::default();
+            (0..count).for_each(|i| pushed.push(native(i)));
+            let collected: Items = (0..count).map(native).collect();
+            let of_vec = Items::from((0..count).map(native).collect::<Vec<_>>());
+            let expected: Vec<u8> = (0..count).collect();
+            for items in [&pushed, &collected, &of_vec] {
+                assert_eq!(tags(items), expected);
+                assert_eq!(items.len(), count as usize);
+                assert_eq!(matches!(items, Items::Many(_)), count > 2);
+            }
+            assert_eq!(tags(&pushed.clone()), expected);
+            let by_value: Vec<u8> = collected.into_iter().map(|m| m.fields.unknown[0]).collect();
+            assert_eq!(by_value, expected);
+            let as_vec: Vec<u8> = of_vec
+                .into_vec()
+                .iter()
+                .map(|m| m.fields.unknown[0])
+                .collect();
+            assert_eq!(as_vec, expected);
+            for item in &mut pushed {
+                NRef::get_mut(item).expect("its own").fields.unknown[0] += 10;
+            }
+            assert_eq!(tags(&pushed), (10..10 + count).collect::<Vec<_>>());
+        }
     }
 
     /// A native message of a million levels drops a level at a time, where a recursion of as many

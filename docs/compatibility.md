@@ -2385,12 +2385,12 @@ errors are the runtime's `DecodeError` and `EncodeError`. The differences:
   it is (so `append` and `extend`, which merge each value into a new message, make no object of it
   either). So the parse, the reads of what a parse or a copy holds natively, the copy of a
   message that Python read and the release of a message of many messages take several times as
-  long as upb's (of CPU time, of a message of a million messages: 0.13 s for the parse, upb's
-  0.05 s, 0.46 s for the parse and a read of every message, upb's 0.17 s; 0.22 s for
+  long as upb's (of CPU time, of a message of a million messages: 0.08 s for the parse, upb's
+  0.05 s, 0.41 s for the parse and a read of every message, upb's 0.18 s; 0.17 s for
   `CopyFrom`, `copy.deepcopy` and `MergeFrom` of a message that Python read, upb's 0.1 s (0.09 s
-  of `MergeFrom`), none for a copy of a parse that it did not read, and 0.22 s for a `MergeFrom`
+  of `MergeFrom`), none for a copy of a parse that it did not read, and 0.21 s for a `MergeFrom`
   into a message that has the repeated field already, whose objects it makes of the copy, upb's
-  0.09 s). A parse holds the messages that Python has not read in slabs of up to 64 messages (of 4,
+  0.09 s; see "The time of a parse" of `dev/parity/known-differences.md`). A parse holds the messages that Python has not read in slabs of up to 64 messages (of 4,
   8, 16 and 32 first), each released once none of its messages is held any longer (the object of a
   message takes its fields); a message that outlives the container or the map that held it (one
   kept of a large parse whose other messages are released) moves the part of the parse that it
@@ -2416,8 +2416,8 @@ errors are the runtime's `DecodeError` and `EncodeError`. The differences:
   fields, the message as the merge has set it so far, a field at a time. A parse that the exception
   of the handler of a signal interrupts leaves the message with what it read until then, as a parse
   that fails does. `SerializeToString`, `==` of two messages of the runtime and the release of a
-  message hold the GIL until they end, as upb's do: 0.07 s, 0.06 s and 0.04 s for a million messages
-  (0.07 s for the release of a copy), where upb's take 0.04 s, 0.11 s and 2 ms. The messages that
+  message hold the GIL until they end, as upb's do: 0.07 s, 0.06 s and 0.02 s for a million messages
+  (0.03 s for the release of a copy), where upb's take 0.04 s, 0.11 s and 2 ms. The messages that
   Python reads of a parse or a copy (of `copy.deepcopy` too), those that a parse makes within a
   message that holds fields, and that of a read of an unset field are not tracked by the garbage
   collector (`gc.is_tracked`), as they make no reference cycles, so that a collection does not go

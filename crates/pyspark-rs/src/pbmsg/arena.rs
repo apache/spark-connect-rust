@@ -345,10 +345,15 @@ impl Deref for NRef {
 
 impl Drop for NRef {
     fn drop(&mut self) {
-        if self.node().refs.fetch_sub(1, Ordering::Release) != 1 {
-            return;
+        // The only reference, which no other can copy meanwhile (an `NRef` has no weak
+        // references), of no atomic write; else as `Arc`.
+        let refs = &self.node().refs;
+        if refs.load(Ordering::Acquire) != 1 {
+            if refs.fetch_sub(1, Ordering::Release) != 1 {
+                return;
+            }
+            fence(Ordering::Acquire);
         }
-        fence(Ordering::Acquire);
         // SAFETY: this was the last reference of the message, which is dropped once, and its
         // node released.
         unsafe {
