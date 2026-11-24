@@ -1217,6 +1217,11 @@ fn release_held_entries(py: Python<'_>, released: Entries) {
 /// A container released releases the messages that it held as [`release_held`] does, at once.
 impl Drop for RepeatedComposite {
     fn drop(&mut self) {
+        // The messages that the container holds natively and alone, released of each slab at
+        // once, as a list releases them (see the drop of `NativeMessages`).
+        if let Some(Pending::Owned(pending)) = self.pending.take() {
+            native::release_list(pending);
+        }
         if self.items.is_empty() {
             return;
         }
@@ -1277,7 +1282,8 @@ impl RepeatedComposite {
         };
         self.pending = Some(match Arc::try_unwrap(value) {
             Ok(value) => {
-                let mut items = value.items.into_vec().into_iter();
+                let mut value = value;
+                let mut items = std::mem::take(&mut value.items).into_vec().into_iter();
                 for _ in 0..next {
                     items.next();
                 }

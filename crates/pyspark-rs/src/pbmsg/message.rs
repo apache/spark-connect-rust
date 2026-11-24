@@ -539,6 +539,12 @@ impl MessageClass {
         }
     }
 
+    /// The maker of the messages of the type `desc` of no class, of the tests.
+    #[cfg(test)]
+    pub(crate) fn of_no_class(desc: &'static MessageDesc) -> MessageClass {
+        MessageClass { class: None, desc }
+    }
+
     pub(crate) fn of(py: Python<'_>, full_name: &str) -> PyResult<MessageClass> {
         let registry = classes().lock().unwrap_or_else(|e| e.into_inner());
         MessageClass::of_locked(py, full_name, &registry)
@@ -1350,8 +1356,10 @@ fn merge_value(
         Value::Messages(items) => {
             let container = PyMessage::composite_of(target, index)?;
             let class = container.bind(py).borrow().class.clone_ref(py);
-            let items =
-                Arc::try_unwrap(items).map_or_else(|items| items.items.clone(), |m| m.items);
+            let items = Arc::try_unwrap(items).map_or_else(
+                |items| items.items.clone(),
+                |mut m| std::mem::take(&mut m.items),
+            );
             for item in items {
                 let copy = native::duplicate_owned(py, item, Some(&class), budget)?;
                 container.bind(py).borrow_mut().items.push(copy.unbind());

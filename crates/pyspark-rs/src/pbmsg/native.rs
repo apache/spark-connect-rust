@@ -423,6 +423,42 @@ impl NativeMessages {
     }
 }
 
+/// The messages of a list of messages of a parse of at most one level below them released one after
+/// another, of the releases of the list (`NRef::release_with`): the nodes of a slab that the list
+/// releases in a row (of the messages of a flat array, which a parse makes in a row) are released
+/// of one atomic operation for each slab, rather than of one for each message. The messages of a
+/// short list, of messages of more levels, whose nodes are apart in their slabs (between those of
+/// the messages below each), and of a copy, which are allocations of their own, are released as
+/// they are.
+impl Drop for NativeMessages {
+    #[inline]
+    fn drop(&mut self) {
+        if self.items.len() >= BATCHED && self.depth <= 2 && NRef::in_slab(&self.items[0]) {
+            release_batched(std::mem::take(&mut self.items));
+        }
+    }
+}
+
+/// Release the messages `items` of a list, of the releases of the list (see the drop of
+/// `NativeMessages`).
+#[inline(never)]
+fn release_batched(items: Items) {
+    release_list(items);
+}
+
+/// Release the messages `items`, one after another, of one release of the nodes of each slab that
+/// they release in a row (`NRef::release_with`).
+pub(crate) fn release_list(items: impl IntoIterator<Item = NRef>) {
+    let mut releases = Releases::default();
+    for item in items {
+        NRef::release_with(item, &mut releases);
+    }
+}
+
+/// The messages of a list from which its drop releases their nodes of a slab at once (see the
+/// drop of `NativeMessages`).
+const BATCHED: usize = 8;
+
 impl NativeMessages {
     /// Append `item`, a message that a native parse read, counting its levels.
     pub(crate) fn push(&mut self, item: NRef) {
@@ -798,8 +834,8 @@ impl Drop for Native {
                     }
                 }
                 Value::Messages(m) => {
-                    if let Ok(m) = Arc::try_unwrap(m) {
-                        values.extend(m.items.into_iter().map(Value::Message));
+                    if let Ok(mut m) = Arc::try_unwrap(m) {
+                        values.extend(std::mem::take(&mut m.items).into_iter().map(Value::Message));
                     }
                 }
                 Value::Map(m) => {
@@ -1379,7 +1415,7 @@ impl Whole {
             }
             Value::Messages(m) => {
                 match Arc::try_unwrap(m) {
-                    Ok(m) => m.items.into_iter().for_each(|item| {
+                    Ok(mut m) => std::mem::take(&mut m.items).into_iter().for_each(|item| {
                         drop(self.fill_message(py, item, level).into_bound(py));
                     }),
                     Err(m) => m.items.iter().cloned().for_each(|item| {
@@ -1489,7 +1525,9 @@ impl Made {
                     }
                     (slot, _) => {
                         match Arc::try_unwrap(m) {
-                            Ok(m) => m.items.into_iter().for_each(fill_next),
+                            Ok(mut m) => {
+                                std::mem::take(&mut m.items).into_iter().for_each(fill_next)
+                            }
                             Err(m) => m.items.iter().cloned().for_each(fill_next),
                         }
                         slot.release(py);

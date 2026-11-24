@@ -1667,19 +1667,21 @@ requests of the unpickled object pickle as it is then. This case still differs:
 - **The time of a parse** (inherent; the runtime's messages are native values of their own). Of the
   plan of 2,835 messages of SPARK-62266's benchmarks (20 projections of 10 expressions, 9,913
   bytes), `Plan.FromString` takes 275 µs, upb's 49 µs (`ParseFromString`, 274 µs and 98 µs; the
-  `to_plan` of `F.col("s.v")`, 1.2 µs and 0.8 µs, which PySpark builds in Python, of no parse).
-  Of the 275 µs, 53 µs are the release of the parse, which drops each of its messages, where upb
-  frees the arena of the parse at once (0.4 µs): a message of the runtime is a node of its own of
-  112 bytes in a slab of the parse, of a count of its references, so that a read of Python can take
-  its fields into an object, a copy can share it and a message of it can outlive the rest of the
-  parse, and its release decrements the count of its slab, an atomic operation for each message
-  (7.5% of the time). The parse writes such a node, its slots and its counts of levels for each
-  message, of 0.53 allocations a message (the vector of the slots of a message of two fields or
-  more, and the list of a repeated field, of the reference of its class); upb writes its messages
-  into its arena, of no allocation and no count of references. Parsing in upb's time would take one
-  block of memory of the parse, freed at once, of which the objects of a read, the copies that
-  share a parse and the messages kept of it could not each hold a part, as they do (SPARK-62266,
-  SPARK-62312, SPARK-62318).
+  `to_plan` of `F.col("s.v")`, 1.2 µs and 0.8 µs, which PySpark builds in Python, of no parse). Of
+  the 275 µs, 53 µs are the release of the parse, which drops each of its messages, where upb frees
+  the arena of the parse at once (0.4 µs): a message of the runtime is a node of its own of 112
+  bytes in a slab of the parse, of a count of its references, so that a read of Python can take its
+  fields into an object, a copy can share it and a message of it can outlive the rest of the parse,
+  and its release decrements the count of its slab, an atomic operation for each message (7.5% of
+  the time; a list of a parse of messages of at most one level below them releases those of a slab
+  at once, but a walk of a tree of its own, which would release the nodes of each slab of the tree
+  at once, took longer than the operations that it saved, SPARK-62322). The parse writes such a
+  node, its slots and its counts of levels for each message, of 0.53 allocations a message (the
+  vector of the slots of a message of two fields or more, and the list of a repeated field, of the
+  reference of its class); upb writes its messages into its arena, of no allocation and no count of
+  references. Parsing in upb's time would take one block of memory of the parse, freed at once, of
+  which the objects of a read, the copies that share a parse and the messages kept of it could not
+  each hold a part, as they do (SPARK-62266, SPARK-62312, SPARK-62318).
 
 ## Type checking (the stubs of `scripts/gen_type_stubs.py`)
 
