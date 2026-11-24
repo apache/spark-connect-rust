@@ -662,6 +662,14 @@ Code that constructs the variant directly sets it to `None`; `profile_id` is sen
 of the schema of the Python client's `DataFrame.to`, which a request calls when it builds the plan,
 as PySpark converts the schema object then. Code that constructs the variant directly sets it to
 `None`; `DataFrame::to` sends its schema as before.
+`LogicalPlan::MlTransform` adds an `input_at` field (`plan::MlInputAt`), which is not a stable API
+either: where a request puts the relation of the node's `input`, which it builds then, in the
+`ml_relation` (the input of its `Transform` or its `model_summary_dataset`), as PySpark's ML plans
+build the plan of their child at each request. Code that constructs the variant directly, of an
+`ml_relation` that holds its input, sets it to `MlInputAt::Nowhere`. So `Transformer::transform`
+and `attribute_relation` of a summary target build the relation of their DataFrame at the
+requests of the result, not at the call, and fail there of its errors (a function of a UDF that
+does not pickle); `Transformer::build_ml_relation` builds it at the call, as before.
 `SentExpression`, the expression of a pickled Column (`ExpressionNode::Sent`), adds a `subqueries`
 field: the plans that its subqueries refer to, of `Expression::sent_with_subqueries`, which the
 relation that holds the expression sends in its `WithRelations`, as it sends the plan of a
@@ -1012,7 +1020,10 @@ classes to build on:
   to infer: send it as `FetchArg::Typed`, as PySpark sends a `(value, DataType)` pair.
 - `attribute_relation(&MlTarget, method, args)` is the DataFrame of a method, as
   `invoke_remote_attribute_relation` reads it, of the summary dataset of a summary target. It keeps
-  the object and the plans of its DataFrame arguments alive.
+  the object and the plans of its DataFrame arguments alive. It builds the relations of its
+  DataFrame arguments at the call, as PySpark's `serialize`, and its requests build the relation of
+  the summary dataset, as PySpark's `AttributeRelation` builds the plan of its child; the requests
+  of the DataFrame of a transform build the relation of its input, as `TransformerRelation`.
 - `write_operator` and `write_object` save an estimator, transformer or evaluator, or a fitted
   model (`Write`), and `read` loads one of its JVM class (`Read`), as `RemoteMLWriter` and
   `RemoteMLReader` of `pyspark.ml.connect.readwrite`. A loaded model is a new `MlRef`.
@@ -1193,7 +1204,14 @@ modules stay PySpark's deprecated ones, unchanged. Each class has, where its PyS
   DataFrame member (`predictions`, `residuals()`) of a summary of the `summary` method first, as
   PySpark names the training summary of a fit, reads the plan of its `_summary_dataset`, which
   PySpark's fit sets, as the summary dataset of the relation, and raises the AttributeError of the
-  attribute of a summary of none, as PySpark's `invoke_remote_attribute_relation` does. The Param of a class (`LinearSVC.maxIter`) is PySpark's, of
+  attribute of a summary of none, as PySpark's `invoke_remote_attribute_relation` does. The
+  DataFrame of such a member, and of a transform, builds the relation of the summary dataset or
+  of the transformed DataFrame at each of its requests (its schema, columns, `repr`, `explain` and
+  actions), and pickles the functions of its UDFs then, as PySpark's `AttributeRelation` and
+  `TransformerRelation` build the plan of their child: so a function that does not pickle fails
+  those requests, each again, and not the member or the transform. The DataFrame arguments of a
+  method (`ChiSquareTest.test(dataset, ...)`, `approxNearestNeighbors(dataset, ...)`,
+  `evaluate(dataset)`) are built at the call, as PySpark's `serialize` builds them. The Param of a class (`LinearSVC.maxIter`) is PySpark's, of
   the parent `undefined`, so `ParamGridBuilder().addGrid(LinearSVC.maxIter, ...)` builds.
   The AttributeError of a missing attribute names the class as PySpark's does, of an object as of
   the class itself (`type object 'DecisionTreeRegressor' has no attribute 'maxIter'`).

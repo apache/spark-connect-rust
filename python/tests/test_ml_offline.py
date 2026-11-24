@@ -2125,6 +2125,92 @@ def test_the_dataframe_members_of_a_summary_of_its_constructor_read_its_summary_
     assert [method.method for method in command.ml_command.fetch.methods] == ["r2"]
 
 
+def test_the_dataframes_of_members_and_transforms_build_their_datasets_at_each_request(ml_mock):
+    # As PySpark's AttributeRelation and TransformerRelation, which build the plan of their child
+    # each time that their own plan is built: the DataFrame of a member of a training summary (of
+    # the training dataset, or of its transform by a clustering model) and of a transform builds
+    # the relation of its dataset at each request, and pickles the functions of its UDFs then, so a
+    # function that does not pickle fails the requests of the DataFrame and not its making. A
+    # helper's method (`ChiSquareTest.test`) and an `evaluate` build their DataFrame arguments when
+    # they are called, as PySpark's `serialize` does.
+    import pickle
+
+    import pyspark.ml.connect as connect
+    from pyspark.ml.linalg import Vectors
+    from pyspark.ml.stat import ChiSquareTest
+    from pyspark.sql import functions as F
+
+    spark, service = ml_mock
+
+    class Pickled:
+        armed = False
+
+        def __reduce__(self):
+            if Pickled.armed:
+                raise TypeError("a function that does not pickle")
+            return (Pickled, ())
+
+    held = Pickled()
+
+    def f(x):
+        return held and x
+
+    frame = spark.createDataFrame([(1.0, Vectors.dense(0.0, 1.0))], ["label", "features"])
+    frame = frame.withColumn("w", F.udf(f, "double")("label"))
+    models = {}
+    for estimator in [
+        connect.regression.LinearRegression(),
+        connect.classification.LogisticRegression(),
+        connect.clustering.KMeans(k=2),
+    ]:
+        _answer_fit(service, estimator, ref=f"lazy-{type(estimator).__name__}")
+        models[type(estimator).__name__] = estimator.fit(frame)
+    regression, logistic, kmeans = models.values()
+    summaries = [regression.summary, logistic.summary, kmeans.summary]
+    sent = _requests_but_deletes(service)
+    Pickled.armed = True
+    members = [
+        (summaries[0].predictions, "summary"),
+        (summaries[0].residuals, "summary"),
+        (summaries[1].roc, "summary"),
+        (summaries[1].predictions, "summary"),
+        (summaries[2].predictions, "clustering"),
+        (summaries[2].cluster, "clustering"),
+        (regression.transform(frame), "transform"),
+        (kmeans.transform(frame), "transform"),
+        (connect.feature.VectorAssembler(inputCols=["w"], outputCol="v").transform(frame), "plain"),
+    ]
+    for df, _ in members:
+        with pytest.raises(pickle.PicklingError, match="a function that does not pickle"):
+            _relation(df)
+        with pytest.raises(pickle.PicklingError, match="a function that does not pickle"):
+            df.count()
+    # The arguments of a helper's method are built at the call.
+    with pytest.raises(pickle.PicklingError, match="a function that does not pickle"):
+        ChiSquareTest.test(frame, "features", "label")
+    with pytest.raises(pickle.PicklingError, match="a function that does not pickle"):
+        regression.evaluate(frame)
+    assert _requests_but_deletes(service) == sent
+    Pickled.armed = False
+    dataset = _relation(frame)
+    for df, kind in members:
+        relation = _relation(df).ml_relation
+        if kind == "summary":
+            assert relation.model_summary_dataset == dataset
+        elif kind == "clustering":
+            # The transform of the training dataset by the model.
+            assert relation.model_summary_dataset.ml_relation.transform.input == dataset
+            assert relation.model_summary_dataset.ml_relation.transform.obj_ref.id == "lazy-KMeans"
+        else:
+            assert relation.transform.input == dataset
+            assert not relation.HasField("model_summary_dataset")
+    # Each request pickles the functions again.
+    Pickled.armed = True
+    for df, _ in members:
+        with pytest.raises(pickle.PicklingError, match="a function that does not pickle"):
+            df.count()
+
+
 def _pickle_error(value, protocol):
     # The type and the message of the error of the pickle of value at protocol.
     import pickle
@@ -6252,7 +6338,7 @@ def test_the_cycles_through_a_udf_of_the_training_dataset_of_a_model_are_collect
     # freed, and the model's object deleted on the server, of a model of each kind of summary
     # dataset (the training dataset, of a regression and a classification, and a transform of it,
     # of a clustering), with or without its summary read, of a copy of it, of the DataFrame of a
-    # method of its summary, and of a OneVsRestModel, whose models of the classes keep the binary
+    # method of its summary, also read once the cycle is made, and of a OneVsRestModel, whose models of the classes keep the binary
     # training sets of their summaries. The native objects keep the datasets in Rust.
     import pyspark.ml.connect as connect
     from pyspark.ml.linalg import Vectors
@@ -6272,7 +6358,7 @@ def test_the_cycles_through_a_udf_of_the_training_dataset_of_a_model_are_collect
         ("km", lambda: connect.clustering.KMeans(k=2, maxIter=2)),
         ("glr", lambda: connect.regression.GeneralizedLinearRegression(maxIter=2)),
     ]:
-        for shape in ["summary", "model", "copy", "predictions"]:
+        for shape in ["summary", "model", "copy", "predictions", "predictions-after"]:
             refs = []
             for i in range(5):
                 job = Job()
@@ -6290,9 +6376,14 @@ def test_the_cycles_through_a_udf_of_the_training_dataset_of_a_model_are_collect
                     job.model = model
                 elif shape == "copy":
                     job.model = model.copy()
-                else:
+                elif shape == "predictions":
                     job.predictions = summary.predictions
                     job.model = model
+                else:
+                    # Read once the function keeps the model, which does not pickle: the
+                    # DataFrame builds its relation at its requests, as PySpark's.
+                    job.model = model
+                    job.predictions = summary.predictions
                 refs.append((ref, weakref.ref(model)))
                 del model, summary, job, df, estimator
             gc.collect()

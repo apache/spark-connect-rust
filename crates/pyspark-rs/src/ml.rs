@@ -754,18 +754,14 @@ impl PyMLModel {
             // As PySpark, the transform of a DataFrame of another session refers to the model
             // on the server of that session, which raises CONNECT_ML.CACHE_INVALID when the
             // DataFrame is analyzed or run, as it caches no such model. (The Rust API rejects
-            // the transform itself.) Its input is the placeholder of the DataFrame, as in the
-            // plans of `pyspark.ml`: the core resolves it, counting its levels for the depth
-            // bound, where an input put in whole would count as one level.
-            let placeholder =
-                DataFrame::from_sent_relation(session.clone(), df.placeholder_relation());
-            let relation = spark_connect_proto::Relation {
-                rel_type: Some(spark_connect_proto::relation::RelType::MlRelation(
-                    Box::new(model.build_ml_relation(&placeholder).to_pyerr()?),
-                )),
-                ..Default::default()
-            };
-            DataFrame::from_relation(session, relation, None).to_pyerr()
+            // the transform itself.) Its requests build the relation of `df`, as its input, and
+            // count its levels for the depth bound, as PySpark's `TransformerRelation`; the
+            // transform is of the placeholder of `df`, which builds nothing of it.
+            let placeholder = DataFrame::from_sent_relation(session, df.placeholder_relation());
+            Ok(spark_connect::ml::transform_without_owner(
+                df,
+                model.build_ml_relation(&placeholder).to_pyerr()?,
+            ))
         } else {
             // Of the plan of `df`, which the transform is built over, and of the summary datasets
             // that the copy of the model holds (see `ModelCore::transform_job`).

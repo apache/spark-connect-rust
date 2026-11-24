@@ -855,6 +855,7 @@ pub(crate) mod tests {
                 ml_relation: Box::default(),
                 input: input(),
                 owner: Some(crate::plan::RelationOwner(Arc::new("ml"))),
+                input_at: crate::plan::MlInputAt::Nowhere,
             }),
             plan(LogicalPlan::CachedRemoteRelation {
                 relation_id: "r".to_string(),
@@ -940,6 +941,7 @@ pub(crate) mod tests {
                 ml_relation: Box::default(),
                 input: Arc::clone(&input.plan),
                 owner,
+                input_at: crate::plan::MlInputAt::Nowhere,
             })
         };
         let plain = vec![

@@ -1143,15 +1143,15 @@ pub fn attribute_relation(
             _ => None,
         })
         .collect();
+    // The DataFrames of the arguments are built now, as PySpark's `serialize` builds them when the
+    // method is called, and the summary dataset at each request of the DataFrame, as PySpark's
+    // `AttributeRelation` builds the plan of its child each time that its own is built.
     let fetch = target.fetch_proto(method, args)?;
     let relation = proto::Relation {
         rel_type: Some(proto::relation::RelType::MlRelation(Box::new(
             proto::MlRelation {
                 ml_type: Some(proto::ml_relation::MlType::Fetch(fetch)),
-                model_summary_dataset: target
-                    .summary_dataset()
-                    .map(|df| df.relation().map(Box::new))
-                    .transpose()?,
+                model_summary_dataset: None,
             },
         ))),
         ..Default::default()
@@ -1167,6 +1167,7 @@ pub fn attribute_relation(
                 ml_relation: Box::new(relation),
                 input: dataset.plan.clone(),
                 owner: Some(RelationOwner(owner)),
+                input_at: crate::plan::MlInputAt::SummaryDataset,
             },
         )),
         None => match inputs.first() {
@@ -1176,6 +1177,7 @@ pub fn attribute_relation(
                     ml_relation: Box::new(relation),
                     input: input.clone(),
                     owner: Some(RelationOwner(owner)),
+                    input_at: crate::plan::MlInputAt::Nowhere,
                 },
             )),
             None => DataFrame::from_relation(target.session().clone(), relation, Some(owner)),
@@ -2131,5 +2133,102 @@ mod tests {
         assert_eq!(std::sync::Arc::strong_count(&object.0), held + 1);
         std::mem::forget(evaluated);
         std::mem::forget((model, object));
+    }
+
+    #[test]
+    fn the_dataframes_of_members_and_transforms_build_their_datasets_at_each_request() {
+        // As PySpark's `AttributeRelation` and `TransformerRelation`, which build the plan of their
+        // child each time that their own plan is built: the DataFrame of a method of a training
+        // summary and of a transform builds the relation of its dataset at each request, of the
+        // picklings of the functions of its UDFs then, and not when it is made; the DataFrame
+        // arguments of a method are built at the call, as PySpark's `serialize` builds them.
+        use crate::column::Column;
+        use crate::expression::{Expression, ExpressionNode};
+        use crate::udf::{
+            CommandPickler, CommonInlineUserDefinedFunctionExpression, PythonUDFPayload,
+        };
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        // Whether the pickling fails, and the number of picklings.
+        let state = Arc::new((AtomicBool::new(false), AtomicUsize::new(0)));
+        let pickler = CommandPickler::new(Arc::clone(&state), |state| {
+            state.1.fetch_add(1, Ordering::SeqCst);
+            if state.0.load(Ordering::SeqCst) {
+                return Err(SparkError::value_msg("a function that does not pickle"));
+            }
+            Ok(b"f".to_vec())
+        });
+        let payload =
+            PythonUDFPayload::pickled_at_build(DataType::Long, 100, pickler, "3.11".to_string());
+        let udf = CommonInlineUserDefinedFunctionExpression::new(
+            "f".to_string(),
+            true,
+            vec![Expression::column("id")],
+            payload,
+        );
+        let udf =
+            Column::new(ExpressionNode::CommonInlineUserDefinedFunction(Box::new(udf)).into());
+        let session = crate::session::SparkSession::builder()
+            .remote("sc://localhost:15002")
+            .get_or_create()
+            .expect("session");
+        let object = MlRef::from_id(&session, "fitted");
+        let train = session
+            .range(3)
+            .expect("range")
+            .select([crate::functions::col("id"), udf.alias("w")]);
+        let summary = training_summary(&object, &train);
+        let transformed = summary_transform(&object, &train).expect("transform");
+        let clustering = training_summary(&object, &transformed);
+
+        state.0.store(true, Ordering::SeqCst);
+        let members = [
+            attribute_relation(&summary, "predictions", Vec::new()).expect("relation"),
+            attribute_relation(&clustering, "cluster", Vec::new()).expect("relation"),
+            object.transform(&train, &Params::new()).expect("transform"),
+        ];
+        assert_eq!(state.1.load(Ordering::SeqCst), 0);
+        for member in &members {
+            let error = member.relation().expect_err("the pickling fails");
+            assert_eq!(error.message, "a function that does not pickle");
+        }
+        // The arguments of a method are built at the call.
+        let Err(error) = attribute_relation(
+            &MlTarget::helper(&session),
+            "chiSquareTest",
+            vec![FetchArg::Input(train.clone())],
+        ) else {
+            panic!("the pickling fails");
+        };
+        assert_eq!(error.message, "a function that does not pickle");
+
+        state.0.store(false, Ordering::SeqCst);
+        let dataset = train.relation().expect("relation");
+        let ml_of = |df: &DataFrame| match df.relation().expect("relation").rel_type {
+            Some(proto::relation::RelType::MlRelation(ml)) => *ml,
+            other => panic!("an ML relation: {other:?}"),
+        };
+        let transform_input = |ml: proto::MlRelation| match ml.ml_type {
+            Some(proto::ml_relation::MlType::Transform(transform)) => *transform.input.unwrap(),
+            other => panic!("a transform: {other:?}"),
+        };
+        for _ in 0..2 {
+            let picklings = state.1.load(Ordering::SeqCst);
+            let predictions = ml_of(&members[0]);
+            assert_eq!(*predictions.model_summary_dataset.unwrap(), dataset);
+            let cluster = ml_of(&members[1]);
+            let Some(proto::relation::RelType::MlRelation(of_transform)) =
+                cluster.model_summary_dataset.unwrap().rel_type
+            else {
+                panic!("the transform of the training dataset");
+            };
+            assert_eq!(transform_input(*of_transform), dataset);
+            let transform = ml_of(&members[2]);
+            assert!(transform.model_summary_dataset.is_none());
+            assert_eq!(transform_input(transform), dataset);
+            // Each request pickles the function again.
+            assert_eq!(state.1.load(Ordering::SeqCst), picklings + 3);
+        }
+        std::mem::forget((members, transformed, summary, clustering, object));
     }
 }

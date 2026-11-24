@@ -325,6 +325,85 @@ def test_models_whose_summary_keeps_their_transform_are_released_as_pyspark(sess
     assert released(ref_id)
 
 
+def test_the_dataframes_of_members_and_transforms_build_their_datasets_at_requests_as_pyspark(
+    session,
+):
+    # As PySpark's AttributeRelation and TransformerRelation, which build the plan of their child
+    # each time that their own plan is built: the DataFrame of a member of a training summary (of
+    # the training dataset, or of its transform by a clustering model) and of a transform builds
+    # the relation of its dataset at each request, and pickles the functions of its UDFs then, so a
+    # function that does not pickle fails each request of the DataFrame, and not its making, also
+    # of the transform of a DataFrame of another session (whose model the server of that session
+    # does not cache). A helper's method builds its DataFrame arguments at the call, as PySpark's
+    # `serialize`.
+    import pickle
+
+    from pyspark.errors.exceptions.connect import SparkException
+    from pyspark.ml.linalg import Vectors
+    from pyspark.ml.stat import ChiSquareTest
+    from pyspark.sql import functions as F
+
+    def of(module, name):
+        return native_class("pyspark.ml.connect." + module, name, "pyspark.ml." + module)
+
+    class Pickled:
+        armed = False
+
+        def __reduce__(self):
+            if Pickled.armed:
+                raise TypeError("a function that does not pickle")
+            return (Pickled, ())
+
+    held = Pickled()
+
+    def f(x):
+        return held and x
+
+    rows = [(float(i % 2), Vectors.dense(float(i % 2), float(i % 3) + 0.5)) for i in range(20)]
+    frame = session.createDataFrame(rows, ["label", "features"])
+    frame = frame.withColumn("w", F.udf(f, "double")("label"))
+    regression = of("regression", "LinearRegression")(maxIter=1).fit(frame)
+    logistic = of("classification", "LogisticRegression")(maxIter=1).fit(frame)
+    kmeans = of("clustering", "KMeans")(k=2, maxIter=1, seed=1).fit(frame)
+    does_not_pickle = "a function that does not pickle"
+    other = session.newSession()
+    held_out = other.createDataFrame(rows, ["label", "features"])
+    held_out = held_out.withColumn("w", F.udf(f, "double")("label"))
+    Pickled.armed = True
+    try:
+        of_another_session = regression.transform(held_out)
+        with pytest.raises(pickle.PicklingError, match=does_not_pickle):
+            of_another_session.count()
+        members = [
+            regression.summary.predictions,
+            regression.summary.residuals,
+            logistic.summary.roc,
+            kmeans.summary.cluster,
+            regression.transform(frame),
+        ]
+        for df in members:
+            with pytest.raises(pickle.PicklingError, match=does_not_pickle):
+                df.columns
+            with pytest.raises(pickle.PicklingError, match=does_not_pickle):
+                df.count()
+        with pytest.raises(pickle.PicklingError, match=does_not_pickle):
+            ChiSquareTest.test(frame, "features", "label")
+        Pickled.armed = False
+        counts = [df.count() for df in members]
+        assert counts[:2] + counts[3:] == [20] * 4 and counts[2] > 0
+        with pytest.raises(SparkException) as error:
+            of_another_session.count()
+        assert error.value.getCondition() == "CONNECT_ML.CACHE_INVALID"
+        # Each request pickles the functions again.
+        Pickled.armed = True
+        for df in members:
+            with pytest.raises(pickle.PicklingError, match=does_not_pickle):
+                df.count()
+    finally:
+        Pickled.armed = False
+        other.stop()
+
+
 def test_ml_connect_fit_of_two_param_maps_returns_two_models_as_pyspark(session):
     # As pyspark.ml's Estimator.fit: a list of two param maps fits the estimator once per map, and
     # returns the two models in a list, each of which transforms the dataset.

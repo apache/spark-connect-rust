@@ -735,18 +735,14 @@ impl Transformer for OperatorTransformer {
     fn transform_impl(&mut self, df: &DataFrame) -> Result<DataFrame> {
         let ml_relation = proto::Relation {
             rel_type: Some(proto::relation::RelType::MlRelation(Box::new(
-                self.build_ml_relation(df)?,
+                operator_transform(
+                    proto::ml_relation::transform::Operator::Transformer(self.operator.to_proto()),
+                    &self.params,
+                )?,
             ))),
             ..Default::default()
         };
-        Ok(DataFrame::new(
-            df.session.clone(),
-            LogicalPlan::MlTransform {
-                ml_relation: Box::new(ml_relation),
-                input: df.plan.clone(),
-                owner: None,
-            },
-        ))
+        Ok(transform_of(df, ml_relation, None))
     }
 }
 

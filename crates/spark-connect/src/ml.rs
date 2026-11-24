@@ -1130,17 +1130,81 @@ pub trait Transformer: Send + Sync {
         &self,
         input: &DataFrame,
     ) -> spark_connect_core::error::Result<proto::MlRelation> {
-        let mut transform = proto::ml_relation::Transform::default();
-        transform.operator = Some(proto::ml_relation::transform::Operator::Transformer(
-            self.operator().to_proto(),
-        ));
-        transform.input = Some(Box::new(input.relation()?));
-        transform.params = Some(self.params().sendable()?);
-
-        let mut ml_relation = proto::MlRelation::default();
-        ml_relation.ml_type = Some(proto::ml_relation::MlType::Transform(Box::new(transform)));
-        Ok(ml_relation)
+        with_transform_input(
+            operator_transform(
+                proto::ml_relation::transform::Operator::Transformer(self.operator().to_proto()),
+                self.params(),
+            )?,
+            input,
+        )
     }
+}
+
+/// The MlRelation of the transform of `operator` of the params `params`, of no input, which the
+/// DataFrame of the transform builds at each request ([`transform_of`]): the params are sent as
+/// they are now, as PySpark's `try_remote_transform_relation` serializes them at the transform.
+pub(crate) fn operator_transform(
+    operator: proto::ml_relation::transform::Operator,
+    params: &Params,
+) -> spark_connect_core::error::Result<proto::MlRelation> {
+    Ok(proto::MlRelation {
+        ml_type: Some(proto::ml_relation::MlType::Transform(Box::new(
+            proto::ml_relation::Transform {
+                operator: Some(operator),
+                input: None,
+                params: Some(params.sendable()?),
+            },
+        ))),
+        ..Default::default()
+    })
+}
+
+/// The transform `ml_relation` (of [`operator_transform`]) of the relation of `input`, as it is
+/// built now.
+fn with_transform_input(
+    mut ml_relation: proto::MlRelation,
+    input: &DataFrame,
+) -> spark_connect_core::error::Result<proto::MlRelation> {
+    if let Some(proto::ml_relation::MlType::Transform(transform)) = &mut ml_relation.ml_type {
+        transform.input = Some(Box::new(input.relation()?));
+    }
+    Ok(ml_relation)
+}
+
+/// The DataFrame of the transform of `df` of the relation `relation` (an `MlRelation` of
+/// [`operator_transform`]), of `owner`, as PySpark's `TransformerRelation`: a request builds the
+/// relation of `df` then, as the input of the transform, with the pickles of the functions of its
+/// UDFs and its errors (see [`crate::plan::MlInputAt`]).
+pub(crate) fn transform_of(
+    df: &DataFrame,
+    relation: proto::Relation,
+    owner: Option<RelationOwner>,
+) -> DataFrame {
+    DataFrame::new(
+        df.session.clone(),
+        LogicalPlan::MlTransform {
+            ml_relation: Box::new(relation),
+            input: df.plan.clone(),
+            owner,
+            input_at: crate::plan::MlInputAt::TransformInput,
+        },
+    )
+}
+
+/// The DataFrame of the transform `ml_relation` (of [`Transformer::build_ml_relation`], whose input
+/// it drops) of `df`, of no owner, whose requests build the relation of `df` as its input, as
+/// PySpark's `TransformerRelation`: the binding's transform of a DataFrame of another session than
+/// its model's, which refers to the model of that session. Not a stable API.
+#[doc(hidden)]
+pub fn transform_without_owner(df: &DataFrame, mut ml_relation: proto::MlRelation) -> DataFrame {
+    if let Some(proto::ml_relation::MlType::Transform(transform)) = &mut ml_relation.ml_type {
+        transform.input = None;
+    }
+    let relation = proto::Relation {
+        rel_type: Some(proto::relation::RelType::MlRelation(Box::new(ml_relation))),
+        ..Default::default()
+    };
+    transform_of(df, relation, None)
 }
 
 /// Base trait for ML Models (result of fitting an Estimator).
@@ -1624,16 +1688,14 @@ impl Transformer for VectorAssembler {
     }
 
     fn transform_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<DataFrame> {
-        let ml_relation = self.build_ml_relation(df)?;
+        let ml_relation = operator_transform(
+            proto::ml_relation::transform::Operator::Transformer(self.operator.to_proto()),
+            &self.params,
+        )?;
         let mut relation = proto::Relation::default();
         relation.common = Some(proto::RelationCommon::default());
         relation.rel_type = Some(proto::relation::RelType::MlRelation(Box::new(ml_relation)));
-        let plan = LogicalPlan::MlTransform {
-            ml_relation: Box::new(relation),
-            input: df.plan.clone(),
-            owner: None,
-        };
-        Ok(DataFrame::new(df.session.clone(), plan))
+        Ok(transform_of(df, relation, None))
     }
 }
 
@@ -2047,18 +2109,19 @@ impl CachedModel {
         df: &DataFrame,
         params: &Params,
     ) -> spark_connect_core::error::Result<proto::MlRelation> {
-        Ok(proto::MlRelation {
-            ml_type: Some(proto::ml_relation::MlType::Transform(Box::new(
-                proto::ml_relation::Transform {
-                    operator: Some(proto::ml_relation::transform::Operator::ObjRef(
-                        self.0.model_ref.clone(),
-                    )),
-                    input: Some(Box::new(df.relation()?)),
-                    params: Some(params.sendable()?),
-                },
-            ))),
-            ..Default::default()
-        })
+        with_transform_input(self.transform_relation(params)?, df)
+    }
+
+    /// The MlRelation of the transform by this model of `params`, of no input (see
+    /// [`operator_transform`]).
+    fn transform_relation(
+        &self,
+        params: &Params,
+    ) -> spark_connect_core::error::Result<proto::MlRelation> {
+        operator_transform(
+            proto::ml_relation::transform::Operator::ObjRef(self.0.model_ref.clone()),
+            params,
+        )
     }
 
     fn transform(
@@ -2073,18 +2136,15 @@ impl CachedModel {
         }
         let relation = proto::Relation {
             rel_type: Some(proto::relation::RelType::MlRelation(Box::new(
-                self.build_ml_relation(df, params)?,
+                self.transform_relation(params)?,
             ))),
             ..Default::default()
         };
         // The DataFrame keeps this model, and the plan of its input, alive.
-        Ok(DataFrame::new(
-            df.session.clone(),
-            LogicalPlan::MlTransform {
-                ml_relation: Box::new(relation),
-                input: df.plan.clone(),
-                owner: Some(RelationOwner(self.0.clone())),
-            },
+        Ok(transform_of(
+            df,
+            relation,
+            Some(RelationOwner(self.0.clone())),
         ))
     }
 }
@@ -5903,6 +5963,7 @@ impl PowerIterationClustering {
                 ml_relation: Box::new(relation),
                 input: dataset.plan.clone(),
                 owner: None,
+                input_at: crate::plan::MlInputAt::Nowhere,
             },
         ))
     }
