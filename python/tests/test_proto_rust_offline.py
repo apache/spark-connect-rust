@@ -8294,17 +8294,20 @@ class _GcPrimer:
     does not."""
 
 
-# Of the text formats of `_plan_of_an_any`: the writer's expansion of the Any of a plan allocates
-# an object of the garbage collector, the message that it parses of the Any's bytes. After a
-# collection of the young generation and the allocation of a `_GcPrimer`, of a threshold of 1,
-# that allocation exceeds the threshold, and Python 3.11, as the versions before it, collects
-# there, within the call, of the callbacks of `gc.callbacks`. Python 3.12 and later collect at
-# the next instruction of the interpreter, after the call, so no Python code runs within it.
+# Of a native call that allocates an object of the garbage collector, as the writer's expansion of
+# the Any of a plan of `_plan_of_an_any` (the message that it parses of the Any's bytes) and the
+# first read of a container (`_first_reads_of_containers`, the container or the weak reference of
+# its owner): after a collection of the young generation and the allocation of a `_GcPrimer`, of a
+# threshold of 1, that allocation exceeds the threshold, and Python 3.11, as the versions before
+# it, collects there, within the call, of the callbacks of `gc.callbacks`. The primer is deleted
+# after the call, before the next one, whose binding would free it, of its count. Python 3.12 and
+# later collect at the next instruction of the interpreter, after the call, so no Python code runs
+# within it.
 _COLLECTS_WITHIN_A_NATIVE_CALL = sys.version_info < (3, 12)
 
-# How long the writer's callback waits for the reader's read, which only a failure of the reader,
-# as a crash of its thread, makes it wait so long.
-_TEXT_FORMAT_TURN_TIMEOUT = 60.0
+# How long the callback of such a collection waits for the read of another thread, which only a
+# failure of that thread, as a crash of it, makes it wait so long.
+_COLLECTION_TURN_TIMEOUT = 60.0
 
 
 @pytest.mark.skipif(
@@ -8388,7 +8391,7 @@ def test_a_first_read_of_another_thread_during_the_text_format_finds_the_message
         turns[i] += 1
         asked.put(i)
         try:
-            outcome = answered.get(timeout=_TEXT_FORMAT_TURN_TIMEOUT)
+            outcome = answered.get(timeout=_COLLECTION_TURN_TIMEOUT)
         except queue.Empty:
             outcome = "the reader did not read"
         if outcome == "ok":
@@ -8804,18 +8807,24 @@ def _first_reads_of_containers():
     }
 
 
+@pytest.mark.skipif(
+    not _COLLECTS_WITHIN_A_NATIVE_CALL,
+    reason="Python 3.12 and later collect after a native call, so no Python code runs within the "
+    "first read of a container",
+)
 def test_a_collection_during_the_first_read_of_a_container_finds_the_message():
     # The first read of a container of a message makes the container, and the weak reference of
     # its owner, with no borrow of the message held: a collection that their allocation starts,
     # whose callback reads the message, finds it free, where it raised the runtime's
-    # PanicException ("Already mutably borrowed").
+    # PanicException ("Already mutably borrowed"). The collection is within the read (see
+    # `_COLLECTS_WITHIN_A_NATIVE_CALL`), whose callback alone reads the message.
     out = {}
     for case, (target_of, read) in _first_reads_of_containers().items():
         target = target_of(proto.Relation())
-        state = {"ran": False, "error": None}
+        state = {"ran": False, "error": None, "reading": False}
 
         def callback(phase, info, target=target, state=state):
-            if phase == "start" and not state["ran"]:
+            if phase == "start" and state["reading"] and not state["ran"]:
                 state["ran"] = True
                 try:
                     target.ListFields()
@@ -8827,41 +8836,62 @@ def test_a_collection_during_the_first_read_of_a_container_finds_the_message():
         threshold = gc.get_threshold()
         gc.set_threshold(1)
         try:
+            gc.collect(0)
+            primer = _GcPrimer()
+            state["reading"] = True
             container = read(target)
+            state["reading"] = False
+            del primer
         finally:
+            state["reading"] = False
             gc.set_threshold(*threshold)
             gc.callbacks.remove(callback)
         out[case] = [state["ran"], state["error"], container is read(target)]
     assert out == {case: [True, None, True] for case in _first_reads_of_containers()}, out
 
 
+@pytest.mark.skipif(
+    not _COLLECTS_WITHIN_A_NATIVE_CALL,
+    reason="Python 3.12 and later collect after a native call, so no Python code runs within the "
+    "first read of a container",
+)
 def test_another_thread_during_the_first_read_of_a_container_finds_the_message():
-    # The cross-thread form: a callback of the collections of the first read gives the GIL to
-    # another thread, which reads the message meanwhile, whole.
+    # The cross-thread form: within the first read of each container, the callback of a collection
+    # gives the GIL to another thread, which reads the message meanwhile, whole. The collection of
+    # each read is of its allocations (see `_COLLECTS_WITHIN_A_NATIVE_CALL`), and its callback gives
+    # the reader its turn and waits for its read, so that every message is read within the first
+    # read of its container, of no scheduling of the threads: a read that started no collection, of
+    # which nothing would be read, fails the test.
     out = {}
     for case, (target_of, read) in _first_reads_of_containers().items():
         targets = [target_of(proto.Relation()) for _ in range(40)]
-        state = {"current": None, "done": False}
+        state = {"target": None}
+        turns = [0] * len(targets)
+        asked, answered = queue.Queue(), queue.Queue()
         seen = {"ok": 0, "errors": {}}
 
-        def reader(targets=targets, state=state, seen=seen):
-            last = None
-            while not state["done"]:
-                i = state["current"]
-                if i is None or i == last:
-                    time.sleep(0)
-                    continue
-                last = i
+        def callback(phase, info, state=state, turns=turns, asked=asked, answered=answered, seen=seen):
+            i = state["target"]
+            if phase != "start" or i is None or turns[i]:
+                return
+            turns[i] += 1
+            asked.put(i)
+            try:
+                outcome = answered.get(timeout=_COLLECTION_TURN_TIMEOUT)
+            except queue.Empty:
+                outcome = "the reader did not read"
+            if outcome == "ok":
+                seen["ok"] += 1
+            else:
+                seen["errors"][outcome] = seen["errors"].get(outcome, 0) + 1
+
+        def reader(targets=targets, asked=asked, answered=answered):
+            while (i := asked.get()) is not None:
                 try:
                     targets[i].ListFields()
-                    seen["ok"] += 1
+                    answered.put("ok")
                 except BaseException as e:  # noqa: BLE001 (a PanicException too)
-                    key = f"{type(e).__name__}: {e}"
-                    seen["errors"][key] = seen["errors"].get(key, 0) + 1
-
-        def callback(phase, info):
-            if phase == "start":
-                time.sleep(0.0002)
+                    answered.put(f"{type(e).__name__}: {e}")
 
         thread = threading.Thread(target=reader)
         thread.start()
@@ -8870,16 +8900,22 @@ def test_another_thread_during_the_first_read_of_a_container_finds_the_message()
         gc.set_threshold(1)
         try:
             for i, target in enumerate(targets):
-                state["current"] = i
+                gc.collect(0)
+                primer = _GcPrimer()
+                state["target"] = i
                 read(target)
+                state["target"] = None
+                del primer
         finally:
+            state["target"] = None
             gc.set_threshold(*threshold)
             gc.callbacks.remove(callback)
-            state["done"] = True
+            asked.put(None)
             thread.join()
-        out[case] = seen["errors"]
+        out[case] = {"missed": [i for i, turn in enumerate(turns) if not turn], **seen}
         assert all(read(t) is read(t) for t in targets)
-    assert out == {case: {} for case in _first_reads_of_containers()}, out
+    expected = {"missed": [], "ok": 40, "errors": {}}
+    assert out == {case: expected for case in _first_reads_of_containers()}, out
 
 
 def _parse_scenarios(cls):
