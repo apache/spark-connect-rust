@@ -1313,6 +1313,203 @@ def test_data_types_convert_values_to_and_from_internal_as_pyspark(monkeypatch):
     assert T.ArrayType(T.YearMonthIntervalType()).needConversion() is False
 
 
+class _EagerInteger(T.IntegerType):
+    """An integer whose `needConversion` is a true str, which converts as ten times its value."""
+
+    def needConversion(self):
+        return "yes"
+
+    def toInternal(self, obj):
+        return None if obj is None else obj * 10
+
+    def fromInternal(self, obj):
+        return None if obj is None else obj // 10
+
+
+class _LazyDate(T.DateType):
+    """A date whose `needConversion` is a false 0, which structs, arrays and maps read as is."""
+
+    def needConversion(self):
+        return 0
+
+
+class _BlankLong(T.LongType):
+    def needConversion(self):
+        return ""
+
+
+class _NoTruth:
+    def __bool__(self):
+        raise ValueError("no truth")
+
+
+class _TruthlessInteger(T.IntegerType):
+    def needConversion(self):
+        return _NoTruth()
+
+
+def test_need_conversion_returns_what_the_methods_of_the_types_return_as_pyspark():
+    # As PySpark's `self.dataType.needConversion()` of a field, `self.elementType.needConversion()`
+    # of an array and `key or value` of a map, of what the methods of the types that they hold
+    # return, which are not bools of a Python subclass: a field, an array and a map return it as
+    # it is, and a map reads the truth of its key's only, which may raise.
+    assert T.StructField("f", _EagerInteger()).needConversion() == "yes"
+    assert T.ArrayType(_EagerInteger()).needConversion() == "yes"
+    for data_type in (T.StructField("f", _LazyDate()), T.ArrayType(_LazyDate())):
+        need = data_type.needConversion()
+        assert need == 0 and type(need) is int
+    for key, value, need in [(_LazyDate(), _EagerInteger(), "yes"),
+                             (_EagerInteger(), _LazyDate(), "yes"),
+                             (_LazyDate(), _BlankLong(), ""), (_BlankLong(), _LazyDate(), 0)]:
+        result = T.MapType(key, value).needConversion()
+        assert (result, type(result)) == (need, type(need))
+    for data_type in (T.StructField("f", _TruthlessInteger()), T.ArrayType(_TruthlessInteger()),
+                      T.MapType(T.IntegerType(), _TruthlessInteger())):
+        assert isinstance(data_type.needConversion(), _NoTruth)
+    with pytest.raises(ValueError, match="^no truth$"):
+        T.MapType(_TruthlessInteger(), T.IntegerType()).needConversion()
+
+
+def test_structs_keep_and_convert_of_the_values_of_need_conversion_as_pyspark():
+    # As PySpark's `self._needConversion = [f.needConversion() for f in self]` and
+    # `self._needSerializeAnyField = any(self._needConversion)`: the values of the fields as their
+    # methods return them, of which toInternal and fromInternal convert the fields of the true
+    # ones, and the bool of any of them, which reads their truth until a true one.
+    import copy
+
+    d = datetime.date(2020, 1, 1)
+    st = T.StructType([T.StructField("a", _EagerInteger()), T.StructField("d", _LazyDate()),
+                       T.StructField("i", T.IntegerType())])
+    assert st._needConversion == ["yes", 0, False] and st._needSerializeAnyField is True
+    for value in ((1, d, 3), [1, d, 3], {"a": 1, "d": d, "i": 3}, Row(a=1, d=d, i=3)):
+        assert st.toInternal(value) == (10, d, 3)
+    assert st.fromInternal((10, 18262, 3)) == Row(a=1, d=18262, i=3)
+    lazy = T.StructType([T.StructField("d", _LazyDate()), T.StructField("b", _BlankLong())])
+    assert lazy._needConversion == [0, ""] and lazy._needSerializeAnyField is False
+    assert lazy.toInternal([d, 5]) == (d, 5)
+    assert lazy.fromInternal([18262, 5]) == Row(d=18262, b=5)
+    assert T.ArrayType(_EagerInteger()).toInternal([1, None, 2]) == [10, None, 20]
+    assert T.ArrayType(_EagerInteger()).fromInternal([10, 20]) == [1, 2]
+    assert T.ArrayType(_LazyDate()).toInternal([d]) == [d]
+    assert T.MapType(_LazyDate(), _EagerInteger()).toInternal({d: 1}) == {18262: 10}
+    assert T.MapType(_LazyDate(), _BlankLong()).toInternal({d: 1}) == {d: 1}
+    assert T.StructField("f", _EagerInteger()).toInternal(4) == 40
+    with pytest.raises(ValueError, match="^no truth$"):
+        T.ArrayType(_TruthlessInteger()).toInternal([1])
+
+    # The truth of a value is read by the constructor until a true value, and by `add` after it
+    # assigned the values, so `_needSerializeAnyField` is as it was of an error.
+    with pytest.raises(ValueError, match="^no truth$"):
+        T.StructType([T.StructField("t", _TruthlessInteger())])
+    first = T.StructType([T.StructField("a", _EagerInteger()),
+                          T.StructField("t", _TruthlessInteger())])
+    assert first._needConversion[0] == "yes" and first._needSerializeAnyField is True
+    grown = T.StructType([T.StructField("i", T.IntegerType())])
+    with pytest.raises(ValueError, match="^no truth$"):
+        grown.add("t", _TruthlessInteger())
+    assert grown.names == ["i", "t"] and grown._needSerializeAnyField is False
+    assert grown._needConversion[0] is False and isinstance(grown._needConversion[1], _NoTruth)
+    grown = T.StructType([T.StructField("i", T.IntegerType())]).add("a", _EagerInteger())
+    assert grown._needConversion == [False, "yes"] and grown._needSerializeAnyField is True
+
+    # The values are of the `__dict__` of the struct, which `==`, copies and pickles read.
+    again = T.StructType([T.StructField("a", _EagerInteger()), T.StructField("d", _LazyDate()),
+                          T.StructField("i", T.IntegerType())])
+    assert st == again and hash(st) == hash(again)
+    for copied in (copy.copy(st), copy.deepcopy(st), pickle.loads(pickle.dumps(st))):
+        assert copied._needConversion == ["yes", 0, False] and copied == st
+
+
+def test_need_conversion_reads_patches_of_the_classes_as_pyspark(monkeypatch):
+    # As PySpark's, whose classes that convert no value inherit `DataType.needConversion`, and
+    # whose fields, arrays, maps and structs call the methods of the types that they hold: a patch
+    # of the method of a class, or of DataType, is the `needConversion` of each of them.
+    monkeypatch.setattr(T.IntegerType, "needConversion", lambda self: "patched", raising=False)
+    patched = T.StructType([T.StructField("i", T.IntegerType())])
+    for data_type in (T.IntegerType(), T.StructField("f", T.IntegerType()),
+                      T.ArrayType(T.IntegerType()), T.MapType(T.StringType(), T.IntegerType())):
+        assert data_type.needConversion() == "patched"
+    assert patched._needConversion == ["patched"] and patched._needSerializeAnyField is True
+    assert patched.toInternal((1,)) == (1,)
+    monkeypatch.undo()
+    assert "needConversion" not in vars(T.IntegerType)
+    plain = T.StructType([T.StructField("i", T.IntegerType())])
+    assert plain._needConversion == [False] and patched != plain
+
+    monkeypatch.setattr(T.DataType, "needConversion", lambda self: "base patched")
+    for data_type in (T.StringType(), T.StructField("f", T.StringType()),
+                      T.StructField("f", T.IntegerType()), T.ArrayType(T.DecimalType())):
+        assert data_type.needConversion() == "base patched"
+    assert T.DateType().needConversion() is True
+    monkeypatch.undo()
+    assert T.StringType().needConversion() is False
+
+
+def test_the_classes_that_define_need_conversion_are_pysparks():
+    # As PySpark's classes: those of the types that convert, and of the types that hold types,
+    # define their own `needConversion`, of no docstring, and the others inherit DataType's.
+    import inspect
+
+    own = {"ArrayType", "CalendarIntervalType", "DataType", "DateType", "DayTimeIntervalType",
+           "GeographyType", "GeometryType", "MapType", "StructField", "StructType", "TimeType",
+           "TimestampNTZType", "TimestampType", "UserDefinedType", "VariantType",
+           "YearMonthIntervalType"}
+    classes = {name: cls for name, cls in vars(T).items()
+               if inspect.isclass(cls) and (issubclass(cls, T.DataType) or cls is T.StructField)}
+    assert {name for name, cls in classes.items() if "needConversion" in vars(cls)} == own
+    for name, cls in classes.items():
+        method = cls.needConversion
+        if name in own:
+            assert method.__qualname__ == f"{name}.needConversion"
+            assert (method.__doc__ is None) is (name != "DataType")
+        else:
+            assert method is T.DataType.needConversion
+            assert method.__qualname__ == "DataType.needConversion"
+
+
+def test_year_month_need_conversion_reads_os_environ_as_pyspark(monkeypatch):
+    # As PySpark's `not os.environ.get("PYSPARK_YM_INTERVAL_LEGACY") == "1"`, of `os.environ` at
+    # each call, of the type and of the arrays, maps, fields and structs that hold it: a variable
+    # that `os.environ` does not hold, of `os.putenv` alone, is not read.
+    ym = T.YearMonthIntervalType()
+    holders = [ym, T.ArrayType(ym), T.MapType(T.StringType(), ym), T.StructField("y", ym)]
+    monkeypatch.delenv("PYSPARK_YM_INTERVAL_LEGACY", raising=False)
+    os.putenv("PYSPARK_YM_INTERVAL_LEGACY", "1")
+    try:
+        assert [holder.needConversion() for holder in holders] == [True] * 4
+    finally:
+        os.unsetenv("PYSPARK_YM_INTERVAL_LEGACY")
+    monkeypatch.setenv("PYSPARK_YM_INTERVAL_LEGACY", "1")
+    assert [holder.needConversion() for holder in holders] == [False] * 4
+    assert T.StructType([T.StructField("y", ym)])._needConversion == [False]
+    monkeypatch.setenv("PYSPARK_YM_INTERVAL_LEGACY", "0")
+    assert [holder.needConversion() for holder in holders] == [True] * 4
+
+
+def test_need_conversion_of_deep_types_and_of_types_that_hold_themselves_as_pyspark():
+    # As PySpark's methods, which call those of the types that they hold in Python: a type of
+    # more levels than Python's recursion limit, or one that holds itself, raises its
+    # RecursionError, of its text, and a struct, which reads none of its fields, does not.
+    deep = T.DateType()
+    for _ in range(1100):
+        deep = T.ArrayType(deep)
+    array = T.ArrayType(T.IntegerType())
+    array.elementType = array
+    value = T.MapType(T.StringType(), T.IntegerType())
+    value.valueType = value
+    field = T.StructField("f", T.IntegerType())
+    field.dataType = field
+    for data_type in (deep, T.StructField("f", deep), array, value, field):
+        with pytest.raises(RecursionError, match="^maximum recursion depth exceeded$"):
+            data_type.needConversion()
+    with pytest.raises(RecursionError, match="^maximum recursion depth exceeded$"):
+        T.StructType([T.StructField("f", array)])
+    s = T.StructType([T.StructField("a", T.IntegerType())])
+    s.fields.append(T.StructField("self", s))
+    assert s.needConversion() is True and T.StructField("x", s).needConversion() is True
+    assert s.add("b", T.IntegerType())._needConversion == [False, True, False]
+
+
 
 
 def test_map_schemas_keep_the_metadata_edited_in_place_as_pyspark(mock_connect):
