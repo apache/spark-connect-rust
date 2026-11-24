@@ -1510,6 +1510,129 @@ def test_need_conversion_of_deep_types_and_of_types_that_hold_themselves_as_pysp
     assert s.add("b", T.IntegerType())._needConversion == [False, True, False]
 
 
+def test_need_conversion_keeps_the_recursion_errors_of_overrides_as_pyspark():
+    # As PySpark's methods, which call those of the types that they hold in Python: a
+    # RecursionError that an override raises reaches the caller as it is, the same object of its
+    # class, text, traceback and cause, of a subclass of RecursionError too, and also when its
+    # text is that of CPython's check of a call of C; and the error of a type too deep is raised
+    # in the frame of its caller, of the exception that it handles as its context.
+    class MyRecursionError(RecursionError):
+        pass
+
+    raised = []
+
+    def overriding(make):
+        class Overriding(T.IntegerType):
+            def needConversion(self):
+                raised.append(make())
+                raise raised[-1]
+
+        return Overriding()
+
+    try:
+        raise KeyError("inner")
+    except KeyError as inner:
+        cause = inner
+    text = "maximum recursion depth exceeded while calling a Python object"
+    makes = [lambda: MyRecursionError(text), lambda: RecursionError(text),
+             lambda: RecursionError("own")]
+
+    def with_cause():
+        error = RecursionError(text)
+        error.__cause__ = cause
+        return error
+
+    makes.append(with_cause)
+    holders = [T.ArrayType, lambda t: T.MapType(T.StringType(), t),
+               lambda t: T.StructField("f", t),
+               lambda t: T.StructType([T.StructField("f", T.ArrayType(t))])]
+    for make in makes:
+        for holder in holders:
+            with pytest.raises(RecursionError) as info:
+                data_type = holder(overriding(make))
+                data_type.needConversion()
+            assert info.value is raised[-1]
+            assert type(info.value) is type(raised[-1]) and str(info.value) == str(raised[-1])
+            assert info.value.__cause__ is raised[-1].__cause__
+            frames = [frame.name for frame in info.traceback]
+            assert frames[-1] == "needConversion", frames
+    deep = T.DateType()
+    for _ in range(1100):
+        deep = T.ArrayType(deep)
+    try:
+        raise KeyError("handled")
+    except KeyError as handled:
+        with pytest.raises(RecursionError, match="^maximum recursion depth exceeded$") as info:
+            deep.needConversion()
+        assert type(info.value) is RecursionError and info.value.__context__ is handled
+
+
+def test_struct_type_assigns_need_conversion_at_the_depth_of_pyspark():
+    # As PySpark's StructType.__init__ and add, whose `[f.needConversion() for f in self]` is a
+    # list comprehension of a frame of its own before Python 3.12 (PEP 709 inlines it), in the
+    # frame of the method: the deepest nesting that the constructor, a subclass's own __init__ and
+    # add take is PySpark's, below that of needConversion() of the same type.
+    import sys
+
+    class OwnInit(T.StructType):
+        def __init__(self, fields=None):
+            super().__init__(fields)
+
+    def deepest(op):
+        low, high = 0, sys.getrecursionlimit() + 10
+        while low < high:
+            middle = (low + high + 1) // 2
+            data_type = T.IntegerType()
+            for _ in range(middle):
+                data_type = T.ArrayType(data_type)
+            try:
+                op(data_type)
+                low = middle
+            except RecursionError as e:
+                assert str(e) == "maximum recursion depth exceeded"
+                high = middle - 1
+        return low
+
+    need = deepest(lambda t: t.needConversion())
+    made = deepest(lambda t: T.StructType([T.StructField("x", t)]))
+    added = deepest(lambda t: T.StructType().add("x", t))
+    own = deepest(lambda t: OwnInit([T.StructField("x", t)]))
+    if sys.version_info < (3, 12):
+        # Of PySpark 4.3.0 of Python 3.10 and 3.11 (from 3.12 it counts no comprehension's frame,
+        # and the drop-in counts none of its callers' frames, see known-differences.md).
+        assert (need - made, need - added, need - own) == (4, 3, 5)
+    elif sys.version_info < (3, 13):
+        assert (need - made, need - added) == (2, 2)
+
+
+def test_year_month_need_conversion_reads_the_os_of_its_module_as_pyspark(monkeypatch):
+    # As PySpark's module, pyspark.sql.types binds `os`, which YearMonthIntervalType.needConversion
+    # reads at each call, as its global: so a patch of `os.environ` through the module's path and
+    # a patch of the module's `os` both reach it, of the type and of the types that hold it.
+    from types import SimpleNamespace
+    from unittest import mock
+
+    assert T.os is os
+    monkeypatch.delenv("PYSPARK_YM_INTERVAL_LEGACY", raising=False)
+    ym = T.YearMonthIntervalType()
+    holders = [ym, T.ArrayType(ym), T.MapType(T.StringType(), ym), T.StructField("y", ym)]
+    with mock.patch.dict("pyspark.sql.types.os.environ", {"PYSPARK_YM_INTERVAL_LEGACY": "1"}):
+        assert [holder.needConversion() for holder in holders] == [False] * 4
+    assert [holder.needConversion() for holder in holders] == [True] * 4
+    fake = SimpleNamespace(environ={"PYSPARK_YM_INTERVAL_LEGACY": "1"})
+    with mock.patch.object(T, "os", fake):
+        assert [holder.needConversion() for holder in holders] == [False] * 4
+        assert T.StructType([T.StructField("y", ym)])._needConversion == [False]
+    with mock.patch.object(T, "os", None):
+        with pytest.raises(AttributeError, match="'NoneType' object has no attribute 'environ'"):
+            ym.needConversion()
+    with mock.patch.dict(vars(T)):
+        del T.os
+        with pytest.raises(NameError, match="^name 'os' is not defined$"):
+            ym.needConversion()
+    assert T.os is os and ym.needConversion() is True
+
+
 
 
 def test_map_schemas_keep_the_metadata_edited_in_place_as_pyspark(mock_connect):

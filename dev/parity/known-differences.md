@@ -631,10 +631,36 @@ requests of the unpickled object pickle as it is then. This case still differs:
   conversions), and ` while decoding a JSON object from a unicode string` (of Python's `json`
   module, of the JSON of a pandas conversion). Of the uses of a fixed text in PySpark, the drop-in
   gives it: none of `simpleString()` of a struct, an array, a map or a field, and of
-  `needConversion()` of an array, a map or a field (whose calls of the methods of the types that
-  they hold cross CPython's check of a C call first, of the text that the drop-in gives as
-  PySpark's, SPARK-62310), and ` while calling a Python object` of `json()` of an array. The levels
-  at which a type of many levels, which does not hold itself, raises it differ too (see above).
+  `needConversion()` of an array, a map or a field (whose calls of the native methods of the types
+  that they hold cross CPython's check of a C call first, of the error whose text the drop-in sets
+  to PySpark's, of the same object, SPARK-62310 and SPARK-62317), and ` while calling a Python
+  object` of `json()` of an array. A `RecursionError` that a Python override of `needConversion`
+  raises, or a subclass of it, reaches the caller as PySpark's does, the same object of its class,
+  text, traceback, cause and context. That of CPython's check of a call that the override itself
+  makes is given PySpark's text of a frame, none: PySpark's text is that too of a call of one of
+  its methods, as `self.elementType.needConversion()` or `super().needConversion()`, but `
+  while calling a Python object` of a call of a function of C, as `operator.methodcaller`, which
+  the drop-in's error does not tell apart from a call of its native method, of the same text and
+  traceback. The levels at which a type of many levels, which does not hold itself, raises it
+  differ too (see above, and the next row).
+
+- **The depth of the `RecursionError` of `needConversion()`, the `StructType` constructor and
+  `add`, from Python 3.12** (inherent of the stable ABI, of the cost of a call). Before 3.12,
+  CPython counts the frames of Python and its checks of the calls of C as one depth, which the
+  native methods enter (`Py_EnterRecursiveCall`), so `needConversion()` of an array, a map or a
+  field, `StructType(...)` (of the frames of PySpark's `__init__` and of its list comprehension),
+  the `__init__` of a subclass that calls `super().__init__` and `add` take the levels that
+  PySpark's take, under any frames of the caller and through Python overrides (SPARK-62317). From
+  3.12, CPython counts the frames of Python apart, a depth that no function of the stable ABI enters
+  or reads, so the drop-in bounds its walks by the levels of the types and the frames of PySpark's
+  methods (`__init__` or `add`, as a level), of none of the frames of its caller or of the Python
+  overrides between them. At a limit of 1000, `needConversion()` of 1,000 nested arrays returns
+  where PySpark's raises past 993 under a probe's frames (and past 393 under 600 frames more), and
+  an alternation of a Python subclass of `ArrayType` and the class takes about 2,000 levels, where
+  PySpark's takes 998. The text and the class of the error are PySpark's. To count the frames of the
+  caller, a call would walk the stack (`f_back`), of a cost above that of the call itself; and on
+  3.13 the depth of PySpark's constructor varies by one with the specialization of its call (the
+  frame of the cleanup of `__init__`).
 
 - **The groups of a response, of protobuf's pure-Python implementation** (intentional; one count of
   the levels). With `PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python`, the drop-in reads the

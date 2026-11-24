@@ -1307,24 +1307,102 @@ fn need_conversion_of<'py>(data_type: &Bound<'py, PyAny>) -> PyResult<Bound<'py,
     type_level(py, || {
         data_type
             .call_method0(pyo3::intern!(py, "needConversion"))
-            .map_err(|error| frames_recursion_error(py, error))
+            .map_err(|error| frames_recursion_error(data_type, error))
     })
 }
 
-/// `error` as PySpark's methods, which recurse in Python, raise it: CPython's `RecursionError` of
-/// a call of a function of C, "maximum recursion depth exceeded while calling a Python object", is
-/// that of a frame of Python, "maximum recursion depth exceeded", of a type nested as deep.
-fn frames_recursion_error(py: Python<'_>, error: PyErr) -> PyErr {
+/// `error`, of the call of the `needConversion` of `data_type`, as PySpark's methods, which
+/// recurse in Python, raise it. A call of a native method of the drop-in crosses CPython's check of
+/// a call of a function of C, whose `RecursionError` reads "maximum recursion depth exceeded while
+/// calling a Python object", where PySpark's method is a frame of Python, whose check raises
+/// "maximum recursion depth exceeded". So the text of such an error of CPython's check is set to
+/// PySpark's, of the same object, of its traceback, cause and context (see
+/// [`of_a_check_of_a_call`]). Any other error is as it is raised: a subclass, and an error that
+/// Python code raised, or of a check of a call in a frame of Python below the override that the
+/// drop-in called.
+fn frames_recursion_error(data_type: &Bound<'_, PyAny>, error: PyErr) -> PyErr {
     const OF_A_CALL: &str = "maximum recursion depth exceeded while calling a Python object";
-    let of_a_call = error.is_instance_of::<pyo3::exceptions::PyRecursionError>(py)
+    let py = data_type.py();
+    let of_a_call = error
+        .get_type(py)
+        .is(py.get_type::<pyo3::exceptions::PyRecursionError>())
         && error
             .value(py)
             .str()
-            .is_ok_and(|message| message.to_cow().is_ok_and(|text| text == OF_A_CALL));
-    match of_a_call {
-        true => pyo3::exceptions::PyRecursionError::new_err("maximum recursion depth exceeded"),
-        false => error,
+            .is_ok_and(|message| message.to_cow().is_ok_and(|text| text == OF_A_CALL))
+        && of_a_check_of_a_call(data_type, &error);
+    if of_a_call {
+        let args = pyo3::types::PyTuple::new(py, ["maximum recursion depth exceeded"]);
+        if let Err(other) = args.and_then(|args| error.value(py).setattr("args", args)) {
+            return other;
+        }
     }
+    error
+}
+
+/// Whether `error`, of the call of the `needConversion` of `data_type`, is of CPython's check of a
+/// call of a function of C, at the call or in the frame of the method itself: of no traceback, of
+/// the call of a native method of the drop-in (see [`is_native_method`]), or of a traceback of the
+/// one frame of a Python override, at an instruction of a call (`CALL`, of the opcodes of `dis`),
+/// not of a `raise`. The check of a call that the override makes, of a native method, of
+/// `super()`'s, or of another function of C (such as `operator.methodcaller`), is not told apart:
+/// all have the text of PySpark's frame (see `dev/parity/known-differences.md`).
+fn of_a_check_of_a_call(data_type: &Bound<'_, PyAny>, error: &PyErr) -> bool {
+    let py = data_type.py();
+    let Some(traceback) = error.traceback(py) else {
+        return is_native_method(data_type, pyo3::intern!(py, "needConversion"));
+    };
+    let at_a_call = || -> PyResult<bool> {
+        if !traceback.getattr(pyo3::intern!(py, "tb_next"))?.is_none() {
+            return Ok(false);
+        }
+        let offset: usize = traceback
+            .getattr(pyo3::intern!(py, "tb_lasti"))?
+            .extract()?;
+        let code = traceback
+            .getattr(pyo3::intern!(py, "tb_frame"))?
+            .getattr(pyo3::intern!(py, "f_code"))?
+            .getattr(pyo3::intern!(py, "co_code"))?;
+        let opcode = code.get_item(offset)?;
+        let name = py
+            .import("dis")?
+            .getattr(pyo3::intern!(py, "opname"))?
+            .get_item(opcode)?;
+        let name = name.cast::<pyo3::types::PyString>()?.to_cow()?;
+        Ok(name.starts_with("CALL") || name == "PRECALL")
+    };
+    at_a_call().unwrap_or(false)
+}
+
+/// Whether the method `name` that a call of `obj` finds is a native method of the drop-in: of its
+/// class (none of the `__dict__` of the instance), a method descriptor of a native class of the
+/// types (a Python subclass defines functions).
+fn is_native_method(obj: &Bound<'_, PyAny>, name: &Bound<'_, pyo3::types::PyString>) -> bool {
+    let py = obj.py();
+    let in_instance = obj
+        .getattr_opt(pyo3::intern!(py, "__dict__"))
+        .ok()
+        .flatten()
+        .and_then(|dict| dict.cast_into::<pyo3::types::PyDict>().ok())
+        .is_some_and(|dict| dict.contains(name).unwrap_or(true));
+    if in_instance {
+        return false;
+    }
+    let Ok(method) = obj.get_type().getattr(name) else {
+        return false;
+    };
+    method
+        .get_type()
+        .name()
+        .is_ok_and(|n| n == "method_descriptor")
+        && method
+            .getattr(pyo3::intern!(py, "__objclass__"))
+            .ok()
+            .and_then(|class| class.cast_into::<pyo3::types::PyType>().ok())
+            .is_some_and(|class| {
+                class.is_subclass_of::<PyDataType>().unwrap_or(false)
+                    || class.is_subclass_of::<PyStructField>().unwrap_or(false)
+            })
 }
 
 /// The `TypeError` of an iteration of `obj`, which is not iterable, as CPython words it: with the
@@ -2927,6 +3005,29 @@ pub(crate) fn pyspark_schema_json_text(
 /// objects (see `keeps_object_of`), a `UserDefinedType`.
 pub(crate) fn holds_udt(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<bool> {
     Ok(is_udt(obj)? || keeps_object_of(py, obj, holds_udt)?)
+}
+
+/// The global `name` of the module `pyspark.sql.types`, as a function of PySpark's module reads
+/// one at each call: of the `__dict__` of the module (kept, as a function keeps its globals), then
+/// of the builtins, else the `NameError` of CPython.
+fn types_module_global<'py>(
+    py: Python<'py>,
+    name: &Bound<'py, pyo3::types::PyString>,
+) -> PyResult<Bound<'py, PyAny>> {
+    static GLOBALS: PyOnceLock<Py<pyo3::types::PyDict>> = PyOnceLock::new();
+    let globals = GLOBALS.get_or_try_init(py, || {
+        py.import("pyspark.sql.types")
+            .map(|module| module.dict().unbind())
+    })?;
+    if let Some(value) = globals.bind(py).get_item(name)? {
+        return Ok(value);
+    }
+    if let Some(value) = py.import("builtins")?.dict().get_item(name)? {
+        return Ok(value);
+    }
+    Err(pyo3::exceptions::PyNameError::new_err(format!(
+        "name '{name}' is not defined"
+    )))
 }
 
 /// The `fromJson` helper `name` of the shim `pyspark.sql.types`, which parses the nested JSON
@@ -5841,20 +5942,34 @@ fn init_struct(obj: &Bound<'_, PyAny>, fields: Option<Bound<'_, PyAny>>) -> PyRe
             }
         }
     }
-    assign_need_conversion(obj)
+    assign_need_conversion(obj, NeedConversionOf::Init)
+}
+
+/// The method of PySpark's that assigns `_needConversion` (see [`assign_need_conversion`]).
+#[derive(Clone, Copy)]
+enum NeedConversionOf {
+    /// `StructType.__init__`.
+    Init,
+    /// `StructType.add`.
+    Add,
 }
 
 /// As PySpark's `self._needConversion = [f.needConversion() for f in self]` and
-/// `self._needSerializeAnyField = any(self._needConversion)` of the struct `obj`, of the elements
-/// as it iterates them (see `struct_iter`), of what their methods return. The list is assigned
-/// first, and `any` reads it back and stops at its first true value: so a value whose truth
-/// raises leaves the list assigned and `_needSerializeAnyField` as it was, as PySpark's.
-fn assign_need_conversion(obj: &Bound<'_, PyAny>) -> PyResult<()> {
+/// `self._needSerializeAnyField = any(self._needConversion)` of the struct `obj`, in the method
+/// `of`, of the elements as it iterates them (see `struct_iter`), of what their methods return.
+/// The list is assigned first, and `any` reads it back and stops at its first true value: so a
+/// value whose truth raises leaves the list assigned and `_needSerializeAnyField` as it was, as
+/// PySpark's. The calls of the methods are made at the depth of PySpark's (see
+/// [`pyspark_frames`]).
+fn assign_need_conversion(obj: &Bound<'_, PyAny>, of: NeedConversionOf) -> PyResult<()> {
     let py = obj.py();
     let need = PyList::empty(py);
-    for item in struct_iter(obj)? {
-        need.append(item?.call_method0(pyo3::intern!(py, "needConversion"))?)?;
-    }
+    pyspark_frames(obj, of, || {
+        for item in struct_iter(obj)? {
+            need.append(item?.call_method0(pyo3::intern!(py, "needConversion"))?)?;
+        }
+        Ok(())
+    })?;
     let name = pyo3::intern!(py, "_needConversion");
     obj.setattr(name, need)?;
     let mut any = false;
@@ -5986,7 +6101,7 @@ impl PyStructType {
             struct_fields(obj)?.call_method1(append, (object,))?;
             parameter(obj, names)?.call_method1(append, (field,))?;
         }
-        assign_need_conversion(obj)?;
+        assign_need_conversion(obj, NeedConversionOf::Add)?;
         Ok(slf)
     }
 
@@ -6957,15 +7072,14 @@ impl PyYearMonthIntervalType {
         json_of_json_value(slf.as_any())
     }
     // As PySpark's `not os.environ.get("PYSPARK_YM_INTERVAL_LEGACY") == "1"`, of `os.environ` at
-    // each call, of the `os` module that PySpark's module binds when it is imported, which an
-    // array, a map and a field of the type read through this method.
+    // each call, of the global `os` of `pyspark.sql.types` at each call too, as PySpark's
+    // function reads it of its module, so of a patch of it (`mock.patch.object(types, "os", ...)`)
+    // and of its `environ` (`mock.patch.dict("pyspark.sql.types.os.environ", ...)`). An array, a
+    // map and a field of the type read it through this method.
     #[pyo3(name = "needConversion")]
     fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
-        static OS: PyOnceLock<Py<PyModule>> = PyOnceLock::new();
         let py = slf.py();
-        let legacy = OS
-            .get_or_try_init(py, || py.import("os").map(Bound::unbind))?
-            .bind(py)
+        let legacy = types_module_global(py, pyo3::intern!(py, "os"))?
             .getattr(pyo3::intern!(py, "environ"))?
             .call_method1(
                 pyo3::intern!(py, "get"),
@@ -8505,6 +8619,70 @@ fn type_level<T>(_py: Python<'_>, f: impl FnOnce() -> PyResult<T>) -> PyResult<T
 /// The levels of the walks of type objects that a thread goes in without reading Python's
 /// recursion limit (see [`type_level`]).
 const TYPE_LEVELS_UNCHECKED: usize = 32;
+
+/// `f`, the calls of the `needConversion` of the fields of the struct `obj` in its method `of`, of
+/// the levels of recursion of the frames of Python that PySpark's method has and the drop-in's
+/// native method does not, of the `RecursionError` of PySpark's past the limit:
+/// - before Python 3.12, where CPython counts the frames of Python and its checks of the calls of
+///   functions of C as one depth, the frame of the list comprehension, and that of `__init__` of a
+///   class whose `__init__` is the native one, which the call of the class (`StructType(...)`)
+///   calls of no check, where PySpark's is a frame. A call of it through its slot wrapper, as
+///   `super().__init__(...)` of a subclass makes, crosses CPython's check of a call of C, as of a
+///   frame, as does a call of `add`. They are entered as CPython's checks
+///   (`Py_EnterRecursiveCall`), of the depth of the frames of the caller;
+/// - from 3.12, where CPython counts the frames of Python apart (and inlines the comprehension,
+///   PEP 709), the frame of `__init__` or `add`, as a level of the walks of the types (see
+///   [`type_level`]), which count no frame of the caller (see `dev/parity/known-differences.md`).
+fn pyspark_frames<T>(
+    obj: &Bound<'_, PyAny>,
+    of: NeedConversionOf,
+    f: impl FnOnce() -> PyResult<T>,
+) -> PyResult<T> {
+    /// The checks of `Py_EnterRecursiveCall` that a call entered, left when it is dropped.
+    struct Entered(usize);
+    impl Drop for Entered {
+        fn drop(&mut self) {
+            for _ in 0..self.0 {
+                // SAFETY: of a check that `Py_EnterRecursiveCall` entered, of the thread that
+                // holds the GIL.
+                unsafe { pyo3::ffi::Py_LeaveRecursiveCall() };
+            }
+        }
+    }
+    let py = obj.py();
+    if frames_apart(py) {
+        return type_level(py, f);
+    }
+    let frames = match of {
+        NeedConversionOf::Init => {
+            let init = pyo3::intern!(py, "__init__");
+            let native = py.get_type::<PyStructType>().getattr(init)?;
+            if obj.get_type().getattr(init)?.is(&native) {
+                2
+            } else {
+                1
+            }
+        }
+        NeedConversionOf::Add => 1,
+    };
+    let mut entered = Entered(0);
+    for _ in 0..frames {
+        // SAFETY: the GIL is held, and the string is a C string literal; a check that succeeds
+        // is left by the drop of `entered`, and one that fails enters none.
+        if unsafe { pyo3::ffi::Py_EnterRecursiveCall(c"".as_ptr()) } != 0 {
+            return Err(PyErr::fetch(py));
+        }
+        entered.0 += 1;
+    }
+    f()
+}
+
+/// Whether CPython counts the depth of its frames of Python apart from that of its calls of
+/// functions of C, as from 3.12 (of the version of the interpreter, read once).
+fn frames_apart(py: Python<'_>) -> bool {
+    static APART: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *APART.get_or_init(|| py.version_info() >= (3, 12))
+}
 
 /// The core type of the `UserDefinedType` object `obj`, of its `jsonValue()` and of the core type
 /// that `lower` makes of its `sqlType()`, in that order, as PySpark's conversion reads them; the
