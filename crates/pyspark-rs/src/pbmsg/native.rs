@@ -433,6 +433,18 @@ impl Value {
         }
     }
 
+    /// Move the messages of the value, of a value of up to [`UNPIN`] messages, out of the slabs of
+    /// their parse (see `arena`), each of an allocation of its own, where no other value holds
+    /// them: of a message that outlives the container that held it (see `PyMessage::unpin`), so
+    /// that it keeps alive no slab of the messages released with the container, as a slab is
+    /// released with the last of its messages. A larger value holds most of the nodes of its slabs
+    /// itself, and is left as it is.
+    pub(crate) fn unpin(&mut self) {
+        if self.count() <= UNPIN {
+            unpin_value(self);
+        }
+    }
+
     /// Discard the unknown fields of the messages of the value, as `discard_unknown` of a message
     /// does at `depth` (see `PyMessage::discard_unknown`), of a clone of what the value shares.
     pub(crate) fn discard_unknown(&mut self, py: Python<'_>, depth: u32) {
@@ -477,6 +489,76 @@ fn unique<T>(arc: &mut Arc<T>, clone: impl FnOnce(&T) -> T) -> &mut T {
         *arc = Arc::new(clone(arc));
     }
     Arc::get_mut(arc).expect("a value of its own")
+}
+
+/// The messages of a native value up to which [`Value::unpin`] moves them out of their slabs.
+const UNPIN: u32 = 256;
+
+/// [`Value::unpin`] of `value`, of any size, a level at a time.
+fn unpin_value(value: &mut Value) {
+    match value {
+        Value::Message(m) => unpin_native(m),
+        Value::Messages(m) => {
+            if let Some(m) = Arc::get_mut(m) {
+                m.items.iter_mut().for_each(unpin_native);
+            }
+        }
+        Value::Map(m) => {
+            if let Some(m) = Arc::get_mut(m) {
+                for value in m.entries.values_mut() {
+                    if let NativeValue::Message(m) = value {
+                        unpin_native(m);
+                    }
+                }
+            }
+        }
+        Value::Scalars(_) => {}
+    }
+}
+
+/// The native messages of `value`, of all its levels, that are nodes of a slab of a parse (of
+/// `_proto_slab_messages` of the tests).
+pub(crate) fn slab_messages(value: &Value) -> usize {
+    fn of(message: &NRef) -> usize {
+        let below: usize = message
+            .fields
+            .slots
+            .iter()
+            .map(|(_, slot)| match slot {
+                Slot::Native(value) => slab_messages(value),
+                _ => 0,
+            })
+            .sum();
+        below + usize::from(NRef::in_slab(message))
+    }
+    grow(|| match value {
+        Value::Message(m) => of(m),
+        Value::Messages(m) => m.items.iter().map(of).sum(),
+        Value::Map(m) => m
+            .entries
+            .iter()
+            .map(|(_, value)| match value {
+                NativeValue::Message(m) => of(m),
+                NativeValue::Scalar(_) => 0,
+            })
+            .sum(),
+        Value::Scalars(_) => 0,
+    })
+}
+
+/// Move the native message `message` and the messages below it out of their slabs, of those that
+/// no other value holds (see [`Value::unpin`]).
+pub(crate) fn unpin_native(message: &mut NRef) {
+    grow(|| {
+        if let Some(native) = NRef::get_mut(message) {
+            for (_, slot) in native.fields.slots.iter_mut() {
+                if let Slot::Native(value) = slot {
+                    unpin_value(value);
+                }
+            }
+        }
+        NRef::rebox(message);
+    })
 }
 
 /// The messages of the native value `value` of a repeated message field, of its own: of a clone of
@@ -1014,6 +1096,14 @@ fn whole_limit() -> u32 {
 #[pyo3(signature = (limit=None))]
 pub(crate) fn _proto_whole_limit(limit: Option<u32>) -> u32 {
     WHOLE_LIMIT.swap(limit.unwrap_or(WHOLE), std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The native messages that `message` holds, of all its levels, that are nodes of a slab of a
+/// parse (see `PyMessage::unpin`): of the tests, which check that a message that outlives the
+/// container that held it keeps no slab alive.
+#[pyfunction]
+pub(crate) fn _proto_slab_messages(message: &Bound<'_, PyMessage>) -> usize {
+    PyMessage::slab_messages(message)
 }
 
 /// The objects of a native value made whole (see [`WHOLE`]), empty, in the order of a walk of the

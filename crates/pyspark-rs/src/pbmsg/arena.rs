@@ -275,6 +275,34 @@ impl NRef {
         }
     }
 
+    /// Whether the message is a node of a slab of a parse (see [`Arena`]), else an allocation of
+    /// its own.
+    pub(crate) fn in_slab(this: &NRef) -> bool {
+        this.node().slab.is_some()
+    }
+
+    /// Move the message out of its slab into an allocation of its own, as [`NRef::new`] makes
+    /// one, if no other reference holds it: it then keeps the slab alive no longer, which is
+    /// released with the last of its other messages.
+    pub(crate) fn rebox(this: &mut NRef) {
+        let node = this.node();
+        let Some(slab) = node.slab else {
+            return;
+        };
+        if node.refs.load(Ordering::Acquire) != 1 {
+            return;
+        }
+        // SAFETY: `this` is the only reference of the message, which the caller holds mutably:
+        // the message is taken out of its node once, `this` set to the new node (of no drop of the
+        // old one), and the old node released as a node whose message was taken.
+        unsafe {
+            let native = ManuallyDrop::take(&mut (*this.0.as_ptr()).native);
+            let fresh = ManuallyDrop::new(NRef::new(native));
+            this.0 = fresh.0;
+            release(slab);
+        }
+    }
+
     /// The message itself, if no other reference holds it; else `this`.
     pub(crate) fn try_unwrap(this: NRef) -> Result<Native, NRef> {
         if this
@@ -616,6 +644,30 @@ mod tests {
         drop(releases);
         assert_eq!(live(first), 3);
         check(&refs, None);
+        drop(refs);
+    }
+
+    /// A message of a slab that no other reference holds moves out of it into an allocation of
+    /// its own (`NRef::rebox`), released from the slab, and reads as it did; of another reference,
+    /// it stays.
+    #[test]
+    fn a_message_of_its_own_moves_out_of_its_slab() {
+        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let arena = Arena::new();
+        let mut refs: Vec<NRef> = (0..3).map(|i| arena.alloc(native(vec![i]))).collect();
+        drop(arena);
+        let slab = slab_of(&refs[0]);
+        assert_eq!(live(slab), 3);
+        let shared = refs[1].clone();
+        NRef::rebox(&mut refs[1]);
+        assert!(NRef::in_slab(&refs[1]) && NRef::ptr_eq(&refs[1], &shared));
+        drop(shared);
+        NRef::rebox(&mut refs[1]);
+        assert!(!NRef::in_slab(&refs[1]));
+        assert_eq!(refs[1].fields.unknown, [1]);
+        assert_eq!(live(slab), 2);
+        NRef::rebox(&mut refs[1]);
+        assert!(!NRef::in_slab(&refs[1]));
         drop(refs);
     }
 

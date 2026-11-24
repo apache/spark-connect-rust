@@ -464,6 +464,29 @@ fn upb_reason(what: &str) -> &'static str {
 /// read a tag of the last of them.
 const PACKED_SLOP: usize = 16;
 
+/// Append the values of the packed field of the fixed width `kind` (of 4 or 8 bytes) of `bytes`,
+/// whose length is a multiple of the width, to `items`, as [`Reader::value`] reads each. Not
+/// inlined, so that the loop of the parse of a message stays as it is compiled without it.
+#[inline(never)]
+fn fixed_values(kind: Kind, bytes: &[u8], items: &mut Vec<Scalar>) {
+    fn of<const N: usize>(
+        bytes: &[u8],
+        items: &mut Vec<Scalar>,
+        value: impl Fn([u8; N]) -> Scalar,
+    ) {
+        items.extend(bytes.as_chunks::<N>().0.iter().map(|chunk| value(*chunk)));
+    }
+    match kind {
+        Kind::Double => of(bytes, items, |b| Scalar::F64(f64::from_le_bytes(b))),
+        Kind::Float => of(bytes, items, |b| Scalar::F32(f32::from_le_bytes(b))),
+        Kind::SFixed64 => of(bytes, items, |b| Scalar::I64(i64::from_le_bytes(b))),
+        Kind::Fixed64 => of(bytes, items, |b| Scalar::U64(u64::from_le_bytes(b))),
+        Kind::SFixed32 => of(bytes, items, |b| Scalar::I32(i32::from_le_bytes(b))),
+        Kind::Fixed32 => of(bytes, items, |b| Scalar::U32(u32::from_le_bytes(b))),
+        _ => unreachable!("a packed field of a fixed width"),
+    }
+}
+
 /// The limit of the nesting of the messages that a parse reads, as upb's of its parsers
 /// (`kUpb_WireFormat_DefaultDepthLimit`): a message, a map entry or a group of more than 100
 /// levels below the message that the parse reads fails it.
@@ -1532,7 +1555,9 @@ struct NativeParse<'b, 'py> {
 impl NativeParse<'_, '_> {
     /// Parse the message that `reader` reads into `native`, one level of the parse, on a stack
     /// with room for it, up to the end tag of the group `group`, when it is one; the levels of
-    /// the message are counted again of what it read, also of a failure.
+    /// the message are counted again of what it read, also of a failure. Inlined into the parse of
+    /// a child (see [`NativeParse::child`]), as the parse of each message runs it.
+    #[inline(always)]
     fn message(
         self,
         desc: &MessageDesc,
@@ -1680,6 +1705,12 @@ impl NativeParse<'_, '_> {
                         .ok_or_else(|| decode_error("truncated packed field"))?;
                     let items = native_scalars(fields, index);
                     items.reserve((end - reader.pos) / width as usize);
+                    // The values within the data, of the slice, a loop of each kind; of a field
+                    // that the patch buffer ends, of the zeros past the data too, a value at a time.
+                    if let Some(bytes) = reader.data.get(reader.pos..end) {
+                        fixed_values(field.kind, bytes, items);
+                        reader.pos = end;
+                    }
                     while reader.pos < end {
                         let value = reader.value(field.kind)?;
                         items.push(value);

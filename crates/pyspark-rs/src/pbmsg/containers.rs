@@ -1189,6 +1189,46 @@ enum Pending {
 /// objects of, at least: those that follow it too, as a read of one most often reads the next.
 const CHUNK: usize = 64;
 
+/// Release `message`, which a container or a map no longer holds: of a message that another holds
+/// still, its native values moved out of the slabs of their parse first (see `PyMessage::unpin`),
+/// so that a message kept of a large parse, whose other messages are released, keeps no slab of
+/// them alive (of up to 64 messages each) for the part of the parse that it holds unread.
+pub(crate) fn release_held(py: Python<'_>, message: Py<PyMessage>) {
+    let message = message.into_bound(py);
+    // SAFETY: of a live object, which `message` holds.
+    if unsafe { pyo3::ffi::Py_REFCNT(message.as_ptr()) } > 1 {
+        PyMessage::unpin(&message);
+    }
+    // Released as a `Bound`, which knows that the thread is attached, with no read of a thread
+    // local.
+    drop(message);
+}
+
+/// [`release_held`] of the messages of the values of the entries `released`, of a map of messages,
+/// which are released with the entries.
+fn release_held_entries(py: Python<'_>, released: Entries) {
+    for (_, value) in released.into_entries() {
+        if let MapValue::Message(message) = value {
+            release_held(py, message);
+        }
+    }
+}
+
+/// A container released releases the messages that it held as [`release_held`] does, at once.
+impl Drop for RepeatedComposite {
+    fn drop(&mut self) {
+        if self.items.is_empty() {
+            return;
+        }
+        // SAFETY: a container is released with the thread attached: of the deallocation of its
+        // object, or of a value that was never one, of the code that made it.
+        let py = unsafe { Python::assume_attached() };
+        for message in std::mem::take(&mut self.items) {
+            release_held(py, message);
+        }
+    }
+}
+
 impl RepeatedComposite {
     pub(crate) fn new(class: MessageClass, items: Vec<Py<PyMessage>>, owner: Owner) -> Self {
         RepeatedComposite {
@@ -1498,7 +1538,10 @@ impl RepeatedComposite {
         Self::reify(slf)?;
         let len = slf.borrow().items.len();
         let at = pop_position(py, key, len)?;
-        remove_at(&mut slf.borrow_mut().items, at)
+        let removed = remove_at(&mut slf.borrow_mut().items, at)?;
+        // The message outlives the container that held it.
+        PyMessage::unpin(removed.bind(py));
+        Ok(removed)
     }
 
     /// As upb's: the first message that equals `elem`, among as many as the container had, each
@@ -1517,10 +1560,11 @@ impl RepeatedComposite {
             let item = item_at(&slf.borrow().items, at, |m| Ok(m.clone_ref(py).into_any()))?;
             if compares_equal(item.bind(py), elem)? {
                 // A message removed is dropped once the container is no longer borrowed.
-                let _removed = {
+                let removed = {
                     let mut me = slf.borrow_mut();
                     (at < me.items.len()).then(|| me.items.remove(at))
                 };
+                removed.into_iter().for_each(|m| release_held(py, m));
                 return Ok(());
             }
         }
@@ -1561,10 +1605,12 @@ impl RepeatedComposite {
     /// As upb's: no change of an unset container (an empty one), so no change of its message.
     fn clear(slf: &Bound<'_, Self>) -> PyResult<()> {
         // Released once the container is no longer borrowed.
-        let _held = {
+        let (held, pending) = {
             let mut c = slf.borrow_mut();
             (std::mem::take(&mut c.items), c.pending.take())
         };
+        held.into_iter().for_each(|m| release_held(slf.py(), m));
+        drop(pending);
         Ok(())
     }
 
@@ -1651,7 +1697,8 @@ impl RepeatedComposite {
         let len = slf.borrow().items.len();
         let subscript = Subscript::of(key, len)?;
         // The messages removed are dropped once the container is no longer borrowed.
-        let _removed = subscript.remove_from(&mut slf.borrow_mut().items);
+        let removed = subscript.remove_from(&mut slf.borrow_mut().items);
+        removed.into_iter().for_each(|m| release_held(slf.py(), m));
         Ok(())
     }
 
@@ -2035,6 +2082,18 @@ pub struct MapContainer {
     /// the map has (see [`MapContainer::new_version`]). An iteration of the map (a [`MapIterator`])
     /// fails at its next step once the version is not the one that it started of.
     version: u64,
+}
+
+/// A map released releases the messages of its values as [`release_held`] does, at once.
+impl Drop for MapContainer {
+    fn drop(&mut self) {
+        if self.map.value != Kind::Message || self.entries.is_empty() {
+            return;
+        }
+        // SAFETY: as of a repeated message container (see its `Drop`).
+        let py = unsafe { Python::assume_attached() };
+        release_held_entries(py, std::mem::take(&mut self.entries));
+    }
 }
 
 impl MapContainer {
@@ -2477,7 +2536,12 @@ impl MapContainer {
         // The entry removed is dropped once the map is no longer borrowed.
         let removed = slf.borrow_mut().entries.remove(&key);
         match removed {
-            Some(_) => Ok(()),
+            Some((_, value)) => {
+                if let MapValue::Message(m) = value {
+                    release_held(slf.py(), m);
+                }
+                Ok(())
+            }
             None => Err(PyKeyError::new_err("Key not present in map")),
         }
     }
@@ -2623,7 +2687,8 @@ impl MapContainer {
         Self::reify(slf)?;
         slf.borrow_mut().new_version();
         // The entries are dropped once the map is no longer borrowed.
-        let _entries = std::mem::take(&mut slf.borrow_mut().entries);
+        let entries = std::mem::take(&mut slf.borrow_mut().entries);
+        release_held_entries(slf.py(), entries);
         Ok(())
     }
 
