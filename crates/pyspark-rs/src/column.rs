@@ -680,9 +680,7 @@ pub(crate) fn install_getattr(m: &Bound<'_, PyModule>) -> PyResult<()> {
 pub(crate) fn expression_message(py: Python<'_>, column: &Column) -> PyResult<Py<PyAny>> {
     use prost::Message;
     let expression = column.try_to_proto().to_pyerr()?;
-    let class = py
-        .import("pyspark.sql.connect.proto")?
-        .getattr("Expression")?;
+    let class = crate::pbmsg::proto_attr(py, "Expression")?;
     Ok(crate::pbmsg::parse_deep(&class, &expression.encode_to_vec())?.unbind())
 }
 

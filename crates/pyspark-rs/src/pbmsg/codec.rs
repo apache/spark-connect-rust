@@ -6,13 +6,13 @@
 //! have such fields.
 
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use pyo3::prelude::*;
 
 use super::containers::{Entries, MapValue, RepeatedComposite, RepeatedScalar};
-use super::message::{new_instance, EntryRef, Fields, MessageClass, PyMessage, Slot};
-use super::native::Value;
+use super::message::{generation, new_instance, EntryRef, Fields, MessageClass, PyMessage, Slot};
+use super::native::{Native, NativeMap, NativeMessages, NativeValue, Value};
 use super::pool::{FieldDesc, Kind, MapDesc, MessageDesc};
 use super::scalar::Scalar;
 use super::text::upb_wire_key_order;
@@ -393,13 +393,12 @@ fn write_field(
 fn encode_message_field(
     py: Python<'_>,
     number: u32,
-    child: &Py<PyMessage>,
+    child: &Fields,
     out: &mut Vec<u8>,
 ) -> PyResult<()> {
-    let child = child.bind(py).borrow();
     let mut sizes = Vec::new();
-    measure_field(py, number, &child, &mut sizes)?;
-    write_field(py, number, &child, &sizes, &mut 0, out)
+    measure_field(py, number, child, &mut sizes)?;
+    write_field(py, number, child, &sizes, &mut 0, out)
 }
 
 /// The cause of a decode error, which [`merge`] gives in upb's error of the message type.
@@ -981,7 +980,30 @@ fn merge_with(
     depth: Depth,
 ) -> PyResult<()> {
     let mut reader = Reader::new(data);
-    merge_message(py, message, &mut reader, budget, depth).map_err(|err| {
+    // A message that holds no field yet (of `FromString`, `ParseFromString`, the drop-in's own
+    // parses) takes a native parse of the bytes, of no object for each message; one that holds
+    // fields merges them as it reads them, as upb's parse into a message does (a member of a oneof
+    // that it reads clears the one that the message held, before the bytes of a message of the
+    // other member are read into it).
+    let empty = {
+        let m = message.try_borrow()?;
+        m.is_empty().then(|| m.desc.clone())
+    };
+    let parsed = if let Some(desc) = empty {
+        let parse = NativeParse {
+            py,
+            budget,
+            generation: generation(),
+            level: 0,
+        };
+        let mut native = Native::empty(desc.clone(), parse.generation);
+        let parsed = parse.message(&desc, &mut native, &mut reader, depth, None);
+        PyMessage::take_parsed(message, native, budget)?;
+        parsed
+    } else {
+        merge_message(py, message, &mut reader, budget, depth)
+    };
+    parsed.map_err(|err| {
         if !err.is_instance_of::<DecodeError>(py) {
             return err;
         }
@@ -1289,7 +1311,7 @@ fn merge_field(
             }
             Err(err) => {
                 if field.has_presence() {
-                    let value = failed_string_value(message, field);
+                    let value = failed_string_value(&message.borrow(), field);
                     message.borrow_mut().set_scalar(py, index, value);
                 }
                 Err(err)
@@ -1310,8 +1332,7 @@ fn merge_field(
 /// bytes, which upb's oneof reads of the same memory (as a string, if it is UTF-8); else an empty
 /// value (where upb reads the memory of another member as a string, which only an empty one is
 /// safely, or the zeros of an unset field rather than its default).
-fn failed_string_value(message: &Bound<'_, PyMessage>, field: &FieldDesc) -> Scalar {
-    let m = message.borrow();
+fn failed_string_value(m: &Fields, field: &FieldDesc) -> Scalar {
     let empty = Scalar::default_of(field.kind);
     let held_by = |member: usize| match m.slots.get(member) {
         Some(Slot::Scalar(Scalar::Str(text))) => Some(text.as_bytes().to_vec()),
@@ -1415,7 +1436,7 @@ fn merge_map_entry(
             write_value(&mut bytes, map.key, &key);
         }
         match (&child, scalar) {
-            (Some(child), _) => encode_message_field(py, 2, child.as_unbound(), &mut bytes)?,
+            (Some(child), _) => encode_message_field(py, 2, &child.borrow(), &mut bytes)?,
             (None, Some(value)) if !value.is_default() || map.value_presence => {
                 write_tag(&mut bytes, 2, map.value.wire_type());
                 write_value(&mut bytes, map.value, &value);
@@ -1441,4 +1462,515 @@ fn merge_map_entry(
     // The value that the entry replaces is dropped once the map is no longer borrowed.
     let _replaced = container.bind(py).borrow_mut().insert(key, value);
     Ok(())
+}
+
+/// A parse of the bytes of a message natively (see [`merge_with`]): into an empty message of its
+/// type ([`Native`]), whose messages, repeated fields and maps are native values too, of no Python
+/// object, as a copy holds them (see `native`); the object of the message takes its fields once
+/// the parse ends, and makes the objects of them when Python reads them. It reads the bytes as the
+/// parse into an object does ([`merge_inner`], [`merge_field`], [`merge_map_entry`]), of the same
+/// values, the same errors in the same places, and the same state at a failure: the fields read
+/// before it are set, and so is the message that it failed in, of the fields that it read, as the
+/// parse into an object sets a message before it reads it. No Python code sees the native values
+/// until the object takes them.
+#[derive(Clone, Copy)]
+struct NativeParse<'b, 'py> {
+    py: Python<'py>,
+    budget: Option<&'b ConversionBudget>,
+    /// The generation of the classes of the messages (see `message::generation`), which their
+    /// objects are made of.
+    generation: u64,
+    /// The level of the message that the parse is at below the message that it parses, of which
+    /// every 16th level runs on a stack with room for 16 levels, as a native copy's do (see
+    /// `native::At`): reading the room left of the stack takes longer than a level of a small
+    /// message.
+    level: u32,
+}
+
+impl NativeParse<'_, '_> {
+    /// Parse the message that `reader` reads into `native`, one level of the parse, on a stack
+    /// with room for it, up to the end tag of the group `group`, when it is one; the levels of
+    /// the message are counted again of what it read, also of a failure.
+    fn message(
+        self,
+        desc: &MessageDesc,
+        native: &mut Native,
+        reader: &mut Reader<'_>,
+        depth: Depth,
+        group: Option<u32>,
+    ) -> PyResult<()> {
+        let parsed = if self.level.is_multiple_of(16) {
+            grow(|| self.inner(desc, &mut native.fields, reader, depth, group))
+        } else {
+            self.inner(desc, &mut native.fields, reader, depth, group)
+        };
+        native.recount();
+        parsed
+    }
+
+    /// The parse of the level below.
+    fn below(self) -> Self {
+        NativeParse {
+            level: self.level + 1,
+            ..self
+        }
+    }
+
+    /// [`merge_inner`] of `fields`, of the type `desc` (the type of `fields`, of the pool, given
+    /// by the field of the message that holds it, which the parse need not share).
+    fn inner(
+        self,
+        desc: &MessageDesc,
+        fields: &mut Fields,
+        reader: &mut Reader<'_>,
+        depth: Depth,
+        group: Option<u32>,
+    ) -> PyResult<()> {
+        if let Some(budget) = self.budget {
+            budget.step(self.py)?;
+        }
+        let mut unknown_from: Option<usize> = None;
+        while !reader.done() {
+            let start = reader.pos;
+            let (number, wire_type) = reader.tag()?;
+            if wire_type == 4 {
+                keep_run(fields, reader, unknown_from, start);
+                if group == Some(number) {
+                    return Ok(());
+                }
+                return Err(decode_error("unexpected end of group"));
+            }
+            let field = field_of_number(desc, number);
+            if field.is_some() {
+                keep_run(fields, reader, unknown_from.take(), start);
+            } else if number == 0 && !(desc.fields.is_empty() && matches!(wire_type, 0..=3 | 5)) {
+                return Err(decode_error("invalid field number 0"));
+            }
+            match field {
+                Some(field) if reads_wire_type(field, wire_type) => {
+                    self.field(fields, field, (start, wire_type), reader, depth)?
+                }
+                Some(_) => {
+                    reader.skip(wire_type, number, depth)?;
+                    reader.check_end()?;
+                    keep_run(fields, reader, Some(start), reader.pos);
+                }
+                None => {
+                    reader.skip(wire_type, number, depth)?;
+                    unknown_from.get_or_insert(start);
+                }
+            }
+            reader.check_end()?;
+        }
+        keep_run(fields, reader, unknown_from, reader.end);
+        if group.is_some() {
+            return Err(decode_error("unterminated group"));
+        }
+        Ok(())
+    }
+
+    /// [`merge_field`] of `fields`.
+    fn field(
+        self,
+        fields: &mut Fields,
+        field: &FieldDesc,
+        (tag_start, wire_type): (usize, u8),
+        reader: &mut Reader<'_>,
+        depth: Depth,
+    ) -> PyResult<()> {
+        let index = field.index;
+        if let Some(map) = &field.map {
+            let len = reader.size()?;
+            let mut entry = reader.sub(len)?;
+            return self
+                .below()
+                .map_entry(fields, field, map, &mut entry, depth.below()?);
+        }
+        if field.kind == Kind::Message {
+            let desc = message_type_of(field)?;
+            let len = if field.delimited { 0 } else { reader.size()? };
+            if field.repeated {
+                // A new message, appended once it is read, also of a failure in it; and those of
+                // the elements of the field that follow it, of the same tag, which the loop of
+                // `inner` would read as it reads this one (of no unknown fields between them),
+                // read here, of no lookup of the field and its messages for each.
+                let messages = native_messages(self.py, fields, field, self.generation)?;
+                let mut len = len;
+                loop {
+                    let mut child = Native::empty(desc.clone(), self.generation);
+                    let parsed = self.child(desc, &mut child, field, len, reader, depth);
+                    messages.push(Arc::new(child));
+                    parsed?;
+                    reader.check_end()?;
+                    if field.delimited || reader.done() {
+                        return Ok(());
+                    }
+                    let at = reader.pos;
+                    match reader.tag() {
+                        Ok((number, 2)) if number == field.number => len = reader.size()?,
+                        _ => {
+                            reader.pos = at;
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+            let child = native_child(fields, index, desc, self.generation);
+            return self.child(desc, child, field, len, reader, depth);
+        }
+        if field.repeated {
+            if wire_type == 2 && field.kind.packable() {
+                let len = reader.size()?;
+                let width = match field.kind.wire_type() {
+                    1 => 8,
+                    5 => 4,
+                    _ => 0,
+                };
+                if width > 0 {
+                    if len % width != 0 {
+                        return Err(decode_error("truncated packed field"));
+                    }
+                    let patched = reader.data.len() <= PACKED_SLOP
+                        || tag_start + PACKED_SLOP >= reader.data.len();
+                    let bound = reader.data.len() + if patched { PACKED_SLOP } else { 0 };
+                    let end = reader
+                        .end_of(len, bound)
+                        .ok_or_else(|| decode_error("truncated packed field"))?;
+                    let items = native_scalars(fields, index);
+                    items.reserve((end - reader.pos) / width as usize);
+                    while reader.pos < end {
+                        let value = reader.value(field.kind)?;
+                        items.push(value);
+                    }
+                    return Ok(());
+                }
+                let mut packed = reader.sub(len)?;
+                native_scalars(fields, index);
+                let closed = field.closed_values.as_deref();
+                while !packed.done() {
+                    if let Some(values) = closed {
+                        let raw = packed.varint()?;
+                        let number = raw as i64 as i32;
+                        if values.binary_search(&number).is_ok() {
+                            native_scalars(fields, index).push(Scalar::Enum(number));
+                        } else {
+                            write_tag(&mut fields.unknown, field.number, 0);
+                            write_varint(&mut fields.unknown, raw);
+                        }
+                        continue;
+                    }
+                    let value = packed.value(field.kind)?;
+                    native_scalars(fields, index).push(value);
+                }
+                return packed.check_end();
+            }
+            let value = value_of_field(reader, field)?;
+            if !enum_value_known(field.closed_values.as_deref(), &value) {
+                reader.check_end()?;
+                fields
+                    .unknown
+                    .extend_from_slice(&reader.data[tag_start..reader.pos]);
+                return Ok(());
+            }
+            native_scalars(fields, index).push(value);
+            return Ok(());
+        }
+        if matches!(field.kind, Kind::String | Kind::Bytes) {
+            let len = reader.size()?;
+            let read = reader
+                .bytes(len)
+                .and_then(|bytes| string_of(field.kind, bytes, field.validate_utf8));
+            return match read {
+                Ok(value) => {
+                    set_native_scalar(fields, index, value);
+                    Ok(())
+                }
+                Err(err) => {
+                    if field.has_presence() {
+                        let value = failed_string_value(fields, field);
+                        set_native_scalar(fields, index, value);
+                    }
+                    Err(err)
+                }
+            };
+        }
+        let value = reader.value(field.kind)?;
+        if !enum_value_known(field.closed_values.as_deref(), &value) {
+            reader.check_end()?;
+            fields
+                .unknown
+                .extend_from_slice(&reader.data[tag_start..reader.pos]);
+            return Ok(());
+        }
+        set_native_scalar(fields, index, value);
+        Ok(())
+    }
+
+    /// Parse the message of the message field `field` that `reader` is at (a group, or of the
+    /// length `len`) into `child`.
+    fn child(
+        self,
+        desc: &MessageDesc,
+        child: &mut Native,
+        field: &FieldDesc,
+        len: u64,
+        reader: &mut Reader<'_>,
+        depth: Depth,
+    ) -> PyResult<()> {
+        if field.delimited {
+            return self
+                .below()
+                .message(desc, child, reader, depth.below()?, Some(field.number));
+        }
+        let mut sub = reader.sub(len)?;
+        self.below()
+            .message(desc, child, &mut sub, depth.below()?, None)
+    }
+
+    /// [`merge_map_entry`] of `fields`.
+    fn map_entry(
+        self,
+        fields: &mut Fields,
+        field: &FieldDesc,
+        map: &Arc<MapDesc>,
+        reader: &mut Reader<'_>,
+        depth: Depth,
+    ) -> PyResult<()> {
+        let py = self.py;
+        if let Some(budget) = self.budget {
+            budget.step(py)?;
+        }
+        let mut key = Scalar::default_of(map.key);
+        let mut key_present = false;
+        let mut scalar = None;
+        let mut child: Option<Native> = None;
+        let mut unknown = Vec::new();
+        while !reader.done() {
+            let start = reader.pos;
+            let (number, wire_type) = reader.tag()?;
+            match number {
+                0 => return Err(decode_error("invalid field number 0")),
+                1 if wire_type == map.key.wire_type() => {
+                    key = map_value(reader, map.key, map.key_validate_utf8)?;
+                    key_present = true;
+                }
+                2 if map.value == Kind::Message && wire_type == 2 => {
+                    let len = reader.size()?;
+                    let desc = map_value_type_of(map)?;
+                    if child.is_none() {
+                        child = Some(Native::empty(desc.clone(), self.generation));
+                    }
+                    let mut sub = reader.sub(len)?;
+                    // (A failure in the value leaves the entry unset, as of the parse into an
+                    // object, whose map takes the entry once it is read.)
+                    self.below().message(
+                        desc,
+                        child.as_mut().expect("made above"),
+                        &mut sub,
+                        depth.below()?,
+                        None,
+                    )?;
+                }
+                2 if map.value != Kind::Message && wire_type == map.value.wire_type() => {
+                    let value = map_value(reader, map.value, map.value_validate_utf8)?;
+                    if enum_value_known(map.value_closed.as_deref(), &value) {
+                        scalar = Some(value);
+                    } else {
+                        reader.check_end()?;
+                        unknown.extend_from_slice(&reader.data[start..reader.pos]);
+                    }
+                }
+                _ => {
+                    reader.skip(wire_type, number, depth)?;
+                    reader.check_end()?;
+                    unknown.extend_from_slice(&reader.data[start..reader.pos]);
+                }
+            }
+            reader.check_end()?;
+        }
+        if !unknown.is_empty() {
+            let mut bytes = Vec::new();
+            if !key.is_default() || (key_present && map.key_presence) {
+                write_tag(&mut bytes, 1, map.key.wire_type());
+                write_value(&mut bytes, map.key, &key);
+            }
+            match (&child, scalar) {
+                (Some(child), _) => encode_message_field(py, 2, &child.fields, &mut bytes)?,
+                (None, Some(value)) if !value.is_default() || map.value_presence => {
+                    write_tag(&mut bytes, 2, map.value.wire_type());
+                    write_value(&mut bytes, map.value, &value);
+                }
+                _ => {}
+            }
+            bytes.extend_from_slice(&unknown);
+            write_tag(&mut fields.unknown, field.number, 2);
+            write_len_delimited(&mut fields.unknown, &bytes);
+            return Ok(());
+        }
+        let value = if map.value == Kind::Message {
+            let child = match child {
+                Some(child) => child,
+                None => Native::empty(map_value_type_of(map)?.clone(), self.generation),
+            };
+            NativeValue::Message(Arc::new(child))
+        } else {
+            NativeValue::Scalar(scalar.unwrap_or_else(|| Scalar::default_of(map.value)))
+        };
+        native_map(fields, field.index, map, self.generation).insert(key, value);
+        Ok(())
+    }
+}
+
+/// The message type of the message field `field`, as the parse into an object makes its message.
+fn message_type_of(field: &FieldDesc) -> PyResult<&Arc<MessageDesc>> {
+    field.message_type().ok_or_else(|| {
+        pyo3::exceptions::PyTypeError::new_err(format!("no message type named {}", field.type_name))
+    })
+}
+
+/// The message type of the values of the map of messages `map`.
+fn map_value_type_of(map: &MapDesc) -> PyResult<&Arc<MessageDesc>> {
+    map.value_message().ok_or_else(|| {
+        pyo3::exceptions::PyTypeError::new_err(format!("no message type named {}", map.value_type))
+    })
+}
+
+/// Keep the fields that `reader` read from `from` to `to` in the unknown fields of `fields`.
+fn keep_run(fields: &mut Fields, reader: &Reader<'_>, from: Option<usize>, to: usize) {
+    if let Some(from) = from {
+        fields.unknown.extend_from_slice(&reader.data[from..to]);
+    }
+}
+
+/// Clear the other members of the oneof of the field `index` of `fields`, as setting a member does.
+fn clear_oneof_of(fields: &mut Fields, index: usize) {
+    let Some(oneof) = fields.desc.fields[index].oneof else {
+        return;
+    };
+    let Fields { desc, slots, .. } = fields;
+    slots.retain(|member| member == index || desc.fields[member].oneof != Some(oneof));
+}
+
+/// Set the scalar field `index` of `fields` to `value`, as a message sets it.
+fn set_native_scalar(fields: &mut Fields, index: usize, value: Scalar) {
+    clear_oneof_of(fields, index);
+    let Fields { desc, slots, .. } = fields;
+    slots.set(desc, index, Slot::Scalar(value));
+}
+
+/// The native message of the message field `index` of `fields`, which the parse merges into: the
+/// one that the field holds, of its own, else a new one of the type `desc`, set now (the other
+/// members of its oneof cleared).
+fn native_child<'f>(
+    fields: &'f mut Fields,
+    index: usize,
+    desc: &Arc<MessageDesc>,
+    generation: u64,
+) -> &'f mut Native {
+    if !matches!(
+        fields.slots.get(index),
+        Some(Slot::Native(Value::Message(_)))
+    ) {
+        clear_oneof_of(fields, index);
+        let child = Arc::new(Native::empty(desc.clone(), generation));
+        let Fields { desc, slots, .. } = &mut *fields;
+        slots.set(desc, index, Slot::Native(Value::Message(child)));
+    }
+    match fields.slots.get_mut(index) {
+        Some(Slot::Native(Value::Message(child))) => own(child, |m| Native {
+            fields: Fields {
+                desc: m.fields.desc.clone(),
+                slots: m.fields.slots.map(|slot| match slot {
+                    Slot::Scalar(v) => Slot::Scalar(v.clone()),
+                    Slot::Native(v) => Slot::Native(v.clone()),
+                    _ => unreachable!("a native message holds no object"),
+                }),
+                unknown: m.fields.unknown.clone(),
+            },
+            depth: m.depth,
+            count: m.count,
+            generation: m.generation,
+        }),
+        _ => unreachable!("set above"),
+    }
+}
+
+/// The value of `arc`, of its own: a clone of it (`clone`) first, if another holds it too, which
+/// no other does of a parse.
+fn own<T>(arc: &mut Arc<T>, clone: impl FnOnce(&T) -> T) -> &mut T {
+    if Arc::get_mut(arc).is_none() {
+        *arc = Arc::new(clone(arc));
+    }
+    Arc::get_mut(arc).expect("a value of its own")
+}
+
+/// The values of the repeated scalar field `index` of `fields`, which the parse appends to.
+fn native_scalars(fields: &mut Fields, index: usize) -> &mut Vec<Scalar> {
+    if !fields.slots.contains(index) {
+        let Fields { desc, slots, .. } = &mut *fields;
+        slots.set(
+            desc,
+            index,
+            Slot::Native(Value::Scalars(Arc::new(Vec::new()))),
+        );
+    }
+    match fields.slots.get_mut(index) {
+        Some(Slot::Native(Value::Scalars(items))) => Arc::make_mut(items),
+        _ => unreachable!("a repeated scalar field of a native message"),
+    }
+}
+
+/// The messages of the repeated message field `field` of `fields`, which the parse appends to, of
+/// the class of the container of the field (as the parse into an object makes it).
+fn native_messages<'f>(
+    py: Python<'_>,
+    fields: &'f mut Fields,
+    field: &FieldDesc,
+    generation: u64,
+) -> PyResult<&'f mut NativeMessages> {
+    let index = field.index;
+    if !fields.slots.contains(index) {
+        let class = MessageClass::now(py, message_type_of(field)?)?;
+        let messages = NativeMessages::new(class, Vec::new(), generation);
+        let Fields { desc, slots, .. } = &mut *fields;
+        slots.set(
+            desc,
+            index,
+            Slot::Native(Value::Messages(Arc::new(messages))),
+        );
+    }
+    match fields.slots.get_mut(index) {
+        Some(Slot::Native(Value::Messages(messages))) => Ok(own(messages, |m| NativeMessages {
+            class: m.class.clone_ref(py),
+            items: m.items.clone(),
+            depth: m.depth,
+            count: m.count,
+            generation: m.generation,
+        })),
+        _ => unreachable!("a repeated message field of a native message"),
+    }
+}
+
+/// The map of the map field `index` of `fields`, of `map`, which the parse sets entries of.
+fn native_map<'f>(
+    fields: &'f mut Fields,
+    index: usize,
+    map: &Arc<MapDesc>,
+    generation: u64,
+) -> &'f mut NativeMap {
+    if !fields.slots.contains(index) {
+        let native = NativeMap::new(map.clone(), Entries::default(), generation);
+        let Fields { desc, slots, .. } = &mut *fields;
+        slots.set(desc, index, Slot::Native(Value::Map(Arc::new(native))));
+    }
+    match fields.slots.get_mut(index) {
+        Some(Slot::Native(Value::Map(native))) => own(native, |m| NativeMap {
+            map: m.map.clone(),
+            entries: m.entries.map(NativeValue::clone),
+            depth: m.depth,
+            count: m.count,
+            generation: m.generation,
+        }),
+        _ => unreachable!("a map field of a native message"),
+    }
 }

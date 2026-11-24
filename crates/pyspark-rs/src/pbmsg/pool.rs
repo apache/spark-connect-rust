@@ -9,7 +9,11 @@
 //! a name that the embedded set does not declare finds it in those.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, OnceLock, RwLock, RwLockReadGuard};
+
+use pyo3::types::PyType;
+use pyo3::Py;
 
 use prost::Message as _;
 
@@ -153,6 +157,21 @@ pub(crate) struct MapDesc {
     /// default that it read.
     pub(crate) key_presence: bool,
     pub(crate) value_presence: bool,
+    /// The message type of a value of a message, once a parse looked it up (see
+    /// [`MapDesc::value_message`]).
+    pub(crate) value_message: OnceLock<Arc<MessageDesc>>,
+}
+
+impl MapDesc {
+    /// The message type of the values of a map of messages, of the pool, looked up once it is
+    /// found (see [`FieldDesc::message_type`]).
+    pub(crate) fn value_message(&self) -> Option<&Arc<MessageDesc>> {
+        if let Some(desc) = self.value_message.get() {
+            return Some(desc);
+        }
+        let desc = pool().message(&self.value_type)?;
+        Some(self.value_message.get_or_init(|| desc.clone()))
+    }
 }
 
 /// Whether a field tells being set apart from holding its default, as protobuf's presence of a
@@ -203,9 +222,23 @@ pub(crate) struct FieldDesc {
     /// goes to the unknown fields. None of an open enum, which takes any value, and of a field of
     /// another kind.
     pub(crate) closed_values: Option<Arc<[i32]>>,
+    /// The message type of a message field, once a parse looked it up (see
+    /// [`FieldDesc::message_type`]).
+    pub(crate) message_type: OnceLock<Arc<MessageDesc>>,
 }
 
 impl FieldDesc {
+    /// The message type of the message field, of the pool, looked up once it is found (a type of
+    /// a file that `register` adds later is looked up again until then), so that a parse of many
+    /// messages of the field does not hash its full name for each.
+    pub(crate) fn message_type(&self) -> Option<&Arc<MessageDesc>> {
+        if let Some(desc) = self.message_type.get() {
+            return Some(desc);
+        }
+        let desc = pool().message(&self.type_name)?;
+        Some(self.message_type.get_or_init(|| desc.clone()))
+    }
+
     /// Whether the field tells being set apart from holding the default: a singular field of
     /// explicit or required presence (see [`Presence`]).
     pub(crate) fn has_presence(&self) -> bool {
@@ -267,6 +300,15 @@ pub(crate) struct MessageDesc {
     /// too, which the first check of a message of the type finds (see `may_lack_required` of
     /// `message.rs`).
     pub(crate) may_lack_required: OnceLock<bool>,
+    /// The class registered of the type (none, of a type that has none) at the first read of it
+    /// of the classes of the runtime, and the generation of the classes then, which the messages
+    /// of the type are made of, of any generation that the class of the type is the same at (see
+    /// `kept_class` of `message.rs`).
+    pub(crate) class: OnceLock<(u64, Option<Py<PyType>>)>,
+    /// The generation of the classes that the last registration that gave the type another class
+    /// began (none, of a type of the class it had at first), which a registration sets before it
+    /// begins the generation.
+    pub(crate) class_changed: AtomicU64,
 }
 
 /// An enum type.
@@ -534,6 +576,7 @@ impl Pool {
                     value_closed: value.and_then(|f| f.closed_values.clone()),
                     key_presence: key.is_some_and(FieldDesc::has_presence),
                     value_presence: value.is_some_and(FieldDesc::has_presence),
+                    value_message: OnceLock::new(),
                 };
                 (m.full_name.clone(), Arc::new(map))
             })
@@ -1332,6 +1375,7 @@ fn add_message(
             delimited,
             validate_utf8: resolved.validate_utf8,
             closed_values: None,
+            message_type: OnceLock::new(),
         });
     }
     for oneof in &mut oneofs {
@@ -1389,6 +1433,8 @@ fn add_message(
         nested_enums,
         required,
         may_lack_required: OnceLock::new(),
+        class: OnceLock::new(),
+        class_changed: AtomicU64::new(0),
     });
 
     for (index, nested) in proto.nested_type.iter().enumerate() {

@@ -247,9 +247,26 @@ pub(crate) fn parse_deep<'py>(
     class: &Bound<'py, PyAny>,
     data: &[u8],
 ) -> PyResult<Bound<'py, PyAny>> {
-    let message = class.call0()?;
+    // A message class of the runtime makes its message as its `FromString` does, without the
+    // call of the class and of its `__init__`, which takes no keyword argument here; any other
+    // callable is called.
+    let message = match message::new_message_of_class(class)? {
+        Some(message) => message.into_any(),
+        None => class.call0()?,
+    };
     codec::merge_unlimited(class.py(), message.cast::<message::PyMessage>()?, data)?;
     Ok(message)
+}
+
+/// The attribute `name` of the module `pyspark.sql.connect.proto`, of the module imported once,
+/// as PySpark's modules hold the module that they imported (`from pyspark.sql.connect import
+/// proto`), so that a class of it that a test patches is the one given.
+pub(crate) fn proto_attr<'py>(py: Python<'py>, name: &str) -> PyResult<Bound<'py, PyAny>> {
+    static PROTO: pyo3::sync::PyOnceLock<Py<PyModule>> = pyo3::sync::PyOnceLock::new();
+    let module = PROTO.get_or_try_init(py, || -> PyResult<_> {
+        Ok(py.import("pyspark.sql.connect.proto")?.unbind())
+    })?;
+    module.bind(py).getattr(name)
 }
 
 /// [`parse_deep`] of Python: a message of `class` of the bytes `data`, of any depth.
