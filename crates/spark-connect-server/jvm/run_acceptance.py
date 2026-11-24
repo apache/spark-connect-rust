@@ -23,8 +23,8 @@ import json
 import os
 from pathlib import Path
 import re
-import shutil
 import shlex
+import shutil
 import signal
 import socket
 import subprocess
@@ -34,6 +34,8 @@ import time
 
 
 SHUTDOWN_COMPLETE = "Embedded Spark Engine shutdown complete"
+JNI_DIAGNOSTIC = re.compile(
+    r"WARNING in native method|FATAL ERROR in native method|WARNING: JNI local refs:")
 
 
 def shutdown_error(content, exit_code, marker=SHUTDOWN_COMPLETE):
@@ -50,10 +52,16 @@ def shutdown_error(content, exit_code, marker=SHUTDOWN_COMPLETE):
 
 
 def record_jni_check(report, content):
-    report["jni_check_clean"] = not re.search(
-        r"WARNING in native method|FATAL ERROR in native method", content)
+    report["jni_check_clean"] = not JNI_DIAGNOSTIC.search(content)
     if not report["jni_check_clean"]:
         report.setdefault("error", "embedded server triggered a JNI check warning")
+
+
+def runtime_skip_evidence(content):
+    prefix = "STOPPED_CONTEXT_READONLY_SKIPPED: "
+    return [{"case": "stopped-context-readonly-artifacts", "marker": line,
+             "reason": line[len(prefix):]}
+            for line in content.splitlines() if line.startswith(prefix)]
 
 
 def listener_owner_pids(port, *, proc_root=Path("/proc")):
@@ -110,9 +118,15 @@ def engine_validation_commands(common, tests_jar):
         ("ipc-separate-executor", cluster + ipc, "IPC_BATCH_SMOKE_OK"),
         ("ipc-result-size", common + ["--conf", "spark.driver.maxResultSize=1m"]
          + ipc + ["--result-size-only"], "IPC_RESULT_SIZE_SMOKE_OK"),
-        ("combined-result-size", common + ["--conf", "spark.driver.maxResultSize=1m",
+        ("per-partition-result-size", common + ["--conf", "spark.driver.maxResultSize=1m",
          "--class", "org.apache.spark.sql.connect.nativebridge.engine.NativeEngineSchedulingTest",
-         str(tests_jar), "--result-size-only"], "NATIVE_ENGINE_COMBINED_RESULT_SIZE_OK"),
+         str(tests_jar), "--result-size-only"], "NATIVE_ENGINE_PER_PARTITION_RESULT_SIZE_OK"),
+        ("engine-config-testing", ["env", "SPARK_TESTING=1"] + common + [
+         "--class", "org.apache.spark.sql.connect.nativebridge.engine.NativeEngineConfigConsistencyTest",
+         str(tests_jar)], "CONFIG_UNSET_DEFAULT: true (rejection and atomic rollback checked)"),
+        ("global-environment-lifecycle", common + [
+         "--class", "org.apache.spark.sql.connect.nativebridge.engine.GlobalEnvironmentLifecycleTest",
+         str(tests_jar)], "GLOBAL_ENVIRONMENT_LIFECYCLE_OK"),
     )
 
 
@@ -150,6 +164,7 @@ def main():
     env = os.environ.copy()
     env.update({"SPARK_HOME": str(spark_home), "SPARK_LOCAL_IP": "127.0.0.1",
                 "SPARK_CONNECT_MODE": "0", "PYSPARK_PYTHON": args.python, "TZ": "UTC"})
+    env.pop("SPARK_TESTING", None)
     env.pop("SPARK_REMOTE", None)
     env.pop("PYSPARK_REMOTE_INIT_CONF_LEN", None)
     common = [str(spark_submit), "--master", "local[2]",
@@ -175,19 +190,22 @@ def main():
         except subprocess.TimeoutExpired as error:
             def decoded(value):
                 return value.decode(errors="replace") if isinstance(value, bytes) else value or ""
-            path.write_text(decoded(error.stdout) + decoded(error.stderr))
+            content = decoded(error.stdout) + decoded(error.stderr)
+            path.write_text(content)
             report["results"].append({"name": name, "command": command, "timed_out": True,
                                       "seconds": round(time.monotonic() - started, 3),
-                                      "log": str(path)})
+                                      "log": str(path), "runtime_skips": runtime_skip_evidence(content)})
             raise RuntimeError(name + " timed out; see " + str(path)) from error
-        path.write_text(completed.stdout + completed.stderr)
+        content = completed.stdout + completed.stderr
+        path.write_text(content)
         result = {"name": name, "command": command, "exit_code": completed.returncode,
-                  "seconds": round(time.monotonic() - started, 3), "log": str(path)}
+                  "seconds": round(time.monotonic() - started, 3), "log": str(path),
+                  "runtime_skips": runtime_skip_evidence(content)}
         report["results"].append(result)
         print(json.dumps(result), flush=True)
         if completed.returncode != 0:
             raise RuntimeError(name + " failed; see " + str(path))
-        if re.search(r"WARNING in native method|FATAL ERROR in native method", path.read_text()):
+        if JNI_DIAGNOSTIC.search(content):
             raise RuntimeError(name + " triggered a JNI check warning")
         return completed
 
@@ -196,6 +214,8 @@ def main():
             ("engine-smoke", "EngineSmokeTest", "ENGINE_SMOKE_OK"),
             ("ipc-smoke", "IpcBatchSmokeTest", "IPC_BATCH_SMOKE_OK"),
             ("engine-scheduling", "NativeEngineSchedulingTest", "NATIVE_ENGINE_SCHEDULING_OK"),
+            ("engine-config", "NativeEngineConfigConsistencyTest",
+             "NATIVE_ENGINE_CONFIG_CONSISTENCY_OK"),
         ):
             completed = run(name, common + ["--class",
                 "org.apache.spark.sql.connect.nativebridge.engine." + class_name,
@@ -216,6 +236,16 @@ def main():
             str(tests_jar), str(library)])
         if "CLEANUP_FAILURE_OK" not in cleanup_failure.stdout:
             raise RuntimeError("cleanup failure retention success marker missing")
+        stopped_context = run("stopped-context-cleanup", common + ["--class",
+            "org.apache.spark.sql.connect.nativebridge.engine.StoppedContextCleanupTest",
+            str(tests_jar), str(library)])
+        if "STOPPED_CONTEXT_CLEANUP_OK" not in stopped_context.stdout:
+            raise RuntimeError("stopped-context cleanup success marker missing")
+        scheduler_stop = run("scheduler-stop-race", common + ["--class",
+            "org.apache.spark.sql.connect.nativebridge.engine.SchedulerStopRaceTest",
+            str(tests_jar)])
+        if "SCHEDULER_STOP_RACE_OK" not in scheduler_stop.stdout:
+            raise RuntimeError("scheduler stop race success marker missing")
         # A private JVM temp root lets the check prove extracted library cleanup at exit.
         native_temp = build / "native-temp"
         native_temp.mkdir()

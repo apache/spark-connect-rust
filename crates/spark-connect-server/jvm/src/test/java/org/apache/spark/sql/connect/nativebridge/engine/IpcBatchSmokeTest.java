@@ -17,6 +17,10 @@
 
 package org.apache.spark.sql.connect.nativebridge.engine;
 
+import static org.apache.spark.sql.connect.nativebridge.engine.TestSupport.field;
+import static org.apache.spark.sql.connect.nativebridge.engine.TestSupport.require;
+import static org.apache.spark.sql.connect.nativebridge.engine.TestSupport.sql;
+
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.DataOutputStream;
@@ -44,11 +48,12 @@ import org.apache.arrow.vector.ipc.ArrowStreamReader;
 import org.apache.spark.SparkException;
 import org.apache.spark.connect.proto.Range;
 import org.apache.spark.connect.proto.Relation;
-import org.apache.spark.connect.proto.SQL;
 import org.apache.spark.scheduler.SparkListener;
 import org.apache.spark.scheduler.SparkListenerJobStart;
 import org.apache.spark.scheduler.SparkListenerTaskStart;
 import org.apache.spark.sql.SparkSession;
+import org.apache.spark.sql.api.java.UDF1;
+import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.util.ArrowUtils$;
 
 /** Spark IPC interoperability, partition order, errors, cancellation and empty nested values. */
@@ -70,7 +75,7 @@ public final class IpcBatchSmokeTest {
         System.out.println("IPC_RESULT_SIZE_SMOKE_OK: result-size abort and session recovery");
         return;
       }
-      resourceErrorMapping();
+      resourceErrorMapping(engine);
       allPartitions(engine);
       wideRowsUseByteEstimate(engine);
       laterPartitionFailure(engine);
@@ -101,10 +106,6 @@ public final class IpcBatchSmokeTest {
       task.close();
       throw failure;
     }
-  }
-
-  private static Relation sql(String value) {
-    return Relation.newBuilder().setSql(SQL.newBuilder().setQuery(value)).build();
   }
 
   private static void config(SparkJvmEngine engine, SparkJvmEngine.Session session,
@@ -150,7 +151,7 @@ public final class IpcBatchSmokeTest {
     }
   }
 
-  private static void resourceErrorMapping() throws Exception {
+  private static void resourceErrorMapping(SparkJvmEngine engine) throws Exception {
     Method engineError = SparkJvmEngine.class.getDeclaredMethod("engineError", Exception.class);
     engineError.setAccessible(true);
     SparkJvmEngine.EngineException original =
@@ -169,14 +170,78 @@ public final class IpcBatchSmokeTest {
     require(mapped.code() == 8 && original.getMessage().equals(mapped.getMessage()),
         "executor serialization or Spark wrapper lost RESOURCE_EXHAUSTED");
     OutOfMemoryException allocation = new OutOfMemoryException("Arrow allocation limit");
+    SparkJvmEngine.EngineException portable = (SparkJvmEngine.EngineException)
+        SparkJvmEngine.executorConversionFailure(new IllegalStateException(allocation));
+    bytes.reset();
+    try (ObjectOutputStream output = new ObjectOutputStream(bytes)) {
+      output.writeObject(portable);
+    }
+    try (ObjectInputStream input = new ObjectInputStream(
+        new ByteArrayInputStream(bytes.toByteArray()))) {
+      SparkJvmEngine.EngineException restored = (SparkJvmEngine.EngineException) input.readObject();
+      require(restored.code() == 8 && restored.getCause() == null
+              && Arrays.equals(restored.getStackTrace(), allocation.getStackTrace()),
+          "portable Arrow allocation failure lost its status or executor stack");
+    }
     mapped = (SparkJvmEngine.EngineException) engineError.invoke(null, allocation);
     require(mapped.code() == 8 && mapped.getCause() == allocation,
         "driver Arrow allocation failure lost RESOURCE_EXHAUSTED");
+    SparkException executorAllocation = new SparkException("executor Arrow allocation failed",
+        new IllegalStateException("task failed", allocation));
+    mapped = (SparkJvmEngine.EngineException) engineError.invoke(null, executorAllocation);
+    require(mapped.code() == 8 && mapped.getCause() == executorAllocation
+            && mapped.getMessage().contains(allocation.getMessage()),
+        "wrapped executor Arrow allocation failure lost RESOURCE_EXHAUSTED or Spark context");
+    executorAllocationFailure(engine);
     try {
       SparkJvmEngine.checkedIpc(new byte[SparkJvmEngine.MAX_IPC_BYTES + 1]);
       throw new AssertionError("executor IPC check accepted a batch over 64 MiB");
     } catch (SparkJvmEngine.EngineException error) {
       require(error.code() == 8, "oversized IPC batch lost RESOURCE_EXHAUSTED");
+    }
+  }
+
+  private static void executorAllocationFailure(SparkJvmEngine engine) throws Exception {
+    try (SparkJvmEngine.Session session = open(engine)) {
+      SparkSession sessionSpark = (SparkSession) field(session, "spark").get(session);
+      String function = "arrow_allocation_failure_" + UUID.randomUUID().toString().replace("-", "");
+      String message = "injected executor Arrow allocation failure";
+      // Throw the allocator's ordinary exception on a real executor without exhausting memory.
+      sessionSpark.udf().register(function, (UDF1<Long, Long>) value -> {
+        throw new OutOfMemoryException(message);
+      }, DataTypes.LongType);
+      try (SparkJvmEngine.Query query = prepare(engine, session,
+          sql("SELECT " + function + "(id) FROM range(0, 1, 1, 1)"))) {
+        SparkJvmEngine.EngineException terminal;
+        try {
+          query.nextIpcBatch();
+          throw new AssertionError("executor Arrow allocation fixture returned IPC");
+        } catch (SparkJvmEngine.EngineException error) {
+          terminal = error;
+          if (error.code() != 8 || !(error.getCause() instanceof SparkException)) {
+            throw new AssertionError(
+                "real executor Arrow allocation lost RESOURCE_EXHAUSTED or its Spark wrapper: code="
+                    + error.code() + ", outer cause="
+                    + (error.getCause() == null ? "null" : error.getCause().getClass().getName())
+                    + ", mapped=" + error, error);
+          }
+          Throwable cause = error.getCause();
+          while (cause != null && !(cause instanceof SparkJvmEngine.EngineException)) {
+            cause = cause.getCause();
+          }
+          require(cause instanceof SparkJvmEngine.EngineException resource
+                  && resource.code() == 8 && resource.getCause() == null
+                  && resource.getMessage().contains(message),
+              "real executor allocation fixture lost its transportable resource error: " + error);
+        }
+        try {
+          query.nextIpcBatch();
+          throw new AssertionError("executor Arrow allocation failure became EOF");
+        } catch (SparkJvmEngine.EngineException error) {
+          require(error == terminal, "executor Arrow allocation replaced its terminal failure");
+        }
+      }
+      assertSingle(engine, session, 13);
     }
   }
 
@@ -434,9 +499,5 @@ public final class IpcBatchSmokeTest {
       }
       assertSingle(engine, session, 5);
     }
-  }
-
-  private static void require(boolean value, String message) {
-    if (!value) throw new AssertionError(message);
   }
 }

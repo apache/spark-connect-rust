@@ -17,10 +17,15 @@
 
 package org.apache.spark.sql.connect.nativebridge.engine;
 
+import static org.apache.spark.sql.connect.nativebridge.engine.TestSupport.CheckedAction;
+import static org.apache.spark.sql.connect.nativebridge.engine.TestSupport.cleanup;
+import static org.apache.spark.sql.connect.nativebridge.engine.TestSupport.field;
+import static org.apache.spark.sql.connect.nativebridge.engine.TestSupport.require;
+import static org.apache.spark.sql.connect.nativebridge.engine.TestSupport.sql;
+
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.UncheckedIOException;
-import java.lang.reflect.Field;
 import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -41,9 +46,9 @@ import java.util.function.BooleanSupplier;
 
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.ipc.ArrowStreamReader;
+import org.apache.spark.SparkConf;
 import org.apache.spark.TaskContext;
 import org.apache.spark.connect.proto.Relation;
-import org.apache.spark.connect.proto.SQL;
 import org.apache.spark.scheduler.SparkListener;
 import org.apache.spark.scheduler.SparkListenerEvent;
 import org.apache.spark.scheduler.SparkListenerJobEnd;
@@ -56,7 +61,9 @@ import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.util.ArrowUtils$;
 import org.apache.spark.util.TaskCompletionListener;
 
-/** Real two-slot Spark jobs: ordered parallel results, waiting pulls and shared result limits. */
+import scala.Option;
+
+/** Real two-slot Spark jobs: ordered windowed results, waiting pulls and result limits. */
 public final class NativeEngineSchedulingTest {
   private static final int TIMEOUT_SECONDS = 15;
   private static final String UPSTREAM_ERROR = "native-scheduling-upstream-failure";
@@ -75,9 +82,9 @@ public final class NativeEngineSchedulingTest {
     spark.sparkContext().setLogLevel("ERROR");
     try (SparkJvmEngine engine = new SparkJvmEngine(spark)) {
       if (arguments.length == 1) {
-        combinedResultSize(engine, spark);
-        System.out.println("NATIVE_ENGINE_COMBINED_RESULT_SIZE_OK: individually fitting "
-            + "partitions share one Spark result-size budget; failure drains and session recovers");
+        perPartitionResultSize(engine, spark);
+        System.out.println("NATIVE_ENGINE_PER_PARTITION_RESULT_SIZE_OK: individually fitting "
+            + "partitions keep independent Spark result-size limits in one execution");
       } else {
         laterPartitionCompletesFirst(engine, spark);
         cancelledBeforePull(engine, spark);
@@ -88,11 +95,20 @@ public final class NativeEngineSchedulingTest {
         preInterruptedWaitingPull(engine, spark);
         upstreamFailureWakesPull(engine, spark);
         emptyPartitions(engine);
+        fetchWindows(spark);
+        defaultWindowFollowsScheduler(spark);
+        pausedMultiBatchPartition(spark);
+        skewedPartitionSizes(spark);
+        cancelBeyondWindow(spark);
         require(!spark.sparkContext().isStopped(), "query cleanup stopped the shared context");
-        System.out.println("NATIVE_ENGINE_SCHEDULING_OK: real task overlap, one job/execution, "
+        activeHostStop(engine, spark);
+        System.out.println("NATIVE_ENGINE_SCHEDULING_OK: real task overlap, one execution, "
+            + "slow-start/byte-target/sequential windows, per-query scheduler defaults, "
+            + "paused multi-batch/skewed results, "
+            + "cancellation beyond the window, "
             + "ordered retained IPC, pre-cancel, running/planning cancellation, close wakeup, "
-            + "session/engine close, waiting caller interrupt, upstream failure, empty partitions "
-            + "and session recovery");
+            + "session/engine close, waiting caller interrupt, upstream failure, empty partitions, "
+            + "session recovery and INTERNAL host-stop classification");
       }
     } finally {
       spark.stop();
@@ -126,7 +142,7 @@ public final class NativeEngineSchedulingTest {
       while ((batch = fixture.query.nextIpcBatch()) != null) next = checkValues(batch, next);
       require(next == 8 && fixture.query.nextIpcBatch() == null, "ordered cursor lost rows or EOF");
       require(Arrays.equals(retained.data(), original), "draining later results changed prior IPC");
-      fixture.probe.singleJobAndExecution();
+      fixture.probe.oneExecution(2);
       fixture.query.close();
       assertStopped(fixture.query);
     }
@@ -225,7 +241,7 @@ public final class NativeEngineSchedulingTest {
         assertStopped(fixture.query);
         fixture.exited(0);
         fixture.exited(1);
-        fixture.probe.singleJobAndExecution();
+        fixture.probe.oneExecution(2);
         require(!spark.sparkContext().isStopped(), "owner close stopped the shared context");
         try (SparkJvmEngine.Session peer = open(entireEngine ? engine : owner)) {
           assertRecovery(entireEngine ? engine : owner, peer);
@@ -276,7 +292,45 @@ public final class NativeEngineSchedulingTest {
       NativeIpcBatch batch;
       while ((batch = fixture.query.nextIpcBatch()) != null) next = checkValues(batch, next);
       require(next == 4, "pre-interrupted waiting fetch changed ordered output");
-      fixture.probe.singleJobAndExecution();
+      fixture.probe.oneExecution(2);
+    }
+  }
+
+  /** A real scheduler shutdown keeps its failure classified as INTERNAL after a parked drain. */
+  private static void activeHostStop(SparkJvmEngine engine, SparkSession spark) throws Exception {
+    try (GatedQuery fixture = new GatedQuery(engine, spark, 2, false, false, -1)) {
+      Pull pending = fixture.pull();
+      fixture.entered(0);
+      fixture.entered(1);
+      pending.waiting();
+      Thread worker = (Thread) field(fixture.query, "worker").get(fixture.query);
+      await(() -> worker.getState() == Thread.State.TIMED_WAITING
+              && Arrays.stream(worker.getStackTrace()).anyMatch(frame ->
+                  frame.getClassName().equals(SparkJvmEngine.Query.class.getName())
+                      && frame.getMethodName().equals("runJobs")),
+          "active query did not park while draining its submitted jobs");
+      require(fixture.query.submittedPartitions() == 2,
+          "active host-stop probe did not submit both gated partitions");
+      fixture.workers.submit(() -> spark.sparkContext().stop())
+          .get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+      // A stopped local scheduler can fail its futures before executor code exits.
+      // Release the test-owned file gates so those task listeners can finish too.
+      fixture.allow(0);
+      fixture.allow(1);
+      SparkJvmEngine.EngineException failure = expectCode(13, pending::get);
+      Throwable schedulerFailure;
+      synchronized (field(fixture.query, "results").get(fixture.query)) {
+        schedulerFailure = (Throwable) field(fixture.query, "jobFailure").get(fixture.query);
+      }
+      require(schedulerFailure != null && failure.getCause() == schedulerFailure
+              && failure.getMessage() != null
+              && failure.getMessage().equals(schedulerFailure.getMessage()),
+          "active host stop lost the scheduler's primary failure: " + failure);
+      fixture.query.close();
+      assertStopped(fixture.query);
+      fixture.exited(0);
+      fixture.exited(1);
+      fixture.probe.drained();
     }
   }
 
@@ -297,10 +351,228 @@ public final class NativeEngineSchedulingTest {
     }
   }
 
-  private static void combinedResultSize(SparkJvmEngine engine, SparkSession spark)
+  /** Eight one-batch partitions: partitions submitted when each one is delivered. */
+  private static void expectWindow(SparkSession spark, int maxConcurrent, long maxBytes,
+      int[] submittedAtPartition) throws Exception {
+    try (SparkJvmEngine engine = new SparkJvmEngine(spark, maxConcurrent, maxBytes)) {
+      expectWindow(engine, spark, maxConcurrent, maxBytes, submittedAtPartition);
+    }
+  }
+
+  private static void expectWindow(SparkJvmEngine engine, SparkSession spark,
+      int maxConcurrent, long maxBytes, int[] submittedAtPartition) throws Exception {
+    String description = "fetch window " + UUID.randomUUID();
+    try (SparkJvmEngine.Session session = open(engine);
+         Jobs probe = new Jobs(spark, description);
+         SparkJvmEngine.Task task = engine.newTask(description);
+         SparkJvmEngine.Query query = session.prepare(
+             sql("SELECT id FROM range(0, 80, 1, 8)").toByteArray(), task)) {
+      long next = 0;
+      for (int partition = 0; partition < 8; partition++) {
+        NativeIpcBatch batch = query.nextIpcBatch();
+        require(batch != null && batch.rowCount() == 10, "partition was not one complete batch");
+        // Delivering this batch has not advanced the cursor past its partition yet, so the
+        // window still counts it. Wait for the worker to fill the remaining allowed slots.
+        if (partition < submittedAtPartition.length) {
+          int expected = submittedAtPartition[partition];
+          // A fast first result can reveal its oversized partition before the second
+          // admission. Either initial count is valid; later byte-limited counts are exact.
+          int minimum = partition == 0 && batch.data().length > maxBytes ? 1 : expected;
+          await(() -> query.submittedPartitions() >= minimum, "window " + maxConcurrent + "/"
+              + maxBytes + " did not reach " + minimum + " partitions at " + partition);
+          awaitProducerIdle(query);
+          int submitted = query.submittedPartitions();
+          require(submitted >= minimum && submitted <= expected, "window " + maxConcurrent + "/"
+              + maxBytes + " had " + submitted + " partitions at " + partition);
+        }
+        next = checkValues(batch, next);
+      }
+      require(query.nextIpcBatch() == null && next == 80, "windowed fetch lost rows or EOF");
+      probe.oneExecution(8);
+    }
+  }
+
+  private static void awaitProducerIdle(SparkJvmEngine.Query query) throws Exception {
+    Thread worker = (Thread) field(query, "worker").get(query);
+    Object results = field(query, "results").get(query);
+    await(() -> {
+      synchronized (results) {
+        try {
+          return field(query, "workerFinished").getBoolean(query)
+              || worker.getState() == Thread.State.TIMED_WAITING
+                  && Arrays.stream(worker.getStackTrace()).anyMatch(frame ->
+                      frame.getClassName().equals(SparkJvmEngine.Query.class.getName())
+                          && frame.getMethodName().equals("runJobs"));
+        } catch (ReflectiveOperationException error) {
+          throw new AssertionError(error);
+        }
+      }
+    }, "producer did not finish or park at its admission window");
+  }
+
+  private static void fetchWindows(SparkSession spark) throws Exception {
+    // Slow start admits up to two partitions before sizes are known, then doubles per delivery.
+    expectWindow(spark, 4, Long.MAX_VALUE, new int[] {2, 5, 6, 7, 8});
+    // A partition larger than the byte budget falls back to one job at a time.
+    expectWindow(spark, 4, 1, new int[] {2, 2, 3, 4});
+    // A window of one is the sequential fetch.
+    expectWindow(spark, 1, Long.MAX_VALUE, new int[] {1, 2, 3});
+  }
+
+  /** Nonpositive limits resolve the current scheduler default for each query, not at startup. */
+  private static void defaultWindowFollowsScheduler(SparkSession spark) throws Exception {
+    String key = "spark.default.parallelism";
+    // getConf() clones; use the host configuration read by the pinned local scheduler.
+    SparkConf host = spark.sparkContext().conf();
+    Option<String> previous = host.getOption(key);
+    try {
+      for (int configured : new int[] {0, -1}) {
+        host.set(key, "1");
+        require(spark.sparkContext().defaultParallelism() == 1,
+            "scheduler fixture did not start with parallelism one");
+        try (SparkJvmEngine engine = new SparkJvmEngine(spark, configured, Long.MAX_VALUE)) {
+          host.set(key, "4");
+          require(spark.sparkContext().defaultParallelism() == 4,
+              "scheduler fixture did not observe the increased host default");
+          expectWindow(engine, spark, configured, Long.MAX_VALUE, new int[] {2, 5, 6, 7, 8});
+          host.set(key, "1");
+          require(spark.sparkContext().defaultParallelism() == 1,
+              "scheduler fixture did not observe the decreased host default");
+          expectWindow(engine, spark, configured, Long.MAX_VALUE, new int[] {1, 2, 3});
+        }
+      }
+    } finally {
+      if (previous.isDefined()) host.set(key, previous.get());
+      else host.remove(key);
+    }
+  }
+
+  /** A partially delivered partition still occupies its window slot while the client pauses. */
+  private static void pausedMultiBatchPartition(SparkSession spark) throws Exception {
+    String description = "paused multi-batch window " + UUID.randomUUID();
+    try (SparkJvmEngine engine = new SparkJvmEngine(spark, 2, Long.MAX_VALUE);
+         SparkJvmEngine.Session session = open(engine);
+         Jobs probe = new Jobs(spark, description);
+         SparkJvmEngine.Task task = engine.newTask(description)) {
+      SparkSession sessionSpark = (SparkSession) field(session, "spark").get(session);
+      sessionSpark.conf().set("spark.sql.execution.arrow.maxRecordsPerBatch", "10");
+      try (SparkJvmEngine.Query query = session.prepare(
+          sql("SELECT id FROM range(0, 800, 1, 8)").toByteArray(), task)) {
+        long next = checkValues(query.nextIpcBatch(), 0);
+        await(() -> query.submittedPartitions() >= 2, "initial window did not fill");
+        await(() -> probe.jobIds.size() >= 2, "initial partition jobs did not start");
+        probe.drained();
+        Thread worker = (Thread) field(query, "worker").get(query);
+        await(() -> worker.getState() == Thread.State.TIMED_WAITING
+                && Arrays.stream(worker.getStackTrace()).anyMatch(frame ->
+                    frame.getClassName().equals(SparkJvmEngine.Query.class.getName())
+                        && frame.getMethodName().equals("runJobs")),
+            "producer did not pause at its admission window");
+        require(query.submittedPartitions() == 2,
+            "paused consumer admitted more than two partitions");
+        probe.executionOpen();
+        while (next < 100) {
+          next = checkValues(query.nextIpcBatch(), next);
+          require(query.submittedPartitions() == 2,
+              "partially delivered partition stopped counting toward the window");
+        }
+        NativeIpcBatch batch;
+        while ((batch = query.nextIpcBatch()) != null) next = checkValues(batch, next);
+        require(next == 800, "paused multi-batch window changed output");
+        probe.oneExecution(8);
+      }
+    }
+  }
+
+  /** An oversized later partition can exceed the byte target without breaking ordered drain. */
+  private static void skewedPartitionSizes(SparkSession spark) throws Exception {
+    String description = "skewed partition window " + UUID.randomUUID();
+    try (SparkJvmEngine engine = new SparkJvmEngine(spark, 4, 8192);
+         SparkJvmEngine.Session session = open(engine);
+         Jobs probe = new Jobs(spark, description);
+         SparkJvmEngine.Task task = engine.newTask(description);
+         SparkJvmEngine.Query query = session.prepare(sql(
+             "SELECT id, repeat('x', CASE WHEN id BETWEEN 20 AND 29 THEN 8192 ELSE 1 END) "
+                 + "AS payload FROM range(0, 80, 1, 8)").toByteArray(), task)) {
+      long next = 0;
+      int shrinkAt = -1;
+      NativeIpcBatch batch;
+      while ((batch = query.nextIpcBatch()) != null) {
+        int partition = (int) (next / 10);
+        if (partition == 2) {
+          awaitProducerIdle(query);
+          shrinkAt = query.submittedPartitions() - 1;
+        }
+        if (shrinkAt >= 0 && partition >= shrinkAt) {
+          // Drain admissions made before the heavy result's size was known. After the
+          // last of those, the observed 80 KiB partition limits fetch to one at a time.
+          awaitProducerIdle(query);
+          require(query.submittedPartitions() - partition == 1,
+              "heavy partition did not reduce later admission to one partition");
+        }
+        require(query.submittedPartitions() - partition <= 4,
+            "skewed result exceeded the partition admission bound");
+        try (BufferAllocator allocator = ArrowUtils$.MODULE$.rootAllocator()
+                .newChildAllocator("skewed-window-test", 0, Long.MAX_VALUE);
+             ArrowStreamReader reader = new ArrowStreamReader(
+                 new ByteArrayInputStream(batch.data()), allocator)) {
+          require(reader.loadNextBatch(), "skewed IPC omitted its record batch");
+          var root = reader.getVectorSchemaRoot();
+          require(root.getRowCount() == batch.rowCount(), "skewed IPC row count changed");
+          for (int row = 0; row < root.getRowCount(); row++) {
+            require(((Number) root.getVector(0).getObject(row)).longValue() == next,
+                "skewed result lost, duplicated or reordered a row");
+            int length = next >= 20 && next < 30 ? 8192 : 1;
+            require(root.getVector(1).getObject(row).toString().equals("x".repeat(length)),
+                "skewed result changed its payload");
+            next++;
+          }
+          require(!reader.loadNextBatch(), "skewed IPC contains multiple record batches");
+        }
+      }
+      require(next == 80, "skewed window changed the row count");
+      probe.oneExecution(8);
+    }
+  }
+
+  /** Cancelling mid-window drains the submitted jobs and never starts the remaining ones. */
+  private static void cancelBeyondWindow(SparkSession spark) throws Exception {
+    String description = "cancel beyond window " + UUID.randomUUID();
+    ExecutorService workers = Executors.newSingleThreadExecutor();
+    try (SparkJvmEngine engine = new SparkJvmEngine(spark, 2, Long.MAX_VALUE);
+         SparkJvmEngine.Session session = open(engine);
+         Jobs probe = new Jobs(spark, description)) {
+      SparkJvmEngine.Task task = engine.newTask(description);
+      SparkJvmEngine.Query query = session.prepare(
+          sql("SELECT id FROM range(0, 1000000000000, 1, 4)").toByteArray(), task);
+      Future<NativeIpcBatch> pending = workers.submit(query::nextIpcBatch);
+      await(() -> probe.jobIds.size() == 2, "window of two did not start two jobs");
+      require(query.submittedPartitions() == 2, "window of two submitted another partition");
+      query.close();
+      assertStopped(query);
+      try {
+        pending.get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        throw new AssertionError("closed query produced a partition");
+      } catch (ExecutionException error) {
+        require(error.getCause() instanceof SparkJvmEngine.EngineException
+            && ((SparkJvmEngine.EngineException) error.getCause()).code() == 1,
+            "closed windowed fetch lost CANCELLED status: " + error.getCause());
+      }
+      probe.drained();
+      require(probe.jobIds.size() == 2 && query.submittedPartitions() == 2,
+          "closed query submitted a partition beyond its window");
+      assertRecovery(engine, session);
+    } finally {
+      workers.shutdownNow();
+      require(workers.awaitTermination(TIMEOUT_SECONDS, TimeUnit.SECONDS),
+          "cancelled fetch did not stop");
+    }
+  }
+
+  private static void perPartitionResultSize(SparkJvmEngine engine, SparkSession spark)
       throws Exception {
     require(spark.sparkContext().getConf().getSizeAsBytes("spark.driver.maxResultSize")
-        == 1024 * 1024, "combined result-size mode requires spark.driver.maxResultSize=1m");
+        == 1024 * 1024, "per-partition result-size mode requires spark.driver.maxResultSize=1m");
     try (SparkJvmEngine.Session session = open(engine)) {
       // Each partition is about 0.8 MiB of IPC, so neither alone exceeds the limit.
       try (SparkJvmEngine.Task task = engine.newTask("single result-size control");
@@ -311,28 +583,17 @@ public final class NativeEngineSchedulingTest {
         while ((batch = query.nextIpcBatch()) != null) next = checkValues(batch, next);
         require(next == 100000, "individually fitting partition control failed");
       }
-      String description = "combined result-size " + UUID.randomUUID();
+      String description = "per-partition result-size " + UUID.randomUUID();
       try (Jobs probe = new Jobs(spark, description);
            SparkJvmEngine.Task task = engine.newTask(description);
            SparkJvmEngine.Query query = session.prepare(
                sql("SELECT id FROM range(0, 200000, 1, 2)").toByteArray(), task)) {
         long next = 0;
-        SparkJvmEngine.EngineException failure;
-        try {
-          NativeIpcBatch batch;
-          while ((batch = query.nextIpcBatch()) != null) next = checkValues(batch, next);
-          throw new AssertionError("combined partitions bypassed the 1 MiB job result-size limit");
-        } catch (SparkJvmEngine.EngineException error) {
-          failure = error;
-        }
-        require(failure.code() == 13 && failure.getMessage() != null
-                && (failure.getMessage().contains("maxResultSize")
-                    || failure.getMessage().contains("serialized results")),
-            "combined result-size fixture failed for a different reason: " + failure);
-        require(next <= 100000, "result-size abort exposed the rejected partition");
-        require(expectCode(13, query::nextIpcBatch) == failure,
-            "result-size failure was not sticky");
-        probe.singleJobAndExecution();
+        NativeIpcBatch batch;
+        while ((batch = query.nextIpcBatch()) != null) next = checkValues(batch, next);
+        // Each partition is its own job, so the limit applies to each and not to their sum.
+        require(next == 200000, "individually fitting partitions shared one result-size limit");
+        probe.oneExecution(2);
       }
       assertRecovery(engine, session);
     }
@@ -342,10 +603,6 @@ public final class NativeEngineSchedulingTest {
     try (SparkJvmEngine.Task task = engine.newTask("scheduling session open")) {
       return engine.openSession("scheduling-test", UUID.randomUUID().toString(), task);
     }
-  }
-
-  private static Relation sql(String text) {
-    return Relation.newBuilder().setSql(SQL.newBuilder().setQuery(text)).build();
   }
 
   private static long checkValues(NativeIpcBatch batch, long next) throws Exception {
@@ -380,12 +637,6 @@ public final class NativeEngineSchedulingTest {
     require(worker == null || !worker.isAlive(), "closed cursor retained a live worker");
     require(field(query, "partitionBatches").get(query) == null,
         "closed cursor retained pending partition results");
-  }
-
-  private static Field field(Object owner, String name) throws ReflectiveOperationException {
-    Field field = owner.getClass().getDeclaredField(name);
-    field.setAccessible(true);
-    return field;
   }
 
   /** File gates work across Spark's driver and task class loaders without shared static state. */
@@ -466,8 +717,7 @@ public final class NativeEngineSchedulingTest {
       await(() -> {
         Thread thread = caller.get();
         if (thread == null || future.isDone()) return false;
-        if (thread.getState() != Thread.State.WAITING
-            && thread.getState() != Thread.State.TIMED_WAITING) return false;
+        if (thread.getState() != Thread.State.WAITING) return false;
         return Arrays.stream(thread.getStackTrace()).anyMatch(frame ->
             frame.getClassName().equals(SparkJvmEngine.Query.class.getName())
                 && frame.getMethodName().equals("nextIpcBatch"));
@@ -608,9 +858,9 @@ public final class NativeEngineSchedulingTest {
           "SQL execution ended while the first partition was still running");
     }
 
-    private void singleJobAndExecution() throws Exception {
+    private void oneExecution(int jobs) throws Exception {
       executionEnded();
-      require(jobIds.size() == 1, "parallel result used more than one Spark job");
+      require(jobIds.size() == jobs, "windowed result used " + jobIds.size() + " Spark jobs");
     }
 
     private void executionEnded() throws Exception {
@@ -625,17 +875,6 @@ public final class NativeEngineSchedulingTest {
 
     @Override
     public void close() { spark.sparkContext().removeSparkListener(this); }
-  }
-
-  @FunctionalInterface
-  private interface CheckedAction { void run() throws Exception; }
-
-  private static Throwable cleanup(Throwable original, CheckedAction action) {
-    try { action.run(); } catch (Throwable error) {
-      if (original == null) return error;
-      if (error != original) original.addSuppressed(error);
-    }
-    return original;
   }
 
   private static SparkJvmEngine.EngineException expectCode(int code, CheckedAction action)
@@ -655,9 +894,5 @@ public final class NativeEngineSchedulingTest {
       require(System.nanoTime() < deadline, message);
       Thread.sleep(5);
     }
-  }
-
-  private static void require(boolean value, String message) {
-    if (!value) throw new AssertionError(message);
   }
 }

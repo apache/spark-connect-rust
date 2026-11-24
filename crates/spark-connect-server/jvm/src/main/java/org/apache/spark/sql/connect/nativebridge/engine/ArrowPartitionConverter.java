@@ -48,17 +48,31 @@ final class ArrowPartitionConverter
 
   @Override
   public Iterator<Tuple2<byte[], Long>> apply(Iterator<InternalRow> rows) {
-    var batches =
-        ArrowConverters$.MODULE$.toBatchWithSchemaIterator(rows, schema, maxRows,
-            MAX_ESTIMATED_BATCH_BYTES, timeZone, false, largeVarTypes);
-    return new AbstractIterator<Tuple2<byte[], Long>>() {
-      @Override
-      public boolean hasNext() { return batches.hasNext(); }
-      @Override
-      public Tuple2<byte[], Long> next() {
-        byte[] data = SparkJvmEngine.checkedIpc(batches.next());
-        return new Tuple2<>(data, batches.rowCountInLastBatch());
-      }
-    };
+    try {
+      var batches =
+          ArrowConverters$.MODULE$.toBatchWithSchemaIterator(rows, schema, maxRows,
+              MAX_ESTIMATED_BATCH_BYTES, timeZone, false, largeVarTypes);
+      return new AbstractIterator<Tuple2<byte[], Long>>() {
+        @Override
+        public boolean hasNext() {
+          try {
+            return batches.hasNext();
+          } catch (Exception error) {
+            throw SparkJvmEngine.executorConversionFailure(error);
+          }
+        }
+        @Override
+        public Tuple2<byte[], Long> next() {
+          try {
+            byte[] data = SparkJvmEngine.checkedIpc(batches.next());
+            return new Tuple2<>(data, batches.rowCountInLastBatch());
+          } catch (Exception error) {
+            throw SparkJvmEngine.executorConversionFailure(error);
+          }
+        }
+      };
+    } catch (Exception error) {
+      throw SparkJvmEngine.executorConversionFailure(error);
+    }
   }
 }

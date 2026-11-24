@@ -49,7 +49,7 @@ listener on loopback and read the [security policy](../../SECURITY.md) before us
 The frontend and JNI adapter passed local checks on macOS ARM64, including the
 selected-runtime acceptance described under [Validation](#validation). The
 historical performance measurements below have not been reproduced with the
-current result-framing frontend.
+current scheduling and result-framing paths.
 
 The workspace currently tracks the Spark 4.3.0 protocol; its pin is recorded in
 [PROTO_VERSION.txt](../spark-connect-proto/proto/PROTO_VERSION.txt). The JNI
@@ -281,11 +281,23 @@ retry after attachment recovers. Worker detachment must run on the owning OS
 thread. A detach failure that persists through its bounded same-thread retry
 retains the attachment and makes shutdown fail; a later close on another thread
 cannot release it. Restart the hosting JVM to recover. A Java cleanup exception
-can occur after Spark or Arrow has released only part of a resource. Such failures
-retain their owners and the original error until JVM exit. Repeated `close()` calls
-report that error without replaying potentially non-idempotent cleanup or claiming
-a successful drain. Restart the hosting JVM to recover from a persistent cleanup
-failure.
+from cancellation or worker drain can be retried by a later close. Cancellation
+also handles a SparkContext that stops before or during scheduler cancellation.
+If Spark discards a queued submission during shutdown without completing its
+future, the adapter waits until the owning scheduler has fully stopped, then
+reports failure without inventing action completion.
+For the pinned Spark assembly, artifact cleanup uses the owning context's file
+server if Spark's Cleaner fails during or after host shutdown; it then finishes
+the session's cache and classloader cleanup once.
+An exception from actual Spark or Arrow resource teardown can follow partial,
+nonrepeatable cleanup. Such failures retain their owners and the original error;
+later closes report that error without replaying the teardown. Restart the hosting
+JVM to recover from a persistent resource-cleanup failure.
+
+Direct Java callers allocate one `SparkJvmEngine.Task` per operation. Query
+preparation and its subsequent fetches share that query's task; completed session
+opening, analysis, configuration and query tasks cannot be reused for another
+operation and fail with `FAILED_PRECONDITION`. Closing a task remains idempotent.
 
 ## Bundle native libraries in JARs
 
@@ -440,13 +452,19 @@ Common unsupported client calls include `df.show()`, `df.printSchema()`,
 `df.explain()`, `spark.version`, `df.describe()`, `df.summary()`, `df.sample()`,
 `df.na.*`, `df.unpivot()`, `spark.read.parquet()` and `df.cache()`.
 
-Configuration is session scoped. Preparation captures analysis and Arrow
-metadata, while physical planning starts on the first fetch. These stages do
-not share a transactional configuration snapshot; a concurrent configuration
-change can affect later physical planning. Config reads apply the hosting
-SparkContext's `spark.redaction.regex` to keys and values; a session setting with
-the same name does not replace that policy. This follows newer Spark Config
-redaction behavior, which is absent from the pinned Spark 4.2 smoke-test assembly.
+Configuration is session scoped. Preparation captures the analyzed schema and
+Arrow conversion settings, including time zone and the maximum records per batch;
+later Config changes do not change those prepared Arrow settings. Physical
+planning starts on the first fetch and otherwise uses live configuration. These
+stages do not share a transactional configuration snapshot, so a concurrent
+configuration change can affect later physical planning.
+
+Config reads apply the hosting SparkContext's `spark.redaction.regex` to keys and
+values; a session setting with the same name does not replace that policy. This
+filters Config RPC responses only. SQL retains the hosting process's permissions
+and configuration access; Config redaction does not establish a confidentiality
+boundary for trusted SQL clients. The Config filtering follows newer Spark
+behavior, which is absent from the pinned Spark 4.2 smoke-test assembly.
 
 Silent Config Set applies keys sequentially and is not atomic across keys.
 Earlier successful writes remain applied if a later key encounters cancellation,
@@ -454,14 +472,27 @@ an admission timeout or another operation-level failure. All keys share the
 original RPC's admission deadline; a long list does not reset that budget.
 
 The first fetch starts one daemon execution worker for the query. It opens one
-Spark SQL execution and submits all output partitions as one result job.
-Partitions can execute concurrently; the cursor returns their batches in
-partition order. The execution scope stays open until the job finishes. Closing
-the cursor cancels the job and waits for its worker to exit before releasing the
-plan. Initializing a zero-partition plan also creates one execution.
-Shuffle-file cleanup remains unsupported pending validation: prepare and analysis
-reject `spark.sql.classic.shuffleDependency.fileCleanup.enabled=true` with
-`UNIMPLEMENTED`, including when the hosting engine inherits that setting.
+Spark SQL execution and session scope, then submits one result job per admitted
+partition through a bounded window. Partitions can execute concurrently; the
+cursor returns their batches in partition order. The execution scope spans
+partition admission and stays open until submitted work finishes or the owning
+scheduler has fully shut down. If the host stops SparkContext before every
+partition has finished, the query fails with `INTERNAL` and discards unread
+buffered output. A complete successful result can still drain after the host
+stops, provided its remaining execution-scope cleanup also succeeds.
+Closing the cursor stops admission, cancels its work and waits for the worker
+before releasing the plan. Initializing a zero-partition plan also creates one
+execution. See the host
+[fetch-window settings](#resource-and-protocol-limits) below.
+
+Shuffle-file cleanup remains unsupported pending validation. Config Set rejects
+`spark.sql.classic.shuffleDependency.fileCleanup.enabled=true` with `UNIMPLEMENTED`
+and rolls back that mutation batch. SilentSet restores the rejected value and
+returns a sanitized warning. Unset is also rejected and rolled back if it would
+restore a default of `true`. Prepare and analysis reject an inherited unsupported
+value. The pinned Spark version captures the shuffle-cleanup mode when preparing
+the query; later configuration changes do not change that prepared mode. Other
+physical-planning configuration can still change before the first fetch.
 
 `SPARK_TESTING` or `spark.testing` can make Spark default this setting to `true`.
 In test environments, explicitly set
@@ -500,9 +531,10 @@ retried automatically. Failed cancellation delivery retains its task handle and
 task admission even if the query later closes successfully. That capacity stays
 unavailable until an explicit `NativeEngineServer.close()` retries the failure
 while stopping the server, or the hosting JVM restarts. A transient JNI
-attachment failure can recover during that close. A persistent worker
-detach failure or a partial Java cleanup failure remains retained until the
-hosting JVM restarts.
+attachment or Java cancellation/drain failure can recover during that close.
+Only failures from nonrepeatable Spark/Arrow resource teardown remain recorded
+without replaying that teardown. A persistent worker detach failure or such a
+partial resource-cleanup failure remains retained until the hosting JVM restarts.
 
 Deferred session closes run serially on one process-wide cleanup lane shared by
 all embedded engines using the native library. A slow or blocked session close
@@ -555,28 +587,50 @@ IPC schema and preserves the existing IPC bytes, including compressed buffers,
 whether it sends a complete batch or negotiated byte chunks. It does not decode,
 decompress or re-encode producer IPC to split responses.
 
+The host's SparkConf supplies these fetch settings when constructing the engine;
+Config RPC changes do not override them. An unset or nonpositive partition limit
+uses the scheduler's default when each query starts fetching:
+
+| Host setting | Default | Effect |
+| --- | --- | --- |
+| `spark.connect.native.fetch.maxConcurrentPartitions` | Scheduler `defaultParallelism` at query execution | Maximum number of partitions running or buffered, including the partition being delivered; a nonpositive value uses the scheduler default. |
+| `spark.connect.native.fetch.maxBufferedBytes` | One eighth of the maximum driver JVM heap | Target for undelivered IPC payload bytes; accepts Spark byte-size units and is clamped to at least one byte. |
+
+The window starts at the smaller of two partitions and the concurrency maximum,
+then doubles after delivered partitions while that maximum and the byte estimate
+allow. It estimates future partition sizes from the largest partition observed
+so far. The partition-count maximum is strict; the byte target is approximate.
+Already admitted jobs can finish while a client is paused, and a new or skewed
+partition can exceed the estimate. At least one partition is always admitted.
+The producer materializes a whole partition, so a single partition's output
+remains unbounded by the fetch-byte target. Concurrent queries have independent
+targets, not a shared memory reservation or process-wide quota.
+
 With the default `spark.sql.execution.arrow.compression.codec=none`, partition
 transfer uses uncompressed Arrow IPC. Nondefault executor/JNI codec
 interoperability remains unvalidated. Network volume and the driver heap needed
 for partition output can exceed Spark's compressed UnsafeRow transfer. A slow
-client or an unfinished earlier partition can leave all completed output,
-including the entire query result, buffered on the driver heap. Spark applies
-`spark.driver.maxResultSize` to the combined serialized results of the job; this
-does not bound retained heap or total query memory. A job can exceed that limit
-even when compressed rows would fit; result-size aborts are reported as
-`INTERNAL`. Batch bounds do not bound one materialized partition's output.
+client or an unfinished earlier partition retains the admitted partitions'
+completed output on the driver; the window stops further admission when full.
+Spark applies `spark.driver.maxResultSize` separately to each partition's result
+job, not to the combined query result. It does not bound retained heap or total
+query memory. A partition can exceed that limit even when compressed rows would
+fit; result-size aborts are reported as `INTERNAL`. Batch bounds do not bound one
+materialized partition's output.
 
 Arrow conversion uses Spark's allocator and cleanup behavior. Its off-heap
 allocations require executor memory overhead, and Spark can retry conversion
-failures according to `spark.task.maxFailures`. Executor Arrow allocation
-failures are reported as `INTERNAL`, matching the JVM Connect server; the native
-IPC size check reports `RESOURCE_EXHAUSTED`.
+failures according to `spark.task.maxFailures`. Arrow `OutOfMemoryException`
+on the driver or in an executor failure's cause chain is reported as
+`RESOURCE_EXHAUSTED`, including failures from upstream operators and UDFs, as
+are native IPC size-check failures. Other executor conversion failures remain
+`INTERNAL`.
 
 ## Historical performance observations
 
-These historical measurements used an earlier prototype revision with a
-different result-framing frontend. They have not been reproduced with the
-current byte-chunking path and do not establish its performance.
+These historical measurements used an earlier prototype revision with different
+scheduling and result framing. They have not been reproduced with the current
+windowed scheduling and byte-chunking paths and do not establish their performance.
 
 A November 17, 2026 comparison used native revision
 `23b2eb6538b355987341b385cdfccc3222669e4b`, including the direct Java-array-to-Rust
@@ -697,9 +751,11 @@ crates/spark-connect-server/jvm/test-engine.sh \
 ```
 
 This compiles Java tests and checks direct planning, IPC batch transfer,
-all-partition scheduling and ordered delivery, native lifecycle, and
-cleanup-failure retention with `-Xcheck:jni`, then runs official PySpark and raw
-gRPC acceptance against `EmbeddedSparkEngine`. It checks JVM listener ownership,
+windowed partition scheduling and ordered delivery, configuration consistency
+under both cleanup defaults, native lifecycle, stopped-context resource cleanup,
+global environment ownership, submission/shutdown races, and cleanup-failure
+retention with `-Xcheck:jni`, then runs official PySpark and raw gRPC acceptance
+against `EmbeddedSparkEngine`. It checks JVM listener ownership,
 shutdown and listener closure. The Python interpreter must have a compatible
 official PySpark Connect client, gRPC and PyArrow installed. Listener checks
 prefer `lsof` when it is installed and otherwise use Linux `/proc`; macOS requires
@@ -733,7 +789,7 @@ suite still requires a selected, compatible assembly and local validation. Its
 recorded full run used the separate Arrow input lifecycle repair described under
 build requirements; the CI smoke does not apply that repair.
 
-Local validation on macOS ARM64 used Rust 1.100 and covered the frontend and
+Historical local validation on macOS ARM64 used Rust 1.100 and covered the frontend and
 JNI tests, client release tests and integration-test compilation, acceptance-runner guards,
 license generators and packaging. Rustfmt, workspace Clippy, C bridge checks
 with and without sanitizers, native loader checks and the real JNI smoke also
@@ -743,5 +799,6 @@ The smoke passed on the unmodified pinned snapshot. The optional Rust client
 example and MSRV 1.88 checks were not rerun for this revision; the hosted frontend
 and native CI workflows include Rust 1.88 jobs. These local results do not
 establish Linux or x86-64 compatibility; hosted CI and nondefault executor/JNI
-IPC compression remain separate validation requirements. Performance was not
-remeasured.
+IPC compression remain separate validation requirements. These historical results
+predate the windowed-scheduling and Java lifecycle follow-up and do not validate
+that patch or establish performance or GC improvements.
