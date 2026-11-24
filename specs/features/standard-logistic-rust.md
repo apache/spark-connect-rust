@@ -9,6 +9,7 @@ created: 2026-11-19
 
 Make the standard Python LogisticRegression API use the existing Rust ML operations.
 Demonstrate the migration with one estimator, its model, and its summaries in a draft PR.
+Reuse the Rust ML implementation without adding Python runtime dependencies.
 
 ## Context
 
@@ -22,6 +23,10 @@ Rust for fit, transform, model access, and persistence, while retaining Python p
 - R3: Fit, transform, model access, and persistence use the Rust ML implementation.
 - R4: Existing native imports alias the same public classes without replacing registrations.
 - R5: Preserve the upstream classification definitions byte-for-byte and check their provenance.
+- R6: Add no Python runtime dependencies; native operations must work without Python protobuf,
+  gRPC, Py4J, zstandard, scipy, scikit-learn, or torch.
+- R7: Preserve composition with standard Pipeline and CrossValidator APIs. Reused upstream
+  standard ML tests must import our package so they exercise shared Rust ML operations.
 
 ## Clarifications
 
@@ -40,11 +45,19 @@ pyspark.ml.connect public API. Existing fork-specific native imports remain alia
   class is the same object and native factories return that class.
 - AC5: GIVEN the preserved upstream source WHEN checking vendored files THEN its bytes match
   the pinned Spark tag at its original path.
+- AC6: GIVEN a fresh process blocking optional Python dependencies WHEN constructing, copying,
+  fitting, evaluating, transforming, saving, and loading THEN native LogisticRegression works
+  without importing the blocked modules. Package runtime requirements remain unchanged.
+- AC7: GIVEN a standard Pipeline and CrossValidator containing LogisticRegression WHEN fitting,
+  transforming, and saving/loading the pipeline THEN it contains the native model and preserves
+  predictions.
 
 ## Constraints
 
 Keep Python parameter maps authoritative and synchronize before native operations.
 Keep the existing Rust model lifetime and session handling. No new wire format or runtime flag.
+Upstream tests use the drop-in package, not upstream Python with only Rust transport injected.
+Python test dependencies do not become package runtime requirements.
 
 ## Out of Scope
 
@@ -62,10 +75,33 @@ across both import paths. Update the vendor mapping and exercise standard public
 - [x] T1: Add the public adapter, preserve upstream source, and reuse native class registrations.
 - [x] T2: Cover import order, Params, copying, pickling, and subclass dispatch.
 - [x] T3: Exercise native routing, model access, persistence, and lazy model lifetime on a server.
-- [x] T-val: Run acceptance criteria verification and record any unavailable pre-push checks.
+- [x] T4: Add fresh-process dependency guards and standard pipeline/tuning coverage.
+- [x] T5: Merge current master, preserving native parameter synchronization and model finalizers.
+- [x] T6: Fix mapped-vendor lint exclusions, offline coverage selection, and OneVsRest class checks.
+- [ ] T-val: Validate the updated revision with a matching extension and required Rust/parity gates.
 
+### Verification of the November 24 update
 
-## Verification
+- Merged Apache master at `d90a730e79fe216dffa9bb66e6a2eff566530e2f`.
+- Offline API, subclass, and standard-import tests: 884 passed, 68 skipped, including the
+  dependency-blocking subprocess test.
+- Ruff, mapped-vendor Ruff exclusions, coverage-scope guards, and generated type-stub drift
+  checks passed.
+- Runtime dependency declarations are unchanged from master. Relocated upstream classification
+  source is byte-identical to the original vendored source.
+- Local tests used the CI extension from run 45128869973, commit
+  `b6126ae5311ef23cb38842bb1996b60915adec64`, not a build of the updated revision.
+- Live tests could not initialize SparkSession, and three typing/runtime-import checks were
+  blocked by the same mismatch: this older extension lacks the `_DataSource` binding required
+  by current master. The live tests,
+  including the new pipeline/tuning and dependency tests, have not passed on this revision.
+- Cargo/rustc are unavailable locally. Required Rust compilation, fmt, clippy, full-project
+  parity, and coverage gates remain unverified. Keep the PR draft pending matching-build CI.
+
+### Historical validation of the original November 19 draft
+
+These results predate the master merge and do not validate the updated revision.
+
 
 - Offline API, subclass, and standard-import tests: 874 passed, 68 skipped.
 - Live standard LogisticRegression tests and existing golden cases: 4 passed

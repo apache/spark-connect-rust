@@ -42,7 +42,7 @@ fn pyfunc_make_udf(
     args: Vec<Bound<'_, PyAny>>,
     deterministic: bool,
     named_args: Vec<(Bound<'_, pyo3::types::PyString>, Bound<'_, PyAny>)>,
-) -> PyResult<PyColumn> {
+) -> PyResult<crate::column::ColumnOut> {
     // The positional arguments, then the named ones, as PySpark's UDF call.
     let arg_exprs: Vec<Expression> = udf_arguments(args, named_args, false)?
         .into_iter()
@@ -61,7 +61,19 @@ fn pyfunc_make_udf(
         // and pickles them when it builds the plan: a type that the build refuses fails the
         // requests and not this call. The type of the payload stands for it until then.
         Err(_) => PythonUDFPayload::pickled_at_build(
-            crate::types::py_to_data_type(return_type)?,
+            // A struct whose fields hold an element that is not a `StructField`, which the build
+            // reads as PySpark's does (see `crate::types::py_to_proto_data_type`), stands as the
+            // types that stand for its elements until then.
+            {
+                let (lowered, maybe_foreign) = crate::types::lower_noting_subclasses(
+                    return_type,
+                    crate::types::MetadataOf::Strict,
+                );
+                match crate::types::foreign_of_lowering(return_type, maybe_foreign)? {
+                    true => crate::types::lenient_type(return_type)?,
+                    false => lowered?,
+                }
+            },
             eval_type,
             crate::udf_command::udf_pickler(
                 pyo3::types::PyTuple::new(return_type.py(), [command, return_type])?
@@ -76,7 +88,7 @@ fn pyfunc_make_udf(
     let udf_expr =
         CommonInlineUserDefinedFunctionExpression::new(name, deterministic, arg_exprs, python_udf);
 
-    Ok(PyColumn::new(Column::new(
+    Ok(crate::column::ColumnOut::new(Column::new(
         ExpressionNode::CommonInlineUserDefinedFunction(Box::new(udf_expr)).into(),
     )))
 }
@@ -93,8 +105,11 @@ fn udf_arguments(
 ) -> PyResult<Vec<Column>> {
     let argument = |arg: &Bound<'_, PyAny>| -> PyResult<Column> {
         if table_args {
-            if let Ok(table_arg) = arg.extract::<PyRef<'_, crate::tablearg::PyTableArg>>() {
-                return Ok(table_arg.inner.to_column());
+            // As PySpark's, of the `_subquery_expr` of the table argument.
+            if arg.is_instance_of::<crate::tablearg::PyTableArg>() {
+                let expression =
+                    crate::state::attr(arg, pyo3::intern!(arg.py(), "_subquery_expr"))?;
+                return crate::column::expression_value(&expression);
             }
         }
         // As PySpark's `to_expr` of a UDF call: a column name is a ColumnReference of it,
@@ -152,7 +167,7 @@ fn pyfunc_make_udtf(
     args: Vec<Bound<'_, PyAny>>,
     deterministic: bool,
     named_args: Vec<(Bound<'_, pyo3::types::PyString>, Bound<'_, PyAny>)>,
-) -> PyResult<PyDataFrame> {
+) -> PyResult<crate::dataframe::NewDataFrame> {
     let py = session.py();
     let col_args = udf_arguments(args, named_args, true)?;
     let command = crate::udf_command::UdfCommand::of(command);
@@ -311,7 +326,7 @@ fn exact_primitive_literal(obj: &Bound<'_, PyAny>) -> PyResult<Option<Expression
 pub fn to_column(obj: &Bound<'_, PyAny>) -> PyResult<Column> {
     // Try to get as PyColumn first
     if let Ok(col) = obj.extract::<Bound<'_, PyColumn>>() {
-        return Ok(col.borrow().column.clone());
+        return crate::column::column_of(&col);
     }
     if let Some(lit) = exact_primitive_literal(obj)? {
         return Ok(Column::new(lit));
@@ -327,16 +342,17 @@ pub fn to_column(obj: &Bound<'_, PyAny>) -> PyResult<Column> {
     }
 
     // A list, or a one-dimensional NumPy array, is an array, as PySpark's functions take a
-    // value with `lit`: `pyspark.sql.functions.lit` builds it. Another NumPy array is not a
-    // literal value; NumPy would convert one of a single element to a scalar below.
+    // value with `lit`: the `lit` of `pyspark.sql.connect.functions.builtin` builds it, as
+    // PySpark Connect's functions call their module's. Another NumPy array is not a literal
+    // value; NumPy would convert one of a single element to a scalar below.
     let ndarray = numpy_ndarray_ndim(obj)?;
     if obj.is_instance_of::<pyo3::types::PyList>() || ndarray == Some(1) {
         let column = obj
             .py()
-            .import("pyspark.sql.functions")?
+            .import("pyspark.sql.connect.functions.builtin")?
             .getattr("lit")?
             .call1((obj,))?;
-        return Ok(column.extract::<PyRef<'_, PyColumn>>()?.column.clone());
+        return crate::column::column_of(column.cast::<PyColumn>()?);
     }
     if ndarray.is_some() {
         return Err(crate::column::raise_pyspark(
@@ -1032,42 +1048,46 @@ fn scalar_literal(obj: &Bound<'_, PyAny>) -> PyResult<Option<LiteralExpression>>
 
 /// `F.col(name)`, as PySpark Connect's ([`crate::plan_args::col`]).
 #[pyfunction]
-fn pyfunc_col(name: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
+fn pyfunc_col(name: &Bound<'_, PyAny>) -> PyResult<crate::column::ColumnOut> {
     // As PySpark's `col`, of `_with_origin`.
     let _origin = crate::origin::with_origin("col")?;
-    Ok(PyColumn::new(crate::plan_args::col(name)?))
+    Ok(crate::column::ColumnOut::new(crate::plan_args::col(name)?))
 }
 
 #[pyfunction]
-fn pyfunc_lit(_py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
+fn pyfunc_lit(_py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<crate::column::ColumnOut> {
     let col = to_column(value)?;
-    Ok(PyColumn::new(col))
+    Ok(crate::column::ColumnOut::new(col))
 }
 
 /// `F.expr(text)`, as PySpark Connect's ([`crate::plan_args::expr`]).
 #[pyfunction]
-fn pyfunc_expr(expr_str: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
-    Ok(PyColumn::new(crate::plan_args::expr(expr_str)?))
+fn pyfunc_expr(expr_str: &Bound<'_, PyAny>) -> PyResult<crate::column::ColumnOut> {
+    Ok(crate::column::ColumnOut::new(crate::plan_args::expr(
+        expr_str,
+    )?))
 }
 
 #[pyfunction]
-fn pyfunc_sum(col: &PyColumn) -> PyColumn {
-    PyColumn::new(spark_funcs::sum(col.column.clone()))
+fn pyfunc_sum(col: &Bound<'_, PyColumn>) -> PyResult<crate::column::ColumnOut> {
+    Ok(crate::column::ColumnOut::new(spark_funcs::sum(
+        crate::column::column_of(col)?,
+    )))
 }
 
 /// `count(col)`, as PySpark Connect's: of a Column or a column name, else NOT_EXPECTED_TYPE,
 /// as its `_to_col`; a star Column, as `col("*")` or `df["*"]`, counts the rows, as
 /// `count(1)`, while a name is the column of it, so that `count("*")` is the count of a star.
 #[pyfunction]
-fn pyfunc_count(col: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
-    let column = if let Ok(column) = col.extract::<PyRef<'_, PyColumn>>() {
+fn pyfunc_count(col: &Bound<'_, PyAny>) -> PyResult<crate::column::ColumnOut> {
+    let column = if let Ok(column) = col.cast::<PyColumn>() {
         if matches!(
-            column.column.expression().node(),
+            crate::column::column_of(column)?.expression().node(),
             ExpressionNode::UnresolvedStar(..)
         ) {
             spark_connect::column::lit(1)
         } else {
-            column.column.clone()
+            crate::column::column_of(column)?
         }
     } else if col.is_instance_of::<pyo3::types::PyString>() {
         // As PySpark's `_to_col`, by `col`, of its origin.
@@ -1086,37 +1106,49 @@ fn pyfunc_count(col: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
             ],
         ));
     };
-    Ok(PyColumn::new(spark_funcs::count(column)))
+    Ok(crate::column::ColumnOut::new(spark_funcs::count(column)))
 }
 
 #[pyfunction]
-fn pyfunc_avg(col: &PyColumn) -> PyColumn {
-    PyColumn::new(spark_funcs::avg(col.column.clone()))
+fn pyfunc_avg(col: &Bound<'_, PyColumn>) -> PyResult<crate::column::ColumnOut> {
+    Ok(crate::column::ColumnOut::new(spark_funcs::avg(
+        crate::column::column_of(col)?,
+    )))
 }
 
 #[pyfunction]
-fn pyfunc_max(col: &PyColumn) -> PyColumn {
-    PyColumn::new(spark_funcs::max(col.column.clone()))
+fn pyfunc_max(col: &Bound<'_, PyColumn>) -> PyResult<crate::column::ColumnOut> {
+    Ok(crate::column::ColumnOut::new(spark_funcs::max(
+        crate::column::column_of(col)?,
+    )))
 }
 
 #[pyfunction]
-fn pyfunc_min(col: &PyColumn) -> PyColumn {
-    PyColumn::new(spark_funcs::min(col.column.clone()))
+fn pyfunc_min(col: &Bound<'_, PyColumn>) -> PyResult<crate::column::ColumnOut> {
+    Ok(crate::column::ColumnOut::new(spark_funcs::min(
+        crate::column::column_of(col)?,
+    )))
 }
 
 #[pyfunction]
-fn pyfunc_when(condition: &PyColumn, value: &PyColumn) -> PyColumn {
-    PyColumn::new(spark_funcs::when(
-        condition.column.clone(),
-        value.column.clone(),
-    ))
+fn pyfunc_when(
+    condition: &Bound<'_, PyColumn>,
+    value: &Bound<'_, PyColumn>,
+) -> PyResult<crate::column::ColumnOut> {
+    Ok(crate::column::ColumnOut::new(spark_funcs::when(
+        crate::column::column_of(condition)?,
+        crate::column::column_of(value)?,
+    )))
 }
 
 /// Generic dispatch function for all 440 SQL functions.
 /// Takes a function name and variadic arguments, calls the appropriate Rust function.
 #[pyfunction]
 #[pyo3(signature = (name, *args))]
-fn pyfunc_call_function(name: String, args: Vec<Bound<'_, PyAny>>) -> PyResult<PyColumn> {
+fn pyfunc_call_function(
+    name: String,
+    args: Vec<Bound<'_, PyAny>>,
+) -> PyResult<crate::column::ColumnOut> {
     // Convert all Python arguments to Columns
     let mut col_args = Vec::new();
     for arg in args {
@@ -1125,7 +1157,7 @@ fn pyfunc_call_function(name: String, args: Vec<Bound<'_, PyAny>>) -> PyResult<P
 
     // Call the dispatch function
     let result_col = dispatch::call_builtin(&name, col_args)?;
-    Ok(PyColumn::new(result_col))
+    Ok(crate::column::ColumnOut::new(result_col))
 }
 
 // ============================================================================
@@ -1145,25 +1177,28 @@ use spark_connect::expression::{
 /// Build a Column wrapping an `UnresolvedNamedLambdaVariable` with the given name.
 /// Mirrors `UnresolvedNamedLambdaVariable([name])` on the Python side.
 #[pyfunction]
-fn pyfunc_named_lambda_variable(name: String) -> PyColumn {
-    PyColumn::new(Column::new(
+fn pyfunc_named_lambda_variable(name: String) -> PyResult<crate::column::ColumnOut> {
+    Ok(crate::column::ColumnOut::new(Column::new(
         ExpressionNode::UnresolvedNamedLambdaVariable(UnresolvedNamedLambdaVariable::new(name))
             .into(),
-    ))
+    )))
 }
 
 /// Build a Column wrapping a `LambdaFunction` from a body Column and its argument
 /// variable names. Mirrors `LambdaFunction(body._expr, arg_exprs)`.
 #[pyfunction]
-fn pyfunc_lambda_function(body: &PyColumn, arg_names: Vec<String>) -> PyColumn {
+fn pyfunc_lambda_function(
+    body: &Bound<'_, PyColumn>,
+    arg_names: Vec<String>,
+) -> PyResult<crate::column::ColumnOut> {
     let args = arg_names
         .into_iter()
         .map(UnresolvedNamedLambdaVariable::new)
         .collect();
-    let lambda = LambdaFunction::new(body.column.expression().clone(), args);
-    PyColumn::new(Column::new(
+    let lambda = LambdaFunction::new(crate::column::column_of(body)?.expression().clone(), args);
+    Ok(crate::column::ColumnOut::new(Column::new(
         ExpressionNode::LambdaFunction(Box::new(lambda)).into(),
-    ))
+    )))
 }
 
 /// Build a Column wrapping a `CallFunction` expression (a named function call
@@ -1174,14 +1209,14 @@ fn pyfunc_lambda_function(body: &PyColumn, arg_names: Vec<String>) -> PyColumn {
 fn pyfunc_call_named_function(
     name: &Bound<'_, PyAny>,
     args: Vec<Bound<'_, PyAny>>,
-) -> PyResult<PyColumn> {
+) -> PyResult<crate::column::ColumnOut> {
     let mut arg_exprs = Vec::with_capacity(args.len());
     for arg in args {
         arg_exprs.push(to_column(&arg)?.expression().clone());
     }
     let (name_args, name) = function_name(name)?;
     let call = ExpressionNode::CallFunction(Box::new(CallFunctionWrapper::new(name, arg_exprs)));
-    Ok(PyColumn::new(Column::new(
+    Ok(crate::column::ColumnOut::new(Column::new(
         name_args.expression(call.into()),
     )))
 }
@@ -1208,13 +1243,13 @@ fn function_name(name: &Bound<'_, PyAny>) -> PyResult<(crate::plan_args::PlanArg
 fn pyfunc_invoke_function(
     name: &Bound<'_, PyAny>,
     args: Vec<Bound<'_, PyAny>>,
-) -> PyResult<PyColumn> {
+) -> PyResult<crate::column::ColumnOut> {
     let mut arg_exprs = Vec::with_capacity(args.len());
     for arg in args {
         arg_exprs.push(to_column(&arg)?.expression().clone());
     }
     let (name_args, name) = function_name(name)?;
-    Ok(PyColumn::new(Column::new(
+    Ok(crate::column::ColumnOut::new(Column::new(
         name_args.expression(Expression::function(name, arg_exprs)),
     )))
 }
@@ -1225,37 +1260,50 @@ fn pyfunc_invoke_function(
 
 /// Wrapper for sha2(col, numbits).
 #[pyfunction]
-fn pyfunc_sha2(col: &PyColumn, numbits: i32) -> PyColumn {
-    PyColumn::new(spark_funcs::sha2(col.column.clone(), numbits))
+fn pyfunc_sha2(col: &Bound<'_, PyColumn>, numbits: i32) -> PyResult<crate::column::ColumnOut> {
+    Ok(crate::column::ColumnOut::new(spark_funcs::sha2(
+        crate::column::column_of(col)?,
+        numbits,
+    )))
 }
 
 /// Wrapper for variant_strip_nulls(v, include_arrays) - bool second arg.
 #[pyfunction]
-fn pyfunc_variant_strip_nulls(v: &PyColumn, include_arrays: bool) -> PyColumn {
-    PyColumn::new(spark_funcs::variant_strip_nulls(
-        v.column.clone(),
-        include_arrays,
+fn pyfunc_variant_strip_nulls(
+    v: &Bound<'_, PyColumn>,
+    include_arrays: bool,
+) -> PyResult<crate::column::ColumnOut> {
+    Ok(crate::column::ColumnOut::new(
+        spark_funcs::variant_strip_nulls(crate::column::column_of(v)?, include_arrays),
     ))
 }
 
 /// Wrapper for window(col, window_duration).
 #[pyfunction]
-fn pyfunc_window(col: &PyColumn, window_duration: &str) -> PyColumn {
-    PyColumn::new(spark_funcs::window(col.column.clone(), window_duration))
+fn pyfunc_window(
+    col: &Bound<'_, PyColumn>,
+    window_duration: &str,
+) -> PyResult<crate::column::ColumnOut> {
+    Ok(crate::column::ColumnOut::new(spark_funcs::window(
+        crate::column::column_of(col)?,
+        window_duration,
+    )))
 }
 
 /// Wrapper for window(col, window_duration, slide_duration, start_time).
 #[pyfunction]
 fn pyfunc_window_with_slide_and_start(
-    col: &PyColumn,
+    col: &Bound<'_, PyColumn>,
     window_duration: &str,
     slide_duration: &str,
     start_time: &str,
-) -> PyColumn {
-    PyColumn::new(spark_funcs::window_with_slide_and_start(
-        col.column.clone(),
-        window_duration,
-        slide_duration,
-        start_time,
+) -> PyResult<crate::column::ColumnOut> {
+    Ok(crate::column::ColumnOut::new(
+        spark_funcs::window_with_slide_and_start(
+            crate::column::column_of(col)?,
+            window_duration,
+            slide_duration,
+            start_time,
+        ),
     ))
 }

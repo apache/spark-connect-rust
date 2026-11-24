@@ -116,39 +116,23 @@ impl MergeIntoWriter {
         }
     }
 
-    /// Whether this merge's source is the plan of `dataframe`, which it shares (see
-    /// [`DataFrame::shares_plan_with`](crate::dataframe::DataFrame::shares_plan_with)). Not a
-    /// stable API.
+    /// The references of this merge to the shared parts of its source plan, its condition and the
+    /// conditions and the values of its clauses (see [`crate::gc`]). Not a stable API.
     #[doc(hidden)]
-    pub fn shares_plan_with(&self, dataframe: &crate::dataframe::DataFrame) -> bool {
-        Arc::ptr_eq(&self.source_plan, &dataframe.plan)
-    }
-
-    /// The objects of the picklers of the UDFs and the UDTFs of the source plan, the condition
-    /// and the clauses of this merge that it alone keeps alive, as
-    /// [`crate::dataframe::DataFrame::exclusive_pickler_objects`] gives those of a DataFrame,
-    /// which a Python wrapper reports to Python's garbage collector, as PySpark's merge builder,
-    /// of Python objects, holds the plan of its DataFrame and the Columns of its condition and
-    /// its clauses: the plan once the DataFrame does not share it. Not a stable API.
-    #[doc(hidden)]
-    pub fn exclusive_pickler_objects(&self) -> Vec<&(dyn std::any::Any + Send + Sync)> {
-        use crate::udf::PicklerHolder::{Expression as Of, Plan};
-        let mut holders = Vec::new();
-        if Arc::strong_count(&self.source_plan) == 1 {
-            holders.push(Plan(&self.source_plan));
-        }
-        holders.push(Of(self.condition.expression()));
+    pub fn held_parts(&self) -> Vec<crate::gc::PartRef<'_>> {
+        use crate::gc::PartRef::{Expression as Of, Plan};
+        let mut held = vec![Plan(&self.source_plan), Of(self.condition.expression())];
         let clauses = self
             .matched_actions
             .iter()
             .chain(&self.not_matched_actions)
             .chain(&self.not_matched_by_source_actions);
         for clause in clauses {
-            holders.extend(clause.condition.iter().map(|c| Of(c.expression())));
+            held.extend(clause.condition.iter().map(|c| Of(c.expression())));
             let values = clause.assignments.iter().flatten();
-            holders.extend(values.map(|(_, value)| Of(value.expression())));
+            held.extend(values.map(|(_, value)| Of(value.expression())));
         }
-        crate::udf::exclusive_pickler_objects(holders)
+        held
     }
 
     /// Drop the source plan, the condition and the clauses of this merge, as

@@ -59,9 +59,12 @@ pyo3::create_exception!(_pyspark, RustRpcError, pyo3::exceptions::PyException);
 /// so the reference client's reattachable iterator can drive it correctly - detecting an
 /// early stream end (e.g. an interrupted operation) and reattaching, rather than us
 /// eagerly collecting the whole stream and reporting partial results as success.
-#[pyclass(module = "pyspark.sql.connect.client")]
+// PySpark has no such class: as `RustConnectStub`, it is of the extension, which has it.
+#[pyclass(module = "pyspark._pyspark")]
 pub struct ResponseStream {
-    stream: Option<tonic::Streaming<Vec<u8>>>,
+    /// The stream of the call, of the connection of the generation of the process that made it,
+    /// which a child of a `fork()` leaves as it is (see `spark_connect_core::fork`).
+    stream: Option<spark_connect_core::fork::ForkLocal<tonic::Streaming<Vec<u8>>>>,
     // Cancellation shared with the owning stub: when the client is closed (mirroring
     // grpcio's channel.close() cancelling in-flight RPCs), a reader blocked here is woken
     // and raises CANCELLED. Without this a long-lived stream (e.g. the streaming-query
@@ -83,13 +86,13 @@ fn until_signal<T: Send>(
     py: Python<'_>,
     future: impl std::future::Future<Output = T> + Send,
 ) -> Result<T, PyErr> {
-    py.detach(|| {
+    crate::gc::detach_without_parts(py, || {
         block_on(async {
             let signal = async {
                 let mut ticks = tokio::time::interval(POLL_INTERVAL);
                 loop {
                     ticks.tick().await;
-                    if let Err(error) = Python::attach(|py| py.check_signals()) {
+                    if let Err(error) = Python::attach(crate::deliver::check_signals) {
                         return error;
                     }
                 }
@@ -177,7 +180,9 @@ impl ResponseStream {
 ///
 /// Each method mirrors one `SparkConnectServiceStub` RPC. Requests/responses cross
 /// the boundary as protobuf bytes so the Python side can keep using its pb2 types.
-#[pyclass(name = "RustConnectStub", module = "pyspark.sql.connect.client")]
+// PySpark has no such class: it is of the extension, which has it, and not of PySpark's modules of
+// the client, whose names are PySpark's.
+#[pyclass(name = "RustConnectStub", module = "pyspark._pyspark")]
 pub struct RustConnectStub {
     client: SparkConnectClient,
     // Shared cancellation, cloned into every ResponseStream this stub hands out. close()
@@ -234,7 +239,7 @@ impl RustConnectStub {
         let stream = until_signal(py, self.client.execute_plan_raw(request.to_vec()))?
             .map_err(|e| spark_err_to_py(py, e))?;
         Ok(ResponseStream {
-            stream: Some(stream),
+            stream: Some(spark_connect_core::fork::ForkLocal::new(stream)),
             cancel: self.cancel.clone(),
             closed: self.closed.clone(),
         })
@@ -248,7 +253,7 @@ impl RustConnectStub {
         let stream = until_signal(py, self.client.reattach_execute_raw(request.to_vec()))?
             .map_err(|e| spark_err_to_py(py, e))?;
         Ok(ResponseStream {
-            stream: Some(stream),
+            stream: Some(spark_connect_core::fork::ForkLocal::new(stream)),
             cancel: self.cancel.clone(),
             closed: self.closed.clone(),
         })

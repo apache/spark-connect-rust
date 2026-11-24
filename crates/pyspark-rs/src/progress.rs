@@ -1,6 +1,7 @@
-//! The progress handlers of the Python client, as PySpark Connect's client keeps them: a list
-//! of each session, whose handlers are called with the keyword arguments of `ProgressHandler`
-//! and the `StageInfo` of `pyspark.sql.connect.shell.progress`, and the progress bars of
+//! The progress handlers of the Python client, as PySpark Connect's client keeps them: the
+//! `_progress_handlers` list of the client of each session, whose handlers are called with the
+//! keyword arguments of `ProgressHandler` and the `StageInfo` of
+//! `pyspark.sql.connect.shell.progress`, and the progress bars of
 //! `SPARK_CONNECT_PROGRESS_BAR_ENABLED`, of its `Progress`.
 
 use std::collections::HashMap;
@@ -10,21 +11,19 @@ use std::sync::{Arc, Mutex, OnceLock};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use spark_connect::progress::ProgressUpdate;
+use spark_connect::session::WeakSparkSession;
 use spark_connect::SparkSession;
 use spark_connect_core::error::SparkError;
 
-/// The progress handlers of a session, and the progress bars of its executions.
+/// The progress bars of the executions of a session, and the number of the progress handlers of
+/// its client.
 pub(crate) struct SessionProgress {
-    /// The handlers, as the `_progress_handlers` list of PySpark's client.
-    handlers: Py<PyList>,
     /// The `Progress` of each execution of a progress bar, by its operation ID.
     bars: Py<PyDict>,
-    /// The number of handlers, so that an execution takes the GIL only for a handler or a bar.
-    /// Written only by [`SessionProgress::sync_count`].
+    /// The number of the handlers of the `_progress_handlers` of the client of the session as its
+    /// last call started, or as its methods changed them, so that an execution takes the GIL only
+    /// for a handler or a bar (see [`set_handler_count`]).
     count: AtomicUsize,
-    /// Makes reading the length of `handlers` and storing it in `count` one step, so that the
-    /// count that is left after concurrent changes of the list is that of the last one.
-    count_sync: Mutex<()>,
 }
 
 /// The progress of each session of the client, by its session ID: every Python object of a
@@ -48,10 +47,8 @@ pub(crate) fn session_progress(py: Python<'_>, session: &SparkSession) -> Arc<Se
     // The Python objects are made before the registry is locked: making one can run the
     // garbage collector, and with it any Python code, which must not find the registry locked.
     let progress = Arc::new(SessionProgress {
-        handlers: PyList::empty(py).unbind(),
         bars: PyDict::new(py).unbind(),
         count: AtomicUsize::new(0),
-        count_sync: Mutex::new(()),
     });
     let mut registry = lock_registry();
     if let Some(progress) = registry.get(&id) {
@@ -59,7 +56,9 @@ pub(crate) fn session_progress(py: Python<'_>, session: &SparkSession) -> Arc<Se
         return Arc::clone(progress);
     }
     let shared = Arc::clone(&progress);
-    session.register_fallible_progress_handler(move |update| shared.notify(update));
+    // A weak handle, which the handler of the core session does not keep the session alive of.
+    let interrupted = session.downgrade();
+    session.register_fallible_progress_handler(move |update| shared.notify(update, &interrupted));
     install_unreturned_error_handler();
     registry.insert(id, Arc::clone(&progress));
     progress
@@ -69,30 +68,96 @@ pub(crate) fn session_progress(py: Python<'_>, session: &SparkSession) -> Arc<Se
 /// of the done call of an execution dropped before its end goes to `sys.unraisablehook`, as
 /// PySpark's generator reports it, and that of an execution that the exception of its done call
 /// replaced is the `__context__` of the one the done call raises, as PySpark's `__exit__` does.
+/// The exception that propagates while the execution is dropped is kept, as the finalization of
+/// PySpark's generator keeps it (see `crate::deliver::preserving_pending_exception`).
 fn install_unreturned_error_handler() {
     static INSTALL: std::sync::Once = std::sync::Once::new();
     INSTALL.call_once(|| {
         spark_connect::progress::set_unreturned_error_handler(|error| {
             use spark_connect::progress::UnreturnedError;
-            Python::attach(|py| match error {
-                UnreturnedError::DroppedDone(error) => {
-                    // The generator of toLocalIterator may be freed by now, so no reference to it
-                    // is left: its type is the object of the hook. Only that generator drops an
-                    // execution that calls the handlers unfinished; the other iterators do not
-                    // report progress.
-                    let error = crate::errors::spark_error_to_py_exception(error);
-                    match py.import("types").and_then(|t| t.getattr("GeneratorType")) {
-                        Ok(generator) => error.write_unraisable(py, Some(&generator)),
-                        Err(_) => error.write_unraisable(py, None),
+            Python::attach(|py| {
+                crate::deliver::preserving_pending_exception(py, |py| match error {
+                    UnreturnedError::DroppedDone(error) => {
+                        // The generator of toLocalIterator may be freed by now, so no reference to
+                        // it is left: its type is the object of the hook. Only that generator
+                        // drops an execution that calls the handlers unfinished; the other
+                        // iterators do not report progress.
+                        let error = crate::errors::spark_error_to_py_exception(error);
+                        match py.import("types").and_then(|t| t.getattr("GeneratorType")) {
+                            Ok(generator) => error.write_unraisable(py, Some(&generator)),
+                            Err(_) => error.write_unraisable(py, None),
+                        }
                     }
-                }
-                UnreturnedError::Replaced { error, done } => {
-                    let context = crate::errors::spark_error_to_py_exception(error);
-                    crate::errors::set_callback_context(py, done, context);
-                }
+                    UnreturnedError::Replaced { error, done } => {
+                        let context = crate::errors::spark_error_to_py_exception(error);
+                        crate::errors::set_callback_context(py, done, context);
+                    }
+                })
             })
         });
     });
+}
+
+/// `error`, the exception of a handler of a progress of an execution of `session`, once the
+/// execution is interrupted on the server when it is a `KeyboardInterrupt` of a progress before the
+/// done one: as the `except KeyboardInterrupt` of PySpark's execution, around the calls of its
+/// handlers, interrupts the operation before it raises it, of the attributes of the client of the
+/// execution then, and the error of the interrupt replaces it, which becomes its context (see
+/// `interrupt::interrupt_for_handler`).
+fn interrupted_by_handler(
+    py: Python<'_>,
+    session: &WeakSparkSession,
+    update: &ProgressUpdate,
+    error: PyErr,
+) -> PyErr {
+    if update.done || !error.is_instance_of::<pyo3::exceptions::PyKeyboardInterrupt>(py) {
+        return error;
+    }
+    let (Some(session), Some(operation_id)) = (session.upgrade(), update.operation_id.as_deref())
+    else {
+        return error;
+    };
+    crate::interrupt::interrupt_for_handler(py, &session, operation_id, error)
+}
+
+/// Make `count`, the number of the progress handlers of the client of `session` as a call starts
+/// (see `crate::interrupt::apply_call_settings`), or as its methods changed them, that of the
+/// handlers that its executions call: of none, they do not take the GIL for them.
+pub(crate) fn set_handler_count(py: Python<'_>, session: &SparkSession, count: usize) {
+    if count == 0 && !lock_registry().contains_key(session.session_id()) {
+        return;
+    }
+    session_progress(py, session)
+        .count
+        .store(count, Ordering::SeqCst);
+}
+
+/// The handlers of the `_progress_handlers` of the client of `session` as they are now, of the
+/// state of its clients (see `_RequestContext` of `pyspark.sql.connect.client.core`), or of the
+/// copy of a client whose method made the call of the execution, as PySpark's `Progress` reads
+/// the list of the client of the execution at each progress: none of a session that is gone or has
+/// none, and the `AttributeError` of a client that has no `_progress_handlers`.
+fn client_handlers<'py>(
+    py: Python<'py>,
+    session: &WeakSparkSession,
+) -> PyResult<Vec<Bound<'py, PyAny>>> {
+    let Some(session) = session.upgrade() else {
+        return Ok(Vec::new());
+    };
+    let Some(state) = crate::interrupt::calling_copy_state(py, &session)
+        .or_else(|| crate::state::client_state_of(py, &session))
+    else {
+        return Ok(Vec::new());
+    };
+    let handlers = match state.get_item("_progress_handlers")? {
+        Some(handlers) => handlers,
+        None => {
+            return Err(pyo3::exceptions::PyAttributeError::new_err(
+                "'SparkConnectClient' object has no attribute '_progress_handlers'",
+            ))
+        }
+    };
+    handlers.try_iter()?.collect()
 }
 
 /// Forget the progress of a stopped session.
@@ -106,63 +171,39 @@ fn progress_bar_enabled() -> bool {
 }
 
 impl SessionProgress {
-    /// Make `count` the number of handlers, after a change of the list. A change of the list
-    /// can run Python code, the `__eq__` of a handler or the `__del__` of one that it drops,
-    /// and on a free-threaded build nothing orders two changes, so that the length that a
-    /// change left may be stale by the time it is stored: the length is read and stored under
-    /// one lock, and each change calls this after it, so that the last store is of a length
-    /// read after every change. No Python code runs under the lock.
-    fn sync_count(&self, py: Python<'_>) {
-        let _sync = self.count_sync.lock().unwrap_or_else(|e| e.into_inner());
-        self.count
-            .store(self.handlers.bind(py).len(), Ordering::SeqCst);
-    }
-
-    /// As PySpark's `register_progress_handler`: a handler is registered once.
-    pub(crate) fn register(&self, py: Python<'_>, handler: &Bound<'_, PyAny>) -> PyResult<()> {
-        let handlers = self.handlers.bind(py);
-        let registered = handlers.contains(handler).and_then(|found| {
-            if found {
-                Ok(())
-            } else {
-                handlers.append(handler)
-            }
-        });
-        self.sync_count(py);
-        registered
-    }
-
-    /// As PySpark's `remove_progress_handler`: a `ValueError` for a handler that is not
-    /// registered, of `list.remove`.
-    pub(crate) fn remove(&self, py: Python<'_>, handler: &Bound<'_, PyAny>) -> PyResult<()> {
-        let handlers = self.handlers.bind(py);
-        let removed = handlers.call_method1("remove", (handler,));
-        self.sync_count(py);
-        removed.map(|_| ())
-    }
-
-    /// As PySpark's `clear_progress_handlers`.
-    pub(crate) fn clear(&self, py: Python<'_>) -> PyResult<()> {
-        let cleared = self.handlers.bind(py).call_method0("clear");
-        self.sync_count(py);
-        cleared.map(|_| ())
-    }
-
     /// Call the handlers with `update`. The exception of a handler fails the execution that
     /// called it, and is raised in its caller, as PySpark's result loop raises it; that of the
-    /// done call too, as PySpark's `Progress.__exit__` raises it from the execution.
-    fn notify(&self, update: &ProgressUpdate) -> Result<(), SparkError> {
+    /// done call too, as PySpark's `Progress.__exit__` raises it from the execution. The done call
+    /// of an execution that is dropped while an exception propagates keeps that exception, as the
+    /// finalization of PySpark's generator does (see `crate::deliver::preserving_pending_exception`).
+    fn notify(
+        &self,
+        update: &ProgressUpdate,
+        session: &WeakSparkSession,
+    ) -> Result<(), SparkError> {
         let bar = progress_bar_enabled();
         if self.count.load(Ordering::SeqCst) == 0 && !bar {
             return Ok(());
         }
         Python::attach(|py| {
-            self.notify_python(py, update, bar)
-                .map_err(crate::errors::callback_error)
+            crate::deliver::preserving_pending_exception(py, |py| {
+                self.notify_python(py, update, bar, session)
+                    .map_err(|error| {
+                        crate::errors::callback_error(interrupted_by_handler(
+                            py, session, update, error,
+                        ))
+                    })
+            })
         })
     }
 
-    fn notify_python(&self, py: Python<'_>, update: &ProgressUpdate, bar: bool) -> PyResult<()> {
+    fn notify_python(
+        &self,
+        py: Python<'_>,
+        update: &ProgressUpdate,
+        bar: bool,
+        session: &WeakSparkSession,
+    ) -> PyResult<()> {
         let module = py.import("pyspark.sql.connect.shell.progress")?;
         let stage_info = module.getattr("StageInfo")?;
         let stages = PyList::empty(py);
@@ -197,8 +238,13 @@ impl SessionProgress {
                 progress.call_method1("update_ticks", (&stages, update.inflight_tasks, key))?;
             }
         }
-        // A copy of the handlers, as PySpark's `Progress` takes the list of the client.
-        let handlers: Vec<Bound<'_, PyAny>> = self.handlers.bind(py).iter().collect();
+        // The handlers of the list of the client as it is now, as PySpark's `Progress` iterates the
+        // list of its client at each progress.
+        let handlers = if self.count.load(Ordering::SeqCst) == 0 {
+            Vec::new()
+        } else {
+            client_handlers(py, session)?
+        };
         if handlers.is_empty() {
             return Ok(());
         }

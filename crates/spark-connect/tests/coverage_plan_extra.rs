@@ -95,8 +95,8 @@ fn lateral_join_to_proto_all_join_types() {
         JoinType::Cross,
     ] {
         let p = LogicalPlan::LateralJoin {
-            left: Arc::new(base()),
-            right: Arc::new(base()),
+            left: Arc::new(base()).into(),
+            right: Arc::new(base()).into(),
             join_type: jt,
             on: None,
         };
@@ -108,7 +108,7 @@ fn lateral_join_to_proto_all_join_types() {
 #[test]
 fn repartition_by_range_to_proto() {
     let p = LogicalPlan::RepartitionByRange {
-        input: Arc::new(base()),
+        input: Arc::new(base()).into(),
         num_partitions: Some(4),
         partition_exprs: vec![],
     };
@@ -123,7 +123,7 @@ fn repartition_by_range_without_a_count_sends_none() {
 
     let count_of = |num_partitions: Option<i32>| {
         let p = LogicalPlan::RepartitionByRange {
-            input: Arc::new(base()),
+            input: Arc::new(base()).into(),
             num_partitions,
             partition_exprs: vec![],
         };
@@ -140,14 +140,14 @@ fn repartition_by_range_without_a_count_sends_none() {
 #[test]
 fn read_datasource_to_proto() {
     let p = LogicalPlan::Read {
-        read_type: ReadType::DataSource {
+        read_type: Box::new(ReadType::DataSource {
             format: Some("parquet".to_string()),
             schema: Some("a INT, b STRING".to_string()),
             options: HashMap::new(),
             paths: vec!["/tmp/data".to_string()],
             predicates: vec![],
             source_name: Some("src".to_string()),
-        },
+        }),
         is_streaming: false,
     };
     assert!(p.to_proto().rel_type.is_some());
@@ -158,7 +158,7 @@ fn read_datasource_to_proto() {
 #[test]
 fn stat_sample_by_to_proto() {
     let p = LogicalPlan::StatSampleBy {
-        input: Arc::new(base()),
+        input: Arc::new(base()).into(),
         col: spark_connect::expression::Expression::column("k"),
         fractions: vec![
             (lit(0).expression().clone(), 0.1),

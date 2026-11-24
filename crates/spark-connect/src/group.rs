@@ -2,8 +2,6 @@
 //!
 //! Mirroring `pyspark.sql.GroupedData`.
 
-use std::sync::Arc;
-
 use spark_connect_core::error::{Result, SparkError, SparkErrorKind};
 
 use crate::column::{expressions_of, Column};
@@ -159,28 +157,23 @@ impl GroupedData {
         &self.grouping_sets
     }
 
-    /// The objects of the picklers of the UDFs of the grouping of these grouped data, of their
-    /// grouping columns, pivot column and values and grouping sets, that they keep alive with the
-    /// clones of them of which the caller answers, `holders` holders of each expression with
-    /// these, as [`DataFrame::exclusive_pickler_objects`] gives those of the plan of a DataFrame.
-    /// A Python wrapper reports them to Python's garbage collector, as PySpark's grouped data, of
-    /// Python objects, holds its grouping columns; it answers for the clones that the cogroups
-    /// of it hold, which keep it. The plan of their DataFrame is not visited: the wrapper of the
-    /// DataFrame, which the wrapper of the grouped data keeps, reports what it holds. Not a
-    /// stable API.
+    /// The references of these grouped data to the shared parts of their plan and grouping (see
+    /// [`crate::gc`]): the plan of their DataFrame, and the expressions of their grouping columns,
+    /// pivot column and values and grouping sets. Not a stable API.
     #[doc(hidden)]
-    pub fn exclusive_pickler_objects(
-        &self,
-        holders: usize,
-    ) -> Vec<&(dyn std::any::Any + Send + Sync)> {
-        let expressions = self
-            .group_cols
-            .iter()
-            .map(Column::expression)
-            .chain(&self.pivot_col)
-            .chain(&self.pivot_values)
-            .chain(self.grouping_sets.iter().flatten().map(Column::expression));
-        crate::udf::exclusive_pickler_objects_held_by(expressions, holders)
+    pub fn held_parts(&self) -> Vec<crate::gc::PartRef<'_>> {
+        use crate::gc::PartRef::Expression as Of;
+        let mut held = self.dataframe.held_parts();
+        held.extend(self.group_cols.iter().map(|column| Of(column.expression())));
+        held.extend(self.pivot_col.iter().map(Of));
+        held.extend(self.pivot_values.iter().map(Of));
+        held.extend(
+            self.grouping_sets
+                .iter()
+                .flatten()
+                .map(|column| Of(column.expression())),
+        );
+        held
     }
 
     /// Drop the plan of the DataFrame and the grouping of these grouped data, as
@@ -364,9 +357,9 @@ impl GroupedData {
     fn group_map(&self, func: CommonInlineUserDefinedFunctionExpression) -> DataFrame {
         let schema = func.python_udf.output_type.clone();
         let plan = LogicalPlan::GroupMap {
-            input: Arc::clone(&self.dataframe.plan),
+            input: self.dataframe.shared_plan(),
             grouping_expressions: self.grouping_expressions(),
-            func,
+            func: Box::new(func),
             sorting_expressions: vec![],
             initial_input: None,
             initial_grouping_expressions: vec![],
@@ -415,9 +408,9 @@ impl GroupedData {
         timeout_conf: &str,
     ) -> DataFrame {
         let plan = LogicalPlan::ApplyInPandasWithState {
-            input: Arc::clone(&self.dataframe.plan),
+            input: self.dataframe.shared_plan(),
             grouping_expressions: self.grouping_expressions(),
-            func,
+            func: Box::new(func),
             output_schema: output_schema.to_string(),
             state_schema: state_schema.to_string(),
             output_mode: output_mode.to_string(),
@@ -482,16 +475,13 @@ impl GroupedData {
         output_schema: Option<DataType>,
     ) -> DataFrame {
         let (initial_input, initial_grouping_expressions) = match initial_state {
-            Some(gd) => (
-                Some(Arc::clone(&gd.dataframe.plan)),
-                gd.grouping_expressions(),
-            ),
+            Some(gd) => (Some(gd.dataframe.shared_plan()), gd.grouping_expressions()),
             None => (None, vec![]),
         };
         let plan = LogicalPlan::GroupMap {
-            input: Arc::clone(&self.dataframe.plan),
+            input: self.dataframe.shared_plan(),
             grouping_expressions: self.grouping_expressions(),
-            func,
+            func: Box::new(func),
             sorting_expressions: vec![],
             initial_input,
             initial_grouping_expressions,
@@ -499,11 +489,11 @@ impl GroupedData {
             output_mode: Some(output_mode.to_string()),
             timeout_conf: None,
             state_schema: None,
-            transform_with_state_info: Some(crate::plan::TransformWithStateInfo {
+            transform_with_state_info: Some(Box::new(crate::plan::TransformWithStateInfo {
                 time_mode: time_mode.to_string(),
                 event_time_column_name: event_time_column_name.map(|s| s.to_string()),
                 output_schema,
-            }),
+            })),
         };
         DataFrame::new(self.dataframe.session.clone(), plan)
     }
@@ -534,7 +524,7 @@ impl GroupedData {
             .collect();
 
         let plan = LogicalPlan::Aggregate {
-            input: Arc::clone(&self.dataframe.plan),
+            input: self.dataframe.shared_plan(),
             group_type: self.group_type,
             grouping_expressions,
             aggregate_expressions: expressions_of(expressions),
@@ -760,11 +750,11 @@ impl StatFunctions {
         self.dataframe.spark_session()
     }
 
-    /// Whether these statistics are of the plan of `dataframe`, which they share (see
-    /// [`DataFrame::shares_plan_with`]). Not a stable API.
+    /// The references of these statistics to the shared parts of the plan of their DataFrame
+    /// (see [`crate::gc`]). Not a stable API.
     #[doc(hidden)]
-    pub fn shares_plan_with(&self, dataframe: &DataFrame) -> bool {
-        self.dataframe.shares_plan_with(dataframe)
+    pub fn held_parts(&self) -> Vec<crate::gc::PartRef<'_>> {
+        self.dataframe.held_parts()
     }
 
     /// Drop the plan of the DataFrame of these statistics, as [`DataFrame::clear_plan`] does. Not
@@ -782,7 +772,7 @@ impl StatFunctions {
     /// Compute a cross-tabulation of two columns.
     pub fn crosstab(&self, col1: &str, col2: &str) -> DataFrame {
         let plan = LogicalPlan::StatCrosstab {
-            input: Arc::clone(&self.dataframe.plan),
+            input: self.dataframe.shared_plan(),
             col1: col1.to_string(),
             col2: col2.to_string(),
         };
@@ -796,7 +786,7 @@ impl StatFunctions {
         support: f64,
     ) -> DataFrame {
         let plan = LogicalPlan::StatFreqItems {
-            input: Arc::clone(&self.dataframe.plan),
+            input: self.dataframe.shared_plan(),
             columns: columns.into_iter().map(Into::into).collect(),
             support,
         };
@@ -837,7 +827,7 @@ impl StatFunctions {
             None
         };
         let plan = LogicalPlan::StatApproxQuantile {
-            input: Arc::clone(&self.dataframe.plan),
+            input: self.dataframe.shared_plan(),
             columns: columns.into_iter().map(Into::into).collect(),
             probabilities,
             relative_error,
@@ -866,7 +856,7 @@ impl StatFunctions {
             ));
         }
         let plan = LogicalPlan::StatCorr {
-            input: Arc::clone(&self.dataframe.plan),
+            input: self.dataframe.shared_plan(),
             col1: col1.to_string(),
             col2: col2.to_string(),
             method: method.to_string(),
@@ -883,7 +873,7 @@ impl StatFunctions {
     /// Executes the stat aggregation and returns the resulting `f64`.
     pub fn cov(&self, col1: &str, col2: &str) -> Result<f64> {
         let plan = LogicalPlan::StatCov {
-            input: Arc::clone(&self.dataframe.plan),
+            input: self.dataframe.shared_plan(),
             col1: col1.to_string(),
             col2: col2.to_string(),
         };
@@ -953,7 +943,7 @@ impl StatFunctions {
             ));
         }
         let plan = LogicalPlan::StatSampleBy {
-            input: Arc::clone(&self.dataframe.plan),
+            input: self.dataframe.shared_plan(),
             col: col.into().expression().clone(),
             fractions,
             seed: Some(seed.unwrap_or_else(crate::dataframe::random_seed)),
@@ -1058,6 +1048,15 @@ impl CoGroupedData {
         self.right.clear_plan();
     }
 
+    /// The references of the cogroups to the shared parts of the plans and the groupings of both
+    /// grouped data (see [`GroupedData::held_parts`]). Not a stable API.
+    #[doc(hidden)]
+    pub fn held_parts(&self) -> Vec<crate::gc::PartRef<'_>> {
+        let mut held = self.left.held_parts();
+        held.extend(self.right.held_parts());
+        held
+    }
+
     /// Apply a pandas UDF to each cogroup (`cogroup(...).applyInPandas`).
     ///
     /// `func` is built on the Python side (cloudpickled, eval type
@@ -1075,11 +1074,11 @@ impl CoGroupedData {
     fn cogroup_map(&self, func: CommonInlineUserDefinedFunctionExpression) -> DataFrame {
         let schema = func.python_udf.output_type.clone();
         let plan = LogicalPlan::CoGroupMap {
-            input: Arc::clone(&self.left.dataframe.plan),
+            input: self.left.dataframe.shared_plan(),
             input_grouping_expressions: self.left.grouping_expressions(),
-            other: Arc::clone(&self.right.dataframe.plan),
+            other: self.right.dataframe.shared_plan(),
             other_grouping_expressions: self.right.grouping_expressions(),
-            func,
+            func: Box::new(func),
         };
         DataFrame::new_with_schema(self.left.dataframe.session.clone(), plan, Some(schema))
     }
@@ -1089,12 +1088,90 @@ impl CoGroupedData {
 mod tests {
     use super::*;
     use crate::session::SparkSession;
+    use std::sync::Arc;
 
     fn session() -> SparkSession {
         SparkSession::builder()
             .remote("sc://localhost:15002")
             .get_or_create()
             .expect("failed to build session")
+    }
+
+    /// The references that grouped data and their cogroups give to the shared parts of their
+    /// plan and grouping, with those of the parts below them, are every reference to those
+    /// parts (see `crate::gc`): of the grouping columns, the subqueries of their expressions,
+    /// the owners of their relations and the errors of their expressions.
+    #[test]
+    fn held_parts_of_grouped_data_are_every_reference_to_their_parts() {
+        use crate::functions::{col, max};
+        use crate::gc::tests::assert_exact;
+        use crate::gc::PartRef;
+        let spark = session();
+        let relation = spark_connect_proto::Relation {
+            common: None,
+            rel_type: Some(spark_connect_proto::relation::RelType::Sql(
+                spark_connect_proto::Sql {
+                    query: "SELECT 1 AS a".to_string(),
+                    ..Default::default()
+                },
+            )),
+        };
+        let inner = DataFrame::from_relation(spark.clone(), relation, Some(Arc::new(7u8))).unwrap();
+        let scalar = inner.select([max(col("a"))]).scalar();
+        drop(inner);
+        let grouped = spark.range(3).unwrap().group_by([scalar.clone()]);
+        // The Column shares the grouping expression.
+        assert_exact(
+            &[
+                grouped.held_parts(),
+                vec![PartRef::Expression(scalar.expression())],
+            ]
+            .concat(),
+        );
+        drop(scalar);
+        let held = grouped.held_parts();
+        assert_exact(&held);
+        // The owner of the relation of the subquery is among the parts below the grouping.
+        let parts = crate::gc::tests::references(&held);
+        assert!(parts
+            .values()
+            .any(|(_, part)| part.object().and_then(|o| o.downcast_ref::<u8>()) == Some(&7)));
+        drop((parts, held));
+        let clone = grouped.clone();
+        let pivoted = grouped
+            .pivot(col("id"), Some(vec![crate::row::Value::Long(1)]))
+            .unwrap();
+        assert_exact(
+            &[
+                grouped.held_parts(),
+                clone.held_parts(),
+                pivoted.held_parts(),
+            ]
+            .concat(),
+        );
+        let cogrouped = grouped.cogroup(&clone);
+        assert_exact(
+            &[
+                grouped.held_parts(),
+                clone.held_parts(),
+                pivoted.held_parts(),
+                cogrouped.held_parts(),
+            ]
+            .concat(),
+        );
+        drop((clone, pivoted, cogrouped));
+
+        // An expression that a request fails to build, as the grouping column itself, and the
+        // grouping sets.
+        let failing = Column::from(Expression::unbuildable_owned(
+            col("a").expression().clone(),
+            SparkError::builtin_runtime_msg("of the plan"),
+            None,
+            Arc::new(9u16),
+        ));
+        let grouped = spark.range(3).unwrap().group_by([failing.clone()]);
+        let sets = GroupedData::new_grouping_sets(spark.range(3).unwrap(), vec![vec![failing]]);
+        assert_exact(&[grouped.held_parts(), sets.held_parts()].concat());
     }
 
     #[test]
@@ -1175,7 +1252,7 @@ mod tests {
         let LogicalPlan::Aggregate { input, .. } = count.plan.as_ref() else {
             panic!("expected aggregate");
         };
-        assert!(Arc::ptr_eq(input, &df.plan));
+        assert!(Arc::ptr_eq(input.arc(), &df.plan));
 
         let stat = df.stat();
         assert!(Arc::ptr_eq(&stat.dataframe.plan, &df.plan));
@@ -1183,7 +1260,7 @@ mod tests {
         let LogicalPlan::StatCrosstab { input, .. } = result.plan.as_ref() else {
             panic!("expected crosstab");
         };
-        assert!(Arc::ptr_eq(input, &df.plan));
+        assert!(Arc::ptr_eq(input.arc(), &df.plan));
     }
 
     #[test]
@@ -1442,7 +1519,7 @@ mod tests {
             ]
         };
         let before = LogicalPlan::Aggregate {
-            input: Arc::clone(&df.plan),
+            input: df.shared_plan(),
             group_type: AggregateGroupType::GroupBy,
             grouping_expressions: vec![col("id").expression().clone()],
             aggregate_expressions: expressions(),

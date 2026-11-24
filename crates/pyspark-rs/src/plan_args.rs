@@ -104,15 +104,22 @@ impl PlanArgs {
 
     /// Record `err`, an exception that PySpark raises when it builds the plan: an
     /// `AttributeError`, a `TypeError`, a `ValueError` or an `OverflowError` of Python itself, the
-    /// last three as [`PlanArgs::converted`] takes them, or an exception of one of PySpark's error
-    /// classes, as [`crate::errors::pyspark_class_error`] gives it. Another, such as a `KeyError`,
-    /// which the core does not raise again, is given back, for the call to raise.
+    /// last three as [`PlanArgs::converted`] takes them, a `RecursionError`, such as that of a
+    /// type that holds itself, or an exception of one of PySpark's error classes, as
+    /// [`crate::errors::pyspark_class_error`] gives it. Another, such as a `KeyError`, which the
+    /// core does not raise again, is given back, for the call to raise.
     pub(crate) fn raised(&mut self, py: Python<'_>, err: PyErr) -> PyResult<()> {
-        use pyo3::exceptions::{PyAttributeError, PyOverflowError, PyTypeError, PyValueError};
+        use pyo3::exceptions::{
+            PyAttributeError, PyOverflowError, PyRecursionError, PyTypeError, PyValueError,
+        };
         let kind = err.get_type(py);
         if kind.is(py.get_type::<PyAttributeError>()) {
             let message = err.value(py).str()?.to_string();
             self.record(SparkError::builtin_attribute(message));
+            return Ok(());
+        }
+        if kind.is(py.get_type::<PyRecursionError>()) {
+            self.record(recursion_error(py, &err)?);
             return Ok(());
         }
         let builtins = [
@@ -190,62 +197,10 @@ impl PlanArgs {
     }
 }
 
-/// The classes of the data types of `pyspark.sql.types` that PySpark's
-/// `pyspark_types_to_proto_types` converts, in its order, and `UnparsedDataType` of
-/// `pyspark.sql.connect.types`.
-const PLAN_TYPE_CLASSES: [&str; 27] = [
-    "NullType",
-    "CharType",
-    "VarcharType",
-    "StringType",
-    "BooleanType",
-    "BinaryType",
-    "ByteType",
-    "ShortType",
-    "IntegerType",
-    "LongType",
-    "FloatType",
-    "DoubleType",
-    "DecimalType",
-    "DateType",
-    "TimeType",
-    "TimestampType",
-    "TimestampNTZType",
-    "DayTimeIntervalType",
-    "YearMonthIntervalType",
-    "CalendarIntervalType",
-    "StructType",
-    "MapType",
-    "ArrayType",
-    "VariantType",
-    "GeometryType",
-    "GeographyType",
-    "UserDefinedType",
-];
-
-/// The error of PySpark's `pyspark_types_to_proto_types` for the data type `data_type`, which it
-/// raises when it builds the plan, if it is of none of the classes that it converts: the
-/// `UNSUPPORTED_OPERATION` of `data type {data_type}`, as of the base `DataType()` or of a Python
-/// subclass of it.
-pub(crate) fn unsupported_type_error(data_type: &Bound<'_, PyAny>) -> PyResult<Option<SparkError>> {
-    let py = data_type.py();
-    let types = py.import("pyspark.sql.types")?;
-    let mut classes = PLAN_TYPE_CLASSES
-        .iter()
-        .map(|name| types.getattr(*name))
-        .collect::<PyResult<Vec<_>>>()?;
-    classes.push(
-        py.import("pyspark.sql.connect.types")?
-            .getattr("UnparsedDataType")?,
-    );
-    if data_type.is_instance(pyo3::types::PyTuple::new(py, classes)?.as_any())? {
-        return Ok(None);
-    }
-    Ok(Some(SparkError::classed(
-        spark_connect_core::error::SparkErrorKind::ValueError,
-        "UNSUPPORTED_OPERATION",
-        &[("operation", &data_type_operation(data_type)?)],
-    )))
+/// The error of `err`, a `RecursionError`, which the core raises again as it is: of the message of
+/// its text.
+pub(crate) fn recursion_error(py: Python<'_>, err: &PyErr) -> PyResult<SparkError> {
+    Ok(SparkError::recursion_msg(err.value(py).str()?.to_string()))
 }
 
 /// The `operation` of PySpark's `UNSUPPORTED_OPERATION` of the data type `data_type`, which it
@@ -313,25 +268,6 @@ pub(crate) fn column_reference(name: &Bound<'_, PyAny>) -> PyResult<Column> {
     let mut args = PlanArgs::new();
     let text = args.str(name)?;
     Ok(Column::new(args.expression(Expression::column(text))))
-}
-
-/// The Column of `name` of `df`, as PySpark Connect's `df._col(name)`, which refers to `df` by its
-/// plan ID, and is a metadata column for `metadata`: a str, of which one that UTF-8 cannot encode
-/// fails the requests of its plans, as [`col`]. Its `ColumnReference` asserts a str, so another
-/// object is a bare `AssertionError`.
-pub(crate) fn df_col(df: &DataFrame, name: &Bound<'_, PyAny>, metadata: bool) -> PyResult<Column> {
-    if !name.is_instance_of::<PyString>() {
-        return Err(pyo3::exceptions::PyAssertionError::new_err(()));
-    }
-    let mut args = PlanArgs::new();
-    let text = args.str(name)?;
-    let column = if metadata {
-        df.metadata_column(&text)
-    } else {
-        // Of the name `*` too, which `_col` does not make a star.
-        df.column_reference(&text)
-    };
-    Ok(args.column(column))
 }
 
 /// The Column of the SQL expression `text`, as PySpark Connect's `F.expr`, whose `SQLExpression`

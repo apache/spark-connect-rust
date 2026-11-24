@@ -3,7 +3,7 @@
 use pyo3::exceptions;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList, PyString};
-use spark_connect_core::error::{ServerErrorInfo, SparkError, SparkErrorKind};
+use spark_connect_core::error::{GrpcCall, ServerErrorInfo, SparkError, SparkErrorKind};
 
 /// Raise a `pyspark.errors` exception (`class_name`) carrying the given `error_class`
 /// condition and message parameters, mirroring the reference Column guard-rails.
@@ -223,10 +223,17 @@ fn server_error_to_py<'py>(
     let kwargs = PyDict::new(py);
     kwargs.set_item("classes", &server.classes)?;
     kwargs.set_item("sql_state", err.sql_state.as_deref())?;
-    kwargs.set_item(
-        "error_class",
-        (!err.error_class.is_empty()).then_some(err.error_class.as_str()),
-    )?;
+    // As PySpark's `convert_exception`, the `errorClass` of the metadata, also empty, or else the
+    // error class of the details of `FetchErrorDetails`.
+    let fetched_class = (!err.error_class.is_empty()).then_some(err.error_class.as_str());
+    let error_class = match &server.metadata {
+        Some(metadata) => metadata
+            .get("errorClass")
+            .map(String::as_str)
+            .or(fetched_class),
+        None => fetched_class,
+    };
+    kwargs.set_item("error_class", error_class)?;
     kwargs.set_item("reason", &server.reason)?;
     kwargs.set_item("message", &err.message)?;
     // In the order that the server gave the parameters, as the reference client keeps it.
@@ -241,13 +248,48 @@ fn server_error_to_py<'py>(
             parameters.set_item(name, value)?;
         }
     }
+    // Those of the metadata are parsed of its JSON, as PySpark parses them (see below).
+    let parameters = (server.metadata.is_none() || server.fetched_parameters).then_some(parameters);
     kwargs.set_item("message_parameters", parameters)?;
+    // The JSON of the metadata of the `ErrorInfo` that PySpark's `convert_exception` parses with
+    // `json.loads`, its `classes` and its `messageParameters`, as it handles grpcio's error of the
+    // call, the context of what it raises, which the converter makes only then.
+    if let Some(metadata) = &server.metadata {
+        let json = (
+            metadata.get("classes").map(String::as_str),
+            metadata.get("messageParameters").map(String::as_str),
+        );
+        kwargs.set_item("json_metadata", json)?;
+        if let Some(grpcio) = server.rpc_error.as_deref() {
+            let grpcio = grpcio.clone();
+            let handled = pyo3::types::PyCFunction::new_closure(
+                py,
+                None,
+                None,
+                move |args: &Bound<'_, pyo3::types::PyTuple>, _| {
+                    let py = args.py();
+                    grpcio_context(py, &grpcio).map(|handled| handled.into_value(py))
+                },
+            )?;
+            kwargs.set_item("handled", handled)?;
+        }
+    }
     kwargs.set_item("stacktrace", err.server_stacktrace.as_deref())?;
     kwargs.set_item("display_server_stacktrace", server.display_stacktrace)?;
     kwargs.set_item("contexts", contexts)?;
     // A server error always comes from a gRPC status; UNKNOWN is the reference default.
     kwargs.set_item("grpc_status_code", err.grpc_code.unwrap_or(2))?;
     kwargs.set_item("breaking_change_info", breaking_change)?;
+    // grpcio's error of the call, which the query context loggers log as the exception.
+    kwargs.set_item(
+        "rpc_error",
+        server.rpc_error.as_deref().map(|grpcio| {
+            (
+                grpcio.call == GrpcCall::ServerStreaming,
+                grpcio.text.as_str(),
+            )
+        }),
+    )?;
     py.import("pyspark.errors.exceptions.connect")?.call_method(
         "_convert_server_error",
         (),
@@ -285,20 +327,105 @@ static CALLBACK_EXCEPTIONS: std::sync::LazyLock<
 
 static NEXT_CALLBACK_EXCEPTION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// The parameter of the error of the core of an exception of a callback that is a
+/// `BaseException` only, as a `KeyboardInterrupt` or a `SystemExit`, which an `except Exception`
+/// of PySpark does not catch (see [`is_base_exception_only`]).
+const BASE_EXCEPTION_ONLY: &str = "base_exception_only";
+
 /// The error of the core of `exception`, the exception of a Python callback that the core calls,
 /// which [`spark_error_to_py_exception`] raises as it is: as PySpark raises the exception of a
 /// hook from the execution that calls it.
 pub(crate) fn callback_error(exception: PyErr) -> SparkError {
+    let base_only =
+        Python::attach(|py| !exception.is_instance_of::<pyo3::exceptions::PyException>(py));
     let id = NEXT_CALLBACK_EXCEPTION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     CALLBACK_EXCEPTIONS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .insert(id, exception);
-    SparkError::classed(
-        SparkErrorKind::Python,
-        PYTHON_CALLBACK_ERROR,
-        &[("callback_id", &id.to_string())],
-    )
+    let id = id.to_string();
+    let mut params = vec![("callback_id", id.as_str())];
+    if base_only {
+        params.push((BASE_EXCEPTION_ONLY, "true"));
+    }
+    SparkError::classed(SparkErrorKind::Python, PYTHON_CALLBACK_ERROR, &params)
+}
+
+/// Whether `err` is the error of an exception of a callback that is a `BaseException` only, as a
+/// `KeyboardInterrupt` or a `SystemExit`, which an `except Exception` does not catch.
+pub(crate) fn is_base_exception_only(err: &SparkError) -> bool {
+    callback_id(err).is_some()
+        && err
+            .params
+            .get(BASE_EXCEPTION_ONLY)
+            .is_some_and(|value| value == "true")
+}
+
+/// The parameter of the error of the core of an exception of a callback that a log raised as the
+/// client handles the failure of a call (see [`raised_in_handling`]).
+const RAISED_IN_HANDLING: &str = "raised_in_handling";
+
+/// `err`, the error of a log that the client writes as it handles the failure of a call, marked as
+/// such when it is the error of an exception of a callback: as PySpark's log is in an `except`
+/// clause of the failure, which the `except KeyboardInterrupt` of its execution does not catch
+/// (see [`is_callback_keyboard_interrupt`]).
+pub(crate) fn raised_in_handling(mut err: SparkError) -> SparkError {
+    if callback_id(&err).is_some() {
+        err.params
+            .insert(RAISED_IN_HANDLING.to_string(), "true".to_string());
+    }
+    err
+}
+
+/// Whether `err` is the error of an exception of a callback that is a `KeyboardInterrupt`, which
+/// the `except KeyboardInterrupt` of PySpark's execution catches: not of a log that the client
+/// writes as it handles the failure of a call (see [`raised_in_handling`]), whose exception goes
+/// out of PySpark's `except Exception` as it is.
+pub(crate) fn is_callback_keyboard_interrupt(py: Python<'_>, err: &SparkError) -> bool {
+    if !is_base_exception_only(err)
+        || err
+            .params
+            .get(RAISED_IN_HANDLING)
+            .is_some_and(|value| value == "true")
+    {
+        return false;
+    }
+    let Some(id) = callback_id(err) else {
+        return false;
+    };
+    CALLBACK_EXCEPTIONS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&id)
+        .is_some_and(|exception| {
+            exception.is_instance_of::<pyo3::exceptions::PyKeyboardInterrupt>(py)
+        })
+}
+
+/// The ID of the exception of the Python callback that `err` is the error of, if it is one, which
+/// tells two such errors apart.
+pub(crate) fn callback_error_id(err: &SparkError) -> Option<u64> {
+    callback_id(err)
+}
+
+/// Release the exceptions of the Python callbacks that `errors` are the errors of, which no caller
+/// raises: as the errors that a call dropped, as a failure that it handled itself.
+pub(crate) fn release_callback_errors(errors: impl IntoIterator<Item = SparkError>) {
+    let ids: Vec<u64> = errors
+        .into_iter()
+        .filter_map(|err| callback_id(&err))
+        .collect();
+    if ids.is_empty() {
+        return;
+    }
+    let released: Vec<PyErr> = {
+        let mut exceptions = CALLBACK_EXCEPTIONS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        ids.iter().filter_map(|id| exceptions.remove(id)).collect()
+    };
+    // Dropped once the map is no longer locked, as a drop can run Python code.
+    drop(released);
 }
 
 /// The ID of the exception of the Python callback that `err` is the error of, if it is one.
@@ -310,13 +437,298 @@ fn callback_id(err: &SparkError) -> Option<u64> {
 }
 
 /// The exception of the Python callback of `err`, if it is the error of one, which is then
-/// released: the exception is raised by the caller instead of `err`.
+/// released: the exception is raised by the caller instead of `err`. Of a kept error
+/// ([`kept_error`]), a new exception of it, as each build of PySpark's plan raises a new one.
 pub(crate) fn callback_exception(err: &SparkError) -> Option<PyErr> {
+    if let Some(exception) = kept_exception(err) {
+        return Some(exception);
+    }
     let id = callback_id(err)?;
     CALLBACK_EXCEPTIONS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .remove(&id)
+}
+
+/// The exception that `err` stands for, as [`spark_error_to_py_exception`] makes it, but of the
+/// exception of a Python callback as it is kept, for the caller that raises or releases it: the
+/// argument of a log of the error that a caller catches, as PySpark's `logger.debug(text, e)` of the
+/// exception that it caught.
+pub(crate) fn exception_of(py: Python<'_>, err: &SparkError) -> PyErr {
+    if let Some(id) = callback_id(err) {
+        if let Some(exception) = CALLBACK_EXCEPTIONS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&id)
+            .map(|exception| exception.clone_ref(py))
+        {
+            return exception;
+        }
+    }
+    spark_error_to_py_exception(err.clone())
+}
+
+/// The error class of the error of the core of an exception that a plan keeps, which each
+/// request of the plan raises ([`kept_error`]).
+const PYTHON_KEPT_ERROR: &str = "PYTHON_KEPT_ERROR";
+
+/// The owners of the exceptions that plans keep, by the IDs of their errors: each is the
+/// `Py<PyAny>` of a tuple of the plan of the Python client whose build raised and the exception,
+/// which the plan of the core holds as the owner of its relation, so the entry goes with the plan.
+static KEPT_EXCEPTIONS: std::sync::LazyLock<
+    std::sync::Mutex<
+        std::collections::HashMap<u64, std::sync::Weak<dyn std::any::Any + Send + Sync>>,
+    >,
+> = std::sync::LazyLock::new(Default::default);
+
+/// The error of the core of `exception`, an `Exception` that `plan`, a plan of the Python client,
+/// raised when it was built, which a plan of the core keeps, and each request of that plan raises
+/// anew, as PySpark raises a new exception at each request that builds the plan
+/// ([`fresh_exception`]): the owner that it gives, of the tuple of `plan` and the exception,
+/// keeps both while the plan of the core holds the owner (as the owner of a relation, see
+/// `DataFrame::from_unbuilt_relation`), which reports it to the garbage collector of Python. The
+/// exception is kept as a copy of no traceback, of copies of its cause and its context of none
+/// either, so that it keeps no frame of the build alive with the plan, and each exception of a
+/// request is one of its own, which keeps the frames of that request alone. A pickle of an object
+/// of the plan carries `plan`, which its unpickle builds again (see [`kept_plan`]).
+pub(crate) fn kept_error(
+    py: Python<'_>,
+    plan: &Bound<'_, PyAny>,
+    exception: PyErr,
+) -> PyResult<(SparkError, std::sync::Arc<dyn std::any::Any + Send + Sync>)> {
+    let value = exception.into_value(py).into_bound(py).into_any();
+    let kept = fresh_exception(&value);
+    let owner: std::sync::Arc<dyn std::any::Any + Send + Sync> = std::sync::Arc::new(
+        pyo3::types::PyTuple::new(py, [plan.clone(), kept])?
+            .into_any()
+            .unbind(),
+    );
+    let id = NEXT_CALLBACK_EXCEPTION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut kept = KEPT_EXCEPTIONS.lock().unwrap_or_else(|e| e.into_inner());
+    kept.retain(|_, owner| owner.strong_count() > 0);
+    kept.insert(id, std::sync::Arc::downgrade(&owner));
+    let error = SparkError::classed(
+        SparkErrorKind::Python,
+        PYTHON_KEPT_ERROR,
+        &[("kept_id", &id.to_string())],
+    );
+    Ok((error, owner))
+}
+
+/// The error of the core of an unpickled Column of a subquery of `plan`, a plan of the Python
+/// client whose build raised when the Column was pickled, which the pickle carried, and the owner
+/// that keeps the plan while the Column holds it ([`kept_error`], of no exception): each request
+/// of the Column builds the plan of the session of the request ([`of_request_session`]), as
+/// PySpark's Column builds the plan objects of its subqueries at each request, of the client of
+/// the request, and raises the error of that build, a new one ([`kept_exception`]); and a pickle
+/// of the Column carries `plan` again ([`kept_plan`]).
+pub(crate) fn unpickled_plan_error(
+    py: Python<'_>,
+    plan: &Bound<'_, PyAny>,
+) -> PyResult<(SparkError, std::sync::Arc<dyn std::any::Any + Send + Sync>)> {
+    let owner: std::sync::Arc<dyn std::any::Any + Send + Sync> = std::sync::Arc::new(
+        pyo3::types::PyTuple::new(py, [plan.clone(), py.None().into_bound(py)])?
+            .into_any()
+            .unbind(),
+    );
+    let id = NEXT_CALLBACK_EXCEPTION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut kept = KEPT_EXCEPTIONS.lock().unwrap_or_else(|e| e.into_inner());
+    kept.retain(|_, owner| owner.strong_count() > 0);
+    kept.insert(id, std::sync::Arc::downgrade(&owner));
+    let error = SparkError::classed(
+        SparkErrorKind::Python,
+        PYTHON_KEPT_ERROR,
+        &[("kept_id", &id.to_string())],
+    );
+    Ok((error, owner))
+}
+
+/// The item `index` of the owner of `err`, if it is a kept error ([`kept_error`]) of a plan that
+/// is alive: the plan of the Python client (0), or the exception that it raised (1), None of a
+/// plan that a request builds again ([`unpickled_plan_error`]).
+fn kept_item<'py>(py: Python<'py>, err: &SparkError, index: usize) -> Option<Bound<'py, PyAny>> {
+    if err.error_class != PYTHON_KEPT_ERROR {
+        return None;
+    }
+    let id = err.params.get("kept_id")?.parse::<u64>().ok()?;
+    let owner = KEPT_EXCEPTIONS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&id)?
+        .upgrade()?;
+    let held = owner.downcast_ref::<Py<PyAny>>()?.bind(py);
+    held.get_item(index).ok()
+}
+
+/// The plan of the Python client whose build raised the error that a plan keeps of `err`, if it is
+/// a kept error of a plan that is alive: what a pickle of an object of the plan carries, as
+/// PySpark's pickle carries its plan objects, which its unpickle builds again, of a new error of
+/// its own.
+pub(crate) fn kept_plan<'py>(py: Python<'py>, err: &SparkError) -> Option<Bound<'py, PyAny>> {
+    // An exception kept of no plan ([`kept_exception_error`]) is of None.
+    kept_item(py, err, 0).filter(|plan| !plan.is_none())
+}
+
+/// The error of the core of `exception`, which an expression keeps and raises anew at each call
+/// that fails of it, as PySpark raises a new exception at each such call, and the owner of the
+/// exception, which the expression holds: as [`kept_error`], of no plan.
+pub(crate) fn kept_exception_error(
+    py: Python<'_>,
+    exception: PyErr,
+) -> PyResult<(SparkError, std::sync::Arc<dyn std::any::Any + Send + Sync>)> {
+    kept_error(py, &py.None().into_bound(py), exception)
+}
+
+thread_local! {
+    /// The sessions of the requests whose errors this thread converts now, and of the builds of
+    /// plans of the Python client that it runs, innermost last (see [`of_request_session`]).
+    static REQUEST_SESSIONS: std::cell::RefCell<Vec<spark_connect::session::SparkSession>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Run `convert`, which converts the errors of a request of `session`, or builds a plan of the
+/// Python client of it, of `session` as the session of the request: so the plan that a Column
+/// of its subquery builds again at a request ([`unpickled_plan_error`]) is built of the session
+/// of the request, as PySpark's Column builds its plan object of the client of the request.
+pub(crate) fn of_request_session<T>(
+    session: &spark_connect::session::SparkSession,
+    convert: impl FnOnce() -> T,
+) -> T {
+    struct Left;
+    impl Drop for Left {
+        fn drop(&mut self) {
+            REQUEST_SESSIONS.with(|sessions| {
+                sessions.borrow_mut().pop();
+            });
+        }
+    }
+    REQUEST_SESSIONS.with(|sessions| sessions.borrow_mut().push(session.clone()));
+    let _left = Left;
+    convert()
+}
+
+/// As [`of_request_session`], of the session of `client`, the client that a plan or an expression
+/// is built of (see `session::session_of_client`), or of the session of the build that runs now
+/// when `client` has none.
+pub(crate) fn of_client_session<T>(client: &Bound<'_, PyAny>, convert: impl FnOnce() -> T) -> T {
+    match crate::session::session_of_client(client) {
+        Some(session) => of_request_session(&session, convert),
+        None => convert(),
+    }
+}
+
+/// A new exception of the one that a plan keeps of `err`, if it is a kept error of a plan that is
+/// alive ([`fresh_exception`]); of a plan that a request builds again ([`unpickled_plan_error`]),
+/// the error of its build now, of the session of the request, as PySpark's request builds the
+/// plan of the client of the request, or of the active session outside a request; of a plan
+/// that builds, the error of the object over it whose plan the pickle has not (see
+/// `dataframe::derived_plan_error`).
+fn kept_exception(err: &SparkError) -> Option<PyErr> {
+    if err.error_class != PYTHON_KEPT_ERROR {
+        return None;
+    }
+    Python::attach(|py| {
+        let kept = kept_item(py, err, 1)?;
+        if !kept.is_none() {
+            return Some(PyErr::from_value(fresh_exception(&kept)));
+        }
+        let plan = kept_item(py, err, 0)?;
+        Some(built_plan_exception(&plan).unwrap_or_else(|error| error))
+    })
+}
+
+/// The exception of the error of the build of `plan`, a plan of the Python client whose build
+/// raised when an object over it was pickled, of the session of the request now, or of the
+/// active session outside a request (see [`kept_exception`]).
+fn built_plan_exception(plan: &Bound<'_, PyAny>) -> PyResult<PyErr> {
+    let py = plan.py();
+    let request = REQUEST_SESSIONS.with(|sessions| sessions.borrow().last().cloned());
+    let session = match request {
+        Some(session) => crate::session::session_object(py, &session)?.into_bound(py),
+        None => {
+            let active = py
+                .import("pyspark.sql.connect.session")?
+                .getattr("SparkSession")?
+                .call_method0("getActiveSession")?;
+            match active.cast_into::<crate::session::PySparkSession>() {
+                Ok(session) => session,
+                Err(_) => {
+                    return Ok(spark_error_to_py_exception(SparkError::classed(
+                        SparkErrorKind::RuntimeError,
+                        "NO_ACTIVE_SESSION",
+                        &[],
+                    )))
+                }
+            }
+        }
+    };
+    // The exception is made while the DataFrame of the plan, which keeps the error of its build,
+    // is alive.
+    let (dataframe, error) = crate::dataframe::rebuilt_python_plan(plan, &session, true)?;
+    let exception =
+        spark_error_to_py_exception(error.unwrap_or_else(crate::dataframe::derived_plan_error));
+    drop(dataframe);
+    Ok(exception)
+}
+
+/// The levels of the chain of causes and contexts of an exception that [`fresh_exception`]
+/// copies; those below are not kept.
+const FRESH_CHAIN_LEVELS: usize = 64;
+
+/// A new exception of `kept`, as PySpark's plan raises a new one each time that it is built: its
+/// copy, as `copy.copy` makes it, of its arguments and its state; or, of a class that does not
+/// take its arguments back, as PySpark's error classes do not take their message, the exception
+/// of its class made of its arguments, without its `__init__`, and of its state. Of copies of the
+/// cause and the context of `kept`, made so in turn, and of no traceback, neither the copy nor
+/// those of its chain, which the raise gives the copy. `kept` itself when neither makes one.
+fn fresh_exception<'py>(kept: &Bound<'py, PyAny>) -> Bound<'py, PyAny> {
+    fresh_exception_of_chain(kept, 0)
+}
+
+fn fresh_exception_of_chain<'py>(kept: &Bound<'py, PyAny>, level: usize) -> Bound<'py, PyAny> {
+    let py = kept.py();
+    let class = kept.get_type();
+    let copied = py
+        .import("copy")
+        .and_then(|copy| copy.call_method1("copy", (kept,)))
+        .ok()
+        .filter(|copy| copy.get_type().is(&class) && !copy.is(kept));
+    let fresh = copied.or_else(|| {
+        let args = kept.getattr("args").ok()?;
+        let args = args.cast::<pyo3::types::PyTuple>().ok()?;
+        let made = class
+            .getattr("__new__")
+            .and_then(|new| {
+                new.call1(pyo3::types::PyTuple::new(
+                    py,
+                    std::iter::once(class.clone().into_any())
+                        .chain(args.iter())
+                        .collect::<Vec<_>>(),
+                )?)
+            })
+            .ok()
+            .filter(|made| made.get_type().is(&class))?;
+        if let (Ok(state), Ok(dict)) = (kept.getattr("__dict__"), made.getattr("__dict__")) {
+            dict.call_method1("update", (state,)).ok()?;
+        }
+        Some(made)
+    });
+    let Some(fresh) = fresh else {
+        return kept.clone();
+    };
+    for name in ["__cause__", "__context__"] {
+        let chained = kept
+            .getattr(name)
+            .ok()
+            .filter(|chained| !chained.is_none() && level < FRESH_CHAIN_LEVELS)
+            .map(|chained| fresh_exception_of_chain(&chained, level + 1));
+        let _ = fresh.setattr(name, chained);
+    }
+    if let Ok(value) = kept.getattr("__suppress_context__") {
+        let _ = fresh.setattr("__suppress_context__", value);
+    }
+    let _ = fresh.call_method1("with_traceback", (py.None(),));
+    fresh
 }
 
 /// Make `context` the `__context__` of the exception of the Python callback that `err` is the
@@ -367,7 +779,7 @@ pub(crate) fn with_context(py: Python<'_>, raised: PyErr, secondary: PyErr) -> P
 /// through `operation_id`). The id is auxiliary: an exception that refuses the attribute is
 /// still the one to raise, so the refusal does not replace it, and goes to
 /// `sys.unraisablehook` instead of being dropped.
-fn stamp_operation_id(exception: &Bound<'_, PyAny>, operation_id: Option<&str>) {
+pub(crate) fn stamp_operation_id(exception: &Bound<'_, PyAny>, operation_id: Option<&str>) {
     if let Some(operation_id) = operation_id {
         if let Err(error) = exception.setattr("_operation_id", operation_id) {
             error.write_unraisable(exception.py(), Some(exception));
@@ -399,9 +811,119 @@ fn unicode_encode_error(utf32le: &[u8], err: &SparkError) -> PyErr {
     })
 }
 
+/// grpcio's `RpcError` of `error`, which PySpark's client leaves to grpc, unconverted (see
+/// `SparkError::grpcio`), as `_grpc_error` of `pyspark.sql.connect.client.core` makes it: None
+/// without grpcio, whose classes cannot be had, when the error is converted as any other.
+fn grpcio_exception(error: &spark_connect_core::error::GrpcioError) -> Option<PyErr> {
+    Python::attach(|py| {
+        let exception = py
+            .import("pyspark.sql.connect.client.core")
+            .and_then(|client| {
+                client.call_method1("_grpc_error", crate::client::grpc_error_args(py, error))
+            });
+        match exception {
+            Ok(exception) => Some(PyErr::from_value(exception)),
+            // As PySpark, where the KeyboardInterrupt of a signal that comes while the error is
+            // made is raised in its place.
+            Err(error) if error.is_instance_of::<pyo3::exceptions::PyKeyboardInterrupt>(py) => {
+                Some(error)
+            }
+            Err(_) => None,
+        }
+    })
+}
+
+/// grpcio's error of the failed call of `grpcio`, as the exception that PySpark handles as it reads
+/// the status of the call, the context of what it raises then: grpcio's own, or, without grpcio, an
+/// exception of the class name and the text of grpcio's error (see
+/// `pyspark.sql.connect.client.core._InactiveRpcError`). None if neither can be made.
+fn grpcio_context(
+    py: Python<'_>,
+    grpcio: &spark_connect_core::error::GrpcioError,
+) -> Option<PyErr> {
+    grpcio_exception(grpcio).or_else(|| {
+        let class = if grpcio.call == GrpcCall::ServerStreaming {
+            "_MultiThreadedRendezvous"
+        } else {
+            "_InactiveRpcError"
+        };
+        py.import("pyspark.sql.connect.client.core")
+            .and_then(|client| client.getattr(class))
+            .and_then(|class| class.call1((grpcio.text.as_str(),)))
+            .ok()
+            .map(PyErr::from_value)
+    })
+}
+
+/// PySpark's error of `grpc_status.rpc_status.from_call` of the failed call of `grpcio`, whose
+/// `google.rpc.Status` does not match it, its `ValueError`, or whose details upb does not read,
+/// protobuf's `DecodeError`, also of the `Any.Unpack` of its `ErrorInfo` or `RetryInfo` (see
+/// `spark_connect_core::error::SparkError::grpcio`): raised as grpcio's error of the call is
+/// handled, its `__context__`, and of the operation ID of an execution, which PySpark's
+/// `_handle_error` sets on any exception of it. Without grpcio, its context is an exception of the
+/// class name and the text of grpcio's error (see
+/// `pyspark.sql.connect.client.core._InactiveRpcError`); without protobuf, the `DecodeError` is the
+/// runtime's (see `pyspark.sql.connect.proto._rust.DecodeError`). Of no `grpcio`, as of the status
+/// that PySpark's `Retrying` reads between its attempts, where no error is handled, it has no
+/// context of the call.
+fn rpc_status_value_error(
+    err: &SparkError,
+    grpcio: Option<&spark_connect_core::error::GrpcioError>,
+) -> PyErr {
+    Python::attach(|py| {
+        let context = grpcio.and_then(|grpcio| grpcio_context(py, grpcio));
+        // As PySpark, where the KeyboardInterrupt of a signal that comes while the error is made
+        // is raised in its place.
+        if let Some(context) = context.as_ref() {
+            if context.is_instance_of::<pyo3::exceptions::PyKeyboardInterrupt>(py) {
+                return context.clone_ref(py);
+            }
+        }
+        let message = err.message();
+        // As grpc_status's `code_to_grpc_status_code`, whose ValueError of a code that is not one
+        // of gRPC's is raised as it handles the KeyError of its lookup.
+        let context = match message
+            .strip_prefix("Invalid status code ")
+            .and_then(|code| code.parse::<i64>().ok())
+        {
+            Some(code) => {
+                let lookup = pyo3::exceptions::PyKeyError::new_err(code);
+                if let Some(context) = context {
+                    set_context(py, lookup.value(py), context);
+                }
+                Some(lookup)
+            }
+            None => context,
+        };
+        let raised = if message.starts_with("Error parsing message with type ") {
+            crate::pbmsg::decode_error_of(py, message)
+        } else {
+            exceptions::PyValueError::new_err(message)
+        };
+        if let Some(context) = context {
+            set_context(py, raised.value(py), context);
+        }
+        stamp_operation_id(raised.value(py).as_any(), err.operation_id.as_deref());
+        raised
+    })
+}
+
 /// Maps a SparkError to a Python exception, attempting to raise the correct typed
 /// exception based on the error kind. Falls back to PyRuntimeError if import fails.
+///
+/// Python work of the binding, which a daemon thread does not run once the interpreter exits
+/// (see `deliver::python_work`): its thread waits until the process ends instead, so that the
+/// finalization does not end it in the imports and the Python code of the build.
 pub fn spark_error_to_py_exception(err: SparkError) -> PyErr {
+    let _work = crate::deliver::python_work();
+    if let Some(grpcio) = err.grpcio.as_deref() {
+        if err.kind == SparkErrorKind::BuiltinValueError {
+            return rpc_status_value_error(&err, Some(grpcio));
+        }
+        if let Some(exception) = grpcio_exception(grpcio) {
+            return exception;
+        }
+    }
     if let Some(exception) = callback_exception(&err) {
         // As PySpark's `_handle_error`, which stamps the operation ID of an execution on any
         // exception of it, such as that of the warning of its spent retries of a filter of
@@ -416,8 +938,10 @@ pub fn spark_error_to_py_exception(err: SparkError) -> PyErr {
         return pyo3::exceptions::PyRecursionError::new_err(err.message());
     }
     if err.kind == SparkErrorKind::BuiltinValueError {
-        // A builtin, as the `int()` or `urllib` of the connection string raises it.
-        return exceptions::PyValueError::new_err(err.message());
+        // A builtin, as the `int()` or `urllib` of the connection string raises it, or the error of
+        // the status of a failure that PySpark's `Retrying` reads between its attempts, of no
+        // context: grpc_status's `ValueError` or protobuf's `DecodeError`.
+        return rpc_status_value_error(&err, None);
     }
     if err.kind == SparkErrorKind::BuiltinTypeError {
         // A builtin, as the protobuf of a plan's argument raises it.

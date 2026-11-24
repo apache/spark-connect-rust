@@ -794,10 +794,9 @@ def _one_vs_rest_fit_cases(rec, spark, df, base):
 
 
 def _one_vs_rest_plain_classifier_cases(rec, df, base):
-    """The cases of a OneVsRest of a classifier that is not a native one, which PySpark fits as any
-    classifier: PySpark's own LogisticRegression and MultilayerPerceptronClassifier of
-    pyspark.ml.classification, a Python subclass of that LogisticRegression, and objects that are
-    no classifier. The model is PySpark's OneVsRestModel of the classifier's own models."""
+    """OneVsRest with standard classification imports, a LogisticRegression subclass, and
+    invalid classifier values. Standard LogisticRegression can be native; the standard
+    MultilayerPerceptronClassifier still exercises the Python classifier fallback."""
     import pyspark.ml.classification as classification
     from pyspark.sql import functions as F
 
@@ -808,7 +807,19 @@ def _one_vs_rest_plain_classifier_cases(rec, df, base):
     est = _native("OneVsRest")(classifier=lr)
     rec("plain_getClassifier_is_classifier", lambda: est.getClassifier() is lr)
     model = est.fit(df)
-    rec("plain_model_class", lambda: (type(model).__name__, type(model).__module__))
+    def model_class():
+        # Standard LogisticRegression can be the native class. OneVsRest then returns its
+        # native model; verify that exact class before comparing its public API identity.
+        from _native_classes import native_module
+
+        native = native_module()
+        if native is not None and isinstance(lr, native.LogisticRegression):
+            assert type(model) is classes("OneVsRest")[1]
+            assert isinstance(model, classification.OneVsRestModel)
+            return type(model).__name__, classification.OneVsRestModel.__module__
+        return type(model).__name__, type(model).__module__
+
+    rec("plain_model_class", model_class)
     _submodel_cases(rec, "plain_lr_", model, lr)
     rec("plain_model_prefix", lambda: model.uid.split("_")[0])
     rec("plain_model_uid_is_estimator", lambda: model.uid == est.uid)

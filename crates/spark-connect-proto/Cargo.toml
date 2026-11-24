@@ -15,14 +15,22 @@ workspace = true
 [lib]
 name = "spark_connect_proto"
 
+[features]
+server = []
+
 [dependencies]
 tonic.workspace = true
 tonic-prost.workspace = true
 prost.workspace = true
 prost-types.workspace = true
+# Grows the stack for the decode of a response of many levels (see src/codec.rs).
+stacker = "0.1"
 
 [build-dependencies]
 tonic-prost-build.workspace = true
 # To write the descriptor set of the protos without their source info (see build.rs).
 prost.workspace = true
 prost-types.workspace = true
+# The identifiers of the generated code, as prost-build makes them, which prost's errors name the
+# messages and fields by (see build.rs).
+heck = "0.5"

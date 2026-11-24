@@ -204,7 +204,7 @@ Fix a behavior in the Rust core (`crates/spark-connect`), in the bindings
 (`crates/pyspark-rs`) or in a hand-written shim instead, and not by monkey-patching a
 Rust class from Python.
 
-`python/pyspark/sql/functions_generated.py` and
+`python/pyspark/sql/connect/functions/_generated.py` and
 `crates/pyspark-rs/src/dispatch_generated.rs` are generated from
 `crates/spark-connect/src/functions.rs`. Regenerate them after changing a function there;
 CI runs the same command with `--check`:
@@ -262,6 +262,17 @@ The stubs keep the docstring of each of PySpark's objects as it has it at run ti
 decorators too: one that the generator does not know is an error, which `DOC_KEEPING_DECORATORS`
 takes when the decorator keeps the docstring.
 
+The classic classes whose Connect classes are native (`pyspark.sql.Column` and the others of
+`_BINDINGS` of `python/pyspark/sql/_classic_bases.py`) forward a patch to the native class unless
+PySpark's Connect class has the name itself or its `__init__` sets it on each object, of the names
+that `_BINDINGS` keeps of PySpark's classes. CI checks those names against the source of PySpark at
+the tracked tag, of which the script works them out, and prints the difference and the names to
+keep when they differ, as after a change of the tracked version:
+
+```bash
+python scripts/check_classic_bindings.py --pyspark-src "$SPARK_HOME/python"
+```
+
 For local collection measurements and their interpretation, see
 [Row conversion throughput and responsiveness](row-conversion-benchmark.md).
 
@@ -292,6 +303,20 @@ markers such as `TODO`, `FIXME`, `todo!()` or "for now" in `crates/*/src`
 (`bash scripts/audit_no_stubs.sh`). Match the surrounding code, keep changes focused,
 and add or update golden tests when you change plan or expression building.
 
+Workspace builds, tests and Clippy include the experimental JNI crate. It needs
+macOS or Linux, a C compiler and `JAVA_HOME` set to a JDK with JNI headers.
+JDK 21 is the validated adapter and CI baseline.
+The frontend-only `cargo test --locked -p spark-connect-server` uses injected
+engines without a JDK. JNI, packaging and live Spark checks are documented in the
+[server guide](https://github.com/apache/spark-connect-rust/blob/master/crates/spark-connect-server/README.md#validation).
+On Windows, or to build/test/lint the other crates without a JDK, exclude it:
+
+```bash
+cargo build --workspace --exclude spark-connect-jni
+cargo test --workspace --exclude spark-connect-jni
+cargo clippy --workspace --all-targets --exclude spark-connect-jni -- -D warnings
+```
+
 Python is checked with ruff 0.14.0, the version CI pins, within the scope and excludes
 of `pyproject.toml`. Run it from the repository root without paths, as CI does:
 
@@ -308,6 +333,13 @@ requests don't conflict. When you pass paths, for example from an editor, add
 vendored ones included.
 
 ## Pull requests
+
+Native JAR license assets record whole-file hashes for the `inputs` in
+`crates/spark-connect-server/jvm/native-licenses/dependencies.json`. Run
+`python3 scripts/gen_native_binary_licenses.py --check` before pushing. If it reports
+stale assets, run `python3 scripts/gen_native_binary_licenses.py` and commit the
+regenerated native-license assets, even if the JNI dependency closure is unchanged.
+CI and native packaging reject stale assets.
 
 Open PRs against
 [`apache/spark-connect-rust`](https://github.com/apache/spark-connect-rust).

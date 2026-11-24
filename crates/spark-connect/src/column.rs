@@ -7,8 +7,9 @@ use std::ops::{Add, BitAnd, BitOr, Div, Mul, Not, Rem, Sub};
 use spark_connect_proto as proto;
 
 use crate::expression::{
-    Alias, CaseWhen, Cast, CastEvalMode, CastTarget, Expression, ExpressionNode, ExtractValue,
-    FrameBoundary, LiteralExpression, SortOrder, UpdateFieldsExpr, WindowExpressionWrapper,
+    Alias, CaseWhen, Cast, CastEvalMode, CastRead, CastTarget, Expression, ExpressionNode,
+    ExtractValue, FrameBoundary, LiteralExpression, SortOrder, UpdateFieldsExpr,
+    WindowExpressionWrapper,
 };
 use crate::types::DataType;
 use crate::window::WindowSpec;
@@ -36,6 +37,35 @@ impl Column {
     /// The underlying Expression, to replace.
     pub(crate) fn expression_mut(&mut self) -> &mut Expression {
         &mut self.expr
+    }
+
+    /// The reference to the column `name` of the DataFrame whose plan has the plan ID `plan_id`,
+    /// of the name `*` too, a metadata column of `metadata`, as PySpark Connect's
+    /// `DataFrame._col(name, is_metadata_column)` makes it of `self._plan._plan_id`, of no
+    /// DataFrame. Not a stable API.
+    #[doc(hidden)]
+    pub fn reference_of_plan(name: &str, plan_id: i64, metadata: bool) -> Column {
+        let reference = crate::expression::ColumnReference::new(name).with_plan_id(plan_id);
+        let reference = match metadata {
+            true => reference.metadata(),
+            false => reference,
+        };
+        Column::new(ExpressionNode::ColumnReference(reference).into())
+    }
+
+    /// The star of the columns of the DataFrame whose plan has the plan ID `plan_id`, as PySpark
+    /// Connect's `df["*"]` makes it of `self._plan._plan_id`. Not a stable API.
+    #[doc(hidden)]
+    pub fn star_of_plan(plan_id: i64) -> Column {
+        Column::new(ExpressionNode::UnresolvedStar(None, Some(plan_id)).into())
+    }
+
+    /// The columns of the DataFrame whose plan has the plan ID `plan_id` whose names match the
+    /// regex `pattern`, as PySpark Connect's `colRegex` makes them of `self._plan._plan_id`. Not
+    /// a stable API.
+    #[doc(hidden)]
+    pub fn regex_of_plan(pattern: &str, plan_id: i64) -> Column {
+        Column::new(ExpressionNode::UnresolvedRegex(pattern.to_string(), Some(plan_id)).into())
     }
 
     /// Mirrors `pyspark.sql.column.Column.alias`.
@@ -111,6 +141,36 @@ impl Column {
         let mut cast = Cast {
             child: self.expr,
             target: CastTarget::Shown(to_type, shown.to_string()),
+            eval_mode: None,
+        };
+        if try_ {
+            cast = cast.with_eval_mode(CastEvalMode::Try);
+        }
+        Column {
+            expr: ExpressionNode::Cast(Box::new(cast)).into(),
+        }
+    }
+
+    /// [`Column::cast`], or [`Column::try_cast`] if `try_`, of a type object of a binding, which
+    /// the cast reads when it renders and when a request builds it (see [`CastRead`]): its
+    /// `type_reader` gives the `spark.connect.DataType` that the request sends, and its
+    /// `shown_reader` the text of the type that the render shows; `stand_in` stands for the
+    /// type of a reader that gives none. Not a stable API.
+    #[doc(hidden)]
+    pub fn cast_read(
+        self,
+        stand_in: DataType,
+        type_reader: crate::udf::CommandPickler,
+        shown_reader: crate::udf::CommandPickler,
+        try_: bool,
+    ) -> Column {
+        let mut cast = Cast {
+            child: self.expr,
+            target: CastTarget::Read(Box::new(CastRead {
+                stand_in,
+                type_reader: Some(type_reader),
+                shown_reader: Some(shown_reader),
+            })),
             eval_mode: None,
         };
         if try_ {
@@ -471,6 +531,22 @@ impl Column {
     ) -> spark_connect_core::error::Result<Column> {
         Ok(Column::new(Expression::sent_with_subqueries(
             expression, rendered, levels, subqueries,
+        )?))
+    }
+
+    /// As [`Column::sent_with_subqueries`], of an expression and relations of subqueries of holes,
+    /// those of a pickled Column, whose functions each request of a plan of the Column pickles
+    /// (see [`Expression::sent_with_holes`]). Not a stable API.
+    #[doc(hidden)]
+    pub fn sent_with_holes(
+        expression: proto::Expression,
+        rendered: String,
+        levels: usize,
+        subqueries: Vec<(proto::Relation, usize, crate::udf::SentHoles)>,
+        holes: crate::udf::SentHoles,
+    ) -> spark_connect_core::error::Result<Column> {
+        Ok(Column::new(Expression::sent_with_holes(
+            expression, rendered, levels, subqueries, holes,
         )?))
     }
 
@@ -870,6 +946,90 @@ mod tests {
             collation: "UTF8_BINARY".to_string(),
         });
         assert!(matches!(casted.expr.node(), ExpressionNode::Cast(_)));
+    }
+
+    #[test]
+    fn cast_read_reads_its_type_when_it_renders_and_when_a_request_builds_it() {
+        // As PySpark's `CastExpression` of a type object, which its `__repr__` and its `to_plan`
+        // read then: the readers of a binding give the text and the type, of the object as it is
+        // at each read, and the errors of each then.
+        use prost::Message;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        let reads = Arc::new(AtomicUsize::new(0));
+        let type_reader = crate::udf::CommandPickler::new(Arc::clone(&reads), |reads| {
+            let read = reads.fetch_add(1, Ordering::SeqCst);
+            let data_type = if read == 0 {
+                DataType::Long
+            } else {
+                DataType::Double
+            };
+            Ok(data_type.to_proto().encode_to_vec())
+        });
+        let shown = Arc::new(AtomicUsize::new(0));
+        let shown_reader = crate::udf::CommandPickler::new(Arc::clone(&shown), |shown| match shown
+            .fetch_add(1, Ordering::SeqCst)
+        {
+            0 => Ok(b"bigint".to_vec()),
+            _ => Err(crate::SparkError::value_msg("boom")),
+        });
+        for (try_, name) in [(false, "CAST"), (true, "TRY_CAST")] {
+            reads.store(0, Ordering::SeqCst);
+            shown.store(0, Ordering::SeqCst);
+            let cast = col("x").cast_read(
+                DataType::Null,
+                type_reader.clone(),
+                shown_reader.clone(),
+                try_,
+            );
+            // The call reads nothing.
+            assert_eq!(reads.load(Ordering::SeqCst), 0);
+            assert_eq!(shown.load(Ordering::SeqCst), 0);
+            assert_eq!(
+                cast.expr.try_render().unwrap(),
+                format!("{name}(x AS BIGINT)")
+            );
+            // A render of a reader that fails shows the type that stands for the object, and the
+            // repr raises its error.
+            assert_eq!(cast.expr.render(), format!("{name}(x AS VOID)"));
+            assert_eq!(cast.expr.try_render().unwrap_err().message, "boom");
+            // Each request reads the type once, as it is then.
+            let sent = |expected: DataType| {
+                let (built, _) = cast.expr.try_to_proto_with_levels().unwrap();
+                let Some(proto::expression::ExprType::Cast(built)) = built.expr_type else {
+                    panic!("not a cast: {built:?}");
+                };
+                assert_eq!(
+                    built.cast_to_type,
+                    Some(proto::expression::cast::CastToType::Type(
+                        expected.to_proto()
+                    ))
+                );
+            };
+            sent(DataType::Long);
+            sent(DataType::Double);
+            assert_eq!(reads.load(Ordering::SeqCst), 2);
+        }
+        // A request raises the error of the reader of the type, after those of the child.
+        let failing =
+            crate::udf::CommandPickler::new((), |_| Err(crate::SparkError::value_msg("no proto")));
+        let cast = col("x").cast_read(DataType::Long, failing, shown_reader.clone(), false);
+        assert_eq!(
+            cast.expr.try_to_proto_with_levels().unwrap_err().message,
+            "no proto"
+        );
+        // Outside a request, of the type that stands for the object.
+        let Some(proto::expression::ExprType::Cast(built)) = cast.expr.to_proto().expr_type else {
+            panic!("not a cast");
+        };
+        assert_eq!(
+            built.cast_to_type,
+            Some(proto::expression::cast::CastToType::Type(
+                DataType::Long.to_proto()
+            ))
+        );
+        // The readers are the picklers of the expression, after those of its child.
+        assert_eq!(cast.expr.picklers().len(), 2);
     }
 
     #[test]

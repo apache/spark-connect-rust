@@ -27,7 +27,9 @@ arrow = { workspace = true, features = ["pyarrow"] }
 tokio.workspace = true
 # The drop-in decodes the protobufs that a pickled Column or DataFrame, and a session hook's
 # request, carry, which PySpark's protobuf decodes at any depth: lift prost's limit of 100
-# nested messages for this crate (the decode stacks are grown, see `on_grown_stack`).
+# nested messages for this crate (the decode stacks are grown, see `on_grown_stack`). The responses
+# of the server keep the limit of upb's decoder, which the codec of the client checks itself
+# (`spark_connect_proto::ClientCodec`).
 prost = { workspace = true, features = ["no-recursion-limit"] }
 prost-types.workspace = true
 tonic.workspace = true
@@ -36,3 +38,12 @@ stacker = "0.1"
 # The hash table of the positions of the keys of a map of the protobuf runtime (`pbmsg`), which
 # holds no copy of the keys; the wheel bundles this version through Arrow already.
 hashbrown = { version = "0.17", default-features = false }
+
+[build-dependencies]
+# The cfgs of the interpreter that the extension is built for, as PyO3's (`Py_GIL_DISABLED` of a
+# free-threaded build, see `build.rs`); the version of PyO3's own.
+pyo3-build-config = "0.29"
+
+[target.'cfg(unix)'.dependencies]
+# The local time and the thread of the lines of gRPC's log that the client writes to stderr.
+libc = "0.2"

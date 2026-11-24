@@ -154,14 +154,14 @@ impl DataStreamReader {
     pub fn load(self, path: Option<&str>) -> DataFrame {
         let paths = path.map(|p| vec![p.to_string()]);
         let plan = LogicalPlan::Read {
-            read_type: ReadType::DataSource {
+            read_type: Box::new(ReadType::DataSource {
                 format: self.format.clone(),
                 schema: Some(self.schema.clone()),
                 options: self.options.clone(),
                 paths: paths.unwrap_or_default(),
                 predicates: vec![],
                 source_name: self.source_name.clone(),
-            },
+            }),
             is_streaming: true,
         };
         let dataframe = self.dataframe_of(plan);
@@ -177,10 +177,10 @@ impl DataStreamReader {
     /// Read a named streaming table.
     pub fn table(self, table_name: &str) -> DataFrame {
         let plan = LogicalPlan::Read {
-            read_type: ReadType::NamedTable {
+            read_type: Box::new(ReadType::NamedTable {
                 table_name: table_name.to_string(),
                 options: self.options.clone(),
-            },
+            }),
             is_streaming: true,
         };
         self.dataframe_of(plan)
@@ -393,11 +393,28 @@ impl DataStreamWriter {
         self.foreach_payload.as_ref()
     }
 
-    /// Whether this writer streams the plan of `dataframe`, which it shares (see
-    /// [`DataFrame::shares_plan_with`]). Not a stable API.
+    /// The references of this writer to the shared parts of the plan that it streams and of the
+    /// picklers of its functions, if any (see [`crate::gc`]). Not a stable API.
     #[doc(hidden)]
-    pub fn shares_plan_with(&self, dataframe: &DataFrame) -> bool {
-        Arc::ptr_eq(&self.plan, &dataframe.plan)
+    pub fn held_parts(&self) -> Vec<crate::gc::PartRef<'_>> {
+        let mut held = vec![crate::gc::PartRef::Plan(&self.plan)];
+        let payloads = self
+            .foreach_batch_payload
+            .iter()
+            .chain(&self.foreach_payload);
+        held.extend(
+            payloads
+                .filter_map(|payload| payload.pickler.as_ref())
+                .map(crate::gc::PartRef::Pickler),
+        );
+        held
+    }
+
+    /// A DataFrame of the plan that this writer streams, of its session, as PySpark's stream
+    /// writer holds the plan of its DataFrame, of no schema cached. Not a stable API.
+    #[doc(hidden)]
+    pub fn dataframe(&self) -> DataFrame {
+        DataFrame::of_shared_plan(self.session.clone(), Arc::clone(&self.plan))
     }
 
     /// Drop the plan that this writer streams, as [`DataFrame::clear_plan`] drops the plan of a
@@ -1402,6 +1419,9 @@ fn run_listener_event_loop(
     bus: Weak<ListenerBus>,
     generation: u64,
 ) {
+    // The records of the responses that the thread reads are written on it, which runs the
+    // listeners, as PySpark's `_query_event_handler` thread logs the responses that it reads.
+    spark_connect_core::client_log::write_records_on_this_thread();
     // Declared first so it runs last, after the dispatch guard, also when a callback unwinds.
     let _finish = FinishGeneration {
         bus: bus.clone(),
@@ -1941,6 +1961,16 @@ impl StreamingQueryManager {
         }
     }
 
+    /// Run `on_started`, which posts the synchronous started event of a query that a client of this
+    /// crate started itself, as the start of a query of [`DataStreamWriter`] posts it: a removal
+    /// from another thread waits for the delivery, as PySpark's bus holds its lock for it. Not a
+    /// stable API.
+    #[doc(hidden)]
+    pub fn post_started<R>(&self, on_started: impl FnOnce(&StreamingQueryManager) -> R) -> R {
+        let _dispatch = self.started_dispatch();
+        on_started(self)
+    }
+
     /// Post `event` to the client-side listeners of the session.
     pub(crate) fn post_to_all(&self, event: &StreamingQueryListenerEvent) {
         self.bus.post_to_all(event);
@@ -2188,7 +2218,10 @@ impl StreamingQueryManager {
             ..Default::default()
         };
 
-        let response_stream = self.session.execute_plan_unreported(request)?;
+        let response_stream = self.session.execute_plan_unreported(
+            request,
+            spark_connect_core::client_log::ExecutionLog::ExecuteCommandAsIterator,
+        )?;
 
         Ok(ListenerEventStream {
             stream: response_stream,

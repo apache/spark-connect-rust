@@ -2,13 +2,10 @@
 //!
 //! Mirrors `pyspark.sql.connect.client.core.SparkConnectClient`.
 
-use hyper_util::client::legacy::connect::HttpConnector;
-use hyper_util::rt::TokioIo;
 use std::collections::BTreeMap;
 use std::time::Duration;
-use tokio::net::TcpStream;
 use tonic::metadata::{AsciiMetadataKey, AsciiMetadataValue, MetadataMap};
-use tonic::transport::{Certificate, Channel, ClientTlsConfig};
+use tonic::transport::Channel;
 use tonic::{Request, Response, Streaming};
 use uuid::Uuid;
 
@@ -31,15 +28,17 @@ use crate::artifact::{
 };
 use crate::channel::{is_secret_param, ChannelBuilder, GRPC_MAX_MESSAGE_LENGTH_DEFAULT};
 use crate::error::{GrpcCall, Result, SparkError, SparkErrorKind};
-use crate::proxy::{HttpProxy, ProxyEnv};
+use crate::proxy::ProxyEnv;
 use crate::reattach::ExecutePlanResponseReattachableIterator;
 use crate::retries::{
-    retrying, unknown_operation, Backoff, RetriesExceeded, RetryError, RetryPolicy, Retrying,
+    retrying, unknown_operation, BackgroundRequest, Backoff, RetriesExceeded, RetryDecider,
+    RetryError, RetryPolicy, Retrying,
 };
 use crate::thread_entries::forget_when_thread_ends;
 
 /// How long [`wait_ready`] waits for the lazy gRPC channel to take a call before surfacing a
-/// retriable `UNAVAILABLE`. The connection itself is bounded by [`CONNECT_TIMEOUT`].
+/// retriable `UNAVAILABLE`. The connection itself is bounded by the connector's deadlines (see
+/// [`crate::connector`]).
 const READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Apply the keepalive of the connection string, as PySpark's channel options do (SPARK-58094):
@@ -73,7 +72,7 @@ fn ssl_roots_pem(path: Option<std::ffi::OsString>) -> Option<Vec<u8>> {
         Err(error) => {
             crate::grpc_log::error(format!(
                 "{SSL_ROOTS_FILE_VAR} names {}, which cannot be read ({error}); using the \
-                 system's roots",
+                 default roots",
                 path.display()
             ));
             None
@@ -81,343 +80,417 @@ fn ssl_roots_pem(path: Option<std::ffi::OsString>) -> Option<Vec<u8>> {
     }
 }
 
-/// The roots of the TLS channels, of [`ssl_roots_pem`], read when the first TLS channel of the
-/// process is made: grpcio computes its default roots once, and a later change of the variable
-/// or of the file is not seen, nor logged again.
-fn ssl_roots() -> Option<&'static [u8]> {
-    static ROOTS: std::sync::OnceLock<Option<Vec<u8>>> = std::sync::OnceLock::new();
-    ROOTS
-        .get_or_init(|| ssl_roots_pem(std::env::var_os(SSL_ROOTS_FILE_VAR)))
-        .as_deref()
+/// The PEM file of the roots that the TLS channels trust besides the system's store, if any (see
+/// [`set_bundled_ssl_roots_file`]).
+static BUNDLED_ROOTS_FILE: std::sync::RwLock<Option<std::path::PathBuf>> =
+    std::sync::RwLock::new(None);
+
+/// Make the TLS channels trust the roots of the PEM file `path` besides those of the system's
+/// store, unless `GRPC_DEFAULT_SSL_ROOTS_FILE_PATH` names a file, whose roots alone they trust: as
+/// the Python binding names grpcio's own bundle (`roots.pem` of the `grpc` package) where grpcio
+/// is installed, whose roots PySpark's channels trust, so that the drop-in trusts those that
+/// PySpark trusts, and those of the system's store too, which an unrelated install of grpcio does
+/// not take away. Of the roots read from then on, once per process, when the first TLS channel is
+/// made. A file that cannot be read, or is empty, is as none. Not a stable API.
+#[doc(hidden)]
+pub fn set_bundled_ssl_roots_file(path: Option<std::path::PathBuf>) {
+    *BUNDLED_ROOTS_FILE
+        .write()
+        .unwrap_or_else(|e| e.into_inner()) = path;
 }
 
-/// The deadline of a connection, as grpcio's 20 s connect deadline: one deadline from the start
-/// of the connection, which its parts share, the TCP connection and the TLS handshake of a
-/// direct connection, or the TCP connection to the proxy, the tunnel, and the TLS handshake
-/// inside it, and the HTTP/2 settings of the server of a plaintext connection (see
-/// [`ServerStream`]). A connection that is not done by then fails with `UNAVAILABLE`, which is
-/// retried, as in grpcio.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
-
-/// A lazy channel to `endpoint`, connected directly.
-///
-/// tonic bounds the whole connection, the TLS handshake included, by [`CONNECT_TIMEOUT`] from
-/// outside the connector, which [`crate::retries::grpc_python_code`] reports as `UNAVAILABLE`.
-/// tonic's `connect_lazy` would bound only the TCP connection, so that a server that accepts it
-/// and never answers the TLS handshake would hold the call until its own deadline. The TCP
-/// connection has the same bound in the connector, which divides it among the addresses of the
-/// host that it tries in turn, so that an address that does not answer leaves time for the
-/// next one. The server of a plaintext connection has the rest of the deadline to send its
-/// settings (see [`DirectConnector`]).
-fn connect_directly(endpoint: tonic::transport::Endpoint) -> Channel {
-    // As tonic's own connector of an endpoint (`Endpoint::http_connector`), of the endpoint's
-    // defaults: an `https` URI goes through it too (tonic negotiates TLS on its stream), and
-    // TCP_NODELAY is set.
-    let mut connector = HttpConnector::new();
-    connector.enforce_http(false);
-    connector.set_nodelay(true);
-    connector.set_connect_timeout(Some(CONNECT_TIMEOUT));
-    endpoint
-        .connect_timeout(CONNECT_TIMEOUT)
-        .connect_with_connector_lazy(DirectConnector(connector))
+/// The roots of the bundled roots file, if one is set and can be read.
+fn bundled_roots_pem() -> Option<Vec<u8>> {
+    let path = BUNDLED_ROOTS_FILE
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()?;
+    std::fs::read(path).ok().filter(|pem| !pem.is_empty())
 }
 
-/// When the server of a connection to `uri` of the deadline `deadline` has to have sent its
-/// settings (see [`ServerStream`]): at that deadline for a plaintext connection, never for TLS.
-fn settings_deadline(
-    uri: &tonic::codegen::http::Uri,
-    deadline: tokio::time::Instant,
-) -> Option<tokio::time::Instant> {
-    (uri.scheme_str() != Some("https")).then_some(deadline)
-}
-
-/// Connects to the server of a URI directly, with tonic's own connector. The server of a
-/// plaintext connection has until the deadline of the connection, [`CONNECT_TIMEOUT`] from when
-/// tonic calls the connector, to send its settings (see [`ServerStream`]).
-#[derive(Clone)]
-struct DirectConnector(HttpConnector);
-
-impl tonic::codegen::Service<tonic::codegen::http::Uri> for DirectConnector {
-    type Response = TokioIo<ServerStream>;
-    type Error = Box<dyn std::error::Error + Send + Sync>;
-    type Future = tonic::codegen::BoxFuture<Self::Response, Self::Error>;
-
-    fn poll_ready(
-        &mut self,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<std::result::Result<(), Self::Error>> {
-        tonic::codegen::Service::poll_ready(&mut self.0, cx).map_err(Into::into)
+/// The roots of the TLS channels, read when the first TLS channel of the process is made, as
+/// grpcio computes its default roots once, so that a later change of the variable, of the files or
+/// of the system's store is not seen, nor logged again, and every channel of the process trusts the
+/// same roots, of which its subchannels are shared (see `crate::connector::SubchannelArgs`): those
+/// of [`ssl_roots_pem`] alone, else the system's store (see `crate::connector::system_roots`) and
+/// the bundled roots file (see [`set_bundled_ssl_roots_file`]).
+fn ssl_roots() -> crate::connector::Roots<'static> {
+    struct Read {
+        file: Option<Vec<u8>>,
+        native: Vec<crate::connector::SystemRoot>,
+        bundle: Option<Vec<u8>>,
     }
-
-    fn call(&mut self, uri: tonic::codegen::http::Uri) -> Self::Future {
-        let deadline = settings_deadline(&uri, tokio::time::Instant::now() + CONNECT_TIMEOUT);
-        let connecting = tonic::codegen::Service::call(&mut self.0, uri);
-        Box::pin(async move {
-            let stream = connecting.await?.into_inner();
-            Ok(TokioIo::new(ServerStream::new(stream, deadline)))
-        })
-    }
-}
-
-/// The details of the failure of a connection whose server sends no settings by its deadline,
-/// grpcio's, which it gives as the last error of the connection (`failed to connect to all
-/// addresses; last error: UNKNOWN: ipv4:127.0.0.1:15002: connection attempt timed out before
-/// receiving SETTINGS frame`).
-const SETTINGS_TIMEOUT: &str = "connection attempt timed out before receiving SETTINGS frame";
-
-/// The length of the header of an HTTP/2 frame (RFC 9113, section 4.1).
-const FRAME_HEADER_LEN: usize = 9;
-
-/// The stream of a connection to the server, whose server has until a deadline, the connect
-/// deadline of a plaintext connection, to send its first HTTP/2 frame, the SETTINGS that it sends
-/// first: grpcio waits for them within its connect deadline before a connection takes calls.
-/// hyper sends the preface of the client at once, as grpcio does, but takes the connection as made
-/// without the server's, so that a server that accepts the connection and never answers would
-/// hold its calls until the keepalive ends the connection, 80 s by default. Past the deadline, a
-/// read fails with [`SETTINGS_TIMEOUT`], which ends the connection and fails its calls with
-/// `UNAVAILABLE`, which is retried. A server that sends its settings late but within the
-/// deadline, or only once it has the client's preface, is read as any other.
-///
-/// A TLS stream has no deadline: tonic bounds its handshake by the connect timeout, and the frames
-/// come in the TLS session, which this stream, under it, does not see.
-struct ServerStream {
-    stream: TcpStream,
-    /// Until the server's first frame has arrived: what of it has, and the deadline.
-    first_frame: Option<(FirstFrame, std::pin::Pin<Box<tokio::time::Sleep>>)>,
-}
-
-impl ServerStream {
-    /// `stream`, whose server has until `deadline` to send its first frame, if there is one.
-    fn new(stream: TcpStream, deadline: Option<tokio::time::Instant>) -> Self {
-        let first_frame = deadline.map(|deadline| {
-            (
-                FirstFrame::default(),
-                Box::pin(tokio::time::sleep_until(deadline)),
-            )
-        });
-        Self {
-            stream,
-            first_frame,
+    static ROOTS: std::sync::OnceLock<Read> = std::sync::OnceLock::new();
+    let read = ROOTS.get_or_init(|| {
+        let file = ssl_roots_pem(std::env::var_os(SSL_ROOTS_FILE_VAR));
+        let (native, bundle) = if file.is_none() {
+            (crate::connector::system_roots(), bundled_roots_pem())
+        } else {
+            (Vec::new(), None)
+        };
+        Read {
+            file,
+            native,
+            bundle,
         }
+    });
+    match &read.file {
+        Some(file) => crate::connector::Roots::Only(file),
+        None => crate::connector::Roots::System {
+            native: &read.native,
+            bundle: read.bundle.as_deref(),
+        },
     }
 }
 
-/// The first frame of the server while it arrives.
-#[derive(Default)]
-struct FirstFrame {
-    /// The header of the frame, as far as it has arrived.
-    header: [u8; FRAME_HEADER_LEN],
-    /// The count of the bytes of the stream that have arrived.
-    received: usize,
-}
-
-impl FirstFrame {
-    /// Whether the frame has arrived whole with `bytes`, the next bytes of the stream: its header,
-    /// and the payload of the length that the header gives.
-    fn arrived(&mut self, bytes: &[u8]) -> bool {
-        let start = self.received.min(FRAME_HEADER_LEN);
-        let header = bytes.len().min(FRAME_HEADER_LEN - start);
-        self.header[start..start + header].copy_from_slice(&bytes[..header]);
-        self.received += bytes.len();
-        // A length of 24 bits: of a header that has not all arrived, too long to be reached.
-        let [a, b, c, ..] = self.header;
-        let length = u32::from_be_bytes([0, a, b, c]) as usize;
-        self.received >= FRAME_HEADER_LEN + length
-    }
-}
-
-impl tokio::io::AsyncRead for ServerStream {
-    fn poll_read(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &mut tokio::io::ReadBuf<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        use std::task::Poll;
-        let this = &mut *self;
-        let filled = buf.filled().len();
-        let read = tokio::io::AsyncRead::poll_read(std::pin::Pin::new(&mut this.stream), cx, buf);
-        if let Some((first_frame, deadline)) = &mut this.first_frame {
-            match &read {
-                Poll::Ready(Ok(())) if first_frame.arrived(&buf.filled()[filled..]) => {
-                    this.first_frame = None;
-                }
-                Poll::Pending if std::future::Future::poll(deadline.as_mut(), cx).is_ready() => {
-                    return Poll::Ready(Err(std::io::Error::new(
-                        std::io::ErrorKind::TimedOut,
-                        SETTINGS_TIMEOUT,
-                    )));
-                }
-                _ => {}
-            }
-        }
-        read
-    }
-}
-
-impl tokio::io::AsyncWrite for ServerStream {
-    fn poll_write(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &[u8],
-    ) -> std::task::Poll<std::io::Result<usize>> {
-        tokio::io::AsyncWrite::poll_write(std::pin::Pin::new(&mut self.stream), cx, buf)
-    }
-
-    fn poll_write_vectored(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        bufs: &[std::io::IoSlice<'_>],
-    ) -> std::task::Poll<std::io::Result<usize>> {
-        tokio::io::AsyncWrite::poll_write_vectored(std::pin::Pin::new(&mut self.stream), cx, bufs)
-    }
-
-    fn is_write_vectored(&self) -> bool {
-        tokio::io::AsyncWrite::is_write_vectored(&self.stream)
-    }
-
-    fn poll_flush(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        tokio::io::AsyncWrite::poll_flush(std::pin::Pin::new(&mut self.stream), cx)
-    }
-
-    fn poll_shutdown(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        tokio::io::AsyncWrite::poll_shutdown(std::pin::Pin::new(&mut self.stream), cx)
-    }
-}
-
-/// The connection of the TCP stream, which hyper reads its addresses of.
-impl hyper_util::client::legacy::connect::Connection for ServerStream {
-    fn connected(&self) -> hyper_util::client::legacy::connect::Connected {
-        hyper_util::client::legacy::connect::Connection::connected(&self.stream)
-    }
-}
-
-/// The details of the failed call of `status` as grpcio gives them: tonic's message, but of a
-/// connection that [`ServerStream`] ends, which tonic reports as a transport error, grpcio's
-/// [`SETTINGS_TIMEOUT`].
+/// The details of the failed call of `status` as grpcio gives them: tonic's message, which is the
+/// connector's text of a connection that failed (see [`crate::connector`]), but of a call that the
+/// end of its connection failed, `Stream removed (...)` in the dialect of grpcio, and of a message
+/// over the size limit of a call (see [`oversized`]), gRPC core's text of it there, `Stream removed
+/// (CLIENT: Received message larger than max (<length> vs. <limit>))` of a response and `CLIENT:
+/// Sent message larger than max (<length> vs. <limit>)` of a request.
 pub(crate) fn status_details(status: &tonic::Status) -> String {
-    let settings_timeout = |error: &(dyn std::error::Error + 'static)| {
-        error.downcast_ref::<std::io::Error>().is_some_and(|error| {
-            error.kind() == std::io::ErrorKind::TimedOut && error.to_string() == SETTINGS_TIMEOUT
-        })
-    };
-    let mut errors =
-        std::iter::successors(std::error::Error::source(status), |error| error.source());
-    if errors.any(settings_timeout) {
-        SETTINGS_TIMEOUT.to_string()
-    } else {
-        status.message().to_string()
-    }
+    status_details_in(status, crate::connector::grpcio_dialect())
 }
 
-/// A lazy channel to `endpoint` through an HTTP CONNECT tunnel of `proxy`. tonic negotiates
-/// TLS (for an `https` endpoint) inside the tunnel, with the endpoint's own server name.
-///
-/// tonic bounds the whole connection, the TLS handshake included, by [`CONNECT_TIMEOUT`] from
-/// outside the connector, which [`crate::retries::grpc_python_code`] reports as `UNAVAILABLE`.
-/// The connector bounds the TCP connection to the proxy and the tunnel by the same deadline
-/// (see [`ProxyConnector`]), so that a proxy that does not open the tunnel is reported as that.
-fn connect_through_proxy(endpoint: tonic::transport::Endpoint, proxy: HttpProxy) -> Channel {
-    endpoint
-        .connect_timeout(CONNECT_TIMEOUT)
-        .connect_with_connector_lazy(ProxyConnector(std::sync::Arc::new(proxy)))
-}
-
-/// The longest response to a CONNECT that the client reads, as hyper-util's tunnel.
-const MAX_PROXY_RESPONSE: usize = 8192;
-
-/// Connects to the server of a URI through a CONNECT tunnel of the proxy.
-///
-/// The TCP connection to the proxy and the tunnel have the deadline of the connection,
-/// [`CONNECT_TIMEOUT`] from when tonic calls the connector, which it does before it starts its
-/// own bound of the whole connection: a proxy that does not open the tunnel in time fails the
-/// connection with an error that names it, at the deadline of the connection, as grpcio's tunnel
-/// shares the connect deadline with the TLS handshake. The server of a plaintext connection has
-/// the same deadline to send its settings in the tunnel (see [`ServerStream`]).
-#[derive(Clone)]
-struct ProxyConnector(std::sync::Arc<HttpProxy>);
-
-impl tonic::codegen::Service<tonic::codegen::http::Uri> for ProxyConnector {
-    type Response = TokioIo<ServerStream>;
-    type Error = Box<dyn std::error::Error + Send + Sync>;
-    type Future = tonic::codegen::BoxFuture<Self::Response, Self::Error>;
-
-    fn poll_ready(
-        &mut self,
-        _: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<std::result::Result<(), Self::Error>> {
-        std::task::Poll::Ready(Ok(()))
-    }
-
-    fn call(&mut self, uri: tonic::codegen::http::Uri) -> Self::Future {
-        let proxy = self.0.clone();
-        // When tonic calls the connector, before it starts its own bound, rather than when the
-        // connection is first polled: the tunnel's deadline is then no later than tonic's.
-        let deadline = tokio::time::Instant::now() + CONNECT_TIMEOUT;
-        let settings = settings_deadline(&uri, deadline);
-        Box::pin(async move {
-            let host = uri.host().ok_or("the endpoint has no host")?;
-            let default_port = if uri.scheme_str() == Some("https") {
-                443
-            } else {
-                80
-            };
-            let port = uri.port_u16().unwrap_or(default_port);
-            match tokio::time::timeout_at(deadline, open_tunnel(&proxy, host, port)).await {
-                Ok(stream) => Ok(TokioIo::new(ServerStream::new(stream?, settings))),
-                Err(_) => Err("the proxy did not open the tunnel in time".into()),
-            }
-        })
-    }
-}
-
-/// A TCP stream to `host:port` through a CONNECT tunnel of `proxy` (RFC 9110, section 9.3.6).
-async fn open_tunnel(proxy: &HttpProxy, host: &str, port: u16) -> std::io::Result<TcpStream> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let mut stream = TcpStream::connect(proxy.authority.as_str()).await?;
-    // With a custom connector, tonic ignores the endpoint's TCP options: set any of them here.
-    // This is tonic's default, which the direct channel has.
-    stream.set_nodelay(true)?;
-    let mut request = format!("CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n");
-    if let Some(authorization) = &proxy.authorization {
-        request.push_str(&format!("Proxy-Authorization: {authorization}\r\n"));
-    }
-    request.push_str("\r\n");
-    stream.write_all(request.as_bytes()).await?;
-    // One byte at a time: the bytes after the response are the server's (a plaintext HTTP/2
-    // server sends its SETTINGS at once), so they must stay in the stream.
-    let mut response = Vec::new();
-    while !response.ends_with(b"\r\n\r\n") {
-        if response.len() == MAX_PROXY_RESPONSE {
-            return Err(std::io::Error::other(
-                "the response of the proxy is too long",
-            ));
+/// As [`status_details`], in the dialect of grpcio if `grpcio`.
+fn status_details_in(status: &tonic::Status, grpcio: bool) -> String {
+    if grpcio {
+        // Of metadata that gRPC's core refuses, as it ends the stream of the call.
+        if crate::metadata::is_refused(status) {
+            return format!("Stream removed ({})", status.message());
         }
-        response.push(stream.read_u8().await?);
+        match oversized(status) {
+            Some((Oversized::Received, length, limit)) => {
+                return format!(
+                    "Stream removed (CLIENT: Received message larger than max ({length} vs. \
+                     {limit}))"
+                );
+            }
+            Some((Oversized::Sent, length, limit)) => {
+                return format!("CLIENT: Sent message larger than max ({length} vs. {limit})");
+            }
+            None => {}
+        }
     }
-    // As grpcio, any 2xx opens the tunnel.
-    let status_line = response.split(|&b| b == b'\r').next().unwrap_or_default();
-    let mut parts = status_line.splitn(3, |&b| b == b' ');
-    let version = parts.next().unwrap_or_default();
-    let status = parts
-        .next()
-        .and_then(|s| std::str::from_utf8(s).ok()?.parse::<u16>().ok());
-    match status {
-        Some(200..=299) if version.starts_with(b"HTTP/1.") => Ok(stream),
-        Some(407) => Err(std::io::Error::other(
-            "the proxy requires authentication (407)",
-        )),
-        Some(status) => Err(std::io::Error::other(format!(
-            "the proxy refused the tunnel ({status})"
-        ))),
-        None => Err(std::io::Error::other("the proxy did not answer in HTTP")),
+    crate::connector::stream_removed_in(status, grpcio)
+        .unwrap_or_else(|| status.message().to_string())
+}
+
+/// Whether a message over the size limit of a call is a response or a request (see [`oversized`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Oversized {
+    /// A response that tonic does not read.
+    Received,
+    /// A request that the client does not send.
+    Sent,
+}
+
+/// The message over the size limit of a call that the client's status `status` is of, its
+/// direction, length and limit (see [`oversized_of`]), of the limit of the client's calls.
+pub(crate) fn oversized(status: &tonic::Status) -> Option<(Oversized, u64, u64)> {
+    oversized_of(status, GRPC_MAX_MESSAGE_LENGTH_DEFAULT as u64)
+}
+
+/// The message over the size limit `limit` of a call that the client's status `status` is of, its
+/// direction, length and limit: of a response, tonic's status of its pinned text, `Error, decoded
+/// message length too large: found <length> bytes, the limit is: <limit> bytes`, of the code
+/// `OUT_OF_RANGE`, which tonic gives as it reads the header of the message, before any codec sees
+/// it, of the limit of the client; of a request, the client's own, which it tags (see
+/// [`too_large_to_send`]). A status of a server of the same code and text, of no details, as a
+/// server of tonic sends of a message over its own limit, is read so too only if the limit of the
+/// server is that of the client. grpc-python's code of either is `RESOURCE_EXHAUSTED`.
+fn oversized_of(status: &tonic::Status, limit: u64) -> Option<(Oversized, u64, u64)> {
+    if status.code() != tonic::Code::OutOfRange || !status.details().is_empty() {
+        return None;
+    }
+    let sent = std::iter::successors(std::error::Error::source(status), |error| error.source())
+        .any(|error| error.is::<RequestTooLarge>());
+    let (direction, rest) = if sent {
+        (
+            Oversized::Sent,
+            status
+                .message()
+                .strip_prefix("Error, encoded message length too large: ")?,
+        )
+    } else {
+        (
+            Oversized::Received,
+            status
+                .message()
+                .strip_prefix("Error, decoded message length too large: ")?,
+        )
+    };
+    let (length, of) = rest
+        .strip_prefix("found ")?
+        .strip_suffix(" bytes")?
+        .split_once(" bytes, the limit is: ")?;
+    let (length, of) = (length.parse().ok()?, of.parse().ok()?);
+    (sent || of == limit).then_some((direction, length, of))
+}
+
+/// The source of the client's status of a request over the size limit of a call, which it does
+/// not send (see [`too_large_to_send`]).
+#[derive(Debug, Clone, Copy)]
+struct RequestTooLarge;
+
+impl std::fmt::Display for RequestTooLarge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the client does not send a request over the size limit of a call")
     }
 }
+
+impl std::error::Error for RequestTooLarge {}
+
+/// The status of a request of `length` bytes over the size limit of a call, as tonic's encoding
+/// gives it, tagged as the client's own (see [`oversized`]).
+fn too_large_to_send(length: usize) -> tonic::Status {
+    let mut status = tonic::Status::out_of_range(format!(
+        "Error, encoded message length too large: found {length} bytes, the limit is: \
+         {GRPC_MAX_MESSAGE_LENGTH_DEFAULT} bytes"
+    ));
+    status.set_source(std::sync::Arc::new(RequestTooLarge));
+    status
+}
+
+/// The error of a request of the bytes `request` over the size limit of a call, if it is.
+#[allow(clippy::result_large_err)] // SparkError is large, as in the other entry points
+fn sendable_bytes(request: &[u8]) -> Result<()> {
+    if request.len() > GRPC_MAX_MESSAGE_LENGTH_DEFAULT {
+        return Err(SparkError::from_grpc_status(too_large_to_send(
+            request.len(),
+        )));
+    }
+    Ok(())
+}
+
+/// `request`, unless its message is over the size limit of a call (see [`Stub`]).
+fn sendable<T: prost::Message>(
+    request: impl tonic::IntoRequest<T>,
+) -> std::result::Result<Request<T>, tonic::Status> {
+    let request = request.into_request();
+    match request.get_ref().encoded_len() {
+        length if length > GRPC_MAX_MESSAGE_LENGTH_DEFAULT => Err(too_large_to_send(length)),
+        _ => Ok(request),
+    }
+}
+
+/// The generated gRPC client of the channel of a client (see [`SparkConnectClient::stub`]), which
+/// refuses a request over the size limit of a call before it is sent, of tonic's status of it
+/// (see [`oversized`]): tonic checks the length of a request as it encodes it in the body of the
+/// call, and its failure there ends the call as a reset of its stream (`h2 protocol error`), of
+/// which hyper drops the cause.
+#[derive(Clone)]
+struct Stub(SparkConnectServiceClient<crate::metadata::Checked>);
+
+/// A call of the generated client whose request is checked first (see [`Stub`]).
+macro_rules! checked_calls {
+    ($($method:ident($request:ty) -> $response:ty;)*) => {
+        impl Stub {
+            $(
+                async fn $method(
+                    &mut self,
+                    request: impl tonic::IntoRequest<$request>,
+                ) -> std::result::Result<tonic::Response<$response>, tonic::Status> {
+                    self.0.$method(sendable(request)?).await
+                }
+            )*
+        }
+    };
+}
+
+checked_calls! {
+    execute_plan(ExecutePlanRequest) -> Streaming<ExecutePlanResponse>;
+    reattach_execute(ReattachExecuteRequest) -> Streaming<ExecutePlanResponse>;
+    release_execute(ReleaseExecuteRequest) -> ReleaseExecuteResponse;
+    analyze_plan(AnalyzePlanRequest) -> AnalyzePlanResponse;
+    config(spark_connect_proto::ConfigRequest) -> spark_connect_proto::ConfigResponse;
+    interrupt(spark_connect_proto::InterruptRequest) -> spark_connect_proto::InterruptResponse;
+    fetch_error_details(spark_connect_proto::FetchErrorDetailsRequest) -> spark_connect_proto::FetchErrorDetailsResponse;
+    clone_session(spark_connect_proto::CloneSessionRequest) -> spark_connect_proto::CloneSessionResponse;
+    release_session(spark_connect_proto::ReleaseSessionRequest) -> spark_connect_proto::ReleaseSessionResponse;
+    get_status(spark_connect_proto::GetStatusRequest) -> GetStatusResponse;
+    artifact_status(spark_connect_proto::ArtifactStatusesRequest) -> spark_connect_proto::ArtifactStatusesResponse;
+}
+
+impl Stub {
+    /// The upload of artifacts, whose requests, chunks of the artifacts, are far smaller than
+    /// the size limit of a call.
+    async fn add_artifacts(
+        &mut self,
+        request: impl tonic::IntoStreamingRequest<Message = spark_connect_proto::AddArtifactsRequest>,
+    ) -> std::result::Result<
+        tonic::Response<spark_connect_proto::AddArtifactsResponse>,
+        tonic::Status,
+    > {
+        self.0.add_artifacts(request).await
+    }
+}
+
+/// What the channels of a client are made of: the endpoint, of its keepalive and its origin, and
+/// what its connections connect to. A client of a new session gets a channel of its own of them
+/// (see [`ChannelFactory::channel`]).
+#[derive(Clone)]
+struct ChannelFactory {
+    endpoint: tonic::transport::Endpoint,
+    /// The origin of the requests and the keepalive of the endpoint, which the subchannels of the
+    /// process are told apart by, with their addresses and the target.
+    origin: String,
+    keepalive: Option<crate::channel::Keepalive>,
+    /// Whether each channel of the factory has call credentials of its own: of a connection string
+    /// of a token, whose sessions grpcio gives channels of their own credentials, which share no
+    /// connection, as the token of each is its own.
+    own_connection: bool,
+    target: crate::connector::Target,
+}
+
+/// The use of its channel by a client of a session and by its clones: open until the client is
+/// closed, or gone, which shuts the channel down, so that it lets go of its subchannels (see
+/// [`crate::connector::ClientChannel::shutdown`]).
+///
+/// A lease is of the generation of the process that made it: in a child of a `fork()`, a lease of
+/// the parent, and its channel, are left as they are when it drops, as the subchannels and the
+/// connections of the channel are of the runtime of the parent, whose epoll instance the child
+/// shares (see [`crate::fork`]).
+struct ChannelLease {
+    /// The channel of the client, as each client of PySpark has a channel of grpcio of its own:
+    /// its resolver, and its `pick_first` over the subchannels of the process, which it shares
+    /// with the other channels of the process.
+    channel: crate::fork::ForkLocal<std::sync::Arc<crate::connector::ClientChannel>>,
+    open: std::sync::atomic::AtomicBool,
+}
+
+impl ChannelLease {
+    fn new(channel: std::sync::Arc<crate::connector::ClientChannel>) -> Self {
+        Self {
+            channel: crate::fork::ForkLocal::new(channel),
+            open: std::sync::atomic::AtomicBool::new(true),
+        }
+    }
+
+    fn close(&self) {
+        if self.open.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            self.channel.shutdown();
+        }
+    }
+
+    fn is_open(&self) -> bool {
+        self.open.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// The channel of a client and of its clones, in the generation of the process that it is of: a
+/// client of a parent of a `fork()` takes a channel of the child's in the child, whose threads the
+/// parent's channel does not have, as grpcio's fork support resets the channels of a parent there.
+/// The lease of each generation is taken without a lock, which a thread of the parent may have
+/// held at the fork, and the lease of the parent is left as it is in the child.
+struct Transport {
+    factory: std::sync::Arc<ChannelFactory>,
+    current: crate::fork::PerGeneration<std::sync::Arc<ChannelLease>>,
+}
+
+impl Transport {
+    fn new(factory: std::sync::Arc<ChannelFactory>) -> Self {
+        let transport = Self {
+            factory,
+            current: crate::fork::PerGeneration::new(),
+        };
+        transport.lease();
+        transport
+    }
+
+    /// The lease of the channel of the generation of the process: in a child, of a channel of its
+    /// own, closed if the client was closed in the parent.
+    fn lease(&self) -> std::sync::Arc<ChannelLease> {
+        std::sync::Arc::clone(self.current.get_or_init(|parent| {
+            let lease = std::sync::Arc::new(ChannelLease::new(self.factory.channel()));
+            if parent.is_some_and(|parent| !parent.is_open()) {
+                lease.close();
+            }
+            lease
+        }))
+    }
+}
+
+impl Drop for ChannelLease {
+    fn drop(&mut self) {
+        // A lease of a parent is left as it is: its channel is of the parent's runtime.
+        if self.channel.is_current() && *self.open.get_mut() {
+            self.channel.shutdown();
+        }
+    }
+}
+
+/// The proxy of the environment now that the channel of `builder` connects through, if any, as
+/// gRPC's proxy mapper decides it: of a target of gRPC, of the host of its path, and none of a
+/// socket of `unix:`; else of the host of the connection string.
+fn proxy_of(
+    builder: &ChannelBuilder,
+) -> std::result::Result<Option<crate::proxy::HttpProxy>, String> {
+    // Of a channel of no credentials that sends its token in plaintext, of the rule of
+    // `ChannelBuilder::secure` (a token to `localhost`), a loopback host connects directly, as no
+    // local credentials keep the token from a proxy (see `crate::proxy`).
+    let direct_loopback =
+        builder.credentials().is_none() && !builder.secure() && builder.token().is_some();
+    match builder.target_names() {
+        Some(names) => match &names.proxied {
+            Some((host, _)) => ProxyEnv::from_process().proxy_for(host, direct_loopback),
+            None => Ok(None),
+        },
+        None => ProxyEnv::from_process().proxy_for(builder.host(), direct_loopback),
+    }
+}
+
+impl ChannelFactory {
+    /// The factory of the channel of a new session of the same endpoint as of `builder`, through
+    /// the proxy of the environment now, as grpcio's channel of a new client reads it, which logs
+    /// what grpcio logs of it again. Of the proxy of this factory if that one is not valid, as
+    /// the error of the creation of a session of it is of the first session only.
+    fn renewed(&self, builder: &ChannelBuilder) -> Self {
+        let target = match proxy_of(builder) {
+            Ok(proxy) => self.target.renewed(builder.host(), builder.port(), proxy),
+            Err(_) => self.target.clone(),
+        };
+        Self {
+            endpoint: self.endpoint.clone(),
+            origin: self.origin.clone(),
+            keepalive: self.keepalive,
+            own_connection: self.own_connection,
+            target,
+        }
+    }
+
+    /// A channel of a client of this factory (see [`crate::connector::ClientChannel`]), of the
+    /// subchannels of the process, of its call credentials of its own of a token, whose work in
+    /// the background and whose connections run on the shared runtime, as the subchannels are the
+    /// process's, which outlive the runtime of the caller.
+    fn channel(&self) -> std::sync::Arc<crate::connector::ClientChannel> {
+        let keepalive = self
+            .keepalive
+            .map(|keepalive| (keepalive.time, keepalive.timeout, keepalive.without_calls));
+        crate::connector::ClientChannel::new(
+            self.target.clone(),
+            crate::connector::SubchannelArgs::new(
+                &self.target,
+                &self.origin,
+                keepalive,
+                self.own_connection,
+            ),
+            self.endpoint.clone(),
+            crate::connector::Pool::of_the_process(),
+            crate::runtime::get_runtime().handle().clone(),
+        )
+    }
+}
+
+/// The flow-control window of a connection, the largest of HTTP/2. h2 gives the window of the
+/// connection back as each stream's data is read, so that the streams that a caller does not read
+/// on, such as the results of `toLocalIterator()` that a session holds open, would use the window
+/// of the connection up, and every other call of the connection, of any session that shares it,
+/// would wait. gRPC's core grows the window of its connections with the windows of their streams,
+/// so that none starves another: a window this large does so too, and the window of each stream
+/// (hyper's, of 2 MiB) still bounds what a stream holds unread.
+const CONNECTION_WINDOW: u32 = (1 << 31) - 1;
 
 /// gRPC/HTTP header carrying the connection-string `token` as `Bearer <token>`.
 /// Named here (rather than as a string literal) so the key is written once.
@@ -431,7 +504,7 @@ const USER_AGENT_HEADER: &str = "user-agent";
 /// (or the timeout) to a gRPC `UNAVAILABLE` error. This matches how grpcio reports an
 /// unreachable server, so the reference client raises `SparkConnectGrpcException` with
 /// `UNAVAILABLE` rather than hanging on a channel that never connects.
-async fn wait_ready(grpc: &mut tonic::client::Grpc<Channel>) -> Result<()> {
+async fn wait_ready(grpc: &mut tonic::client::Grpc<crate::metadata::Checked>) -> Result<()> {
     match tokio::time::timeout(READY_TIMEOUT, grpc.ready()).await {
         Ok(Ok(())) => Ok(()),
         Ok(Err(e)) => Err(SparkError::from_grpc_status(tonic::Status::unavailable(
@@ -557,6 +630,167 @@ fn with_deadline<T>(mut request: Request<T>, deadline: Option<Duration>) -> Requ
     request
 }
 
+/// Add the entries of `metadata` to those of the request `req`: its `grpc-timeout` of a deadline,
+/// which [`with_deadline`] set, stays.
+fn add_metadata<T>(req: &mut Request<T>, metadata: &MetadataMap) {
+    let added = req.metadata_mut();
+    for entry in metadata.iter() {
+        match entry {
+            tonic::metadata::KeyAndValueRef::Ascii(key, value) => {
+                added.append(key.clone(), value.clone());
+            }
+            tonic::metadata::KeyAndValueRef::Binary(key, value) => {
+                added.append_bin(key.clone(), value.clone());
+            }
+        }
+    }
+}
+
+/// `request`, an execution request, of an operation ID: in the dialect of grpcio, of a new one when
+/// it has none, the one that the iterator of the execution would give it, as PySpark's request has
+/// one before its hooks run and its stub is called, so that the error of a closed client or
+/// channel carries it.
+fn with_operation_id_of_grpcio(mut request: ExecutePlanRequest) -> ExecutePlanRequest {
+    if crate::connector::grpcio_dialect()
+        && request.operation_id.as_deref().is_none_or(str::is_empty)
+    {
+        request.operation_id = Some(Uuid::new_v4().to_string());
+    }
+    request
+}
+
+/// A failure of a call whose conversion runs for the calling thread (see [`converting_failure`]).
+/// Not a stable API.
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub struct Conversion {
+    /// grpcio's error of the failure.
+    pub failure: crate::error::GrpcioError,
+    /// The operation ID of the execution of the failure, of a failure of an execution, which
+    /// PySpark's `_handle_error` sets on any exception that goes out of the conversion.
+    pub operation_id: Option<String>,
+}
+
+/// A mark of [`CONVERTING`]: the conversion, of the thread that its call acts for, of the watch
+/// of the waits of that call (see [`crate::runtime::wait_watch_id`]) and of the client of the call
+/// (see [`SparkConnectClient::identity`]).
+struct ConvertingMark {
+    thread: std::thread::ThreadId,
+    watch: Option<usize>,
+    client: usize,
+    conversion: Conversion,
+}
+
+/// The failures of the calls whose conversion runs now (see [`converting_failure`]), of each
+/// generation of the process (see [`crate::fork`]).
+static CONVERTING: crate::fork::PerGeneration<std::sync::Mutex<Vec<ConvertingMark>>> =
+    crate::fork::PerGeneration::new();
+
+/// The marks of [`CONVERTING`] of the generation of the process, locked.
+fn converting() -> std::sync::MutexGuard<'static, Vec<ConvertingMark>> {
+    CONVERTING
+        .get_or_init(|_| Default::default())
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+/// Marks the failure of a call as converted for the thread that the call acts for, until it
+/// drops (see [`converting_failure`]).
+struct Converting {
+    thread: std::thread::ThreadId,
+}
+
+impl Converting {
+    fn start(
+        failure: &crate::error::GrpcioError,
+        operation_id: Option<String>,
+        client: usize,
+    ) -> Self {
+        let thread = crate::runtime::calling_thread_id();
+        converting().push(ConvertingMark {
+            thread,
+            watch: crate::runtime::wait_watch_id(),
+            client,
+            conversion: Conversion {
+                failure: failure.clone(),
+                operation_id,
+            },
+        });
+        Converting { thread }
+    }
+}
+
+impl Drop for Converting {
+    fn drop(&mut self) {
+        let mut converting = converting();
+        if let Some(position) = converting
+            .iter()
+            .rposition(|mark| mark.thread == self.thread)
+        {
+            converting.remove(position);
+        }
+    }
+}
+
+/// The failure of a call whose conversion runs now for the calling thread, the innermost, if any,
+/// of the call whose waits the watch of the calling thread polls (see
+/// [`crate::runtime::with_wait_watch`]): of its logs, of the request of the details of an error of
+/// the server and of the reads of the configs of its stack trace. PySpark's `_handle_error`
+/// converts the failure of a call in the `except Exception` clause of the call, outside of the
+/// `except KeyboardInterrupt` of an execution: the exception that a signal handler raises
+/// meanwhile, as the `KeyboardInterrupt` of Ctrl-C, goes out of the call as it is, of that
+/// failure as its context and of the operation ID of its execution, and interrupts nothing, so
+/// that a wait that polls the signals ends then rather than interrupt the execution of the
+/// failure. A call that runs during the conversion, as of a handler of one of its logs, is not of
+/// it, as PySpark's call runs a conversion of its own, if any. Not a stable API.
+#[doc(hidden)]
+pub fn converting_failure() -> Option<Conversion> {
+    let thread = crate::runtime::calling_thread_id();
+    let watch = crate::runtime::wait_watch_id();
+    converting()
+        .iter()
+        .rev()
+        .find(|mark| mark.thread == thread && mark.watch == watch)
+        .map(|mark| mark.conversion.clone())
+}
+
+/// The operation IDs of the executions whose failure a call that acts for `thread` converts now,
+/// of any call of the thread (see [`converting_failure`]).
+fn converted_operation_ids(thread: std::thread::ThreadId) -> Vec<String> {
+    converting()
+        .iter()
+        .filter(|mark| mark.thread == thread)
+        .filter_map(|mark| mark.conversion.operation_id.clone())
+        .collect()
+}
+
+/// Tell the listener of the retries of the process of the failure `failed` of a request in the
+/// background, `request` (see [`crate::retries::RetriesListener::background_failure`]): of its
+/// spent retries, of a failure that is not retried, or of the error of the decider of its
+/// retries.
+fn background_failure<E>(request: BackgroundRequest, failed: RetryError<E>) {
+    use crate::retries::BackgroundFailure;
+    let text = |status: &tonic::Status| crate::error::grpcio_error_text(status, GrpcCall::Unary);
+    // A log that no caller waits for, of no error.
+    let _ = crate::retries::log(|listener| {
+        match failed {
+            RetryError::Exceeded(status) => listener.background_failure(
+                request,
+                Some(RetriesExceeded::Policy),
+                BackgroundFailure::Rpc(&text(&status)),
+            ),
+            RetryError::Status(status) => {
+                listener.background_failure(request, None, BackgroundFailure::Rpc(&text(&status)))
+            }
+            RetryError::Failed(error) => {
+                listener.background_failure(request, None, BackgroundFailure::Error(error))
+            }
+            RetryError::Aborted(_) | RetryError::WaitAborted => {}
+        }
+        Ok(())
+    });
+}
+
 /// `call` bounded as a whole by `deadline`, as gRPC bounds an RPC: past it, the call fails with
 /// `DEADLINE_EXCEEDED`, as PySpark's does, however far it got.
 ///
@@ -582,11 +816,6 @@ async fn within_deadline<T>(
     }
 }
 
-/// The server-side session ID observed by a client, from its shared slot.
-fn observed_of(slot: &std::sync::Mutex<Option<String>>) -> Option<String> {
-    slot.lock().unwrap_or_else(|e| e.into_inner()).clone()
-}
-
 /// The error of a response that does not match this session, as PySpark's
 /// `PySparkAssertionError`, which has no error class.
 fn assertion_error(message: String) -> SparkError {
@@ -603,6 +832,56 @@ fn stream_deadline_in(deadline: Option<Duration>) -> Option<tokio::time::Instant
     deadline.and_then(|deadline| tokio::time::Instant::now().checked_add(deadline))
 }
 
+/// The details of grpcio's cancel of a call in flight when `close` closes its channel, before the
+/// response of the call begins (see [`ChannelClosed`]).
+pub(crate) const CLOSED_CHANNEL: &str = "Channel closed!";
+
+/// The details of grpcio's cancel of a call in flight when `close` closes its channel, once the
+/// response of the call began, as of a stream whose responses are read.
+pub(crate) const STREAM_OF_A_CLOSED_CHANNEL: &str = "Stream removed (Channel closed!)";
+
+/// The next read of `stream`, a stream of responses of an execution, after grpcio's `close` of its
+/// channel, which cancels the calls of the channel whose status is not delivered yet: a call whose
+/// responses were all read, and which the server ended, ends as the server ended it, of its status;
+/// another fails as cancelled, `CANCELLED`, `Stream removed (Channel closed!)`, of none of the
+/// responses that it holds, which the cancel discards, and of the trailing metadata of the end of
+/// the call, if it arrived, as of the failure that the server ended the stream with, such as the
+/// error of an execution of the session that the `stop()` of the client released, whose
+/// `google.rpc.Status` then does not match the cancel, as grpc_status raises it of PySpark's call.
+fn read_after_close(
+    stream: &mut Streaming<ExecutePlanResponse>,
+) -> std::result::Result<Option<ExecutePlanResponse>, tonic::Status> {
+    read_after_close_of(stream, false)
+}
+
+/// As [`read_after_close`], of a stream of which a response was read already after the close, as
+/// by a read in flight when the client closed the channel, if `discarded`: grpcio's cancel gives
+/// no response after it, so that response is discarded too, and no release of it is sent.
+fn read_after_close_of(
+    stream: &mut Streaming<ExecutePlanResponse>,
+    discarded: bool,
+) -> std::result::Result<Option<ExecutePlanResponse>, tonic::Status> {
+    use futures::FutureExt;
+    const DETAILS: &str = STREAM_OF_A_CLOSED_CHANNEL;
+    let mut unread = discarded;
+    loop {
+        match stream.message().now_or_never() {
+            Some(Ok(Some(_))) => unread = true,
+            Some(Ok(None)) if !unread => return Ok(None),
+            Some(Err(ended)) if !unread => return Err(ended),
+            Some(Err(ended)) => {
+                return Err(tonic::Status::with_details_and_metadata(
+                    tonic::Code::Cancelled,
+                    DETAILS,
+                    ended.details().to_vec().into(),
+                    ended.metadata().clone(),
+                ))
+            }
+            Some(Ok(None)) | None => return Err(tonic::Status::cancelled(DETAILS)),
+        }
+    }
+}
+
 /// The error of a reattach to an operation that the server does not know, once a response was
 /// read: `RESPONSE_ALREADY_RECEIVED`, with the error class of the server as `error_type`.
 fn response_already_received(error_type: &str) -> SparkError {
@@ -611,6 +890,19 @@ fn response_already_received(error_type: &str) -> SparkError {
         "RESPONSE_ALREADY_RECEIVED",
         &[("error_type", error_type)],
     )
+}
+
+/// What the Rust client makes of the failure of a call that PySpark's client leaves to grpc,
+/// whose error the dialect of grpcio raises as grpcio's (see
+/// [`SparkConnectClient::result_left_to_grpc`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LeftToGrpc {
+    /// The error of the server, as of the other calls, with the details that it asks for: of the
+    /// uploads of `copy_from_local_to_fs` and of the caching of artifacts.
+    Converted,
+    /// The error of its status as it is, of nothing more asked of the server, which does not
+    /// close the client: of `clone`, as PySpark's `clone` does not call `_handle_error`.
+    AsItIs,
 }
 
 const PLAN_COMPRESSION_THRESHOLD_CONF: &str = "spark.connect.session.planCompression.threshold";
@@ -629,16 +921,135 @@ enum PlanCompression {
     Zstd { threshold: usize },
 }
 
-/// The plan compression of the confs of the server, as PySpark reads them: zstd above a threshold
-/// that is not negative. Any other algorithm, or a missing or invalid threshold, disables it.
-fn plan_compression_of(threshold: Option<&str>, algorithm: Option<&str>) -> PlanCompression {
-    let threshold = threshold
-        .filter(|threshold| !threshold.is_empty())
-        .and_then(|threshold| threshold.parse::<usize>().ok());
-    match (threshold, algorithm) {
-        (Some(threshold), Some("ZSTD")) => PlanCompression::Zstd { threshold },
+/// The settings of the plan compression of a client, as PySpark's client keeps them in its
+/// `_plan_compression_threshold` and `_plan_compression_algorithm`: the threshold of the conf of
+/// the server as an int (-1 of none), and its algorithm, which PySpark's plans compress with when it
+/// is `ZSTD`, above a threshold that is not negative. Binding hook; not a stable API.
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlanCompressionSettings {
+    pub threshold: i128,
+    pub algorithm: Option<String>,
+}
+
+impl PlanCompressionSettings {
+    /// The settings that a plan compression of no others stands for: of a failed lookup, of the
+    /// threshold -1 and the algorithm `NONE`, as PySpark's lookup and its `CANNOT_PARSE` set them.
+    fn of(compression: PlanCompression) -> Option<Self> {
+        match compression {
+            PlanCompression::Unknown => None,
+            PlanCompression::Disabled => Some(Self {
+                threshold: -1,
+                algorithm: Some("NONE".to_string()),
+            }),
+            PlanCompression::Zstd { threshold } => Some(Self {
+                threshold: i128::try_from(threshold).unwrap_or(i128::MAX),
+                algorithm: Some("ZSTD".to_string()),
+            }),
+        }
+    }
+}
+
+/// The threshold of the plan compression of the conf `threshold` of the server, as PySpark's
+/// `int(plan_compression_threshold_str) if plan_compression_threshold_str else -1` reads it, or
+/// None where `int()` raises.
+fn plan_compression_threshold(threshold: Option<&str>) -> Option<i128> {
+    match threshold {
+        None | Some("") => Some(-1),
+        Some(threshold) => crate::client_log::python_int(threshold),
+    }
+}
+
+/// The plan compression of the threshold `threshold`, as PySpark reads it of its conf, and of the
+/// algorithm `algorithm`: zstd above a threshold that is not negative.
+fn plan_compression_above(threshold: i128, algorithm: Option<&str>) -> PlanCompression {
+    match algorithm {
+        Some("ZSTD") if threshold >= 0 => PlanCompression::Zstd {
+            threshold: usize::try_from(threshold).unwrap_or(usize::MAX),
+        },
         _ => PlanCompression::Disabled,
     }
+}
+
+/// The plan compression of the confs `threshold` and `algorithm` of the server, as PySpark reads
+/// them: zstd above a threshold that is not negative, which any other algorithm, or a missing or
+/// invalid threshold, disables; and what PySpark's `_get_plan_compression_threshold_and_algorithm`
+/// logs of them: `Plan compression threshold: ..., algorithm: ...`, or, of a threshold that `int()`
+/// does not read, its `ValueError` with which it disables the compression.
+fn looked_up_plan_compression(
+    threshold: Option<&str>,
+    algorithm: Option<&str>,
+) -> (PlanCompression, crate::client_log::Message) {
+    use crate::client_log::Message;
+    match plan_compression_threshold(threshold) {
+        Some(value) => (
+            plan_compression_above(value, algorithm),
+            Message::Text(format!(
+                "Plan compression threshold: {value}, algorithm: {}",
+                algorithm.unwrap_or("None")
+            )),
+        ),
+        None => {
+            let text = threshold.unwrap_or_default();
+            let error = SparkError::builtin_value_msg(format!(
+                "invalid literal for int() with base 10: {}",
+                python_str_repr(text)
+            ));
+            (
+                PlanCompression::Disabled,
+                Message::WithError {
+                    text: PLAN_COMPRESSION_UNSUPPORTED,
+                    error: Box::new(error),
+                },
+            )
+        }
+    }
+}
+
+/// What PySpark's `_get_plan_compression_threshold_and_algorithm` logs, of the exception that it
+/// catches as its argument, when it disables the plan compression of a lookup that failed.
+const PLAN_COMPRESSION_UNSUPPORTED: &str =
+    "Plan compression is disabled because the server does not support it.";
+
+/// The `repr` of the Python string `text`: in single quotes, or in double quotes of a text of
+/// single quotes and of no double quotes, with the escapes of Python's `repr` of the backslash,
+/// the quote, the whitespace controls and the other characters that are not printable.
+fn python_str_repr(text: &str) -> String {
+    let quote = if text.contains('\'') && !text.contains('"') {
+        '"'
+    } else {
+        '\''
+    };
+    let mut repr = String::with_capacity(text.len() + 2);
+    repr.push(quote);
+    for c in text.chars() {
+        match c {
+            '\\' => repr.push_str("\\\\"),
+            '\n' => repr.push_str("\\n"),
+            '\r' => repr.push_str("\\r"),
+            '\t' => repr.push_str("\\t"),
+            c if c == quote => {
+                repr.push('\\');
+                repr.push(c);
+            }
+            c if (c as u32) < 0x20 || c as u32 == 0x7f => {
+                repr.push_str(&format!("\\x{:02x}", c as u32));
+            }
+            c if c.is_control() => {
+                let code = c as u32;
+                if code <= 0xff {
+                    repr.push_str(&format!("\\x{code:02x}"));
+                } else if code <= 0xffff {
+                    repr.push_str(&format!("\\u{code:04x}"));
+                } else {
+                    repr.push_str(&format!("\\U{code:08x}"));
+                }
+            }
+            c => repr.push(c),
+        }
+    }
+    repr.push(quote);
+    repr
 }
 
 /// The stack that a clone of a request takes for the levels of its plan: prost's derived `Clone`
@@ -658,33 +1069,48 @@ fn clone_on_grown_stack<T: Clone>(value: &T) -> T {
 }
 
 /// Replace the relation or command of `plan` with its zstd-compressed operation, when it is over
-/// `threshold` bytes and compression makes it smaller, as PySpark's `_try_compress_and_set_plan`.
-fn compress_over_threshold(plan: &mut Plan, threshold: usize) {
+/// `threshold` bytes and compression makes it smaller, as PySpark's `_try_compress_and_set_plan`:
+/// what it logs of a compression, its sizes and its time (`Plan compression: ...`), and that it was
+/// not effective. The frame is that of the `compress` of python-zstandard, of the same level, which
+/// writes the size of the content: the same bytes, of the same version of zstd.
+fn compress_over_threshold(plan: &mut Plan, threshold: usize) -> Vec<String> {
     let (op_type, size) = match &plan.op_type {
         Some(PlanOpType::Root(relation)) => (CompressedOpType::Relation, relation.encoded_len()),
         Some(PlanOpType::Command(command)) => (CompressedOpType::Command, command.encoded_len()),
-        _ => return,
+        _ => return Vec::new(),
     };
     // The size of the encoding, without encoding the plans that are not over the threshold.
     if size <= threshold {
-        return;
+        return Vec::new();
     }
     let message = match &plan.op_type {
         Some(PlanOpType::Root(relation)) => relation.encode_to_vec(),
         Some(PlanOpType::Command(command)) => command.encode_to_vec(),
-        _ => return,
+        _ => return Vec::new(),
     };
-    let Ok(data) = zstd::encode_all(message.as_slice(), zstd::DEFAULT_COMPRESSION_LEVEL) else {
-        return;
+    let started = std::time::Instant::now();
+    let Ok(data) = zstd::bulk::compress(message.as_slice(), zstd::DEFAULT_COMPRESSION_LEVEL) else {
+        return Vec::new();
     };
+    let duration = started.elapsed().as_secs_f64();
+    // As PySpark's f-string of the ratio and the time, of Python's rounding of a float.
+    let mut logged = vec![format!(
+        "Plan compression: original_size={}, compressed_size={}, saving_ratio={:.2}, \
+         duration_s={duration:.1}",
+        message.len(),
+        data.len(),
+        1.0 - data.len() as f64 / message.len() as f64,
+    )];
     if data.len() >= message.len() {
-        return;
+        logged.push("Plan compression not effective. Using original plan.".to_string());
+        return logged;
     }
     plan.op_type = Some(PlanOpType::CompressedOperation(CompressedOperation {
         data: data.into(),
         op_type: op_type as i32,
         compression_codec: CompressionCodec::Zstd as i32,
     }));
+    logged
 }
 
 /// The plans of an analysis, which PySpark builds with its plan compression. The plans of
@@ -706,6 +1132,16 @@ fn analyze_plans(analyze: &mut Analyze) -> Vec<&mut Option<Plan>> {
         | Analyze::GetStorageLevel(_)
         | Analyze::JsonToDdl(_) => Vec::new(),
     }
+}
+
+/// An execution whose request is built, as PySpark's client builds it before its `Progress` of
+/// the execution starts, and not sent yet: [`SparkConnectClient::build_execution`] builds it and
+/// [`SparkConnectClient::execute_built`] sends it. Not a stable API.
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct BuiltExecution {
+    request: ExecutePlanRequest,
+    log: crate::client_log::ExecutionLog,
 }
 
 /// A hook of the executions of a client, as PySpark's `SparkSession.Hook.on_execute_plan`: it is
@@ -751,17 +1187,180 @@ fn add_result_chunking_option(request: &mut ExecutePlanRequest, chunking: Result
     });
 }
 
+/// What PySpark's `execute_command` logs of the command of `request` before it sets the command in
+/// the plan of its request (`Execute command for command ...`), or its
+/// `execute_command_as_iterator`, of the command truncated.
+fn logged_command(
+    request: &ExecutePlanRequest,
+    log: crate::client_log::ExecutionLog,
+) -> crate::client_log::Message {
+    use crate::client_log::{types, Encoded, ExecutionLog, Message};
+    let prefix = match log {
+        ExecutionLog::ExecuteCommandAsIterator => "Execute command as iterator for command ",
+        _ => "Execute command for command ",
+    };
+    let message = match request.plan.as_ref().and_then(|plan| plan.op_type.as_ref()) {
+        Some(PlanOpType::Command(command)) => Encoded::of(types::COMMAND, command),
+        _ => Encoded::of(types::COMMAND, &spark_connect_proto::Command::default()),
+    };
+    Message::Proto {
+        prefix: prefix.into(),
+        message,
+        truncated: true,
+    }
+}
+
+/// Log what the method of PySpark's client that the execution of `request` stands for logs as it
+/// is called, before it builds the request, as `log` says: the plan of `to_table` and of
+/// `to_table_as_iterator`, of the plan as it is sent (`Executing plan ...`), and the command of
+/// `execute_command` and of `execute_command_as_iterator`, before it is compressed (`Execute
+/// command for command ...`), truncated. The error of a record fails the execution there.
+async fn log_execution_call(
+    request: &ExecutePlanRequest,
+    log: crate::client_log::ExecutionLog,
+) -> Result<()> {
+    use crate::client_log::{logged, ExecutionLog, Level};
+    match log {
+        ExecutionLog::ToTable | ExecutionLog::ToTableAsIterator => {
+            logged(Level::Debug, || {
+                crate::client_log::executing_plan(request.plan.as_ref())
+            })
+            .await
+        }
+        ExecutionLog::ExecuteCommand | ExecutionLog::ExecuteCommandAsIterator => {
+            logged(Level::Debug, || logged_command(request, log)).await
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Log what PySpark's client logs of the execution once its request is built, before its
+/// `Progress` of the execution starts, as `log` says: the `ExecuteAndFetch` of
+/// `_execute_and_fetch` or the `Execute` of `_execute`. The error of the record fails the execution
+/// there, before its request is sent.
+async fn log_execution(log: crate::client_log::ExecutionLog) -> Result<()> {
+    use crate::client_log::{logged, ExecutionLog, Level, Message};
+    let started = match log {
+        ExecutionLog::ToTable | ExecutionLog::Fetch | ExecutionLog::ExecuteCommand => {
+            Some("ExecuteAndFetch")
+        }
+        ExecutionLog::Execute => Some("Execute"),
+        _ => None,
+    };
+    if let Some(started) = started {
+        logged(Level::Debug, || Message::Text(started.to_string())).await?;
+    }
+    Ok(())
+}
+
+/// Log the request of an execution as `_execute_and_fetch_as_iterator` logs it as it starts, in
+/// the `Progress` of the execution, before the hooks of the executions run
+/// (`ExecuteAndFetchAsIterator. Request: ...`), of an execution whose responses are logged. The
+/// error of the record fails the execution there, before its request is sent.
+async fn log_execution_request(
+    request: &ExecutePlanRequest,
+    log: crate::client_log::ExecutionLog,
+) -> Result<()> {
+    use crate::client_log::{logged, types, Encoded, Level, Message};
+    if log.logs_responses() {
+        logged(Level::Debug, || Message::Proto {
+            prefix: "ExecuteAndFetchAsIterator. Request: ".into(),
+            message: Encoded::of(types::EXECUTE_PLAN_REQUEST, request),
+            truncated: false,
+        })
+        .await?;
+    }
+    Ok(())
+}
+
+/// Log what PySpark's `schema` logs of the plan of the analysis `request` as it starts, as `log`
+/// says, of the plan that `to_proto` built, compressed, truncated: `Schema for plan: ...`. The error
+/// of the record fails the analysis there, before its request is sent.
+async fn log_analysis(
+    request: &AnalyzePlanRequest,
+    log: crate::client_log::AnalysisLog,
+) -> Result<()> {
+    use crate::client_log::{logged, types, AnalysisLog, Encoded, Level, Message};
+    let plan = match (log, request.analyze.as_ref()) {
+        (AnalysisLog::Schema, Some(Analyze::Schema(schema))) => schema.plan.as_ref(),
+        _ => return Ok(()),
+    };
+    logged(Level::Debug, || {
+        let message = match plan {
+            Some(plan) => Encoded::of(types::PLAN, plan),
+            None => Encoded::of(types::PLAN, &Plan::default()),
+        };
+        Message::Proto {
+            prefix: "Schema for plan: ".into(),
+            message,
+            truncated: true,
+        }
+    })
+    .await
+}
+
+/// Log `response`, a response of an execution as the stream reads it, as PySpark's
+/// `_execute_and_fetch_as_iterator` logs each response that it reads: the response
+/// (`ExecuteAndFetchAsIterator. Response received: ...`), and what it has of the metrics, the
+/// observed metrics, the schema, the result of a SQL command and an Arrow batch, or a chunk of one,
+/// in that order. The joining of the chunks of a batch logs it once it is whole (`Assembling arrow
+/// batch ...`). The error of a record fails the execution there.
+pub(crate) async fn log_response(response: &ExecutePlanResponse) -> Result<()> {
+    use crate::client_log::{logged, types, Encoded, Level, Message};
+    use spark_connect_proto::execute_plan_response::ResponseType;
+    if !crate::client_log::enabled(Level::Debug) {
+        return Ok(());
+    }
+    logged(Level::Debug, || Message::Proto {
+        prefix: "ExecuteAndFetchAsIterator. Response received: ".into(),
+        message: Encoded::of(types::EXECUTE_PLAN_RESPONSE, response),
+        truncated: false,
+    })
+    .await?;
+    let text = |text: &str| Message::Text(text.to_string());
+    if response.metrics.is_some() {
+        logged(Level::Debug, || text("Received metric batch.")).await?;
+    }
+    if !response.observed_metrics.is_empty() {
+        logged(Level::Debug, || text("Received observed metric batch.")).await?;
+    }
+    if response.schema.is_some() {
+        logged(Level::Debug, || text("Received the schema.")).await?;
+    }
+    match &response.response_type {
+        Some(ResponseType::SqlCommandResult(_)) => {
+            logged(Level::Debug, || text("Received the SQL command result.")).await?;
+        }
+        Some(ResponseType::ArrowBatch(batch)) => {
+            logged(Level::Debug, || {
+                Message::Text(format!(
+                    "Received arrow batch rows={} Number of chunks in batch={} Chunk index={} \
+                     size={}",
+                    batch.row_count,
+                    batch.num_chunks_in_batch.unwrap_or(0),
+                    batch.chunk_index.unwrap_or(0),
+                    batch.data.len()
+                ))
+            })
+            .await?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 /// A Spark Connect client for communicating with a remote Spark server.
 ///
 /// Mirrors `pyspark.sql.connect.client.core.SparkConnectClient`.
 #[derive(Clone)]
 pub struct SparkConnectClient {
-    /// The tonic gRPC channel.
-    channel: Channel,
+    /// The channel of the client and its clones, of the subchannels of the process (see
+    /// [`ChannelLease`]), of each generation of the process (see [`Transport`]).
+    transport: std::sync::Arc<Transport>,
+    /// What the channel was made of, of which a client of a new session gets its own.
+    channel_factory: std::sync::Arc<ChannelFactory>,
     /// The display host of the endpoint of the channel, as `ChannelBuilder::host`.
     host: String,
-    /// The generated gRPC client stub.
-    stub: SparkConnectServiceClient<Channel>,
     /// Session ID (UUID v4) identifying this session on the server.
     session_id: String,
     /// The session ID that the requests carry and the responses are checked against, shared by
@@ -769,27 +1368,43 @@ pub struct SparkConnectClient {
     /// `client._session_id` is an attribute that its requests read (see
     /// [`SparkConnectClient::set_client_session_id`]). Those of the artifacts carry
     /// `session_id`, as PySpark's ArtifactManager keeps the ID of the client when it was built.
-    client_session_id: std::sync::Arc<std::sync::RwLock<String>>,
+    client_session_id: std::sync::Arc<crate::fork::Shared<String>>,
     /// The channel builder of the connection, as PySpark's `client._builder`: of no session ID
     /// for the client of a new session, and of its own for that of a clone.
     builder: crate::channel::ChannelBuilder,
-    /// User context (user_id from the channel builder).
+    /// User context (user_id from the channel builder), which the requests of the artifacts
+    /// carry, as PySpark's ArtifactManager keeps the user of the client when it was built.
     user_id: Option<String>,
+    /// The user that the other requests carry, shared by the clones of the client: `user_id`
+    /// until a caller sets another, as PySpark's `client._user_id` is an attribute that its
+    /// requests read (see [`SparkConnectClient::set_request_user_id`]).
+    request_user_id: std::sync::Arc<crate::fork::Shared<Option<String>>>,
     /// The metadata of the connection string, and the `authorization` of its token.
     metadata: Vec<(String, String)>,
     /// The headers of every request: `metadata`, but a `user-agent` parameter (see `connect`).
     /// They are validated once, by `connect`, so that attaching them to a request cannot fail.
     headers: Vec<(AsciiMetadataKey, AsciiMetadataValue)>,
+    /// The `authorization` of the token among `headers`, which the requests of a source of the
+    /// metadata carry with the metadata of the source, as grpcio's call credentials of PySpark
+    /// add it to the metadata of each call.
+    call_credentials: Vec<(AsciiMetadataKey, AsciiMetadataValue)>,
+    /// What gives the metadata of each call, and of each request of the artifacts, in place of
+    /// `headers`, if anything, shared by the clones of the client (see
+    /// [`SparkConnectClient::set_metadata_source`]).
+    metadata_source: std::sync::Arc<crate::fork::Shared<MetadataSources>>,
     /// The user agent, which the requests that PySpark builds with `ChannelBuilder.userAgent`
     /// carry as their client type, or the error of that property, which each of them raises
     /// (see [`SparkConnectClient::client_type`]).
-    user_agent: Result<String>,
+    user_agent: std::sync::Arc<crate::fork::Shared<Result<String>>>,
     /// The user context extensions of the requests of the client.
     user_context_extensions: std::sync::Arc<std::sync::Mutex<UserContextExtensions>>,
     /// Retry policy applied to RPCs (exponential backoff on transient failures), shared by the
     /// clones of the client, as PySpark's `set_retry_policies` replaces the policies of a client
     /// in use: each call reads the policy when it starts its retries.
-    retry_policy: std::sync::Arc<std::sync::RwLock<RetryPolicy>>,
+    retry_policy: std::sync::Arc<crate::fork::Shared<RetryPolicy>>,
+    /// What decides the retries in place of the policy, if anything, shared by the clones of the
+    /// client as the policy is (see [`SparkConnectClient::set_retry_decider`]).
+    retry_decider: std::sync::Arc<crate::fork::Shared<Option<std::sync::Arc<dyn RetryDecider>>>>,
     /// The deadline of each kind of RPC.
     rpc_deadlines: RpcDeadlines,
     /// The `token` parameter of the connection string, if any, which PySpark's
@@ -808,10 +1423,17 @@ pub struct SparkConnectClient {
     /// Whether the client is closed, shared by its clones: its RPCs then raise
     /// `NO_ACTIVE_SESSION`, as PySpark's `SparkConnectClient._stub` does once it is closed.
     closed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Whether [`SparkConnectClient::close`] closed the channel of the client, shared by its
+    /// clones, as PySpark's `close` closes its gRPC channel: once the client is open again (see
+    /// [`SparkConnectClient::set_closed`]), its RPCs raise the `ValueError` of grpc's closed
+    /// channel, and so do those of the artifacts, which PySpark's ArtifactManager sends whether
+    /// the client is closed or not. Its calls in flight at the close end then (see
+    /// [`ChannelClosed`]).
+    channel_closed: std::sync::Arc<ChannelClosed>,
     /// The server-side session ID that the first response carried, shared by the clones of the
     /// client, as PySpark's `_server_session_id`. Each request sends it as the observed ID, and
     /// each response is checked against it.
-    server_session_id: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    server_session_id: std::sync::Arc<crate::fork::Shared<Option<String>>>,
     /// Whether the client tracks its session: the session ID and the observed server-side session
     /// ID of the requests that its callers build, the check of the IDs of its responses, and its
     /// close when the server reports that the session changed. See
@@ -820,21 +1442,148 @@ pub struct SparkConnectClient {
     /// The executions in flight, shared by the clones of the client, in the order they started,
     /// each with the thread that waits for it now, if any. See
     /// [`SparkConnectClient::running_operation_id`].
-    inflight_operations: std::sync::Arc<std::sync::Mutex<Vec<InflightEntry>>>,
+    inflight_operations: std::sync::Arc<Inflight>,
+    /// The releases in the background of the executions of the client, shared by its clones (see
+    /// [`SparkConnectClient::wait_for_releases`]).
+    releases: std::sync::Arc<Releases>,
     /// The plan compression of the client, shared by its clones, looked up on its first plan.
     plan_compression: std::sync::Arc<std::sync::Mutex<PlanCompression>>,
+    /// The settings of the plan compression of the client as PySpark's client keeps them, of its
+    /// lookup or of a binding, shared by its clones (see [`PlanCompressionSettings`]).
+    plan_compression_settings: std::sync::Arc<std::sync::Mutex<Option<PlanCompressionSettings>>>,
 }
 
-/// An execution in flight: its operation ID, and the thread that waits for it now, if any.
+/// Whether [`SparkConnectClient::close`] closed the channel of a client, which its clones share,
+/// and the wake-up of their calls in flight then, which end, as grpcio's `close` cancels the calls
+/// of its channel (see `crate::metadata::Checked`).
+#[derive(Default)]
+pub(crate) struct ChannelClosed {
+    closed: std::sync::atomic::AtomicBool,
+    /// Of each generation of the process (see [`crate::fork`]), as the calls that wait for it are
+    /// of the threads of its generation.
+    wake_up: crate::fork::PerGeneration<tokio::sync::Notify>,
+}
+
+impl ChannelClosed {
+    /// Whether the channel is closed.
+    pub(crate) fn is_closed(&self) -> bool {
+        self.closed.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Mark the channel closed: the calls that start from now on see it closed, and so do those
+    /// that fail from then on (see `crate::metadata::Checked`).
+    pub(crate) fn mark_closed(&self) {
+        self.closed.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Wake the calls that wait for the close of the channel, once it is marked closed.
+    pub(crate) fn wake_up(&self) {
+        self.notify().notify_waiters();
+    }
+
+    fn notify(&self) -> &tokio::sync::Notify {
+        self.wake_up.get_or_init(|_| tokio::sync::Notify::new())
+    }
+
+    /// Ends once the channel is closed: at once if it is.
+    pub(crate) async fn closed(&self) {
+        // Made before the mark is read, so that a close after the read wakes it.
+        let woken = self.notify().notified();
+        if self.is_closed() {
+            return;
+        }
+        woken.await;
+    }
+}
+
+/// An execution in flight: its operation ID, and the thread that waits for it now, if any, of the
+/// watch of the waits of the call of that thread (see [`crate::runtime::wait_watch_id`]).
 #[derive(Debug, Clone, PartialEq)]
 struct InflightEntry {
     operation_id: String,
     waiter: Option<std::thread::ThreadId>,
+    watch: Option<usize>,
+}
+
+/// The executions in flight of a client, of each generation of the process (see
+/// [`crate::fork`]): in a child of a `fork()`, the executions of the parent are the parent's, which
+/// the child neither waits for nor interrupts, and the lock of its own is one that no thread of
+/// the parent held at the fork.
+type Inflight = crate::fork::PerGeneration<std::sync::Mutex<Vec<InflightEntry>>>;
+
+/// The executions in flight of `registry`, of the generation of the process, locked.
+fn inflight_of(registry: &Inflight) -> std::sync::MutexGuard<'_, Vec<InflightEntry>> {
+    registry
+        .get_or_init(|_| Default::default())
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+/// How long the close of a session waits for the releases of its executions, as PySpark's
+/// `close` waits for its release futures (`concurrent.futures.wait(..., timeout=10)`).
+const RELEASES_WAIT: Duration = Duration::from_secs(10);
+
+/// The releases in the background of the executions of a client (see
+/// [`SparkConnectClient::spawn_release`]), of each generation of the process (see
+/// [`crate::fork`]): a child waits for none of its parent's.
+type Releases = crate::fork::PerGeneration<std::sync::Mutex<Vec<PendingRelease>>>;
+
+/// The releases of `releases` of the generation of the process, locked, of those that ended
+/// dropped.
+fn releases_of(releases: &Releases) -> std::sync::MutexGuard<'_, Vec<PendingRelease>> {
+    let mut pending = releases
+        .get_or_init(|_| Default::default())
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    pending.retain(|release| !release.done.is_done());
+    pending
+}
+
+/// A release in the background of an execution.
+struct PendingRelease {
+    /// Whether the stream of the execution ended, as PySpark's client keeps the release futures
+    /// of an iterator once the iterator ended (`_release_futures`), which its `close` waits for.
+    stream_ended: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    done: std::sync::Arc<ReleaseDone>,
+}
+
+/// Whether a release in the background ended, and the wake-up of its waits.
+#[derive(Default)]
+struct ReleaseDone {
+    done: std::sync::atomic::AtomicBool,
+    woken: tokio::sync::Notify,
+}
+
+impl ReleaseDone {
+    fn is_done(&self) -> bool {
+        self.done.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Ends once the release ended: at once if it did.
+    async fn ended(&self) {
+        // Made before the flag is read, so that an end after the read wakes it.
+        let woken = self.woken.notified();
+        if self.is_done() {
+            return;
+        }
+        woken.await;
+    }
+}
+
+/// Ends its release when it drops, with the task of the release, also unfinished, as of a
+/// runtime that drops its tasks.
+struct ReleaseEnds(std::sync::Arc<ReleaseDone>);
+
+impl Drop for ReleaseEnds {
+    fn drop(&mut self) {
+        self.0.done.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.0.woken.notify_waiters();
+    }
 }
 
 /// Keeps an execution in the registry of the in-flight executions of its client until it drops.
 struct InflightGuard {
-    registry: std::sync::Arc<std::sync::Mutex<Vec<InflightEntry>>>,
+    registry: std::sync::Arc<Inflight>,
     operation_id: String,
     /// The thread that registered the execution, which is the caller that starts it.
     registered_on: std::thread::ThreadId,
@@ -842,17 +1591,12 @@ struct InflightGuard {
 
 impl InflightGuard {
     /// Register the execution `operation_id` in `registry` until the guard drops.
-    fn register(
-        registry: std::sync::Arc<std::sync::Mutex<Vec<InflightEntry>>>,
-        operation_id: String,
-    ) -> Self {
-        registry
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push(InflightEntry {
-                operation_id: operation_id.clone(),
-                waiter: None,
-            });
+    fn register(registry: std::sync::Arc<Inflight>, operation_id: String) -> Self {
+        inflight_of(&registry).push(InflightEntry {
+            operation_id: operation_id.clone(),
+            waiter: None,
+            watch: None,
+        });
         InflightGuard {
             registry,
             operation_id,
@@ -879,7 +1623,7 @@ impl InflightGuard {
 /// [`InflightHandle::waiting`]. The handle does not keep the execution in flight.
 #[derive(Clone)]
 pub struct InflightHandle {
-    registry: std::sync::Arc<std::sync::Mutex<Vec<InflightEntry>>>,
+    registry: std::sync::Arc<Inflight>,
     operation_id: String,
     registered_on: std::thread::ThreadId,
 }
@@ -906,7 +1650,7 @@ impl InflightHandle {
 
 impl Drop for InflightGuard {
     fn drop(&mut self) {
-        let mut inflight = self.registry.lock().unwrap_or_else(|e| e.into_inner());
+        let mut inflight = inflight_of(&self.registry);
         if let Some(position) = inflight
             .iter()
             .rposition(|entry| entry.operation_id == self.operation_id)
@@ -919,7 +1663,7 @@ impl Drop for InflightGuard {
 /// Marks an execution as waited for by the calling thread, until it drops. See
 /// [`InflightHandle::waiting`].
 pub struct WaitingGuard {
-    registry: std::sync::Arc<std::sync::Mutex<Vec<InflightEntry>>>,
+    registry: std::sync::Arc<Inflight>,
     operation_id: String,
     marked: bool,
 }
@@ -932,20 +1676,39 @@ impl Drop for WaitingGuard {
     }
 }
 
-/// Sets the thread that waits for the execution `operation_id` in `registry`, if it is in flight.
-fn set_waiter(
-    registry: &std::sync::Mutex<Vec<InflightEntry>>,
-    operation_id: &str,
-    waiter: Option<std::thread::ThreadId>,
-) {
-    let mut inflight = registry.lock().unwrap_or_else(|e| e.into_inner());
+/// Sets the thread that waits for the execution `operation_id` in `registry`, if it is in flight,
+/// of the watch of the waits of the calling thread.
+fn set_waiter(registry: &Inflight, operation_id: &str, waiter: Option<std::thread::ThreadId>) {
+    let mut inflight = inflight_of(registry);
     if let Some(entry) = inflight
         .iter_mut()
         .rev()
         .find(|entry| entry.operation_id == operation_id)
     {
         entry.waiter = waiter;
+        entry.watch = waiter.and_then(|_| crate::runtime::wait_watch_id());
     }
+}
+
+/// The hook of [`set_failure_requests_hook`].
+type FailureRequestsHook = fn(&SparkConnectClient, &SparkError) -> Result<bool>;
+
+/// The hook of [`set_failure_requests_hook`].
+static FAILURE_REQUESTS_HOOK: std::sync::OnceLock<FailureRequestsHook> = std::sync::OnceLock::new();
+
+/// Set, once for the process, the function that a client calls on the thread that converts the
+/// failure of a call, an error that the server raised, which it is given, before it builds the
+/// requests that it sends for it, of the details of the error and of the configs of its stack
+/// trace: a binding brings the context of the requests of that thread up to date then, of the
+/// attributes of its client, as PySpark builds those requests of them, and returns whether to send
+/// them. When it does not, the
+/// error of the server is the error of the call as it is, of no details and of the stack trace
+/// that its message has; an error of the hook is the error of the call in place of it, of no
+/// requests either, as PySpark raises the error of the build of the request of the details. A
+/// later call does nothing. Not a stable API.
+#[doc(hidden)]
+pub fn set_failure_requests_hook(hook: FailureRequestsHook) {
+    let _ = FAILURE_REQUESTS_HOOK.set(hook);
 }
 
 /// The class of the error of a wait that a signal of the process ended (see
@@ -970,9 +1733,50 @@ pub fn is_wait_aborted(error: &SparkError) -> bool {
 struct UserContextExtensions {
     global: Vec<(String, prost_types::Any)>,
     by_thread: std::collections::HashMap<std::thread::ThreadId, SharedUserContextExtensions>,
+    /// The session ID, the user and the global extensions of the requests of each thread that a
+    /// binding gave them (see [`SparkConnectClient::set_thread_request_context`]), which take the
+    /// place of those of the client for the requests of that thread.
+    request_by_thread: std::collections::HashMap<std::thread::ThreadId, ThreadRequestContext>,
+    /// The call stack of the user's code of the call of each thread that a binding gave it (see
+    /// [`SparkConnectClient::set_thread_call_stack`]), which the requests of its executions, its
+    /// analyses and its configurations carry last of their user context extensions.
+    call_stack_by_thread: std::collections::HashMap<std::thread::ThreadId, prost_types::Any>,
     /// What a binding keeps to bring the extensions up to date before the calls of a thread send
     /// requests (see [`SparkConnectClient::set_user_context_refresher`]).
     refresher: Option<UserContextRefresher>,
+    /// The deadlines and the result chunking that a binding gave a thread last (see
+    /// [`SparkConnectClient::set_thread_call_settings`]), which the calls of a thread that it gave
+    /// no request context take, as a thread of the transport that sends the requests of a call,
+    /// such as one of the fits of the classes of a OneVsRest.
+    latest_call_settings: Option<(Option<RpcDeadlines>, Option<ResultChunking>)>,
+}
+
+/// The session ID, the user and the global user context extensions of the requests of a thread,
+/// of the client of a binding that the thread called last (see
+/// [`SparkConnectClient::set_thread_request_context`]).
+#[derive(Clone, Debug)]
+struct ThreadRequestContext {
+    session_id: String,
+    user_id: Option<String>,
+    global: Vec<(String, prost_types::Any)>,
+    /// The deadlines of the RPCs of the thread, in the place of the client's, of a binding (see
+    /// [`SparkConnectClient::set_thread_call_settings`]).
+    rpc_deadlines: Option<RpcDeadlines>,
+    /// The result chunking options of the executions of the thread, in the place of the
+    /// client's, of a binding (see [`SparkConnectClient::set_thread_call_settings`]).
+    result_chunking: Option<ResultChunking>,
+}
+
+/// The context of the requests of a thread as it was, of
+/// [`SparkConnectClient::thread_request_state`], which
+/// [`SparkConnectClient::restore_thread_request_state`] gives the thread again. Not a stable API.
+#[doc(hidden)]
+#[derive(Clone, Debug)]
+pub struct ThreadRequestState {
+    thread: std::thread::ThreadId,
+    request: Option<ThreadRequestContext>,
+    own: Option<SharedUserContextExtensions>,
+    call_stack: Option<prost_types::Any>,
 }
 
 /// The opaque refresher of the user context extensions of a binding.
@@ -1023,6 +1827,8 @@ impl SharedUserContextExtensions {
 /// thread.
 fn forget_thread_extensions(extensions: &mut UserContextExtensions, thread: std::thread::ThreadId) {
     extensions.by_thread.remove(&thread);
+    extensions.request_by_thread.remove(&thread);
+    extensions.call_stack_by_thread.remove(&thread);
 }
 
 impl SparkConnectClient {
@@ -1047,43 +1853,68 @@ impl SparkConnectClient {
         // client, where getOrCreate() does not dial the server). This also means the
         // client can be constructed without a live server (e.g. in unit tests that only
         // build request protos).
-        let endpoint = builder.endpoint();
-        let scheme = if builder.secure() { "https" } else { "http" };
-        let mut tonic_endpoint = Channel::from_shared(format!("{scheme}://{endpoint}"))
+        // The `:authority` of the calls: of a target of gRPC, gRPC's default authority of it, of
+        // the host and the port of the connection string, which stand for it, where HTTP cannot
+        // carry it (of a `%` but in brackets, or of more than one `:`, as of a Unix socket or of a
+        // list of addresses); else the host and the port of the connection string.
+        let endpoint = builder
+            .target_names()
+            .map(|names| names.authority.clone())
+            .filter(|authority| {
+                !authority.is_empty()
+                    && authority
+                        .parse::<tonic::codegen::http::uri::Authority>()
+                        .is_ok()
+            })
+            .unwrap_or_else(|| builder.endpoint());
+        // The connector makes the TLS session itself (see `crate::connector`), so the endpoint is
+        // of plaintext, and the requests have the `https` scheme of its origin.
+        let mut tonic_endpoint = Channel::from_shared(format!("http://{endpoint}"))
             .map_err(|e| SparkError::connect_msg(format!("Invalid endpoint: {}", e)))?;
-        if builder.secure() {
-            // TLS with the roots that grpcio would trust. Roots must be given explicitly:
-            // tonic >=0.11 does NOT load a trust store from the `tls-native-roots` feature
-            // alone, so without them the TLS handshake has no CA anchors, fails, and the retry
-            // policy masks it as a hang.
-            // The server name of an IPv6 host is its address without the brackets of the URL.
-            let domain = builder.host().trim_start_matches('[').trim_end_matches(']');
-            let config = ClientTlsConfig::new().domain_name(domain);
-            let tls_config = match ssl_roots() {
-                Some(pem) => config.ca_certificate(Certificate::from_pem(pem)),
-                None => config.with_native_roots(),
-            };
-            tonic_endpoint = tonic_endpoint
-                .tls_config(tls_config)
-                .map_err(|e| SparkError::connect_msg(format!("Failed to configure TLS: {}", e)))?;
-        }
-        let tonic_endpoint = with_keepalive(tonic_endpoint, builder);
-        // Through the proxy of the environment, as grpcio's channel of PySpark is.
-        let proxy = ProxyEnv::from_process()
-            .proxy_for(builder.host())
-            .map_err(SparkError::connect_msg)?;
-        let channel = match proxy {
-            None => connect_directly(tonic_endpoint),
-            Some(proxy) => connect_through_proxy(tonic_endpoint, proxy),
+        let tls = if builder.secure() {
+            // TLS with the roots of GRPC_DEFAULT_SSL_ROOTS_FILE_PATH alone, as grpcio trusts them,
+            // else those of the system's store and of the bundled roots file, grpcio's bundle of
+            // the Python binding (see `docs/configuration.md`). The server name of an IPv6 host
+            // is its address without the brackets of the URL; of a target of gRPC, it is the
+            // name that gRPC's TLS verifies of its authority, never the host that stands for it.
+            let tls = match builder.target_names() {
+                Some(names) => crate::connector::Tls::of_target_name(names.tls_name(), ssl_roots()),
+                None => crate::connector::Tls::new(
+                    builder.host().trim_start_matches('[').trim_end_matches(']'),
+                    ssl_roots(),
+                ),
+            }
+            .map_err(|e| SparkError::connect_msg(format!("Failed to configure TLS: {}", e)))?;
+            let origin = format!("https://{endpoint}")
+                .parse()
+                .map_err(|e| SparkError::connect_msg(format!("Invalid endpoint: {}", e)))?;
+            tonic_endpoint = tonic_endpoint.origin(origin);
+            Some(tls)
+        } else {
+            None
         };
-
-        // Raise the message-size cap from tonic's 4 MiB default (too small for real Arrow
-        // `collect()` results) to 128 MiB, applied to both the stub and the raw Grpc calls
-        // below. The reference client sets this unconditionally via GRPC_DEFAULT_OPTIONS
-        // (grpc.max_{send,receive}_message_length); it is not a connection-string option.
-        let stub = SparkConnectServiceClient::new(channel.clone())
-            .max_decoding_message_size(GRPC_MAX_MESSAGE_LENGTH_DEFAULT)
-            .max_encoding_message_size(GRPC_MAX_MESSAGE_LENGTH_DEFAULT);
+        let tonic_endpoint = with_keepalive(tonic_endpoint, builder)
+            .initial_connection_window_size(CONNECTION_WINDOW)
+            // Far past gRPC's limits of the metadata of a response, which the channel checks.
+            .http2_max_header_list_size(crate::metadata::MAX_HEADER_LIST_SIZE);
+        // Through the proxy of the environment, as grpcio's channel of PySpark is.
+        let proxy = proxy_of(builder).map_err(SparkError::connect_msg)?;
+        let origin = format!(
+            "{}://{endpoint}",
+            if tls.is_some() { "https" } else { "http" }
+        );
+        let factory = std::sync::Arc::new(ChannelFactory {
+            endpoint: tonic_endpoint,
+            origin,
+            keepalive: builder.keepalive(),
+            own_connection: builder.token().is_some(),
+            target: crate::connector::Target::new(builder.host(), builder.port(), proxy, tls)
+                .of_local_credentials(
+                    builder.credentials() == Some(crate::channel::Credentials::Local),
+                )
+                .of_channel_target(builder.target().cloned(), builder.target_names().cloned()),
+        });
+        let transport = std::sync::Arc::new(Transport::new(std::sync::Arc::clone(&factory)));
 
         // The headers are checked here, once: one that gRPC cannot send is an error of the
         // connection, rather than a header that every request silently goes without. The
@@ -1095,7 +1926,8 @@ impl SparkConnectClient {
         let mut metadata: Vec<(String, String)> = builder.metadata();
         for (key, value) in &metadata {
             let header = (metadata_key(key)?, metadata_value(key, value)?);
-            if key != USER_AGENT_HEADER {
+            // Neither the `user-agent`, of grpcio's own, nor a key that gRPC's core sets itself.
+            if key != USER_AGENT_HEADER && crate::metadata::sent_of_an_application(key) {
                 headers.push(header);
             }
         }
@@ -1106,7 +1938,8 @@ impl SparkConnectClient {
         if let Some(tok) = builder.token() {
             // The token is sent over TLS, or over plaintext only on `localhost`: the scheme
             // above is `builder.secure()`, which is TLS for a token on any other host, as
-            // the reference client does.
+            // the reference client does. Of local credentials, it is sent over a connection of
+            // the loopback only (`Credentials::Local`).
             let bearer = format!("Bearer {}", tok);
             headers.push((
                 AsciiMetadataKey::from_static(AUTHORIZATION_HEADER),
@@ -1114,30 +1947,42 @@ impl SparkConnectClient {
             ));
             metadata.push((AUTHORIZATION_HEADER.to_string(), bearer));
         }
+        let call_credentials = match builder.token() {
+            Some(_) => headers.last().cloned().into_iter().collect(),
+            None => Vec::new(),
+        };
 
+        let user_id = builder.user_id().map(String::from).or_else(default_user_id);
         Ok(Self {
-            channel,
+            transport,
+            channel_factory: factory,
             host: builder.host().to_string(),
-            stub,
-            client_session_id: std::sync::Arc::new(std::sync::RwLock::new(session_id.clone())),
+            client_session_id: std::sync::Arc::new(crate::fork::Shared::new(session_id.clone())),
             session_id,
             builder: builder.clone(),
-            user_id: builder.user_id().map(String::from).or_else(default_user_id),
+            request_user_id: std::sync::Arc::new(crate::fork::Shared::new(user_id.clone())),
+            user_id,
             metadata,
             headers,
-            user_agent,
+            call_credentials,
+            metadata_source: Default::default(),
+            user_agent: std::sync::Arc::new(crate::fork::Shared::new(user_agent)),
             user_context_extensions: Default::default(),
             retry_policy: Default::default(),
+            retry_decider: Default::default(),
             rpc_deadlines: RpcDeadlines::default(),
             token: builder.get(crate::channel::PARAM_TOKEN).map(String::from),
             result_chunking: ResultChunking::default(),
             reattachable: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
             execute_plan_hook: Default::default(),
             closed: Default::default(),
+            channel_closed: Default::default(),
             server_session_id: Default::default(),
             session_tracking: true,
             inflight_operations: Default::default(),
+            releases: Default::default(),
             plan_compression: Default::default(),
+            plan_compression_settings: Default::default(),
         })
     }
 
@@ -1148,13 +1993,267 @@ impl SparkConnectClient {
 
     /// The session ID that the requests of this client and of its clones carry, as PySpark's
     /// `client._session_id`: the session ID, unless
-    /// [`SparkConnectClient::set_client_session_id`] set another. Not a stable API.
+    /// [`SparkConnectClient::set_client_session_id`] set another, or the one that a binding gave
+    /// the requests of the calling thread ([`SparkConnectClient::set_thread_request_context`]).
+    /// Not a stable API.
     #[doc(hidden)]
     pub fn client_session_id(&self) -> String {
-        self.client_session_id
-            .read()
+        if let Some(session_id) = self.thread_request(|request| request.session_id.clone()) {
+            return session_id;
+        }
+        self.client_session_id.get()
+    }
+
+    /// `of` of the request context that a binding gave the calling thread, if it gave it one (see
+    /// [`SparkConnectClient::set_thread_request_context`]).
+    fn thread_request<T>(&self, of: impl FnOnce(&ThreadRequestContext) -> T) -> Option<T> {
+        self.user_context_extensions
+            .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .clone()
+            .request_by_thread
+            .get(&crate::runtime::calling_thread_id())
+            .map(of)
+    }
+
+    /// Make the requests of the calling thread ([`crate::runtime::calling_thread_id`], whose
+    /// requests read it) carry the session ID `session_id`, the user `user_id` and the global user
+    /// context extensions `global`, of their IDs, in their order, in the place of those of the
+    /// client, until the thread ends or is given others: as a binding gives them of the client
+    /// that the thread calls, which PySpark's requests read when they are built, so that the calls
+    /// of two clients of the session, such as a client and its copy, carry their own, also at once
+    /// on two threads. Not a stable API.
+    #[doc(hidden)]
+    pub fn set_thread_request_context(
+        &self,
+        session_id: String,
+        user_id: Option<String>,
+        global: Vec<(String, prost_types::Any)>,
+    ) {
+        let mut extensions = self
+            .user_context_extensions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let thread = crate::runtime::calling_thread_id();
+        if !extensions.by_thread.contains_key(&thread)
+            && !extensions.request_by_thread.contains_key(&thread)
+        {
+            forget_when_thread_ends(&self.user_context_extensions, forget_thread_extensions);
+        }
+        // The settings of the calls of the thread stay those that the binding gave it (see
+        // `set_thread_call_settings`).
+        let (rpc_deadlines, result_chunking) = extensions
+            .request_by_thread
+            .get(&thread)
+            .map(|request| (request.rpc_deadlines.clone(), request.result_chunking))
+            .unwrap_or_default();
+        extensions.request_by_thread.insert(
+            thread,
+            ThreadRequestContext {
+                session_id,
+                user_id,
+                global,
+                rpc_deadlines,
+                result_chunking,
+            },
+        );
+    }
+
+    /// Give the calls of the calling thread the deadlines `rpc_deadlines` of their RPCs, and their
+    /// executions the result chunking options `result_chunking`, in the place of those of the
+    /// client, or the client's again of None, until the thread is given others: as a binding
+    /// gives them of the client that the thread calls, which PySpark's requests read of its
+    /// `_rpc_deadlines`, `_allow_arrow_batch_chunking` and `_preferred_arrow_chunk_size` when they
+    /// are sent. An execution keeps those that it started with for its reattaches and its
+    /// release, as PySpark's iterator of the execution keeps those of its client then; the
+    /// requests of the artifacts keep the client's deadlines, as PySpark's `ArtifactManager` keeps
+    /// those that its client was made with. A thread of no request context of a binding (see
+    /// [`SparkConnectClient::set_thread_request_context`]) is given one of the session ID, the
+    /// user and the global user context extensions of the client. Binding hook; not a stable API.
+    #[doc(hidden)]
+    pub fn set_thread_call_settings(
+        &self,
+        rpc_deadlines: Option<RpcDeadlines>,
+        result_chunking: Option<ResultChunking>,
+    ) {
+        let mut extensions = self
+            .user_context_extensions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        extensions.latest_call_settings = Some((rpc_deadlines.clone(), result_chunking));
+        let thread = crate::runtime::calling_thread_id();
+        if let Some(request) = extensions.request_by_thread.get_mut(&thread) {
+            request.rpc_deadlines = rpc_deadlines;
+            request.result_chunking = result_chunking;
+            return;
+        }
+        if rpc_deadlines.is_none() && result_chunking.is_none() {
+            return;
+        }
+        if !extensions.by_thread.contains_key(&thread) {
+            forget_when_thread_ends(&self.user_context_extensions, forget_thread_extensions);
+        }
+        let global = extensions.global.clone();
+        extensions.request_by_thread.insert(
+            thread,
+            ThreadRequestContext {
+                session_id: self.client_session_id.get(),
+                user_id: self.request_user_id.get(),
+                global,
+                rpc_deadlines,
+                result_chunking,
+            },
+        );
+    }
+
+    /// The deadlines of the RPCs of the calling thread now: those that a binding gave it (see
+    /// [`SparkConnectClient::set_thread_call_settings`]), or, of a thread of no request context of
+    /// a binding, those that it gave a thread last; else the client's.
+    fn call_rpc_deadlines(&self) -> RpcDeadlines {
+        self.call_settings_of_thread(|(deadlines, _)| deadlines.clone())
+            .unwrap_or_else(|| self.rpc_deadlines.clone())
+    }
+
+    /// Of the settings of the calls of the calling thread (see
+    /// [`SparkConnectClient::call_rpc_deadlines`]), the one that `of` reads, if a binding gave it.
+    fn call_settings_of_thread<T>(
+        &self,
+        of: impl FnOnce(&(Option<RpcDeadlines>, Option<ResultChunking>)) -> Option<T>,
+    ) -> Option<T> {
+        let extensions = self
+            .user_context_extensions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        match extensions
+            .request_by_thread
+            .get(&crate::runtime::calling_thread_id())
+        {
+            Some(request) => of(&(request.rpc_deadlines.clone(), request.result_chunking)),
+            None => extensions.latest_call_settings.as_ref().and_then(of),
+        }
+    }
+
+    /// The result chunking options of the executions of the calling thread now: those that a
+    /// binding gave it (see [`SparkConnectClient::set_thread_call_settings`]), else the client's.
+    fn call_result_chunking(&self) -> ResultChunking {
+        self.call_settings_of_thread(|(_, chunking)| *chunking)
+            .unwrap_or(self.result_chunking)
+    }
+
+    /// A clone of this client of the settings of the calls of the calling thread now, its
+    /// deadlines and its result chunking (see [`SparkConnectClient::set_thread_call_settings`]),
+    /// for the requests that a call sends once it returned, as the reattaches and the release of
+    /// an execution, on threads that are not the caller's.
+    fn of_call_settings(&self) -> Self {
+        let mut client = self.clone();
+        client.rpc_deadlines = self.call_rpc_deadlines();
+        client.result_chunking = self.call_result_chunking();
+        client
+    }
+
+    /// What the requests of the calling thread carry of the context that a binding gave it, as of
+    /// now: the session ID, the user and the global user context extensions of
+    /// [`SparkConnectClient::set_thread_request_context`], and the user context extensions of the
+    /// thread, which [`SparkConnectClient::restore_thread_request_state`] gives the thread again.
+    /// Not a stable API.
+    #[doc(hidden)]
+    pub fn thread_request_state(&self) -> ThreadRequestState {
+        let extensions = self
+            .user_context_extensions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let thread = crate::runtime::calling_thread_id();
+        ThreadRequestState {
+            thread,
+            request: extensions.request_by_thread.get(&thread).cloned(),
+            own: extensions.by_thread.get(&thread).cloned(),
+            call_stack: extensions.call_stack_by_thread.get(&thread).cloned(),
+        }
+    }
+
+    /// Give the thread of `state` the context of its requests that `state` kept (see
+    /// [`SparkConnectClient::thread_request_state`]), in the place of the one that it has: as a
+    /// binding gives the requests of a call back their context once a call that ran during it,
+    /// such as one of a progress handler or of a finalizer, gave the thread its own. Not a stable
+    /// API.
+    #[doc(hidden)]
+    pub fn restore_thread_request_state(&self, state: ThreadRequestState) {
+        let mut extensions = self
+            .user_context_extensions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let thread = state.thread;
+        // A thread that had an entry is registered still: its registration ends with it.
+        match state.request {
+            Some(request) => {
+                extensions.request_by_thread.insert(thread, request);
+            }
+            None => {
+                extensions.request_by_thread.remove(&thread);
+            }
+        }
+        match state.own {
+            Some(own) => {
+                extensions.by_thread.insert(thread, own);
+            }
+            None => {
+                extensions.by_thread.remove(&thread);
+            }
+        }
+        match state.call_stack {
+            Some(call_stack) => {
+                extensions.call_stack_by_thread.insert(thread, call_stack);
+            }
+            None => {
+                extensions.call_stack_by_thread.remove(&thread);
+            }
+        }
+    }
+
+    /// Make the requests of the executions, the analyses and the configurations of the calling
+    /// thread carry `call_stack`, the call stack of the user's code of the call that the thread
+    /// runs, last of their user context extensions, or none, until the thread ends or is given
+    /// another: as PySpark's requests carry the call stack of their build when
+    /// `SPARK_CONNECT_DEBUG_CLIENT_CALL_STACK` is set (`_build_call_stack_trace`), which a
+    /// binding reads as each call starts. Not a stable API.
+    #[doc(hidden)]
+    pub fn set_thread_call_stack(&self, call_stack: Option<prost_types::Any>) {
+        let mut extensions = self
+            .user_context_extensions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let thread = crate::runtime::calling_thread_id();
+        let Some(call_stack) = call_stack else {
+            extensions.call_stack_by_thread.remove(&thread);
+            return;
+        };
+        if !extensions.by_thread.contains_key(&thread)
+            && !extensions.request_by_thread.contains_key(&thread)
+            && !extensions.call_stack_by_thread.contains_key(&thread)
+        {
+            forget_when_thread_ends(&self.user_context_extensions, forget_thread_extensions);
+        }
+        extensions.call_stack_by_thread.insert(thread, call_stack);
+    }
+
+    /// Append the call stack of the calling thread (see
+    /// [`SparkConnectClient::set_thread_call_stack`]), if it has one, to the user context
+    /// extensions of a request, after those of the client and of the thread, as PySpark's
+    /// `_execute_plan_request_with_metadata`, `_analyze_plan_request_with_metadata` and
+    /// `_config_request_with_metadata` append the call stack that they build.
+    fn add_call_stack(&self, context: &mut Option<UserContext>) {
+        let extensions = self
+            .user_context_extensions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(call_stack) = extensions
+            .call_stack_by_thread
+            .get(&crate::runtime::calling_thread_id())
+        {
+            context
+                .get_or_insert_with(UserContext::default)
+                .extensions
+                .push(call_stack.clone());
+        }
     }
 
     /// Make the requests of this client and of its clones carry `session_id`, against which
@@ -1168,10 +2267,7 @@ impl SparkConnectClient {
     /// with their own session ID. Not a stable API.
     #[doc(hidden)]
     pub fn set_client_session_id(&self, session_id: String) {
-        *self
-            .client_session_id
-            .write()
-            .unwrap_or_else(|e| e.into_inner()) = session_id;
+        self.client_session_id.set(session_id);
     }
 
     /// The channel builder of the connection of this client, as PySpark's `client._builder`: of
@@ -1182,32 +2278,58 @@ impl SparkConnectClient {
         &self.builder
     }
 
-    /// Create a new client that reuses this client's channel/stub/metadata but
-    /// starts a brand-new server-side session (fresh session id). Mirrors the
-    /// reference client's `newSession()`, which opens a new session over the same
-    /// connection: the new client keeps the deadlines, the hook and whether the executions are
-    /// reattachable, and has the default retry policy and result chunking, as PySpark's
-    /// `newSession()` and `clone()` build their client of these only.
+    /// Create a new client of this client's endpoint, metadata and proxy, of a brand-new
+    /// server-side session (fresh session id). Mirrors the reference client's `newSession()`:
+    /// the new client shares the connection of the process to its target, as PySpark's new client
+    /// makes a channel of the subchannels of the process, reading the proxy of the environment
+    /// again, and keeps the deadlines, the hook and whether the executions are reattachable, and
+    /// has the default retry policy and result chunking, as PySpark's `newSession()` and `clone()`
+    /// build their client of these only. Its user is the `user_id` of the connection, else the
+    /// user of the requests of this client (see [`SparkConnectClient::set_request_user_id`]), as
+    /// PySpark's new client takes the `_user_id` of the client that makes it.
     pub fn with_new_session_id(&self) -> Self {
+        let user_id = self
+            .builder
+            .user_id()
+            .map(String::from)
+            .or_else(|| self.request_user_id());
+        self.with_new_session_id_of_user(user_id)
+    }
+
+    /// As [`SparkConnectClient::with_new_session_id`], of the user `user_id` as it is given, whom
+    /// the requests of the new client and those of its artifacts carry, also when the connection
+    /// has a `user_id`, which PySpark's `SparkConnectClient(connection, user_id=...)` and
+    /// `with_new_session_id` take in its place: the caller decides the user, as a binding does of
+    /// the attributes of PySpark's client. Not a stable API.
+    #[doc(hidden)]
+    pub fn with_new_session_id_of_user(&self, user_id: Option<String>) -> Self {
         let session_id = Uuid::new_v4().to_string();
         // As PySpark's `newSession`, which pops the session ID of a copy of the builder.
         let mut builder = self.builder.clone();
         builder.remove(crate::channel::PARAM_SESSION_ID);
+        let channel_factory = std::sync::Arc::new(self.channel_factory.renewed(&self.builder));
+        let transport =
+            std::sync::Arc::new(Transport::new(std::sync::Arc::clone(&channel_factory)));
         SparkConnectClient {
-            channel: self.channel.clone(),
+            transport,
+            channel_factory,
             host: self.host.clone(),
-            stub: self.stub.clone(),
-            client_session_id: std::sync::Arc::new(std::sync::RwLock::new(session_id.clone())),
+            client_session_id: std::sync::Arc::new(crate::fork::Shared::new(session_id.clone())),
             session_id,
             builder,
-            user_id: self.user_id.clone(),
+            request_user_id: std::sync::Arc::new(crate::fork::Shared::new(user_id.clone())),
+            user_id,
             metadata: self.metadata.clone(),
             headers: self.headers.clone(),
-            user_agent: self.user_agent.clone(),
+            call_credentials: self.call_credentials.clone(),
+            // A client of a new session reads the metadata of its own builder, if anything.
+            metadata_source: Default::default(),
+            user_agent: std::sync::Arc::new(crate::fork::Shared::new(self.user_agent.get())),
             // As PySpark's client of a new session, of no user context extensions.
             user_context_extensions: Default::default(),
             retry_policy: Default::default(),
-            rpc_deadlines: self.rpc_deadlines.clone(),
+            retry_decider: Default::default(),
+            rpc_deadlines: self.call_rpc_deadlines(),
             token: self.token.clone(),
             result_chunking: ResultChunking::default(),
             reattachable: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
@@ -1215,26 +2337,149 @@ impl SparkConnectClient {
             )),
             execute_plan_hook: std::sync::Arc::clone(&self.execute_plan_hook),
             closed: Default::default(),
+            channel_closed: Default::default(),
             server_session_id: Default::default(),
             session_tracking: self.session_tracking,
             inflight_operations: Default::default(),
+            releases: Default::default(),
             plan_compression: Default::default(),
+            plan_compression_settings: Default::default(),
         }
     }
 
-    /// Close this client, as PySpark's `SparkConnectClient.close` closes its channel: its RPCs
-    /// raise `NO_ACTIVE_SESSION` from now on, and its clones with them. `release_session` is
-    /// still sent, as `stop()` sends it before it closes the client.
-    pub fn close(&self) {
-        self.closed.store(true, std::sync::atomic::Ordering::SeqCst);
+    /// The channel of tonic of the connection of the client, of the generation of the process (see
+    /// [`Transport`]), of the tests, which call it without [`crate::metadata::Checked`].
+    #[cfg(test)]
+    async fn channel(&self) -> Channel {
+        match self.transport.lease().channel.pick().await {
+            Ok(channel) => channel,
+            Err(_) => panic!("the client did not connect"),
+        }
     }
 
-    /// Open this client again, which [`SparkConnectClient::close`] closed, as PySpark's
-    /// `client._closed = False` lets its RPCs be sent again. Not a stable API.
+    /// The channel of the client for its calls, of the generation of the process (see
+    /// [`Transport`]), whose metadata is checked as gRPC's core checks it, whose resolver and
+    /// `pick_first` pick the subchannel whose connection each call takes, and which the close of the
+    /// client ends while they are in flight (see [`crate::metadata::Checked`]).
+    fn checked_channel(&self) -> crate::metadata::Checked {
+        let lease = self.transport.lease();
+        crate::metadata::Checked {
+            channel: std::sync::Arc::clone(&lease.channel),
+            closed: std::sync::Arc::clone(&self.channel_closed),
+            refused: matches!(
+                self.builder.target(),
+                Some(crate::channel::ChannelTarget::Refused { .. })
+            ),
+        }
+    }
+
+    /// The generated gRPC client stub of the channel of the client. Its message-size cap is
+    /// raised from tonic's 4 MiB default (too small for real Arrow `collect()` results) to 128 MiB,
+    /// as the raw Grpc calls' too: the reference client sets this unconditionally via
+    /// GRPC_DEFAULT_OPTIONS (grpc.max_{send,receive}_message_length); it is not a connection-string
+    /// option.
+    fn stub(&self) -> Stub {
+        Stub(
+            SparkConnectServiceClient::new(self.checked_channel())
+                .max_decoding_message_size(GRPC_MAX_MESSAGE_LENGTH_DEFAULT)
+                .max_encoding_message_size(GRPC_MAX_MESSAGE_LENGTH_DEFAULT),
+        )
+    }
+
+    /// Close this client, as PySpark's `SparkConnectClient.close` closes its channel: its RPCs
+    /// raise `NO_ACTIVE_SESSION` from now on, and its clones with them, but those of the
+    /// artifacts, which raise the `ValueError` of grpc's closed channel, as PySpark's
+    /// ArtifactManager does of its own stub, and the reattaches, the retries and the releases of
+    /// a reattachable execution in flight, which raise it too, as PySpark's iterator sends them
+    /// through the stub that it was made with; once the client is open again
+    /// ([`SparkConnectClient::set_closed`]), all of them raise that `ValueError`, as PySpark's do
+    /// then. Its calls in flight, and those of its clones, end now, as grpcio's `close` cancels
+    /// the calls of its channel: as cancelled, `CANCELLED`, `Channel closed!` of a call whose
+    /// response has not begun, and `Stream removed (Channel closed!)` of one whose response is
+    /// read (see `crate::metadata::Checked`), the releases of executions in the background too,
+    /// which the close of a session waits for first (see
+    /// [`SparkConnectClient::wait_for_releases`]).
+    pub fn close(&self) {
+        self.channel_closed.mark_closed();
+        self.closed.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.channel_closed.wake_up();
+        // As grpcio's `close` of the channel: it lets go of its subchannels, whose connections end
+        // once no other channel holds them.
+        self.transport.lease().close();
+    }
+
+    /// Wait for the releases in the background of the executions of the client, and of its
+    /// clones, whose streams ended, at most 10 s, as PySpark's `close` waits for the release
+    /// futures that its iterators left it (`concurrent.futures.wait(self._release_futures,
+    /// timeout=10)`) before it closes its channel, which would cancel them (see
+    /// [`SparkConnectClient::close`]): a release of an execution whose stream is still read is
+    /// not waited for, as PySpark's iterator keeps its own until it ends. Not a stable API.
+    #[doc(hidden)]
+    pub async fn wait_for_releases(&self) {
+        let pending = self.releases_to_wait_for();
+        if pending.is_empty() {
+            return;
+        }
+        let ended = futures::future::join_all(pending.iter().map(|done| done.ended()));
+        let _ = tokio::time::timeout(RELEASES_WAIT, ended).await;
+    }
+
+    /// Whether [`SparkConnectClient::wait_for_releases`] currently has releases to wait for. Not a
+    /// stable API.
+    #[doc(hidden)]
+    pub fn has_releases_to_wait_for(&self) -> bool {
+        !self.releases_to_wait_for().is_empty()
+    }
+
+    /// The releases in the background, not ended, of the streams of the client that ended.
+    fn releases_to_wait_for(&self) -> Vec<std::sync::Arc<ReleaseDone>> {
+        releases_of(&self.releases)
+            .iter()
+            .filter(|release| {
+                release
+                    .stream_ended
+                    .load(std::sync::atomic::Ordering::SeqCst)
+            })
+            .map(|release| std::sync::Arc::clone(&release.done))
+            .collect()
+    }
+
+    /// Mark this client closed, or open, as a set of PySpark's `client._closed`, without closing
+    /// its channel: a closed client raises `NO_ACTIVE_SESSION` for its RPCs but those of the
+    /// artifacts, which PySpark's ArtifactManager sends of its own stub, and an open one sends
+    /// them, unless [`SparkConnectClient::close`] closed its channel. Not a stable API.
+    #[doc(hidden)]
+    pub fn set_closed(&self, closed: bool) {
+        self.closed
+            .store(closed, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Open this client again, as `set_closed(false)`. Not a stable API.
     #[doc(hidden)]
     pub fn reopen(&self) {
-        self.closed
-            .store(false, std::sync::atomic::Ordering::SeqCst);
+        self.set_closed(false);
+    }
+
+    /// The user that the requests of this client and of its clones carry, but those of the
+    /// artifacts, as PySpark's `client._user_id`: the user of the connection, unless
+    /// [`SparkConnectClient::set_request_user_id`] set another, or the one that a binding gave the
+    /// requests of the calling thread ([`SparkConnectClient::set_thread_request_context`]). Not a
+    /// stable API.
+    #[doc(hidden)]
+    pub fn request_user_id(&self) -> Option<String> {
+        if let Some(user_id) = self.thread_request(|request| request.user_id.clone()) {
+            return user_id;
+        }
+        self.request_user_id.get()
+    }
+
+    /// Make the requests of this client and of its clones carry the user `user_id`, or none, as
+    /// a set of PySpark's `client._user_id` does, which its requests read. The requests of the
+    /// artifacts carry the user of the client when it was made, as PySpark's ArtifactManager
+    /// keeps it. Not a stable API.
+    #[doc(hidden)]
+    pub fn set_request_user_id(&self, user_id: Option<String>) {
+        self.request_user_id.set(user_id);
     }
 
     /// Whether the client is closed. See [`SparkConnectClient::close`].
@@ -1245,21 +2490,72 @@ impl SparkConnectClient {
     /// The operation ID of the innermost execution that the calling thread is waiting for, if any:
     /// the one that a wait of the calling thread is for, as PySpark interrupts the operation of
     /// the iterator that is interrupted. An execution in flight that nothing waits for, such as
-    /// an iterator that is not consumed, is not one.
+    /// an iterator that is not consumed, is not one, nor is one whose failure the thread converts
+    /// now (see [`converting_failure`]), as for a call that a handler of a log of the conversion
+    /// makes: PySpark converts the failure in the `except Exception` clause of the execution, so
+    /// the exception of a signal during that call goes out of the conversion and interrupts none
+    /// of it.
     pub fn running_operation_id(&self) -> Option<String> {
         let caller = crate::runtime::calling_thread_id();
-        let inflight = self
-            .inflight_operations
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let converted = converted_operation_ids(caller);
+        let inflight = inflight_of(&self.inflight_operations);
         inflight
             .iter()
             .rev()
-            .find(|entry| entry.waiter == Some(caller))
+            .find(|entry| entry.waiter == Some(caller) && !converted.contains(&entry.operation_id))
             .map(|entry| entry.operation_id.clone())
     }
 
-    /// The error of an RPC of a closed client, as PySpark's `SparkConnectClient._stub` raises it.
+    /// The identity of the client and of its clones, which share its state, as PySpark's session
+    /// has one client: not of the client of another session (see
+    /// [`SparkConnectClient::with_new_session_id`]).
+    fn identity(&self) -> usize {
+        std::sync::Arc::as_ptr(&self.inflight_operations) as *const () as usize
+    }
+
+    /// Whether the calling thread converts the failure of a call of this client now, as the
+    /// `inside_error_handling` of the `thread_local` of PySpark's client tells it while its
+    /// `_handle_error` runs: the failure of a call of the client that runs meanwhile, as of a
+    /// handler of a log of the conversion, is not converted, and the error of such a call has no
+    /// operation ID, as that `_handle_error` raises the error of the call as it is. Not a stable
+    /// API.
+    ///
+    /// A call runs during a conversion when it runs within a poll of the conversion (see
+    /// [`crate::runtime::polling_conversion`]), as a call of a handler of one of its records, or,
+    /// of a conversion of a call that a watch waits for (see [`crate::runtime::with_wait_watch`]),
+    /// which blocks its thread until it ends, of the Python binding, when it runs on the thread at
+    /// all, as a call of a signal handler that a poll of the watch runs. A call of another task
+    /// of an async caller of the client, which the thread polls between two polls of the
+    /// conversion, does not.
+    #[doc(hidden)]
+    pub fn inside_error_handling(&self) -> bool {
+        let client = self.identity();
+        if crate::runtime::polls_conversion_of(client) {
+            return true;
+        }
+        let thread = crate::runtime::calling_thread_id();
+        converting()
+            .iter()
+            .any(|mark| mark.thread == thread && mark.client == client && mark.watch.is_some())
+    }
+
+    /// The operation ID of the innermost execution that the calling thread is waiting for within
+    /// the call whose watch it runs (see [`crate::runtime::wait_watch_id`]), if any: not of the
+    /// execution of another call of the thread that a call during it, as of a handler of a log,
+    /// waits within, as PySpark's `_handle_error` of a call has the operation ID of that call.
+    fn operation_id_of_this_call(&self) -> Option<String> {
+        let caller = crate::runtime::calling_thread_id();
+        let watch = crate::runtime::wait_watch_id();
+        let inflight = inflight_of(&self.inflight_operations);
+        inflight
+            .iter()
+            .rev()
+            .find(|entry| entry.waiter == Some(caller) && entry.watch == watch)
+            .map(|entry| entry.operation_id.clone())
+    }
+
+    /// The error of a unary RPC of a closed client, as PySpark's `SparkConnectClient._stub` raises
+    /// it, or of one whose channel is closed (see [`SparkConnectClient::close`]).
     #[allow(clippy::result_large_err)] // SparkError is large; changing the type would break the API
     fn ensure_open(&self) -> Result<()> {
         if self.is_closed() {
@@ -1269,22 +2565,63 @@ impl SparkConnectClient {
                 &[],
             ));
         }
+        self.ensure_channel_open()
+    }
+
+    /// Whether [`SparkConnectClient::close`] closed the channel of this client.
+    fn channel_is_closed(&self) -> bool {
+        self.channel_closed.is_closed()
+    }
+
+    /// The `ValueError` of a server-streaming RPC on a closed channel, as grpc raises it once
+    /// PySpark's `close` closed it, whether the client is closed or not: the reattaches and the
+    /// retries of a reattachable execution check it only, as PySpark's iterator sends them through
+    /// the stub that it was made with rather than the `_stub` of the client.
+    #[allow(clippy::result_large_err)] // SparkError is large; changing the type would break the API
+    fn ensure_channel_open_for_stream(&self) -> Result<()> {
+        if self.channel_is_closed() {
+            return Err(SparkError::builtin_value_msg(
+                "Cannot invoke RPC: Channel closed!",
+            ));
+        }
+        Ok(())
+    }
+
+    /// As [`SparkConnectClient::ensure_open`], for a server-streaming RPC, `ExecutePlan` and
+    /// `ReattachExecute`, whose call grpc refuses of another message on a closed channel.
+    #[allow(clippy::result_large_err)] // SparkError is large; changing the type would break the API
+    fn ensure_open_for_stream(&self) -> Result<()> {
+        if self.channel_is_closed() && !self.is_closed() {
+            return Err(SparkError::builtin_value_msg(
+                "Cannot invoke RPC: Channel closed!",
+            ));
+        }
+        self.ensure_open()
+    }
+
+    /// The `ValueError` of a unary or a client-streaming RPC on a closed channel, as grpc raises it
+    /// once PySpark's `close` closed it, whether the client is closed or not: the RPCs of the
+    /// artifacts check it only, as PySpark's ArtifactManager calls its own stub.
+    #[allow(clippy::result_large_err)] // SparkError is large; changing the type would break the API
+    fn ensure_channel_open(&self) -> Result<()> {
+        if self.channel_is_closed() {
+            return Err(SparkError::builtin_value_msg(
+                "Cannot invoke RPC on closed channel!",
+            ));
+        }
         Ok(())
     }
 
     /// The server-side session ID that the responses have carried, if one has, as PySpark's
     /// `_server_session_id`: None before the first response.
     pub fn observed_server_session_id(&self) -> Option<String> {
-        observed_of(&self.server_session_id)
+        self.server_session_id.get()
     }
 
     /// Set the server-side session ID that the requests observe, as PySpark's
     /// `_server_session_id` is settable: a response that carries another one closes the client.
     pub fn set_observed_server_session_id(&self, id: Option<String>) {
-        *self
-            .server_session_id
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = id;
+        self.server_session_id.set(id);
     }
 
     /// The display host of the endpoint of the channel, as PySpark's `SparkConnectClient.host`.
@@ -1315,9 +2652,11 @@ impl SparkConnectClient {
 
     /// Checks the IDs of a response, as PySpark's `_verify_response_integrity`: the session ID
     /// must be this session's. The first non-empty server-side session ID that a response
-    /// carries is observed; a later one that differs closes the client, as the server restarted,
-    /// and is an error. An empty ID is neither observed nor checked. PySpark keeps an empty
-    /// first ID and then raises for a later non-empty one.
+    /// carries is observed; a later one that differs marks the client closed, as the server
+    /// restarted, and is an error. As PySpark's `_closed = True` of then, the channel stays open,
+    /// so the artifacts are sent and the client sends its requests again once it is open (see
+    /// [`SparkConnectClient::set_closed`]). An empty ID is neither observed nor checked. PySpark
+    /// keeps an empty first ID and then raises for a later non-empty one.
     #[allow(clippy::result_large_err)] // SparkError is large; changing the type would break the API
     fn verify_response(&self, session_id: &str, server_side_session_id: &str) -> Result<()> {
         if !self.session_tracking {
@@ -1331,42 +2670,77 @@ impl SparkConnectClient {
                 "Received incorrect session identifier for request:{session_id} != {expected}"
             )));
         }
-        let mut observed = self
-            .server_session_id
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        match observed.clone() {
-            None if !server_side_session_id.is_empty() => {
-                *observed = Some(server_side_session_id.to_string());
+        if server_side_session_id.is_empty() {
+            return Ok(());
+        }
+        // Read without a lock, as each response is, and set by the first response that carries one.
+        let observed = |observed: &Option<String>| observed.clone();
+        let old = match self.server_session_id.read(observed) {
+            None => {
+                let first = Some(server_side_session_id.to_string());
+                if self
+                    .server_session_id
+                    .update(|observed| observed.is_none().then(|| first.clone()))
+                {
+                    return Ok(());
+                }
+                // Another response was first.
+                self.server_session_id.read(observed)
             }
-            None => {}
-            Some(old) if !server_side_session_id.is_empty() && server_side_session_id != old => {
-                drop(observed);
-                self.close();
-                return Err(assertion_error(format!(
+            old => old,
+        };
+        match old {
+            Some(old) if server_side_session_id != old => {
+                self.set_closed(true);
+                Err(assertion_error(format!(
                     "Received incorrect server side session identifier for request. Please \
                      create a new Spark Session to reconnect. ({server_side_session_id} != {old})"
-                )));
+                )))
             }
-            Some(_) => {}
+            _ => Ok(()),
         }
-        Ok(())
     }
 
-    /// The gRPC failure of a call of the kind `call` as a [`SparkError`], which closes the client
-    /// when the server reports that the session changed, and disables its plan compression when
-    /// the server cannot parse a plan, as PySpark's `_handle_rpc_error` does.
+    /// The gRPC failure of a call of the kind `call` as a [`SparkError`], which marks the client
+    /// closed when the server reports that the session changed, of an open channel (see
+    /// [`SparkConnectClient::verify_response`]), and disables its plan compression when the server
+    /// cannot parse a plan, as PySpark's `_handle_rpc_error` does.
     fn grpc_error(&self, status: tonic::Status, call: GrpcCall) -> SparkError {
-        let error = SparkError::from_grpc_status_of(status, call);
-        let condition = error.get_condition();
-        if self.session_tracking && condition.as_deref() == Some("INVALID_HANDLE.SESSION_CHANGED") {
-            self.close();
+        let read = crate::connector::grpcio_dialect()
+            .then(|| crate::rpc_status::Details::of(status.details()));
+        self.grpc_error_read(status, call, read)
+    }
+
+    /// [`SparkConnectClient::grpc_error`], of `read`, the details of `status` as upb reads them in
+    /// the dialect of grpcio, which the other readers of the failure share, or none out of it.
+    fn grpc_error_read(
+        &self,
+        status: tonic::Status,
+        call: GrpcCall,
+        read: Option<crate::rpc_status::Details>,
+    ) -> SparkError {
+        let error = self.session_checked_grpc_error_read(status, call, read);
+        if error.get_condition().as_deref() == Some("CONNECT_INVALID_PLAN.CANNOT_PARSE") {
+            self.keep_plan_compression(PlanCompression::Disabled);
         }
-        if condition.as_deref() == Some("CONNECT_INVALID_PLAN.CANNOT_PARSE") {
-            *self
-                .plan_compression
-                .lock()
-                .unwrap_or_else(|e| e.into_inner()) = PlanCompression::Disabled;
+        error
+    }
+
+    /// The gRPC failure of a call of the kind `call` as a [`SparkError`], of `read`, the details
+    /// of `status` as upb reads them in the dialect of grpcio, or none out of it, which marks the
+    /// client closed when the server reports that the session changed (see
+    /// [`SparkConnectClient::grpc_error`]).
+    fn session_checked_grpc_error_read(
+        &self,
+        status: tonic::Status,
+        call: GrpcCall,
+        read: Option<crate::rpc_status::Details>,
+    ) -> SparkError {
+        let error = SparkError::from_grpc_status_read(status, call, read);
+        if self.session_tracking
+            && error.get_condition().as_deref() == Some("INVALID_HANDLE.SESSION_CHANGED")
+        {
+            self.set_closed(true);
         }
         error
     }
@@ -1400,28 +2774,6 @@ impl SparkConnectClient {
         Ok(request)
     }
 
-    /// `request` as the hook of the executions returns it, with its plan compressed again when a
-    /// hook ran: a hook may put in a plan, such as the drop-in's hook, which resolves the plan of
-    /// a DataFrame there, as PySpark's hook would put in the plan of `to_proto`, which compresses
-    /// it. A plan that is compressed already is kept.
-    async fn hooked_and_compressed(
-        &self,
-        request: ExecutePlanRequest,
-    ) -> Result<ExecutePlanRequest> {
-        let hook_set = self
-            .execute_plan_hook
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .is_some();
-        let mut request = self.hooked(request)?;
-        if hook_set {
-            if let Some(plan) = request.plan.as_mut() {
-                self.compress_plan(plan).await;
-            }
-        }
-        Ok(request)
-    }
-
     /// Get the user ID, if set.
     pub fn user_id(&self) -> Option<&str> {
         self.user_id.as_deref()
@@ -1435,7 +2787,7 @@ impl SparkConnectClient {
             .user_context_extensions
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let thread = std::thread::current().id();
+        let thread = crate::runtime::calling_thread_id();
         if !extensions.by_thread.contains_key(&thread) {
             forget_when_thread_ends(&self.user_context_extensions, forget_thread_extensions);
         }
@@ -1466,7 +2818,7 @@ impl SparkConnectClient {
             .user_context_extensions
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let thread = std::thread::current().id();
+        let thread = crate::runtime::calling_thread_id();
         if !all.by_thread.contains_key(&thread) {
             forget_when_thread_ends(&self.user_context_extensions, forget_thread_extensions);
         }
@@ -1511,7 +2863,7 @@ impl SparkConnectClient {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .by_thread
-            .remove(&std::thread::current().id());
+            .remove(&crate::runtime::calling_thread_id());
     }
 
     /// Add `extension` to the user context of the requests of all the threads, and return its
@@ -1544,7 +2896,10 @@ impl SparkConnectClient {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         if extension_id.starts_with("threadlocal_") {
-            if let Some(own) = extensions.by_thread.get_mut(&std::thread::current().id()) {
+            if let Some(own) = extensions
+                .by_thread
+                .get_mut(&crate::runtime::calling_thread_id())
+            {
                 // As PySpark rebinds the list of the thread, which other threads that share it
                 // keep as it was.
                 let kept = own
@@ -1566,7 +2921,9 @@ impl SparkConnectClient {
             .user_context_extensions
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        extensions.by_thread.remove(&std::thread::current().id());
+        extensions
+            .by_thread
+            .remove(&crate::runtime::calling_thread_id());
         extensions.global.clear();
     }
 
@@ -1577,18 +2934,24 @@ impl SparkConnectClient {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .by_thread
-            .get(&std::thread::current().id())
+            .get(&crate::runtime::calling_thread_id())
             .map(SharedUserContextExtensions::snapshot)
             .unwrap_or_default()
     }
 
     /// The global user context extensions, of their IDs, as PySpark's
-    /// `global_user_context_extensions` of a client.
+    /// `global_user_context_extensions` of a client: those that the requests of the calling
+    /// thread carry, of a binding (see [`SparkConnectClient::set_thread_request_context`]), else
+    /// those of the client.
     pub fn global_user_context_extensions(&self) -> Vec<(String, prost_types::Any)> {
-        self.user_context_extensions
+        let extensions = self
+            .user_context_extensions
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .global
+            .unwrap_or_else(|e| e.into_inner());
+        extensions
+            .request_by_thread
+            .get(&crate::runtime::calling_thread_id())
+            .map_or(&extensions.global, |request| &request.global)
             .clone()
     }
 
@@ -1601,17 +2964,22 @@ impl SparkConnectClient {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         // The thread that calls the API, also when this future is polled on another thread.
+        let caller = crate::runtime::calling_thread_id();
         let own = extensions
             .by_thread
-            .get(&crate::runtime::calling_thread_id())
+            .get(&caller)
             .map(|own| own.0.lock().unwrap_or_else(|e| e.into_inner()));
-        if extensions.global.is_empty() && own.as_ref().is_none_or(|own| own.is_empty()) {
+        // The global extensions that a binding gave the thread, else those of the client.
+        let global = extensions
+            .request_by_thread
+            .get(&caller)
+            .map_or(&extensions.global, |request| &request.global);
+        if global.is_empty() && own.as_ref().is_none_or(|own| own.is_empty()) {
             return;
         }
         let context = context.get_or_insert_with(UserContext::default);
         context.extensions.extend(
-            extensions
-                .global
+            global
                 .iter()
                 .chain(own.iter().flat_map(|own| own.iter()))
                 .map(|(_, extension)| extension.clone()),
@@ -1639,15 +3007,49 @@ impl SparkConnectClient {
     /// PySpark's `SparkConnectClient.set_retry_policies`: each call reads the policy when it
     /// starts its retries, so the calls that start from now on retry under `policy`.
     pub fn replace_retry_policy(&self, policy: RetryPolicy) {
-        *self.retry_policy.write().unwrap_or_else(|e| e.into_inner()) = policy;
+        self.retry_policy.set(policy);
     }
 
     /// The retry policy of this client's RPCs.
     pub fn retry_policy(&self) -> RetryPolicy {
-        self.retry_policy
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
+        self.retry_policy.get()
+    }
+
+    /// Make `decider` decide the retries of the calls of this client and of its clones that start
+    /// from now on, in place of its retry policy, or the policy again with none: as the Python
+    /// binding does of PySpark's retry policies of methods of their own, whose `Retrying` it runs
+    /// (see [`RetryDecider`]). The calls that wait for their retries and the requests sent in the
+    /// background have it alike, as PySpark's `Retrying` of them is of the policies of the
+    /// client. A client of a new session has none. Not a stable API.
+    #[doc(hidden)]
+    pub fn set_retry_decider(&self, decider: Option<std::sync::Arc<dyn RetryDecider>>) {
+        self.retry_decider.set(decider);
+    }
+
+    /// Give the calls of this client and of its clones, from now on, the metadata of `calls`, and
+    /// the requests of the artifacts that of `artifacts`, in place of the metadata of the builder,
+    /// with the `authorization` of the token, or that of the builder again with none: as the
+    /// Python binding does of a channel builder whose `metadata()` is its own, which PySpark's
+    /// client calls for each attempt of a call, and once as it is made, of which its
+    /// ArtifactManager sends its requests. The requests of a reattachable execution, and the
+    /// release of its results, carry the metadata of `calls` as the execution started, as
+    /// PySpark's iterator is made of a `metadata()`, and a request sent in the background, of no
+    /// caller, the metadata of the builder. A client of a new session has none. Not a stable API.
+    #[doc(hidden)]
+    pub fn set_metadata_source(
+        &self,
+        calls: Option<std::sync::Arc<dyn crate::channel::MetadataSource>>,
+        artifacts: Option<std::sync::Arc<dyn crate::channel::MetadataSource>>,
+    ) {
+        self.metadata_source
+            .set(MetadataSources { calls, artifacts });
+    }
+
+    /// The retries of a call of the kind `call` that starts now: of the decider of the client, if
+    /// it has one, else of its policy.
+    fn retries_of(&self, call: GrpcCall) -> Retrying {
+        let decider = self.retry_decider.get();
+        Retrying::new(&self.retry_policy()).of_call(call, decider.as_ref())
     }
 
     /// The `token` parameter of the connection string, if it has one. PySpark's
@@ -1713,19 +3115,23 @@ impl SparkConnectClient {
 
     /// The plan compression of this client. The server's confs are read on the first plan, with
     /// one `Config` call, and kept for the client; a failed read disables the compression for it,
-    /// as PySpark's `_get_plan_compression_threshold_and_algorithm` does.
-    async fn plan_compression(&self) -> PlanCompression {
+    /// as PySpark's `_get_plan_compression_threshold_and_algorithm` does. The error is one that
+    /// its `except Exception` does not catch (see [`crate::retries::RetriesListener::caught`]).
+    async fn plan_compression(&self) -> Result<PlanCompression> {
         let known = *self
             .plan_compression
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         if known != PlanCompression::Unknown {
-            return known;
+            return Ok(known);
         }
         // As PySpark's `except Exception` of the lookup, which catches the exception that a signal
         // handler raises while the lookup waits, unless it is a `BaseException` only, such as the
         // KeyboardInterrupt of Ctrl-C: then the settings are those of a failed lookup, kept for the
         // later plans, and the call goes on (see `runtime::catching`).
+        // The settings as PySpark's lookup sets them, of the threshold as an int and the algorithm
+        // as it is, of a lookup whose threshold is one.
+        let mut read = None;
         let looked_up = match crate::runtime::catching(self.get_configs(&[
             PLAN_COMPRESSION_THRESHOLD_CONF,
             PLAN_COMPRESSION_ALGORITHM_CONF,
@@ -1735,28 +3141,162 @@ impl SparkConnectClient {
             None => PlanCompression::Disabled,
             Some(Ok(values)) => match values.as_slice() {
                 [threshold, algorithm] => {
-                    plan_compression_of(threshold.as_deref(), algorithm.as_deref())
+                    read = plan_compression_threshold(threshold.as_deref()).map(|threshold| {
+                        PlanCompressionSettings {
+                            threshold,
+                            algorithm: algorithm.clone(),
+                        }
+                    });
+                    // As PySpark's lookup, which logs the settings that it read, or the error of a
+                    // threshold that is not an integer, which disables the compression.
+                    let (looked_up, logged) =
+                        looked_up_plan_compression(threshold.as_deref(), algorithm.as_deref());
+                    let of_error = match &logged {
+                        crate::client_log::Message::WithError { error, .. } => {
+                            Some(error.as_ref().clone())
+                        }
+                        _ => None,
+                    };
+                    match crate::client_log::logged(crate::client_log::Level::Debug, || logged)
+                        .await
+                    {
+                        Ok(()) => looked_up,
+                        Err(error) => match &of_error {
+                            // The log of the error of the threshold is in PySpark's `except
+                            // Exception as e`: its error is raised, of the compression disabled,
+                            // of the error of the threshold as its context.
+                            Some(caught) => {
+                                self.keep_plan_compression(PlanCompression::Disabled);
+                                return Err(crate::retries::raised_in_handling(
+                                    error,
+                                    crate::retries::Handled::Error(caught),
+                                ));
+                            }
+                            // The log of the settings is in its `try`, whose `except Exception`
+                            // catches the error of a handler of the log, as a failed lookup.
+                            None => {
+                                return self
+                                    .plan_compression_after_error(error, Some((looked_up, read)))
+                                    .await
+                            }
+                        },
+                    }
                 }
                 _ => PlanCompression::Disabled,
             },
             Some(Err(error)) => {
-                let aborted = is_wait_aborted(&error);
-                // As PySpark's `except Exception` of the lookup, which catches its failure, and the
-                // exception of the warning of its retries once they are spent.
-                crate::retries::caught(error);
                 // An aborted lookup is not the answer of the server: nothing is kept, so the
                 // lookup is made again by the next plan.
-                if aborted {
-                    return PlanCompression::Disabled;
+                if is_wait_aborted(&error) {
+                    if let Some(error) = crate::retries::caught(error) {
+                        return Err(error);
+                    }
+                    return Ok(PlanCompression::Disabled);
                 }
-                PlanCompression::Disabled
+                return self.plan_compression_after_error(error, None).await;
             }
         };
+        self.keep_plan_compression_of(looked_up, read);
+        Ok(looked_up)
+    }
+
+    /// Keep `looked_up` as the plan compression of this client, for its later plans, of the
+    /// settings that it stands for (see [`PlanCompressionSettings::of`]).
+    fn keep_plan_compression(&self, looked_up: PlanCompression) {
+        self.keep_plan_compression_of(looked_up, None);
+    }
+
+    /// Keep `looked_up` as the plan compression of this client, of the settings `read` of its
+    /// lookup, else of those that it stands for.
+    fn keep_plan_compression_of(
+        &self,
+        looked_up: PlanCompression,
+        read: Option<PlanCompressionSettings>,
+    ) {
         *self
             .plan_compression
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = looked_up;
-        looked_up
+        *self
+            .plan_compression_settings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) =
+            read.or_else(|| PlanCompressionSettings::of(looked_up));
+    }
+
+    /// The settings of the plan compression of this client, as PySpark's client keeps them (see
+    /// [`PlanCompressionSettings`]): of its lookup, of the first plan, or of
+    /// [`SparkConnectClient::set_plan_compression_settings`], and None before. Binding hook; not
+    /// a stable API.
+    #[doc(hidden)]
+    pub fn plan_compression_settings(&self) -> Option<PlanCompressionSettings> {
+        self.plan_compression_settings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Make `settings` the plan compression of this client and of its clones, as a binding sets
+    /// PySpark's `_plan_compression_threshold` and `_plan_compression_algorithm` of its client,
+    /// which its plans read: of a threshold that is not negative and the algorithm `ZSTD`, the
+    /// plans of more bytes than the threshold are compressed, and of other settings none is; of
+    /// None, or of no algorithm, the settings are looked up again with the next plan, as
+    /// PySpark's client looks them up while either is None. Binding hook; not a stable API.
+    #[doc(hidden)]
+    pub fn set_plan_compression_settings(&self, settings: Option<PlanCompressionSettings>) {
+        let compression = match &settings {
+            Some(PlanCompressionSettings {
+                threshold,
+                algorithm: Some(algorithm),
+            }) => plan_compression_above(*threshold, Some(algorithm.as_str())),
+            _ => PlanCompression::Unknown,
+        };
+        *self
+            .plan_compression
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = compression;
+        *self
+            .plan_compression_settings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = settings;
+    }
+
+    /// The plan compression after `error`, of the lookup of its settings or of the log of them, as
+    /// the `except Exception` of PySpark's `_get_plan_compression_threshold_and_algorithm` catches
+    /// it: the error of a lookup, the exception of the warning of its spent retries or of a policy,
+    /// or that of a handler of the log of the settings, `read` the settings that it logged. The
+    /// compression is disabled, and the exception that it caught is logged, as the argument of a
+    /// text of no placeholder for it, whose error is raised, as the log is in the `except` clause.
+    /// An error that is not caught, of a `BaseException` only, as the `KeyboardInterrupt` of a
+    /// policy's Python or of a handler, is raised: of the settings that the log read, which
+    /// PySpark has set before it logs them, else of none kept, so that the next plan looks them up.
+    async fn plan_compression_after_error(
+        &self,
+        error: SparkError,
+        read: Option<(PlanCompression, Option<PlanCompressionSettings>)>,
+    ) -> Result<PlanCompression> {
+        // Of the error as it is, before it is caught, of which the listener logs only one of an
+        // `Exception`. The error of the log has the error that it logs as its context, as the log
+        // is in the `except Exception as e` of PySpark's lookup.
+        let logged = crate::client_log::logged(crate::client_log::Level::Debug, || {
+            crate::client_log::Message::WithError {
+                text: PLAN_COMPRESSION_UNSUPPORTED,
+                error: Box::new(error.clone()),
+            }
+        })
+        .await
+        .map_err(|raised| {
+            crate::retries::raised_in_handling(raised, crate::retries::Handled::Error(&error))
+        });
+        if let Some(error) = crate::retries::caught(error) {
+            if let Some((read, settings)) = read {
+                self.keep_plan_compression_of(read, settings);
+            }
+            return Err(error);
+        }
+        self.keep_plan_compression(PlanCompression::Disabled);
+        logged?;
+        Ok(PlanCompression::Disabled)
     }
 
     /// Read the server's plan compression settings, unless this client has them, as PySpark's
@@ -1765,63 +3305,164 @@ impl SparkConnectClient {
     /// read. A caller that reads settings of its own between building a plan and sending it, as
     /// PySpark's `toPandas` does, reads these first; any other execution reads them as it sends
     /// its plan.
-    pub async fn read_plan_compression(&self) {
-        self.plan_compression().await;
+    /// The error is one that the `except Exception` of PySpark's lookup does not catch, as the
+    /// KeyboardInterrupt of the Python of a retry policy.
+    pub async fn read_plan_compression(&self) -> Result<()> {
+        self.plan_compression().await.map(drop)
     }
 
-    /// Compress `plan` as the plan compression of this client asks.
-    async fn compress_plan(&self, plan: &mut Plan) {
-        if let PlanCompression::Zstd { threshold } = self.plan_compression().await {
-            compress_over_threshold(plan, threshold);
+    /// The plan compression of this client once its settings are read, of the first plan, and
+    /// None before: the threshold over which the plans of relations and of commands are
+    /// compressed, the size of their encoding, or None when the compression is disabled. A caller
+    /// that encodes a plan outside the core tells with it that the core would send the plan as it
+    /// is (see [`SparkConnectClient::prepare_plan`]). Not a stable API.
+    #[doc(hidden)]
+    pub fn known_plan_compression(&self) -> Option<Option<usize>> {
+        match *self
+            .plan_compression
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+        {
+            PlanCompression::Unknown => None,
+            PlanCompression::Disabled => Some(None),
+            PlanCompression::Zstd { threshold } => Some(Some(threshold)),
         }
     }
 
-    /// `request`, the request of an execution, as PySpark's client sends it: of its client type,
-    /// its result chunking options, its user context, the server-side session ID that it
-    /// observes, its plan compressed as the plan compression of this client asks when
-    /// `compressed`, and as the hook of the executions, if any, returns it.
+    /// Compress `plan` as the plan compression of this client asks, after the lookup of its
+    /// settings of the first plan, as PySpark's `to_proto` builds a plan, with what it logs of
+    /// them. The compression is tried once: a plan prepared so is sent as it is, compressed or
+    /// not, with [`SparkConnectClient::execute_plan_reattachable_as_is`]. A caller that reads
+    /// settings of its own between building a plan and sending it, as PySpark's `toPandas` and
+    /// `toLocalIterator` do, prepares its plan first. The error is that of
+    /// [`SparkConnectClient::read_plan_compression`], or of a record of the compression. Not a
+    /// stable API.
+    #[doc(hidden)]
+    pub async fn prepare_plan(&self, plan: &mut Plan) -> Result<()> {
+        self.compress_plan(plan).await
+    }
+
+    /// Compress `plan` as the plan compression of this client asks, with what PySpark's
+    /// `_try_compress_and_set_plan` logs of it, whose error fails the call there.
+    async fn compress_plan(&self, plan: &mut Plan) -> Result<()> {
+        if let PlanCompression::Zstd { threshold } = self.plan_compression().await? {
+            for logged in compress_over_threshold(plan, threshold) {
+                crate::client_log::logged(crate::client_log::Level::Debug, || {
+                    crate::client_log::Message::Text(logged)
+                })
+                .await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// `request`, the request of an execution, as PySpark's client sends it (see
+    /// [`SparkConnectClient::unstarted_execution_request`] and
+    /// [`SparkConnectClient::started_execution_request`]).
+    async fn execution_request(
+        &self,
+        request: ExecutePlanRequest,
+        compressed: bool,
+        log: crate::client_log::ExecutionLog,
+    ) -> Result<ExecutePlanRequest> {
+        let request = self
+            .unstarted_execution_request(request, compressed, log)
+            .await?;
+        self.started_execution_request(request, log).await
+    }
+
+    /// `request`, the request of an execution, as PySpark's client builds it before its
+    /// `Progress` of the execution starts: of its client type, its result chunking options, its
+    /// user context, the server-side session ID that it observes, and its plan compressed as the
+    /// plan compression of this client asks when `compressed`.
     ///
     /// PySpark builds the plan of a relation, with the lookup of the plan compression of its
     /// first plan, before the request (`to_proto`), which then observes the server-side session
     /// ID that the response of the lookup gives. It builds the request of a command before it sets
     /// the command in its plan (`execute_command`), so the request of the first command of a
     /// session observes none. A plan that is not `compressed` is set as it is, without the lookup,
-    /// as the registrations of PySpark's `_execute` set their command.
-    async fn execution_request(
+    /// as the registrations of PySpark's `_execute` set their command, and as PySpark's client
+    /// sends the plan that it is given, which `to_proto` built and compressed.
+    ///
+    /// It logs what PySpark's client logs of the execution then, as `log` says (see
+    /// [`ExecutionLog`](crate::client_log::ExecutionLog)): a command before the request is built
+    /// and the command compressed, as `execute_command` logs it before it builds the request and
+    /// sets the command in its plan; a plan of a relation once it is compressed, before the request
+    /// is built, as `to_table` logs the plan that `to_proto` built; and the `ExecuteAndFetch` of
+    /// `_execute_and_fetch`. The error of a record fails the execution there. A closed client
+    /// raises once the records are written, when the request is sent (see
+    /// [`SparkConnectClient::started_execution_request`]), as PySpark's client reads its `_stub`
+    /// only then: a compression of the plan, of the first plan of the client, looks its settings up
+    /// first, which fails of the closed client as PySpark's lookup does, and disables it.
+    async fn unstarted_execution_request(
         &self,
         mut request: ExecutePlanRequest,
         compressed: bool,
+        log: crate::client_log::ExecutionLog,
     ) -> Result<ExecutePlanRequest> {
-        self.fill_client_type(&mut request.client_type)?;
-        self.ensure_open()?;
-        add_result_chunking_option(&mut request, self.result_chunking);
-        self.session_on(&mut request.session_id);
-        // The caller has extended the user context with the extensions of its thread.
-        self.fill_user_context(&mut request.user_context);
+        use crate::client_log::{ExecutionLog, Level};
         let of_a_relation = matches!(
             request.plan.as_ref().and_then(|plan| plan.op_type.as_ref()),
             Some(PlanOpType::Root(_))
         );
-        if !of_a_relation {
-            self.observe_on(&mut request.client_observed_server_side_session_id);
-        }
-        if compressed {
+        // As PySpark's `to_proto`, which compresses the plan of a relation before the method of
+        // the client is called with it.
+        if compressed && of_a_relation {
             if let Some(plan) = request.plan.as_mut() {
-                self.compress_plan(plan).await;
+                self.compress_plan(plan).await?;
             }
         }
-        if of_a_relation {
-            self.observe_on(&mut request.client_observed_server_side_session_id);
+        // Boxed, of an execution that is logged only: the future of the request holds its pointer.
+        if log != ExecutionLog::Silent && crate::client_log::enabled(Level::Debug) {
+            Box::pin(log_execution_call(&request, log)).await?;
         }
-        let request = if compressed {
-            self.hooked_and_compressed(request).await?
-        } else {
-            self.hooked(request)?
-        };
-        // As PySpark reads its `_stub` once the plan is built and the hooks ran: the lookup of
-        // the plan compression of the first plan closes the client when it sees that the server
-        // restarted, and then the execution raises NO_ACTIVE_SESSION and sends nothing.
-        self.ensure_open()?;
+        self.fill_client_type(&mut request.client_type)?;
+        add_result_chunking_option(&mut request, self.call_result_chunking());
+        self.session_on(&mut request.session_id);
+        // The caller has extended the user context with the extensions of its thread.
+        self.fill_user_context(&mut request.user_context);
+        // Of the server-side session ID that the lookup of the plan compression of the first plan
+        // of a relation gave, and before that of a command, which PySpark builds the request of
+        // before it sets the command in its plan.
+        self.observe_on(&mut request.client_observed_server_side_session_id);
+        if compressed && !of_a_relation {
+            if let Some(plan) = request.plan.as_mut() {
+                self.compress_plan(plan).await?;
+            }
+        }
+        if log != ExecutionLog::Silent && crate::client_log::enabled(Level::Debug) {
+            Box::pin(log_execution(log)).await?;
+        }
+        Ok(request)
+    }
+
+    /// `request`, an execution request that [`SparkConnectClient::unstarted_execution_request`]
+    /// built, as PySpark's `_execute_and_fetch_as_iterator` sends it, in the `Progress` of the
+    /// execution: it logs the request, as `log` says, and the hook of the executions, if any, gives
+    /// the request to send, as it is, as PySpark sends the request of its hooks.
+    async fn started_execution_request(
+        &self,
+        request: ExecutePlanRequest,
+        log: crate::client_log::ExecutionLog,
+    ) -> Result<ExecutePlanRequest> {
+        use crate::client_log::Level;
+        if log.logs_responses() && crate::client_log::enabled(Level::Debug) {
+            Box::pin(log_execution_request(&request, log)).await?;
+        }
+        let request = self.hooked(request)?;
+        // As PySpark reads its `_stub` once the plan is built, the records are written and the
+        // hooks ran: a closed client or channel raises its error and sends nothing, as of the
+        // lookup of the plan compression of the first plan, which closes the client when it sees
+        // that the server restarted. Its error carries the operation ID of the request, as the
+        // `_handle_error` of PySpark's execution sets it, of an operation ID that is not empty.
+        if let Err(closed) = self.ensure_open_for_stream() {
+            return Err(
+                match request.operation_id.as_deref().filter(|id| !id.is_empty()) {
+                    Some(operation_id) => closed.with_operation_id(operation_id),
+                    None => closed,
+                },
+            );
+        }
         Ok(request)
     }
 
@@ -1837,10 +3478,13 @@ impl SparkConnectClient {
         mut request: ExecutePlanRequest,
     ) -> Result<Streaming<ExecutePlanResponse>> {
         self.extend_user_context(&mut request.user_context);
-        let request = self.execution_request(request, true).await?;
+        self.add_call_stack(&mut request.user_context);
+        let request = self
+            .execution_request(request, true, crate::client_log::ExecutionLog::Silent)
+            .await?;
         let mut req = Request::new(request);
         self._attach_metadata(&mut req);
-        match self.stub.clone().execute_plan(req).await {
+        match self.stub().execute_plan(req).await {
             Ok(response) => Ok(response.into_inner()),
             Err(status) => Err(self
                 .error_from_status_of(status, GrpcCall::ServerStreaming)
@@ -1854,8 +3498,9 @@ impl SparkConnectClient {
     /// and deep plans don't hit the recursion limit - the server sees exactly the bytes
     /// the reference client built.
     pub async fn execute_plan_raw(&self, request: Vec<u8>) -> Result<Streaming<Vec<u8>>> {
-        self.ensure_open()?;
-        let mut grpc = tonic::client::Grpc::new(self.channel.clone())
+        self.ensure_open_for_stream()?;
+        sendable_bytes(&request)?;
+        let mut grpc = tonic::client::Grpc::new(self.checked_channel())
             .max_decoding_message_size(GRPC_MAX_MESSAGE_LENGTH_DEFAULT)
             .max_encoding_message_size(GRPC_MAX_MESSAGE_LENGTH_DEFAULT);
         wait_ready(&mut grpc).await?;
@@ -1864,8 +3509,9 @@ impl SparkConnectClient {
         let path = tonic::codegen::http::uri::PathAndQuery::from_static(
             "/spark.connect.SparkConnectService/ExecutePlan",
         );
+        let codec = crate::bytes_codec::ClientBytesCodec::<ExecutePlanResponse>::default();
         let resp = grpc
-            .server_streaming(req, path, crate::bytes_codec::BytesCodec)
+            .server_streaming(req, path, codec)
             .await
             .map_err(SparkError::from_grpc_status)?;
         Ok(resp.into_inner())
@@ -1873,8 +3519,9 @@ impl SparkConnectClient {
 
     /// ReattachExecute, byte-exact passthrough returning a raw response stream.
     pub async fn reattach_execute_raw(&self, request: Vec<u8>) -> Result<Streaming<Vec<u8>>> {
-        self.ensure_open()?;
-        let mut grpc = tonic::client::Grpc::new(self.channel.clone())
+        self.ensure_open_for_stream()?;
+        sendable_bytes(&request)?;
+        let mut grpc = tonic::client::Grpc::new(self.checked_channel())
             .max_decoding_message_size(GRPC_MAX_MESSAGE_LENGTH_DEFAULT)
             .max_encoding_message_size(GRPC_MAX_MESSAGE_LENGTH_DEFAULT);
         wait_ready(&mut grpc).await?;
@@ -1883,8 +3530,9 @@ impl SparkConnectClient {
         let path = tonic::codegen::http::uri::PathAndQuery::from_static(
             "/spark.connect.SparkConnectService/ReattachExecute",
         );
+        let codec = crate::bytes_codec::ClientBytesCodec::<ExecutePlanResponse>::default();
         let resp = grpc
-            .server_streaming(req, path, crate::bytes_codec::BytesCodec)
+            .server_streaming(req, path, codec)
             .await
             .map_err(SparkError::from_grpc_status)?;
         Ok(resp.into_inner())
@@ -1898,12 +3546,12 @@ impl SparkConnectClient {
         mut request: ReattachExecuteRequest,
     ) -> Result<Streaming<ExecutePlanResponse>> {
         self.fill_client_type(&mut request.client_type)?;
-        self.ensure_open()?;
+        self.ensure_open_for_stream()?;
         self.fill_user_context(&mut request.user_context);
         self.observe_on(&mut request.client_observed_server_side_session_id);
         let mut req = Request::new(request);
         self._attach_metadata(&mut req);
-        match self.stub.clone().reattach_execute(req).await {
+        match self.stub().reattach_execute(req).await {
             Ok(response) => Ok(response.into_inner()),
             Err(status) => Err(self
                 .error_from_status_of(status, GrpcCall::ServerStreaming)
@@ -1924,7 +3572,7 @@ impl SparkConnectClient {
         self.fill_user_context(&mut request.user_context);
         let mut req = Request::new(request);
         self._attach_metadata(&mut req);
-        match self.stub.clone().release_execute(req).await {
+        match self.stub().release_execute(req).await {
             Ok(response) => {
                 let response = response.into_inner();
                 self.verify_response(&response.session_id, &response.server_side_session_id)?;
@@ -1943,52 +3591,86 @@ impl SparkConnectClient {
     /// reference client, which never re-decodes the request it built).
     pub async fn analyze_plan_raw(&self, request: Vec<u8>) -> Result<Vec<u8>> {
         self.ensure_open()?;
-        let mut grpc = tonic::client::Grpc::new(self.channel.clone())
+        sendable_bytes(&request)?;
+        let mut grpc = tonic::client::Grpc::new(self.checked_channel())
             .max_decoding_message_size(GRPC_MAX_MESSAGE_LENGTH_DEFAULT)
             .max_encoding_message_size(GRPC_MAX_MESSAGE_LENGTH_DEFAULT);
         wait_ready(&mut grpc).await?;
-        let deadline = self.rpc_deadlines.analyze_plan;
+        let deadline = self.call_rpc_deadlines().analyze_plan;
         let mut req = with_deadline(Request::new(request), deadline);
         self._attach_metadata(&mut req);
         let path = tonic::codegen::http::uri::PathAndQuery::from_static(
             "/spark.connect.SparkConnectService/AnalyzePlan",
         );
-        let resp = within_deadline(
-            deadline,
-            grpc.unary(req, path, crate::bytes_codec::BytesCodec),
-        )
-        .await
-        .map_err(SparkError::from_grpc_status)?;
+        let codec = crate::bytes_codec::ClientBytesCodec::<AnalyzePlanResponse>::default();
+        let resp = within_deadline(deadline, grpc.unary(req, path, codec))
+            .await
+            .map_err(SparkError::from_grpc_status)?;
         Ok(resp.into_inner())
     }
 
     /// Analyze a plan and return metadata about it.
     ///
     /// Mirrors `pyspark.sql.connect.client.core.SparkConnectClient.analyze_plan`.
-    pub async fn analyze_plan(
+    pub async fn analyze_plan(&self, request: AnalyzePlanRequest) -> Result<AnalyzePlanResponse> {
+        self.analyze_plan_logged(request, crate::client_log::AnalysisLog::Silent)
+            .await
+    }
+
+    /// As [`SparkConnectClient::analyze_plan`], with what the method of PySpark's client that the
+    /// analysis stands for logs of its plan as it is sent, compressed, as `log` says: `Schema for
+    /// plan: ...` of `schema`. Not a stable API.
+    #[doc(hidden)]
+    pub async fn analyze_plan_logged(
         &self,
         mut request: AnalyzePlanRequest,
+        log: crate::client_log::AnalysisLog,
     ) -> Result<AnalyzePlanResponse> {
+        // As PySpark's `to_proto`, which builds the plans of an analysis, of the lookup of the plan
+        // compression of its first plan, before the method of the analysis logs its plan and
+        // `_analyze` builds the request. A closed client raises when the request is sent, once the
+        // plan is logged, as PySpark's `_analyze` reads its `_stub` only then; the lookup of the
+        // first plan fails of it, as PySpark's does, and disables the compression.
+        if let Some(analyze) = request.analyze.as_mut() {
+            for plan in analyze_plans(analyze).into_iter().flatten() {
+                self.compress_plan(plan).await?;
+            }
+        }
+        self.analyze_plan_as_is(request, log).await
+    }
+
+    /// As [`SparkConnectClient::analyze_plan_logged`], for an analysis whose plans are sent as
+    /// they are, neither compressed nor with the lookup of the plan compression of the client: a
+    /// plan that [`SparkConnectClient::prepare_plan`] prepared, and the plans that PySpark's
+    /// `SparkConnectClient.schema`, `explain_string`, `same_semantics`, `semantic_hash` and
+    /// `_analyze` are given, which they send as they are. Not a stable API.
+    #[doc(hidden)]
+    pub async fn analyze_plan_as_is(
+        &self,
+        mut request: AnalyzePlanRequest,
+        log: crate::client_log::AnalysisLog,
+    ) -> Result<AnalyzePlanResponse> {
+        // As the method of PySpark's client, which logs the plan before `_analyze` builds the
+        // request: the error of the record fails the analysis there.
+        if log != crate::client_log::AnalysisLog::Silent
+            && crate::client_log::enabled(crate::client_log::Level::Debug)
+        {
+            Box::pin(log_analysis(&request, log)).await?;
+        }
         self.session_on(&mut request.session_id);
         self.fill_client_type(&mut request.client_type)?;
         self.ensure_open()?;
         self.extend_user_context(&mut request.user_context);
+        self.add_call_stack(&mut request.user_context);
         self.fill_user_context(&mut request.user_context);
-        if let Some(analyze) = request.analyze.as_mut() {
-            for plan in analyze_plans(analyze).into_iter().flatten() {
-                self.compress_plan(plan).await;
-            }
-        }
-        // As in `execute_plan`: the lookup of the plan compression may have closed the client.
-        self.ensure_open()?;
         let response = self
             .with_retry(|| {
-                let deadline = self.rpc_deadlines.analyze_plan;
+                let deadline = self.call_rpc_deadlines().analyze_plan;
                 let mut request = clone_on_grown_stack(&request);
                 self.observe_on(&mut request.client_observed_server_side_session_id);
                 let mut req = with_deadline(Request::new(request), deadline);
                 self._attach_metadata(&mut req);
-                let mut stub = self.stub.clone();
+                let mut stub = self.stub();
                 async move {
                     within_deadline(deadline, stub.analyze_plan(req))
                         .await
@@ -2010,8 +3692,21 @@ impl SparkConnectClient {
         F: FnMut() -> Fut,
         Fut: std::future::Future<Output = std::result::Result<T, tonic::Status>>,
     {
-        let mut retries = Retrying::new(&self.retry_policy()).ending_with_abort();
+        let mut retries = self.retries_of(GrpcCall::Unary).ending_with_abort();
         self.with_retry_in(&mut retries, GrpcCall::Unary, op).await
+    }
+
+    /// As [`Self::with_retry`], of a call that PySpark's client leaves to grpc, without converting
+    /// its failure, which the Rust client makes as `rust` says (see
+    /// [`Self::result_left_to_grpc`]).
+    async fn with_retry_left_to_grpc<T, Fut, F>(&self, rust: LeftToGrpc, op: F) -> Result<T>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = std::result::Result<T, tonic::Status>>,
+    {
+        let mut retries = self.retries_of(GrpcCall::Unary).ending_with_abort();
+        let attempts = self.retried(&mut retries, op).await;
+        self.result_left_to_grpc(attempts, rust).await
     }
 
     /// As [`Self::with_retry`], of a call of the kind `call`, whose attempts are those of
@@ -2036,6 +3731,25 @@ impl SparkConnectClient {
     async fn retried<T, Fut, F>(
         &self,
         retries: &mut Retrying,
+        op: F,
+    ) -> std::result::Result<T, RetryError<SparkError>>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = std::result::Result<T, tonic::Status>>,
+    {
+        // As the reference's `_stub`, through which each attempt goes: once the client is closed
+        // (its session stopped while the call waited), the retry raises NO_ACTIVE_SESSION and
+        // sends nothing.
+        self.retried_checking(retries, || self.ensure_open(), op)
+            .await
+    }
+
+    /// As [`Self::retried`], of the attempts that `still_open` checks before each retry, whose
+    /// error ends them.
+    async fn retried_checking<T, Fut, F>(
+        &self,
+        retries: &mut Retrying,
+        still_open: impl FnMut() -> Result<()>,
         mut op: F,
     ) -> std::result::Result<T, RetryError<SparkError>>
     where
@@ -2043,7 +3757,7 @@ impl SparkConnectClient {
         Fut: std::future::Future<Output = std::result::Result<T, tonic::Status>>,
     {
         use futures::FutureExt;
-        self.attempts_in(retries, || {
+        retrying(retries, still_open, || {
             // An attempt that is not answered ends with the signal that a wait of the caller
             // takes, as PySpark's blocked call does. A combinator rather than an async block that
             // awaits the call: such a block keeps the future of the call twice, as what it
@@ -2062,20 +3776,6 @@ impl SparkConnectClient {
             )
         })
         .await
-    }
-
-    /// Makes the attempts of a call of one response of this client under its retry policy (see
-    /// [`retrying`]), and gives the failed RPC that ends them as the error of the server. An
-    /// attempt may fail with an error that is not a failed RPC, which is not retried. The backoff
-    /// before a retry ends with a signal that the wait of the caller takes, as the sleep of
-    /// PySpark's `Retrying` does.
-    async fn with_attempts<T, Fut>(&self, attempt: impl FnMut() -> Fut) -> Result<T>
-    where
-        Fut: std::future::Future<Output = std::result::Result<T, RetryError<SparkError>>>,
-    {
-        let mut retries = Retrying::new(&self.retry_policy()).ending_with_abort();
-        let attempts = self.attempts_in(&mut retries, attempt).await;
-        self.result_of_attempts(attempts, GrpcCall::Unary).await
     }
 
     /// The attempts of a call of this client under `retries` (see [`retrying`]), which end with
@@ -2110,6 +3810,46 @@ impl SparkConnectClient {
                 .exceeded_error(status, RetriesExceeded::Policy, call)
                 .await),
             Err(RetryError::Aborted(error)) => Err(error),
+            Err(RetryError::Failed(error)) => Err(*error),
+            Err(RetryError::WaitAborted) => Err(wait_aborted()),
+        }
+    }
+
+    /// The result of the attempts of a call of one response that PySpark's client leaves to grpc,
+    /// without converting its failure (`clone`, and the uploads of `copy_from_local_to_fs` and
+    /// of the caching of artifacts), in the dialect of grpcio: the failed RPC that ends them is
+    /// the error of its status, of grpcio's error of it, which the Python binding raises, and of
+    /// no details of the server nor logs, once PySpark's `Retrying` warned of its spent retries.
+    /// Of the Rust client, as `rust` says: the result of the attempts as of any call
+    /// ([`Self::result_of_attempts`]), or the error of the status as it is, as of the grpcio
+    /// dialect but without grpcio's error.
+    async fn result_left_to_grpc<T>(
+        &self,
+        attempts: std::result::Result<T, RetryError<SparkError>>,
+        rust: LeftToGrpc,
+    ) -> Result<T> {
+        let grpcio = crate::connector::grpcio_dialect();
+        if !grpcio && rust == LeftToGrpc::Converted {
+            return self.result_of_attempts(attempts, GrpcCall::Unary).await;
+        }
+        // Neither the details of the error nor the configs of its stack trace are asked for, and
+        // the client is not closed of it, as PySpark's `_handle_error` is not called.
+        let left_to_grpc = |status: tonic::Status| {
+            let grpcio =
+                grpcio.then(|| Box::new(crate::error::grpcio_error(&status, GrpcCall::Unary)));
+            let mut error = SparkError::from_grpc_status(status);
+            error.grpcio = grpcio;
+            error
+        };
+        match attempts {
+            Ok(value) => Ok(value),
+            Err(RetryError::Status(status)) => Err(left_to_grpc(status)),
+            Err(RetryError::Exceeded(status)) => {
+                crate::retries::retries_exceeded(RetriesExceeded::Policy)?;
+                Err(left_to_grpc(status))
+            }
+            Err(RetryError::Aborted(error)) => Err(error),
+            Err(RetryError::Failed(error)) => Err(*error),
             Err(RetryError::WaitAborted) => Err(wait_aborted()),
         }
     }
@@ -2147,35 +3887,108 @@ impl SparkConnectClient {
     /// False: its request has no reattach option, its `ExecutePlan` has no deadline, the stream
     /// is never reattached or released, and a failure that the retry policy retries, of the call
     /// or of its stream, sends the `ExecutePlan` again, under the retries of the whole execution.
+    ///
+    /// It logs what PySpark's `to_table` logs of a plan of a relation, and what its
+    /// `execute_command` logs of a command (see [`crate::client_log`]).
     pub async fn execute_plan_reattachable(
         &self,
         request: ExecutePlanRequest,
     ) -> Result<ReattachableResponseStream> {
-        self.execute_reattachable(request, true).await
+        let log = match request.plan.as_ref().and_then(|plan| plan.op_type.as_ref()) {
+            Some(PlanOpType::Root(_)) => crate::client_log::ExecutionLog::ToTable,
+            _ => crate::client_log::ExecutionLog::ExecuteCommand,
+        };
+        self.execute_reattachable(request, true, log).await
+    }
+
+    /// As [`SparkConnectClient::execute_plan_reattachable`], with the logs of the method of
+    /// PySpark's client that the execution stands for, as `log` says. Not a stable API.
+    #[doc(hidden)]
+    pub async fn execute_plan_reattachable_logged(
+        &self,
+        request: ExecutePlanRequest,
+        log: crate::client_log::ExecutionLog,
+    ) -> Result<ReattachableResponseStream> {
+        self.execute_reattachable(request, true, log).await
+    }
+
+    /// As [`SparkConnectClient::execute_plan_reattachable_logged`], for a request whose plan is
+    /// sent as it is, neither compressed nor with the lookup of the plan compression of the
+    /// client: a plan that [`SparkConnectClient::prepare_plan`] prepared, whose compression was
+    /// tried once, as PySpark's `to_proto` tries it, and the plan that PySpark's
+    /// `SparkConnectClient.to_table`, `to_table_as_iterator` and `to_pandas` are given, which they
+    /// send as it is. Not a stable API.
+    #[doc(hidden)]
+    pub async fn execute_plan_reattachable_as_is(
+        &self,
+        request: ExecutePlanRequest,
+        log: crate::client_log::ExecutionLog,
+    ) -> Result<ReattachableResponseStream> {
+        self.execute_reattachable(request, false, log).await
     }
 
     /// As [`SparkConnectClient::execute_plan_reattachable`], for a request whose plan is sent as
     /// it is, neither compressed nor with the lookup of the plan compression of the client, as
     /// PySpark's registrations of functions, table functions, data sources and Java functions
     /// (`register_udf`, `register_udtf`, `register_data_source` and `register_java`) set their
-    /// command in the plan of their request.
+    /// command in the plan of their request, whose `_execute` logs `Execute`.
     pub async fn execute_plan_reattachable_uncompressed(
         &self,
         request: ExecutePlanRequest,
     ) -> Result<ReattachableResponseStream> {
-        self.execute_reattachable(request, false).await
+        self.execute_reattachable(request, false, crate::client_log::ExecutionLog::Execute)
+            .await
     }
 
     /// The execution of `request` as a reattachable stream, of its plan compressed when
-    /// `compressed` (see [`SparkConnectClient::execute_plan_reattachable`]).
+    /// `compressed` (see [`SparkConnectClient::execute_plan_reattachable`]), and of the logs that
+    /// `log` says.
     async fn execute_reattachable(
+        &self,
+        request: ExecutePlanRequest,
+        compressed: bool,
+        log: crate::client_log::ExecutionLog,
+    ) -> Result<ReattachableResponseStream> {
+        let built = self.build_execution(request, compressed, log).await?;
+        self.execute_built(built).await
+    }
+
+    /// The first part of the execution of `request` that
+    /// [`SparkConnectClient::execute_plan_reattachable_logged`] makes, of its plan compressed when
+    /// `compressed`, as PySpark's client builds an execution before its `Progress` of the
+    /// execution starts: the request of the user context extensions of the calling thread, of the
+    /// call stack of its call, and of the client, its plan compressed, and the records that
+    /// PySpark's client logs then (see [`SparkConnectClient::unstarted_execution_request`]). An
+    /// error of it, as of one of the records, fails the execution before its `Progress` starts:
+    /// [`SparkConnectClient::execute_built`] sends it. Not a stable API.
+    #[doc(hidden)]
+    pub async fn build_execution(
         &self,
         mut request: ExecutePlanRequest,
         compressed: bool,
-    ) -> Result<ReattachableResponseStream> {
+        log: crate::client_log::ExecutionLog,
+    ) -> Result<BuiltExecution> {
         self.extend_user_context(&mut request.user_context);
-        self.execute_plan_reattachable_in_context(request, compressed)
-            .await
+        self.add_call_stack(&mut request.user_context);
+        // In the dialect of grpcio, the operation ID that the iterator would give the request is
+        // given it first (see `with_operation_id_of_grpcio`).
+        let request = with_operation_id_of_grpcio(request);
+        let request = self
+            .unstarted_execution_request(request, compressed, log)
+            .await?;
+        Ok(BuiltExecution { request, log })
+    }
+
+    /// Send `built`, an execution that [`SparkConnectClient::build_execution`] built, as
+    /// PySpark's `_execute_and_fetch_as_iterator` sends it in the `Progress` of the execution: the
+    /// record of the request, the hook of the executions, and the stream of the responses, as
+    /// [`SparkConnectClient::execute_plan_reattachable`] reads them. Not a stable API.
+    #[doc(hidden)]
+    pub async fn execute_built(&self, built: BuiltExecution) -> Result<ReattachableResponseStream> {
+        let request = self
+            .started_execution_request(built.request, built.log)
+            .await?;
+        self.execute_plan_reattachable_of(request, built.log).await
     }
 
     /// Run `request` as [`SparkConnectClient::execute_plan_reattachable`] runs it, without
@@ -2190,10 +4003,15 @@ impl SparkConnectClient {
     #[doc(hidden)]
     pub fn spawn_execute_plan_reattachable(&self, mut request: ExecutePlanRequest) {
         self.extend_user_context(&mut request.user_context);
-        let client = self.clone();
+        self.add_call_stack(&mut request.user_context);
+        let client = self.of_call_settings();
         drop(crate::runtime::get_runtime().spawn(async move {
             if let Ok(mut stream) = client
-                .execute_plan_reattachable_in_context(request, true)
+                .execute_plan_reattachable_in_context(
+                    request,
+                    true,
+                    crate::client_log::ExecutionLog::ExecuteCommand,
+                )
                 .await
             {
                 while let Ok(Some(_)) = stream.message().await {}
@@ -2207,13 +4025,34 @@ impl SparkConnectClient {
         &self,
         request: ExecutePlanRequest,
         compressed: bool,
+        log: crate::client_log::ExecutionLog,
     ) -> Result<ReattachableResponseStream> {
         // Before the iterator: its ReattachExecute and ReleaseExecute requests take the
         // user context and the client type of this request, and the request of the hook, as
         // PySpark's iterator is of the request that the hooks return. PySpark reads its `_stub`
-        // before it makes the iterator, so nothing is released of a closed client.
-        let request = self.execution_request(request, compressed).await?;
+        // before it makes the iterator, so nothing is released of a closed client. In the dialect
+        // of grpcio, the operation ID that the iterator would give the request is given it first
+        // (see `with_operation_id_of_grpcio`).
+        let request = with_operation_id_of_grpcio(request);
+        let request = self.execution_request(request, compressed, log).await?;
+        self.execute_plan_reattachable_of(request, log).await
+    }
+
+    /// The stream of the execution of `request`, the request to send, which
+    /// [`SparkConnectClient::execution_request`] built, of the logs of `log`.
+    async fn execute_plan_reattachable_of(
+        &self,
+        request: ExecutePlanRequest,
+        log: crate::client_log::ExecutionLog,
+    ) -> Result<ReattachableResponseStream> {
         let reattachable = self.reattachable_execute();
+        // As PySpark's: the metadata of a reattachable execution is read once, of which its
+        // iterator sends each of its requests; each attempt of one that is not reads its own.
+        let execution_metadata = if reattachable {
+            Some(self.metadata_of_execution().await?)
+        } else {
+            None
+        };
         let iter = if reattachable {
             ExecutePlanResponseReattachableIterator::new(request)
         } else {
@@ -2226,34 +4065,61 @@ impl SparkConnectClient {
         );
         // As PySpark's: an execution that is not reattachable has no deadline, which would end it.
         let deadline = if reattachable {
-            self.rpc_deadlines.reattachable_execute_plan
+            self.call_rpc_deadlines().reattachable_execute_plan
         } else {
             None
         };
         let mut stream_deadline = None;
         // The attempts of the first RPC are those of the first response too, as the reference's
         // first `_has_next` retries both (see `first_response_retries`).
-        let mut first_response_retries = Retrying::new(&self.retry_policy()).ending_with_abort();
+        let mut first_response_retries = self
+            .retries_of(GrpcCall::ServerStreaming)
+            .ending_with_abort()
+            .reading_status_first(reattachable);
         let stream = {
             // The first RPC is a wait of the caller for the execution.
             let _waiting = inflight.waiting();
-            self.with_retry_in(
-                &mut first_response_retries,
-                GrpcCall::ServerStreaming,
-                || {
-                    let request = clone_on_grown_stack(iter.request());
-                    let mut req = with_deadline(Request::new(request), deadline);
-                    self._attach_metadata(&mut req);
-                    stream_deadline = stream_deadline_in(deadline);
-                    let mut stub = self.stub.clone();
-                    async move {
-                        within_deadline(deadline, stub.execute_plan(req))
-                            .await
-                            .map(Response::into_inner)
+            let op = || {
+                let request = clone_on_grown_stack(iter.request());
+                let mut req = with_deadline(Request::new(request), deadline);
+                let refused = match &execution_metadata {
+                    Some(Ok(metadata)) => {
+                        add_metadata(&mut req, metadata);
+                        None
                     }
-                },
-            )
-            .await
+                    Some(Err(status)) => Some(status.clone()),
+                    None => {
+                        self._attach_metadata(&mut req);
+                        None
+                    }
+                };
+                stream_deadline = stream_deadline_in(deadline);
+                let mut stub = self.stub();
+                async move {
+                    if let Some(status) = refused {
+                        return Err(status);
+                    }
+                    within_deadline(deadline, stub.execute_plan(req))
+                        .await
+                        .map(Response::into_inner)
+                }
+            };
+            // As the reference's iterator, which retries through the stub that it was made with:
+            // once the channel of the client is closed, as by the `stop()` of another thread, a
+            // retry raises grpc's `ValueError` of a closed channel; of an execution that is not
+            // reattachable, as its `_stub`, which each attempt reads.
+            let attempts = if reattachable {
+                self.retried_checking(
+                    &mut first_response_retries,
+                    || self.ensure_channel_open_for_stream(),
+                    op,
+                )
+                .await
+            } else {
+                self.retried(&mut first_response_retries, op).await
+            };
+            self.result_of_attempts(attempts, GrpcCall::ServerStreaming)
+                .await
         };
         let stream = match stream {
             Ok(stream) => Some(stream),
@@ -2274,23 +4140,37 @@ impl SparkConnectClient {
                     if let Some(refused) = release_refused() {
                         return Err(refused);
                     }
-                    self.spawn_release(self.execution_metadata(), iter.release_all_request());
+                    // Of an execution whose iterator ended with the failure. Of metadata that
+                    // gRPC does not send, the release fails too, unsent.
+                    if let Some(Ok(metadata)) = &execution_metadata {
+                        self.spawn_release(
+                            metadata.clone(),
+                            iter.release_all_request(),
+                            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+                        );
+                    }
                 }
                 return Err(error.with_operation_id(iter.operation_id()));
             }
         };
         Ok(ReattachableResponseStream {
-            client: self.clone(),
+            metadata: execution_metadata
+                .and_then(std::result::Result::ok)
+                .unwrap_or_else(|| self.execution_metadata()),
+            client: self.of_call_settings(),
+            log,
             reattachable,
             first_response_retries: Some(first_response_retries),
             iter,
-            stream,
+            stream: stream.map(crate::fork::ForkLocal::new),
             stream_deadline,
             execute_again: false,
             done: false,
+            stream_ended: Default::default(),
             // Nothing is released of an execution that is not reattachable.
             released: !reattachable,
             _inflight: inflight,
+            generation: crate::fork::generation(),
         })
     }
 
@@ -2308,10 +4188,10 @@ impl SparkConnectClient {
         self.extend_user_context(&mut request.user_context);
         self.fill_user_context(&mut request.user_context);
         self.observe_on(&mut request.client_observed_server_side_session_id);
-        let deadline = self.rpc_deadlines.fetch_error_details;
+        let deadline = self.call_rpc_deadlines().fetch_error_details;
         let mut req = with_deadline(Request::new(request), deadline);
         self._attach_metadata(&mut req);
-        let resp = within_deadline(deadline, self.stub.clone().fetch_error_details(req)).await;
+        let resp = within_deadline(deadline, self.stub().fetch_error_details(req)).await;
         let response = resp
             .map(Response::into_inner)
             .map_err(|status| self.grpc_error(status, GrpcCall::Unary))?;
@@ -2332,22 +4212,143 @@ impl SparkConnectClient {
     /// which names the class of grpcio's error in the message of a status that the server did not
     /// raise an error of (see [`SparkError::from_grpc_status_of`]).
     async fn error_from_status_of(&self, status: tonic::Status, call: GrpcCall) -> SparkError {
-        let error = self.grpc_error(status, call);
+        // The error of the source of the metadata of the call, which PySpark raises as it is.
+        if let Some(error) = crate::metadata::metadata_failure(&status) {
+            return error;
+        }
+        let failure = crate::error::grpcio_error(&status, call);
+        // As PySpark's `_handle_error`, which raises the error of a call as grpc gives it while the
+        // thread handles another failure of the client (`inside_error_handling`), as of a call
+        // that a handler of a log of that conversion makes, so that the handling does not recurse:
+        // of no records, no details of the server, no configs of its stack trace, and the error of
+        // the status as it is, of grpcio's error, which the Python binding raises.
+        if self.inside_error_handling() {
+            let mut error = SparkError::from_grpc_status(status);
+            error.grpcio = crate::connector::grpcio_dialect().then(|| Box::new(failure));
+            return error;
+        }
+        // As PySpark's `_handle_error`, which converts the failure in the `except Exception`
+        // clause of the call, outside of the `except KeyboardInterrupt` of an execution: a signal
+        // while it runs interrupts nothing (see [`converting_failure`]).
+        let _converting =
+            Converting::start(&failure, self.operation_id_of_this_call(), self.identity());
+        // Of whose polls a call of the client is of the handling of this failure (see
+        // [`SparkConnectClient::inside_error_handling`]). Boxed, as the future of every call that
+        // converts its failure would otherwise hold the conversion.
+        crate::runtime::polling_conversion(
+            self.identity(),
+            Box::pin(self.converted_error_of(status, call, failure)),
+        )
+        .await
+    }
+
+    /// The error of the failed RPC of `status`, of grpcio's error `failure`, as
+    /// [`SparkConnectClient::error_from_status_of`] converts it.
+    async fn converted_error_of(
+        &self,
+        status: tonic::Status,
+        call: GrpcCall,
+        failure: crate::error::GrpcioError,
+    ) -> SparkError {
+        // As PySpark's `_handle_rpc_error`, which logs the error of grpc before it reads it, and
+        // then the `ErrorInfo` of a status of the server, but of a call past its deadline, which
+        // it raises at once. It reads the `google.rpc.Status` of the call with grpc_status, which
+        // raises its `ValueError` of one that does not match the call, or protobuf's `DecodeError`
+        // of one that upb does not read, before the `ErrorInfo` is read, and so does the unpacking
+        // of its first `ErrorInfo`, before it is logged.
+        let deadline = crate::retries::grpc_python_code(&status) == tonic::Code::DeadlineExceeded;
+        // The details as upb reads them, in the dialect of grpcio, read once for the readers of the
+        // failure. Boxed, as they are kept across the wait for the logs, and so is the mismatch.
+        let read = crate::connector::grpcio_dialect()
+            .then(|| Box::new(crate::rpc_status::Details::of(status.details())));
+        let mismatch = match (&read, deadline) {
+            (Some(read), false) => crate::error::from_call_error_of(
+                &status,
+                read,
+                call,
+                crate::error::StatusRead::ErrorInfo,
+            )
+            .map(Box::new),
+            _ => None,
+        };
+        // The logs of a call off the thread of its caller, as of a stream that is read in the
+        // background, precede what the call does next with its error, as PySpark's do. The error
+        // of a log, of a handler or a filter of the logger that raised, is the error of the call,
+        // of the failure as its context, as the exception of PySpark's log goes out of
+        // `_handle_rpc_error`, before what follows the log.
+        if let Err(error) =
+            crate::retries::log_delivered(|listener| listener.rpc_error(&failure)).await
+        {
+            return crate::retries::raised_in_handling(
+                error,
+                crate::retries::Handled::Rpc(&failure),
+            );
+        }
+        if !deadline && mismatch.is_none() {
+            if let Some(text) = crate::error::error_info_text(status.details(), read.as_deref()) {
+                if let Err(error) =
+                    crate::retries::log_delivered(|listener| listener.error_info(&text)).await
+                {
+                    return crate::retries::raised_in_handling(
+                        error,
+                        crate::retries::Handled::Rpc(&failure),
+                    );
+                }
+            }
+        }
+        if let Some(mismatch) = mismatch {
+            return *mismatch;
+        }
+        let error = self.session_checked_grpc_error_read(status, call, read.map(|read| *read));
+        if error.get_condition().as_deref() == Some("CONNECT_INVALID_PLAN.CANNOT_PARSE") {
+            // As PySpark's `_handle_rpc_error`, which logs that it disables the plan compression
+            // before it disables it and asks for the details of the error.
+            if let Err(logged) = crate::client_log::logged(crate::client_log::Level::Info, || {
+                crate::client_log::Message::Text(
+                    "Disabling plan compression for the session due to \
+                     CONNECT_INVALID_PLAN.CANNOT_PARSE error."
+                        .to_string(),
+                )
+            })
+            .await
+            {
+                return crate::retries::raised_in_handling(
+                    logged,
+                    crate::retries::Handled::Rpc(&failure),
+                );
+            }
+            self.keep_plan_compression(PlanCompression::Disabled);
+        }
         if error.server.is_none() {
             return error;
         }
         // Boxed: the fetch of the details and the reads of the confs, which retry, would
         // otherwise make the future of every call that converts its failure much larger, in a
         // debug build past the stack of a thread that polls it.
-        Box::pin(self.server_error_with_details(error)).await
+        Box::pin(self.server_error_with_details(error, &failure)).await
     }
 
     /// `error`, an error that the server raised, with its details and its stack trace, as
-    /// [`SparkConnectClient::error_from_status`] completes it.
-    async fn server_error_with_details(&self, error: SparkError) -> SparkError {
+    /// [`SparkConnectClient::error_from_status`] completes it, of the failed RPC of grpcio's error
+    /// `failure`.
+    async fn server_error_with_details(
+        &self,
+        error: SparkError,
+        failure: &crate::error::GrpcioError,
+    ) -> SparkError {
         let Some(server) = &error.server else {
             return error;
         };
+        // The requests of the failure are of the context of the calling thread as it is now, as
+        // PySpark builds them of the attributes of its client then, and none is sent when the
+        // binding cannot build them.
+        if let Some(hook) = FAILURE_REQUESTS_HOOK.get() {
+            match hook(self, &error) {
+                Ok(true) => {}
+                Ok(false) => return error,
+                Err(unbuilt) => return unbuilt,
+            }
+        }
         let details = match &server.error_id {
             Some(error_id) => {
                 // PySpark builds the request of the details with its user agent, and fetches
@@ -2365,13 +4366,20 @@ impl SparkConnectClient {
             }
             None => None,
         };
-        let display_stacktrace = self.display_server_stacktrace().await;
-        error.with_details(details, display_stacktrace)
+        match self.display_server_stacktrace().await {
+            Ok(display_stacktrace) => error.with_details(details, display_stacktrace),
+            // As PySpark's `_display_server_stack_trace`, whose `except Exception` lets out a
+            // `BaseException` only, which replaces the error that is raised, as it is raised while
+            // `_handle_rpc_error` handles the failure.
+            Err(uncaught) => {
+                crate::retries::raised_in_handling(uncaught, crate::retries::Handled::Rpc(failure))
+            }
+        }
     }
 
     /// The details of the error that the server keeps under `error_id`, or `None` if they
-    /// cannot be fetched, with a request of the client type `client_type`. Mirrors
-    /// `SparkConnectClient._fetch_enriched_error`.
+    /// cannot be fetched, or once a signal interrupted the wait of the caller, with a request of
+    /// the client type `client_type`. Mirrors `SparkConnectClient._fetch_enriched_error`.
     async fn error_details(
         &self,
         error_id: &str,
@@ -2381,8 +4389,8 @@ impl SparkConnectClient {
             session_id: self.client_session_id(),
             error_id: error_id.to_string(),
             client_type: Some(client_type),
-            user_context: self.user_id.as_ref().map(|user_id| UserContext {
-                user_id: user_id.clone(),
+            user_context: self.request_user_id().map(|user_id| UserContext {
+                user_id,
                 ..Default::default()
             }),
             ..Default::default()
@@ -2391,13 +4399,20 @@ impl SparkConnectClient {
         // As `_fetch_enriched_error`, whose request carries the user context extensions.
         self.extend_user_context(&mut request.user_context);
         self.observe_on(&mut request.client_observed_server_side_session_id);
-        let deadline = self.rpc_deadlines.fetch_error_details;
+        let deadline = self.call_rpc_deadlines().fetch_error_details;
         let mut req = with_deadline(Request::new(request), deadline);
         self._attach_metadata(&mut req);
-        let response = within_deadline(deadline, self.stub.clone().fetch_error_details(req))
-            .await
-            .ok()?
-            .into_inner();
+        // Not sent once a signal interrupted the wait of the caller, which raises the exception of
+        // the signal: as PySpark's KeyboardInterrupt leaves the failure of the execution that it
+        // interrupts unread, such as the server's cancellation of it. The reads of the configs of
+        // the stack trace end then too (see `conf_while_raising`).
+        let response = crate::runtime::until_abort(
+            crate::runtime::ABORT_RETRIES,
+            within_deadline(deadline, self.stub().fetch_error_details(req)),
+        )
+        .await?
+        .ok()?
+        .into_inner();
         self.verify_response(&response.session_id, &response.server_side_session_id)
             .ok()?;
         Some(response)
@@ -2405,19 +4420,21 @@ impl SparkConnectClient {
 
     /// Whether the message of an error that the server raised shows the server's stack
     /// trace. Mirrors `SparkConnectClient._display_server_stack_trace`, which shows it when a
-    /// config cannot be read.
-    async fn display_server_stacktrace(&self) -> bool {
-        match self
-            .conf_while_raising("spark.sql.connect.serverStacktrace.enabled")
-            .await
-        {
-            Some(enabled) if enabled == "true" => true,
-            Some(_) => self
-                .conf_while_raising("spark.sql.pyspark.jvmStacktrace.enabled")
-                .await
-                .is_none_or(|enabled| enabled == "true"),
-            None => true,
-        }
+    /// config cannot be read. The error is one that its `except Exception` does not catch.
+    async fn display_server_stacktrace(&self) -> Result<bool> {
+        Ok(
+            match self
+                .conf_while_raising("spark.sql.connect.serverStacktrace.enabled")
+                .await?
+            {
+                Some(enabled) if enabled == "true" => true,
+                Some(_) => self
+                    .conf_while_raising("spark.sql.pyspark.jvmStacktrace.enabled")
+                    .await?
+                    .is_none_or(|enabled| enabled == "true"),
+                None => true,
+            },
+        )
     }
 
     /// The value of a config, or `None` if it cannot be read, as PySpark's
@@ -2425,18 +4442,18 @@ impl SparkConnectClient {
     /// whose `config` retries it under the retry policy, and whose failure its `except Exception`
     /// catches, with the exception of the warning of the retries once they are spent. A failure
     /// is not converted, as PySpark's `_handle_error` raises an error of the handling of another
-    /// as it is.
-    async fn conf_while_raising(&self, key: &str) -> Option<String> {
+    /// as it is. The error is one that the `except Exception` does not catch.
+    async fn conf_while_raising(&self, key: &str) -> Result<Option<String>> {
         use spark_connect_proto::config_request::{operation::OpType, Get, Operation};
         // PySpark reads the config through `_stub`, which raises NO_ACTIVE_SESSION once the
         // client is closed, as a session change closes it, so it sends nothing then.
         if self.is_closed() {
-            return None;
+            return Ok(None);
         }
         let mut request = ConfigRequest {
             session_id: self.client_session_id(),
             user_context: Some(UserContext {
-                user_id: self.user_id.clone().unwrap_or_default(),
+                user_id: self.request_user_id().unwrap_or_default(),
                 ..Default::default()
             }),
             operation: Some(Operation {
@@ -2446,43 +4463,69 @@ impl SparkConnectClient {
             }),
             // As the conf of PySpark's `_display_server_stack_trace`, which catches the error of
             // its user agent as any other: the stack trace is then shown.
-            client_type: Some(self.client_type().ok()?),
+            client_type: match self.client_type() {
+                Ok(client_type) => Some(client_type),
+                Err(_) => return Ok(None),
+            },
             ..Default::default()
         };
         // As the request of PySpark's `RuntimeConf.get`, which carries the user context
-        // extensions, as every Config request, and which `config` builds before its retries.
+        // extensions and the call stack of the user's code, as every Config request, of
+        // `_config_request_with_metadata`, and which `config` builds before its retries.
         self.extend_user_context(&mut request.user_context);
+        self.add_call_stack(&mut request.user_context);
         self.observe_on(&mut request.client_observed_server_side_session_id);
         let request = &request;
-        let mut retries = Retrying::new(&self.retry_policy()).ending_with_abort();
+        let mut retries = self.retries_of(GrpcCall::Unary).ending_with_abort();
         // As the `except Exception` of `_display_server_stack_trace`, which catches the exception
         // that a signal handler raises while the config is read, unless it is a `BaseException`
         // only: the config is then not read (see `runtime::catching`).
-        let attempts = crate::runtime::catching(self.retried(&mut retries, || {
-            let deadline = self.rpc_deadlines.config;
+        let Some(attempts) = crate::runtime::catching(self.retried(&mut retries, || {
+            let deadline = self.call_rpc_deadlines().config;
             let mut req = with_deadline(Request::new(request.clone()), deadline);
             self._attach_metadata(&mut req);
-            let mut stub = self.stub.clone();
+            let mut stub = self.stub();
             async move {
                 within_deadline(deadline, stub.config(req))
                     .await
                     .map(Response::into_inner)
             }
         }))
-        .await?;
+        .await
+        else {
+            return Ok(None);
+        };
         let response = match attempts {
             Ok(response) => response,
             Err(RetryError::Exceeded(_)) => {
                 if let Err(error) = crate::retries::retries_exceeded(RetriesExceeded::Policy) {
-                    crate::retries::caught(error);
+                    if let Some(error) = crate::retries::caught(error) {
+                        return Err(error);
+                    }
                 }
-                return None;
+                return Ok(None);
             }
-            Err(_) => return None,
+            // As PySpark's `except Exception`, which catches the exception of a decider too, but
+            // not a `BaseException` only.
+            Err(RetryError::Failed(error)) => {
+                if let Some(error) = crate::retries::caught(*error) {
+                    return Err(error);
+                }
+                return Ok(None);
+            }
+            Err(_) => return Ok(None),
         };
-        self.verify_response(&response.session_id, &response.server_side_session_id)
-            .ok()?;
-        response.pairs.into_iter().next()?.value
+        if self
+            .verify_response(&response.session_id, &response.server_side_session_id)
+            .is_err()
+        {
+            return Ok(None);
+        }
+        Ok(response
+            .pairs
+            .into_iter()
+            .next()
+            .and_then(|pair| pair.value))
     }
 
     /// Update or fetch configurations.
@@ -2493,15 +4536,16 @@ impl SparkConnectClient {
         self.fill_client_type(&mut request.client_type)?;
         self.ensure_open()?;
         self.extend_user_context(&mut request.user_context);
+        self.add_call_stack(&mut request.user_context);
         self.fill_user_context(&mut request.user_context);
         let response = self
             .with_retry(|| {
-                let deadline = self.rpc_deadlines.config;
+                let deadline = self.call_rpc_deadlines().config;
                 let mut request = request.clone();
                 self.observe_on(&mut request.client_observed_server_side_session_id);
                 let mut req = with_deadline(Request::new(request), deadline);
                 self._attach_metadata(&mut req);
-                let mut stub = self.stub.clone();
+                let mut stub = self.stub();
                 async move {
                     within_deadline(deadline, stub.config(req))
                         .await
@@ -2524,12 +4568,12 @@ impl SparkConnectClient {
         self.fill_user_context(&mut request.user_context);
         let response = self
             .with_retry(|| {
-                let deadline = self.rpc_deadlines.interrupt;
+                let deadline = self.call_rpc_deadlines().interrupt;
                 let mut request = request.clone();
                 self.observe_on(&mut request.client_observed_server_side_session_id);
                 let mut req = with_deadline(Request::new(request), deadline);
                 self._attach_metadata(&mut req);
-                let mut stub = self.stub.clone();
+                let mut stub = self.stub();
                 async move {
                     within_deadline(deadline, stub.interrupt(req))
                         .await
@@ -2548,7 +4592,7 @@ impl SparkConnectClient {
         let mut request = ConfigRequest::default();
         request.session_id = self.client_session_id();
         request.user_context = Some(UserContext {
-            user_id: self.user_id.clone().unwrap_or_default(),
+            user_id: self.request_user_id().unwrap_or_default(),
             ..Default::default()
         });
 
@@ -2621,7 +4665,7 @@ impl SparkConnectClient {
         let request = ConfigRequest {
             session_id: self.client_session_id(),
             user_context: Some(UserContext {
-                user_id: self.user_id.clone().unwrap_or_default(),
+                user_id: self.request_user_id().unwrap_or_default(),
                 ..Default::default()
             }),
             operation: Some(spark_connect_proto::config_request::Operation {
@@ -2644,7 +4688,7 @@ impl SparkConnectClient {
         let mut request = ConfigRequest::default();
         request.session_id = self.client_session_id();
         request.user_context = Some(UserContext {
-            user_id: self.user_id.clone().unwrap_or_default(),
+            user_id: self.request_user_id().unwrap_or_default(),
             ..Default::default()
         });
 
@@ -2688,7 +4732,7 @@ impl SparkConnectClient {
         let mut request = ConfigRequest::default();
         request.session_id = self.client_session_id();
         request.user_context = Some(UserContext {
-            user_id: self.user_id.clone().unwrap_or_default(),
+            user_id: self.request_user_id().unwrap_or_default(),
             ..Default::default()
         });
 
@@ -2710,7 +4754,7 @@ impl SparkConnectClient {
         let mut request = ConfigRequest::default();
         request.session_id = self.client_session_id();
         request.user_context = Some(UserContext {
-            user_id: self.user_id.clone().unwrap_or_default(),
+            user_id: self.request_user_id().unwrap_or_default(),
             ..Default::default()
         });
 
@@ -2739,7 +4783,7 @@ impl SparkConnectClient {
         let mut request = ConfigRequest::default();
         request.session_id = self.client_session_id();
         request.user_context = Some(UserContext {
-            user_id: self.user_id.clone().unwrap_or_default(),
+            user_id: self.request_user_id().unwrap_or_default(),
             ..Default::default()
         });
 
@@ -2770,7 +4814,7 @@ impl SparkConnectClient {
         let mut request = InterruptRequest::default();
         request.session_id = self.client_session_id();
         request.user_context = Some(UserContext {
-            user_id: self.user_id.clone().unwrap_or_default(),
+            user_id: self.request_user_id().unwrap_or_default(),
             ..Default::default()
         });
         // InterruptType::INTERRUPT_TYPE_ALL = 1
@@ -2787,7 +4831,7 @@ impl SparkConnectClient {
         let mut request = InterruptRequest::default();
         request.session_id = self.client_session_id();
         request.user_context = Some(UserContext {
-            user_id: self.user_id.clone().unwrap_or_default(),
+            user_id: self.request_user_id().unwrap_or_default(),
             ..Default::default()
         });
         // InterruptType::INTERRUPT_TYPE_TAG = 2
@@ -2806,7 +4850,7 @@ impl SparkConnectClient {
         let mut request = InterruptRequest::default();
         request.session_id = self.client_session_id();
         request.user_context = Some(UserContext {
-            user_id: self.user_id.clone().unwrap_or_default(),
+            user_id: self.request_user_id().unwrap_or_default(),
             ..Default::default()
         });
         // InterruptType::INTERRUPT_TYPE_OPERATION_ID = 3
@@ -2828,27 +4872,53 @@ impl SparkConnectClient {
     /// `SparkConnectClient.clone(new_session_id)`: a `CloneSession` RPC copies the server-side
     /// state of the session, its SQL configurations, temporary views, registered functions
     /// and catalog state, into a new session, of the id `new_session_id` if one is given. The
-    /// returned client, of the same channel, is of that session.
+    /// returned client, of the connection of the process to the same endpoint, is of that
+    /// session. A failure of the RPC is the error of its status as it is, of grpcio's error of it
+    /// in the dialect of grpcio, as PySpark's `clone` leaves it to grpc: neither the details of the
+    /// error nor the stack trace of the server are requested for it. As PySpark's, the response is
+    /// not checked against the session of this client: a session ID or a server-side session ID
+    /// of the response that is not that of this client is not an error, and does not close it.
     pub async fn clone_session(&self, new_session_id: Option<&str>) -> Result<Self> {
+        let user_id = self
+            .builder
+            .user_id()
+            .map(String::from)
+            .or_else(|| self.request_user_id());
+        self.clone_session_of_user(new_session_id, user_id).await
+    }
+
+    /// As [`SparkConnectClient::clone_session`], of a client of the user `user_id` as it is given,
+    /// whom its requests and those of its artifacts carry, also when the connection has a
+    /// `user_id`, which `clone_session` takes in its place, as PySpark's `clone` makes its client
+    /// of the connection and `user_id=self._user_id` (see
+    /// [`SparkConnectClient::with_new_session_id_of_user`]). Not a stable API.
+    #[doc(hidden)]
+    pub async fn clone_session_of_user(
+        &self,
+        new_session_id: Option<&str>,
+        user_id: Option<String>,
+    ) -> Result<Self> {
         self.ensure_open()?;
         // As PySpark's request: of the client type "python", not of the user agent, and with
         // no observed server-side session ID.
         let request = CloneSessionRequest {
             session_id: self.client_session_id(),
             user_context: Some(UserContext {
-                user_id: self.user_id.clone().unwrap_or_default(),
+                user_id: self.request_user_id().unwrap_or_default(),
                 ..Default::default()
             }),
             client_type: Some("python".to_string()),
             new_session_id: new_session_id.map(str::to_string),
             ..Default::default()
         };
+        // As PySpark's `clone`, which leaves the failure to grpc: nothing else is asked of the
+        // server for it, of the Rust client too.
         let response = self
-            .with_retry(|| {
-                let deadline = self.rpc_deadlines.clone_session;
+            .with_retry_left_to_grpc(LeftToGrpc::AsItIs, || {
+                let deadline = self.call_rpc_deadlines().clone_session;
                 let mut req = with_deadline(Request::new(request.clone()), deadline);
                 self._attach_metadata(&mut req);
-                let mut stub = self.stub.clone();
+                let mut stub = self.stub();
                 async move {
                     within_deadline(deadline, stub.clone_session(req))
                         .await
@@ -2856,7 +4926,8 @@ impl SparkConnectClient {
                 }
             })
             .await?;
-        self.verify_response(&response.session_id, &response.server_side_session_id)?;
+        // As PySpark's `clone`, which does not check the IDs of its response: neither its session
+        // ID nor its server-side session ID, which the client does not observe either.
         if let Some(requested) = new_session_id {
             if response.new_session_id != requested {
                 return Err(SparkError::connect_msg(format!(
@@ -2865,13 +4936,13 @@ impl SparkConnectClient {
                 )));
             }
         }
-        let mut cloned = self.with_new_session_id();
+        let mut cloned = self.with_new_session_id_of_user(user_id);
         // As PySpark's `clone`, which sets the new session ID in a copy of the builder.
         cloned
             .builder
             .set(crate::channel::PARAM_SESSION_ID, &response.new_session_id);
         cloned.client_session_id =
-            std::sync::Arc::new(std::sync::RwLock::new(response.new_session_id.clone()));
+            std::sync::Arc::new(crate::fork::Shared::new(response.new_session_id.clone()));
         cloned.session_id = response.new_session_id;
         Ok(cloned)
     }
@@ -2885,18 +4956,21 @@ impl SparkConnectClient {
         let mut request = ReleaseSessionRequest::default();
         request.session_id = self.client_session_id();
         request.user_context = Some(UserContext {
-            user_id: self.user_id.clone().unwrap_or_default(),
+            user_id: self.request_user_id().unwrap_or_default(),
             ..Default::default()
         });
         // The error of the user agent is that of the release, which PySpark's `stop()` logs.
         request.client_type = Some(self.client_type()?);
+        // As PySpark's `_stub`, read once the request is built: NO_ACTIVE_SESSION once the client is
+        // closed, and the error of a closed channel once it is open again.
+        self.ensure_open()?;
 
         let response = self
             .with_retry(|| {
-                let deadline = self.rpc_deadlines.release_session;
+                let deadline = self.call_rpc_deadlines().release_session;
                 let mut req = with_deadline(Request::new(request.clone()), deadline);
                 self._attach_metadata(&mut req);
-                let mut stub = self.stub.clone();
+                let mut stub = self.stub();
                 async move {
                     within_deadline(deadline, stub.release_session(req))
                         .await
@@ -2919,9 +4993,9 @@ impl SparkConnectClient {
         self.ensure_open()?;
         request.session_id = self.client_session_id();
         request.client_type = Some(self.client_type()?);
-        if let Some(user_id) = self.user_id.as_ref().filter(|user_id| !user_id.is_empty()) {
+        if let Some(user_id) = self.request_user_id().filter(|user_id| !user_id.is_empty()) {
             request.user_context = Some(UserContext {
-                user_id: user_id.clone(),
+                user_id,
                 ..Default::default()
             });
         }
@@ -2930,10 +5004,10 @@ impl SparkConnectClient {
         }
         let response = self
             .with_retry(|| {
-                let deadline = self.rpc_deadlines.get_status;
+                let deadline = self.call_rpc_deadlines().get_status;
                 let mut req = with_deadline(Request::new(request.clone()), deadline);
                 self._attach_metadata(&mut req);
-                let mut stub = self.stub.clone();
+                let mut stub = self.stub();
                 async move {
                     within_deadline(deadline, stub.get_status(req))
                         .await
@@ -2957,14 +5031,14 @@ impl SparkConnectClient {
         archive: bool,
         file: bool,
     ) -> Result<()> {
-        self.ensure_open()?;
+        self.ensure_channel_open()?;
         // Each path is named as PySpark's ArtifactManager names it, by the flags and its file
         // extension (see `parse_artifact`).
         for path in paths {
             let (name, local) = crate::artifact::parse_artifact(path, pyfile, archive, file)
                 .map_err(|e| SparkError::connect_msg(e.to_string()))?;
             let artifact = NamedArtifact::new(name, Box::new(FileArtifact::new(local)));
-            self.upload_artifact(&artifact).await?;
+            self.upload_artifact(&artifact, false).await?;
         }
         Ok(())
     }
@@ -2975,10 +5049,11 @@ impl SparkConnectClient {
     /// Used by `SparkSession::copy_from_local_to_fs`, which names the artifact
     /// `forward_to_fs/<dest>` so the server writes it to the target filesystem path.
     pub async fn add_named_artifact(&self, name: &str, local_path: &str) -> Result<()> {
-        self.ensure_open()?;
+        self.ensure_channel_open()?;
         let artifact =
             NamedArtifact::new(name.to_string(), Box::new(FileArtifact::new(local_path)));
-        self.upload_artifact(&artifact).await
+        // As PySpark's `copy_from_local_to_fs`, which leaves the failure to grpc.
+        self.upload_artifact(&artifact, true).await
     }
 
     /// Upload session-scoped cache blobs, returning SHA-256 hashes in input order.
@@ -2987,7 +5062,7 @@ impl SparkConnectClient {
     /// As `SparkConnectClient.cache_artifacts`, the status check and the upload are one
     /// attempt under the retry policy, so a transient failure of either retries both.
     pub async fn cache_artifacts(&self, blobs: Vec<Vec<u8>>) -> Result<Vec<String>> {
-        self.ensure_open()?;
+        self.ensure_channel_open()?;
         use bytes::Bytes;
         use std::collections::HashSet;
 
@@ -3006,8 +5081,9 @@ impl SparkConnectClient {
         let (blobs, names, unique) = (&blobs, &names, &unique);
         // As PySpark's ArtifactManager, which does not check the IDs of its responses: a change of
         // the server-side session is raised by the next call of the client.
+        // As PySpark's `cache_artifact`, which leaves the failure to grpc.
         let uploaded = self
-            .with_retry(|| async move {
+            .with_retry_left_to_grpc(LeftToGrpc::Converted, || async move {
                 let status = self.artifact_status_rpc(unique).await?;
                 let cached: std::collections::HashMap<String, bool> = status
                     .statuses
@@ -3038,17 +5114,17 @@ impl SparkConnectClient {
     }
 
     /// The identity of a typed request that the caller built: adds the user context when it
-    /// is missing, and takes a missing user ID from the connection (`user_id` of the
-    /// channel), as the reference client sets `user_context.user_id` on the requests it
-    /// builds. The server keys a session by the user ID of each request, so without it the
-    /// request would reach another session than the RPCs this client builds itself. An
-    /// explicit user ID, the user name and the extensions are kept; raw requests are sent
-    /// as given.
+    /// is missing, and takes a missing user ID from the user of the requests (the `user_id` of
+    /// the channel, unless [`SparkConnectClient::set_request_user_id`] set another), as the
+    /// reference client sets `user_context.user_id` on the requests it builds of its `_user_id`.
+    /// The server keys a session by the user ID of each request, so without it the request
+    /// would reach another session than the RPCs this client builds itself. An explicit user
+    /// ID, the user name and the extensions are kept; raw requests are sent as given.
     fn fill_user_context(&self, context: &mut Option<UserContext>) {
-        let context = context.get_or_insert_with(|| self.new_user_context());
+        let context = context.get_or_insert_with(UserContext::default);
         if context.user_id.is_empty() {
-            if let Some(user_id) = &self.user_id {
-                context.user_id.clone_from(user_id);
+            if let Some(user_id) = self.request_user_id() {
+                context.user_id = user_id;
             }
         }
     }
@@ -3071,7 +5147,28 @@ impl SparkConnectClient {
     /// The session is made all the same, and the requests that PySpark builds without the user
     /// agent, those of the artifacts and `CloneSession`, are sent.
     fn client_type(&self) -> Result<String> {
-        self.user_agent.clone()
+        self.user_agent.get()
+    }
+
+    /// Read the user agent of the requests of this client and of its clones again, of the
+    /// connection string, else of `SPARK_CONNECT_USER_AGENT` in the environment of the process
+    /// now (see [`ChannelBuilder::user_agent`]): as the Python binding reads it as each of its
+    /// calls starts, while it holds the GIL, under which Python changes the environment, as
+    /// PySpark's requests read `os.environ` when each is built. Not a stable API.
+    #[doc(hidden)]
+    pub fn refresh_user_agent(&self) {
+        let user_agent = self.builder.user_agent();
+        // Read first, without a lock: the user agent of a call is that of the one before it but
+        // when the environment changed.
+        let unchanged = self
+            .user_agent
+            .read(|current| match (current, &user_agent) {
+                (Ok(current), Ok(user_agent)) => current == user_agent,
+                _ => false,
+            });
+        if !unchanged {
+            self.user_agent.set(user_agent);
+        }
     }
 
     /// Build a fresh request context, even when no user ID is configured.
@@ -3086,10 +5183,12 @@ impl SparkConnectClient {
     /// Upload one artifact, retrying a transient failure of the whole upload under the retry
     /// policy, and validate the response. An attempt sends all the frames again from the start:
     /// a stream is not resumed. The frames are read as the RPC consumes them, so an attempt
-    /// holds one chunk of the artifact at a time.
-    async fn upload_artifact(&self, artifact: &NamedArtifact) -> Result<()> {
-        let response = self
-            .with_attempts(|| async move {
+    /// holds one chunk of the artifact at a time. With `left_to_grpc`, of an upload that PySpark's
+    /// client leaves to grpc, its failure is not converted (see [`Self::result_left_to_grpc`]).
+    async fn upload_artifact(&self, artifact: &NamedArtifact, left_to_grpc: bool) -> Result<()> {
+        let mut retries = self.retries_of(GrpcCall::Unary).ending_with_abort();
+        let attempts = self
+            .attempts_in(&mut retries, || async move {
                 // A data source that cannot be opened is an error before any frame is sent.
                 let frames = ArtifactFrames::new(self.session_id.clone(), artifact)
                     .map_err(RetryError::Aborted)?;
@@ -3108,7 +5207,13 @@ impl SparkConnectClient {
                 take_frame_failure(&failure).map_err(RetryError::Aborted)?;
                 result.map_err(RetryError::Status)
             })
-            .await?;
+            .await;
+        let response = if left_to_grpc {
+            self.result_left_to_grpc(attempts, LeftToGrpc::Converted)
+                .await?
+        } else {
+            self.result_of_attempts(attempts, GrpcCall::Unary).await?
+        };
         // The IDs of the response are not checked, as by PySpark's ArtifactManager.
         check_artifact_upload(response, None)
     }
@@ -3129,8 +5234,8 @@ impl SparkConnectClient {
         });
         let deadline = self.rpc_deadlines.add_artifacts;
         let mut req = with_deadline(Request::new(futures::stream::iter(requests)), deadline);
-        self._attach_metadata(&mut req);
-        within_deadline(deadline, self.stub.clone().add_artifacts(req))
+        self.attach_artifact_metadata(&mut req);
+        within_deadline(deadline, self.stub().add_artifacts(req))
             .await
             .map(Response::into_inner)
     }
@@ -3142,7 +5247,7 @@ impl SparkConnectClient {
         &self,
         names: &[&str],
     ) -> Result<std::collections::HashMap<String, bool>> {
-        self.ensure_open()?;
+        self.ensure_channel_open()?;
         let names: Vec<String> = names.iter().map(|n| n.to_string()).collect();
         match self.artifact_status_rpc(&names).await {
             // The IDs of the response are not checked, as by PySpark's ArtifactManager.
@@ -3169,8 +5274,8 @@ impl SparkConnectClient {
 
         let deadline = self.rpc_deadlines.artifact_status;
         let mut req = with_deadline(Request::new(request), deadline);
-        self._attach_metadata(&mut req);
-        within_deadline(deadline, self.stub.clone().artifact_status(req))
+        self.attach_artifact_metadata(&mut req);
+        within_deadline(deadline, self.stub().artifact_status(req))
             .await
             .map(Response::into_inner)
     }
@@ -3178,8 +5283,45 @@ impl SparkConnectClient {
     /// Attach metadata headers to a request.
     ///
     /// Inserts the metadata of the connection string and the token (if present) into the gRPC
-    /// metadata. They were validated by `connect`. The `user-agent` header is tonic's own.
+    /// metadata. They were validated by `connect`. The `user-agent` header is tonic's own. Of a
+    /// source of the metadata ([`SparkConnectClient::set_metadata_source`]), the `authorization`
+    /// of the token only, and the mark of the source, which gives the rest as the request is sent
+    /// (see `crate::metadata::Checked`).
     fn _attach_metadata<T>(&self, req: &mut Request<T>) {
+        match self.metadata_source.get().calls {
+            Some(source) => self.attach_pending_metadata(req, source),
+            None => self.attach_static_metadata(req),
+        }
+    }
+
+    /// Attach the metadata of a request of the artifacts, as PySpark's ArtifactManager sends the
+    /// `metadata()` that its client read when it was made: of the source of the artifacts, if
+    /// any (see [`SparkConnectClient::set_metadata_source`]), else of the builder.
+    fn attach_artifact_metadata<T>(&self, req: &mut Request<T>) {
+        match self.metadata_source.get().artifacts {
+            Some(source) => self.attach_pending_metadata(req, source),
+            None => self.attach_static_metadata(req),
+        }
+    }
+
+    /// Attach the `authorization` of the token to a request, and the mark of `source`, which
+    /// gives the rest of its metadata as it is sent (see `crate::metadata::Checked`).
+    fn attach_pending_metadata<T>(
+        &self,
+        req: &mut Request<T>,
+        source: std::sync::Arc<dyn crate::channel::MetadataSource>,
+    ) {
+        // After the metadata of the source, as grpcio's call credentials (see
+        // `crate::metadata::append_metadata`).
+        req.extensions_mut()
+            .insert(crate::metadata::PendingMetadata {
+                source,
+                after: self.call_credentials.clone(),
+            });
+    }
+
+    /// Attach the metadata of the builder, and the token, to a request.
+    fn attach_static_metadata<T>(&self, req: &mut Request<T>) {
         let metadata = req.metadata_mut();
         // NOTE: the session id is carried in the request *body* (proto), not in gRPC
         // metadata. The reference client sends no `session_id` header; sending one
@@ -3188,8 +5330,10 @@ impl SparkConnectClient {
         // associate work with the wrong session. So we do not attach it here.
         // No user_id header: as PySpark's `ChannelBuilder.metadata()`, which leaves the user ID
         // to the user context of the requests.
+        // Of every value of a key, in their order, the token's `authorization` last, as grpcio
+        // sends the metadata of a call and then its call credentials.
         for (key, value) in &self.headers {
-            metadata.insert(key.clone(), value.clone());
+            metadata.append(key.clone(), value.clone());
         }
     }
 }
@@ -3236,6 +5380,14 @@ fn metadata_value(key: &str, value: &str) -> Result<AsciiMetadataValue> {
     let mut header = ascii_header_value(value).ok_or_else(invalid)?;
     header.set_sensitive(is_secret_param(key));
     Ok(header)
+}
+
+/// The sources of the metadata of a client (see [`SparkConnectClient::set_metadata_source`]): of
+/// its calls, and of the requests of its artifacts.
+#[derive(Clone, Default)]
+struct MetadataSources {
+    calls: Option<std::sync::Arc<dyn crate::channel::MetadataSource>>,
+    artifacts: Option<std::sync::Arc<dyn crate::channel::MetadataSource>>,
 }
 
 /// The `Bearer <token>` of the token as the value of the `authorization` header. grpc-python,
@@ -3291,6 +5443,11 @@ pub struct ReattachableResponseStream {
     /// The client that started the execution, whose stub, headers, session and retry policy it
     /// uses.
     client: SparkConnectClient,
+    /// The gRPC metadata of the requests of the execution, as it started (see
+    /// `SparkConnectClient::metadata_of_execution`).
+    metadata: MetadataMap,
+    /// What PySpark's client logs of the execution, of its responses as they are read.
+    log: crate::client_log::ExecutionLog,
     /// Whether the execution is reattachable, as
     /// [`SparkConnectClient::set_reattachable_execute`] sets the executions of a client.
     reattachable: bool,
@@ -3301,18 +5458,24 @@ pub struct ReattachableResponseStream {
     /// not reattachable are of the whole execution, as PySpark's one `Retrying` around its stream.
     first_response_retries: Option<Retrying>,
     iter: ExecutePlanResponseReattachableIterator,
-    /// The stream of the execution, or none to reattach before reading.
-    stream: Option<Streaming<ExecutePlanResponse>>,
+    /// The stream of the execution, or none to reattach before reading, of the connection of the
+    /// generation of the process that read it (see [`crate::fork`]).
+    stream: Option<crate::fork::ForkLocal<Streaming<ExecutePlanResponse>>>,
     /// When the deadline of the stream passes, as gRPC's of the call that opened it.
     stream_deadline: Option<tokio::time::Instant>,
     /// Whether the next stream is opened by sending the ExecutePlan again, rather than by
     /// reattaching: the server does not know the execution, which never reached it.
     execute_again: bool,
     done: bool,
+    /// Whether the stream ended, done or dropped, which its releases in the background share
+    /// (see [`SparkConnectClient::wait_for_releases`]).
+    stream_ended: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Whether `ReleaseAll` was sent, after which nothing else is released.
     released: bool,
     /// The registration of the execution as in flight, which ends with the stream.
     _inflight: InflightGuard,
+    /// The generation of the process that started the execution (see [`crate::fork`]).
+    generation: u64,
 }
 
 /// The user ID of a connection string that does not set one: `SPARK_USER`, else `USER`, as
@@ -3359,11 +5522,32 @@ fn release_refused() -> Option<SparkError> {
 }
 
 impl SparkConnectClient {
+    /// The gRPC metadata of every request of a reattachable execution that starts now, as
+    /// PySpark's iterator of the execution is made of a `metadata()`: of the source of the
+    /// metadata of the calls, read once (see [`SparkConnectClient::set_metadata_source`]), with
+    /// the `authorization` of the token, or the `INTERNAL` of metadata that gRPC does not send,
+    /// which fails the requests; else of the builder. The error is that of the source.
+    async fn metadata_of_execution(
+        &self,
+    ) -> Result<std::result::Result<MetadataMap, tonic::Status>> {
+        let Some(source) = self.metadata_source.get().calls else {
+            return Ok(Ok(self.execution_metadata()));
+        };
+        let pairs = source.metadata().await?;
+        Ok(crate::metadata::call_metadata(&pairs).map(|mut metadata| {
+            // After the metadata of the source, as grpcio's call credentials.
+            for (key, value) in &self.call_credentials {
+                metadata.append(key.clone(), value.clone());
+            }
+            metadata
+        }))
+    }
+
     /// The gRPC metadata of every request about an execution.
     fn execution_metadata(&self) -> MetadataMap {
         let mut metadata = MetadataMap::new();
         for (key, value) in &self.headers {
-            metadata.insert(key.clone(), value.clone());
+            metadata.append(key.clone(), value.clone());
         }
         metadata
     }
@@ -3373,14 +5557,43 @@ impl SparkConnectClient {
     /// removes an execution that is never released once it has been detached for
     /// `spark.connect.execute.manager.detachedTimeout`. As the reference's, the request carries
     /// no observed server-side session ID.
-    fn spawn_release(&self, metadata: MetadataMap, request: ReleaseExecuteRequest) {
-        let stub = self.stub.clone();
-        let policy = self.retry_policy();
+    fn spawn_release(
+        &self,
+        metadata: MetadataMap,
+        request: ReleaseExecuteRequest,
+        stream_ended: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        let stub = self.stub();
+        let mut retries = self.retries_of(GrpcCall::Unary);
+        let channel_closed = std::sync::Arc::clone(&self.channel_closed);
+        let done = std::sync::Arc::<ReleaseDone>::default();
+        releases_of(&self.releases).push(PendingRelease {
+            stream_ended,
+            done: std::sync::Arc::clone(&done),
+        });
+        let ends = ReleaseEnds(done);
         let release = async move {
+            let _ends = ends;
             // As the reference's, which goes through the stub of its iterator rather than the
-            // `_stub` of the client: a release is retried whether or not the client was closed.
-            let whatever_the_client = || Ok::<(), std::convert::Infallible>(());
-            let released = retrying(&mut Retrying::new(&policy), whatever_the_client, || {
+            // `_stub` of the client: a release is retried whether or not the client was closed,
+            // but grpc refuses each of its attempts once the channel is closed, as by the `stop()`
+            // of another thread, of its `ValueError` of a closed channel, which is not retried.
+            let channel_open = || {
+                if channel_closed.is_closed() {
+                    return Err(SparkError::builtin_value_msg(
+                        "Cannot invoke RPC on closed channel!",
+                    ));
+                }
+                Ok(())
+            };
+            if let Err(refused) = channel_open() {
+                background_failure(
+                    BackgroundRequest::ReleaseExecute,
+                    RetryError::<SparkError>::Failed(Box::new(refused)),
+                );
+                return;
+            }
+            let released = retrying(&mut retries, channel_open, || {
                 let mut req = Request::new(request.clone());
                 *req.metadata_mut() = metadata.clone();
                 let mut stub = stub.clone();
@@ -3394,14 +5607,20 @@ impl SparkConnectClient {
             .await;
             match released {
                 Ok(()) => {}
-                Err(RetryError::Status(status) | RetryError::Exceeded(status)) => tracing::warn!(
-                    "ReleaseExecute of operation {} failed: {}",
-                    request.operation_id,
-                    status
-                ),
-                Err(RetryError::Aborted(never)) => match never {},
                 // Its backoffs are waited whole.
                 Err(RetryError::WaitAborted) => {}
+                // Of a channel closed during its backoff.
+                Err(RetryError::Aborted(refused)) => background_failure(
+                    BackgroundRequest::ReleaseExecute,
+                    RetryError::<SparkError>::Failed(Box::new(refused)),
+                ),
+                Err(failed) => {
+                    tracing::warn!(
+                        "ReleaseExecute of operation {} failed: {failed:?}",
+                        request.operation_id
+                    );
+                    background_failure(BackgroundRequest::ReleaseExecute, failed);
+                }
             }
         };
         // A stream is read inside a runtime, but it can be dropped outside of any, for
@@ -3429,11 +5648,13 @@ impl SparkConnectClient {
     /// client is closed. Not a stable API.
     #[doc(hidden)]
     pub fn spawn_unary_execute_plan(&self, mut request: ExecutePlanRequest) {
-        if self.is_closed() {
+        // Neither is sent of a closed channel, whose call PySpark's finalizer would fail.
+        if self.is_closed() || self.channel_is_closed() {
             return;
         }
-        add_result_chunking_option(&mut request, self.result_chunking);
+        add_result_chunking_option(&mut request, self.call_result_chunking());
         self.extend_user_context(&mut request.user_context);
+        self.add_call_stack(&mut request.user_context);
         self.fill_user_context(&mut request.user_context);
         // A user agent that PySpark refuses raises as its finalizer builds the request, before
         // anything is sent, and the error of a finalizer is only reported.
@@ -3446,9 +5667,34 @@ impl SparkConnectClient {
             .operation_id
             .get_or_insert_with(|| Uuid::new_v4().to_string())
             .clone();
-        let stub = self.stub.clone();
+        let stub = self.stub();
         let metadata = self.execution_metadata();
-        let policy = self.retry_policy();
+        // As PySpark's finalizer, whose call reads the `metadata()` of a builder of its own for
+        // each attempt: of the source of the metadata of the calls, if any, of which the first
+        // attempt is read now, on the thread of the finalizer, where it can be.
+        let source = self.metadata_source.get().calls;
+        let after = self.call_credentials.clone();
+        let mut first = match source.as_ref().and_then(|source| source.metadata_now()) {
+            Some(Ok(pairs)) => match crate::metadata::call_metadata(&pairs) {
+                Ok(mut read) => {
+                    for (key, value) in &after {
+                        read.append(key.clone(), value.clone());
+                    }
+                    Some(read)
+                }
+                Err(status) => {
+                    tracing::warn!("ExecutePlan of a finalizer was not sent: {status}");
+                    return;
+                }
+            },
+            // As PySpark's finalizer, whose `except Exception` takes the error of its call.
+            Some(Err(error)) => {
+                tracing::warn!("ExecutePlan of a finalizer was not sent: {error}");
+                return;
+            }
+            None => None,
+        };
+        let mut retries = self.retries_of(GrpcCall::Unary);
         let closed = std::sync::Arc::clone(&self.closed);
         let send = async move {
             // A client closed meanwhile makes no more attempts, as the channel of a closed
@@ -3460,9 +5706,19 @@ impl SparkConnectClient {
                     Ok(())
                 }
             };
-            let sent = retrying(&mut Retrying::new(&policy), still_open, || {
+            let sent = retrying(&mut retries, still_open, || {
                 let mut req = Request::new(request.clone());
-                *req.metadata_mut() = metadata.clone();
+                match (first.take(), &source) {
+                    (Some(read), _) => *req.metadata_mut() = read,
+                    (None, Some(source)) => {
+                        req.extensions_mut()
+                            .insert(crate::metadata::PendingMetadata {
+                                source: std::sync::Arc::clone(source),
+                                after: after.clone(),
+                            });
+                    }
+                    (None, None) => *req.metadata_mut() = metadata.clone(),
+                }
                 let mut stub = stub.clone();
                 async move {
                     let mut responses = stub
@@ -3482,8 +5738,12 @@ impl SparkConnectClient {
                 }
             })
             .await;
-            if let Err(RetryError::Status(status) | RetryError::Exceeded(status)) = sent {
-                tracing::warn!("ExecutePlan of operation {operation_id} failed: {status}");
+            match sent {
+                Ok(()) | Err(RetryError::Aborted(())) | Err(RetryError::WaitAborted) => {}
+                Err(failed) => {
+                    tracing::warn!("ExecutePlan of operation {operation_id} failed: {failed:?}");
+                    background_failure(BackgroundRequest::RemoveCachedRemoteRelation, failed);
+                }
             }
         };
         drop(crate::runtime::get_runtime().spawn(send));
@@ -3491,6 +5751,15 @@ impl SparkConnectClient {
 }
 
 impl ReattachableResponseStream {
+    /// Whether the responses of the execution are logged as PySpark's client logs them (see
+    /// [`crate::client_log::ExecutionLog`]): a reader that joins the chunks of an Arrow batch logs
+    /// the batch once it is whole, as PySpark's `_execute_and_fetch_as_iterator` does
+    /// (`Assembling arrow batch ...`). Not a stable API.
+    #[doc(hidden)]
+    pub fn logs_responses(&self) -> bool {
+        self.log.logs_responses()
+    }
+
     /// The handle of the execution of this stream, to mark the waits of the caller that starts it
     /// for the execution while the caller reads its responses from another thread (see
     /// [`InflightHandle::waiting`]).
@@ -3500,11 +5769,11 @@ impl ReattachableResponseStream {
 
     /// The gRPC metadata of every request about this execution.
     fn metadata_map(&self) -> MetadataMap {
-        self.client.execution_metadata()
+        self.metadata.clone()
     }
 
     fn attach_metadata<T>(&self, req: &mut Request<T>) {
-        *req.metadata_mut() = self.metadata_map();
+        add_metadata(req, &self.metadata);
     }
 
     /// Next response, transparently reattaching whenever the stream ends before
@@ -3518,7 +5787,10 @@ impl ReattachableResponseStream {
         if !self.reattachable {
             let mut retrying = match self.first_response_retries.take() {
                 Some(retries) => retries,
-                None => Retrying::new(&self.client.retry_policy()).ending_with_abort(),
+                None => self
+                    .client
+                    .retries_of(GrpcCall::ServerStreaming)
+                    .ending_with_abort(),
             };
             let next = self.next_of_one_execution(&mut retrying).await;
             self.first_response_retries = Some(retrying);
@@ -3532,36 +5804,69 @@ impl ReattachableResponseStream {
         // execution are its retries.
         let mut retrying = match self.first_response_retries.take() {
             Some(retries) => retries,
-            None => Retrying::new(&self.client.retry_policy()).ending_with_abort(),
+            None => self
+                .client
+                .retries_of(GrpcCall::ServerStreaming)
+                .ending_with_abort()
+                .reading_status_first(true),
         };
-        if self.stream.is_none() && !retrying.retry_at_once() {
-            // The initial ExecutePlan passed its deadline, a RetryException that fails at once
-            // when the bound of the retries has passed, as it has when the bound is 0.
-            let status = tonic::Status::deadline_exceeded("Deadline Exceeded");
-            return Err(self
-                .fail_exceeded(status, RetriesExceeded::RetryException)
-                .await);
+        if self.stream.is_none() {
+            // The initial ExecutePlan passed its deadline, which PySpark's iterator logs as it
+            // reads it, then a RetryException that fails at once when the bound of the retries
+            // has passed, as it has when the bound is 0.
+            if let Err(error) = self.log_deadline().await {
+                return Err(self.fail(error));
+            }
+            let retried = match retrying.retry_at_once() {
+                Ok(retried) => retried,
+                Err(error) => return Err(self.fail(error)),
+            };
+            if !retried {
+                let status = tonic::Status::deadline_exceeded("Deadline Exceeded");
+                return Err(self
+                    .fail_exceeded(status, RetriesExceeded::RetryException)
+                    .await);
+            }
         }
         loop {
             let Some(stream) = self.stream.as_mut() else {
                 self.reattach(&mut retrying).await?;
                 continue;
             };
-            let deadline = self.stream_deadline;
-            let read = async {
-                match deadline {
-                    Some(deadline) => tokio::time::timeout_at(deadline, stream.message())
-                        .await
-                        .unwrap_or_else(|_| {
-                            Err(tonic::Status::deadline_exceeded("Deadline Exceeded"))
-                        }),
-                    None => stream.message().await,
+            let next = if self.client.channel_is_closed() {
+                // As grpcio's `close` of the channel, which cancels its calls: the stream of the
+                // execution of a client whose channel was closed since, as by `stop()`, fails at
+                // its next read, of the responses that it holds too, unless it ended already (see
+                // `read_after_close`).
+                read_after_close(stream)
+            } else {
+                let deadline = self.stream_deadline;
+                let read = async {
+                    match deadline {
+                        Some(deadline) => tokio::time::timeout_at(deadline, stream.message())
+                            .await
+                            .unwrap_or_else(|_| {
+                                Err(tonic::Status::deadline_exceeded("Deadline Exceeded"))
+                            }),
+                        None => stream.message().await,
+                    }
+                };
+                match crate::runtime::until_abort(crate::runtime::ABORT_ALL, read).await {
+                    // A response that a read in flight gives once the client closed the channel,
+                    // which grpcio's cancel would not give (see `read_after_close_of`).
+                    Some(Ok(Some(_))) if self.client.channel_is_closed() => {
+                        read_after_close_of(stream, true)
+                    }
+                    Some(next) => next,
+                    None => return Err(self.fail(wait_aborted())),
                 }
             };
-            let next = match crate::runtime::until_abort(crate::runtime::ABORT_ALL, read).await {
-                Some(next) => next,
-                None => return Err(self.fail(wait_aborted())),
-            };
+            // As the reference's `_call_iter`, which reads the status of each failure first.
+            if let Err(status) = &next {
+                if let Some(mismatch) = self.mismatch(status) {
+                    return Err(self.fail(mismatch));
+                }
+            }
             match next {
                 Ok(Some(resp)) => {
                     if let Err(error) = self
@@ -3574,7 +5879,7 @@ impl ReattachableResponseStream {
                     // As the reference's `send`, whose release raises before it returns the
                     // response once releases are refused: the stream ends with that error.
                     let released = if self.iter.is_completed().await {
-                        self.done = true;
+                        self.end();
                         self.release_all()
                     } else if !resp.response_id.is_empty() {
                         self.release_until(&resp.response_id)
@@ -3582,8 +5887,11 @@ impl ReattachableResponseStream {
                         Ok(())
                     };
                     if let Err(refused) = released {
-                        self.done = true;
+                        self.end();
                         return Err(refused);
+                    }
+                    if let Err(error) = self.log_response(&resp).await {
+                        return Err(self.fail(error));
                     }
                     return Ok(Some(resp));
                 }
@@ -3598,7 +5906,14 @@ impl ReattachableResponseStream {
                     if status.code() == tonic::Code::DeadlineExceeded
                         && !self.iter.is_completed().await =>
                 {
-                    if !retrying.retry_at_once() {
+                    if let Err(error) = self.log_deadline().await {
+                        return Err(self.fail(error));
+                    }
+                    let retried = match retrying.retry_at_once() {
+                        Ok(retried) => retried,
+                        Err(error) => return Err(self.fail(error)),
+                    };
+                    if !retried {
                         return Err(self
                             .fail_exceeded(status, RetriesExceeded::RetryException)
                             .await);
@@ -3615,7 +5930,11 @@ impl ReattachableResponseStream {
                         let error_type = unknown_operation(&status).unwrap_or_default();
                         return Err(self.fail(response_already_received(error_type)));
                     }
-                    if !retrying.retry_at_once() {
+                    let retried = match retrying.retry_at_once() {
+                        Ok(retried) => retried,
+                        Err(error) => return Err(self.fail(error)),
+                    };
+                    if !retried {
                         return Err(self
                             .fail_exceeded(status, RetriesExceeded::RetryException)
                             .await);
@@ -3643,6 +5962,7 @@ impl ReattachableResponseStream {
                             return Err(self.fail_exceeded(status, RetriesExceeded::Policy).await)
                         }
                         Backoff::Aborted => return Err(self.fail(wait_aborted())),
+                        Backoff::Failed(error) => return Err(self.fail(*error)),
                     }
                     self.reattach(&mut retrying).await?;
                 }
@@ -3675,7 +5995,7 @@ impl ReattachableResponseStream {
                     None => return Err(self.fail(wait_aborted())),
                 };
                 match opened {
-                    Ok(stream) => self.stream = Some(stream),
+                    Ok(stream) => self.stream = Some(crate::fork::ForkLocal::new(stream)),
                     Err(status) => match retrying.backoff(&status).await {
                         Backoff::Retry => {}
                         Backoff::GiveUp => return Err(self.fail_with_status(status).await),
@@ -3683,18 +6003,25 @@ impl ReattachableResponseStream {
                             return Err(self.fail_exceeded(status, RetriesExceeded::Policy).await)
                         }
                         Backoff::Aborted => return Err(self.fail(wait_aborted())),
+                        Backoff::Failed(error) => return Err(self.fail(*error)),
                     },
                 }
                 continue;
             };
-            let next = match crate::runtime::until_abort(
-                crate::runtime::ABORT_ALL,
-                stream.message(),
-            )
-            .await
-            {
-                Some(next) => next,
-                None => return Err(self.fail(wait_aborted())),
+            let next = if self.client.channel_is_closed() {
+                // As grpcio's `close` of the channel, which cancels its calls (see
+                // `read_after_close`).
+                read_after_close(stream)
+            } else {
+                match crate::runtime::until_abort(crate::runtime::ABORT_ALL, stream.message()).await
+                {
+                    // As in the reattachable stream (see `read_after_close_of`).
+                    Some(Ok(Some(_))) if self.client.channel_is_closed() => {
+                        read_after_close_of(stream, true)
+                    }
+                    Some(next) => next,
+                    None => return Err(self.fail(wait_aborted())),
+                }
             };
             match next {
                 Ok(Some(resp)) => {
@@ -3705,10 +6032,13 @@ impl ReattachableResponseStream {
                         return Err(self.fail(error));
                     }
                     self.iter.set_last_response_id(&resp).await;
+                    if let Err(error) = self.log_response(&resp).await {
+                        return Err(self.fail(error));
+                    }
                     return Ok(Some(resp));
                 }
                 Ok(None) => {
-                    self.done = true;
+                    self.end();
                     return Ok(None);
                 }
                 Err(status) => match retrying.backoff(&status).await {
@@ -3718,6 +6048,7 @@ impl ReattachableResponseStream {
                         return Err(self.fail_exceeded(status, RetriesExceeded::Policy).await)
                     }
                     Backoff::Aborted => return Err(self.fail(wait_aborted())),
+                    Backoff::Failed(error) => return Err(self.fail(*error)),
                 },
             }
         }
@@ -3732,9 +6063,12 @@ impl ReattachableResponseStream {
     /// attempts of the policy.
     async fn reattach(&mut self, retrying: &mut Retrying) -> Result<()> {
         loop {
-            // As the reference's `_stub`: once the client is closed (its session stopped), the
-            // reattach and the ExecutePlan sent again raise NO_ACTIVE_SESSION, and the stream ends.
-            if let Err(error) = self.client.ensure_open() {
+            // As the reference's iterator, which sends its reattaches and its ExecutePlans again
+            // through the stub that it was made with: once the channel of the client is closed, as
+            // by the `stop()` of another thread, they raise grpc's `ValueError` of a closed
+            // channel, and the stream ends; a client closed of its session alone, as of a session
+            // change, still sends them.
+            if let Err(error) = self.client.ensure_channel_open_for_stream() {
                 return Err(self.fail(error));
             }
             let opened = match crate::runtime::until_abort(crate::runtime::ABORT_RETRIES, async {
@@ -3751,17 +6085,24 @@ impl ReattachableResponseStream {
             };
             let status = match opened {
                 Ok(stream) => {
-                    self.stream = Some(stream);
+                    self.stream = Some(crate::fork::ForkLocal::new(stream));
                     self.execute_again = false;
                     return Ok(());
                 }
                 Err(status) => status,
             };
+            if let Some(mismatch) = self.mismatch(&status) {
+                return Err(self.fail(mismatch));
+            }
             if let Some(error_type) = unknown_operation(&status) {
                 if self.iter.last_response_id().await.is_some() {
                     return Err(self.fail(response_already_received(error_type)));
                 }
-                if !retrying.retry_at_once() {
+                let retried = match retrying.retry_at_once() {
+                    Ok(retried) => retried,
+                    Err(error) => return Err(self.fail(error)),
+                };
+                if !retried {
                     return Err(self
                         .fail_exceeded(status, RetriesExceeded::RetryException)
                         .await);
@@ -3772,7 +6113,14 @@ impl ReattachableResponseStream {
             if status.code() == tonic::Code::DeadlineExceeded {
                 // As the reference: a call past its deadline, whether it is sent again or
                 // reattached, is retried at once, the execution going on on the server.
-                if !retrying.retry_at_once() {
+                if let Err(error) = self.log_deadline().await {
+                    return Err(self.fail(error));
+                }
+                let retried = match retrying.retry_at_once() {
+                    Ok(retried) => retried,
+                    Err(error) => return Err(self.fail(error)),
+                };
+                if !retried {
                     return Err(self
                         .fail_exceeded(status, RetriesExceeded::RetryException)
                         .await);
@@ -3787,8 +6135,46 @@ impl ReattachableResponseStream {
                     return Err(self.fail_exceeded(status, RetriesExceeded::Policy).await)
                 }
                 Backoff::Aborted => return Err(self.fail(wait_aborted())),
+                Backoff::Failed(error) => return Err(self.fail(*error)),
             }
         }
+    }
+
+    /// Log `response`, which the stream returns, as PySpark's `_execute_and_fetch_as_iterator`
+    /// logs each response that it reads, of an execution whose responses are logged (see
+    /// [`log_response`]): the error of a record, which ends the stream.
+    async fn log_response(&self, response: &ExecutePlanResponse) -> Result<()> {
+        // Boxed, of a response that is logged only: the stream's future holds its pointer.
+        if self.log.logs_responses() && crate::client_log::enabled(crate::client_log::Level::Debug)
+        {
+            return Box::pin(log_response(response)).await;
+        }
+        Ok(())
+    }
+
+    /// Log that the deadline of the stream passed, as the `_call_iter` of PySpark's iterator logs
+    /// it before the iterator reattaches (`Deadline exceeded on stream for operation ...`): the
+    /// error of the record, which ends the stream in place of the reattach.
+    async fn log_deadline(&self) -> Result<()> {
+        use crate::client_log::{Level, Message};
+        if self.log == crate::client_log::ExecutionLog::Silent
+            || !crate::client_log::enabled(Level::Debug)
+        {
+            return Ok(());
+        }
+        Box::pin(async {
+            let last = self.iter.last_response_id().await;
+            crate::client_log::logged(Level::Debug, || {
+                Message::Text(format!(
+                    "Deadline exceeded on stream for operation {}; will reattach. (last \
+                     response: {})",
+                    self.iter.operation_id(),
+                    last.as_deref().unwrap_or("None")
+                ))
+            })
+            .await
+        })
+        .await
     }
 
     /// ReattachExecute from the last response read, bounded by the deadline of the call.
@@ -3801,8 +6187,7 @@ impl ReattachableResponseStream {
         // After the metadata, which the deadline is a header of.
         let req = with_deadline(req, deadline);
         self.stream_deadline = stream_deadline_in(deadline);
-        let response =
-            within_deadline(deadline, self.client.stub.clone().reattach_execute(req)).await?;
+        let response = within_deadline(deadline, self.client.stub().reattach_execute(req)).await?;
         Ok(response.into_inner())
     }
 
@@ -3818,11 +6203,25 @@ impl ReattachableResponseStream {
         };
         let request = clone_on_grown_stack(self.iter.request());
         let mut req = with_deadline(Request::new(request), deadline);
-        self.client._attach_metadata(&mut req);
+        self.attach_metadata(&mut req);
         self.stream_deadline = stream_deadline_in(deadline);
-        let response =
-            within_deadline(deadline, self.client.stub.clone().execute_plan(req)).await?;
+        let response = within_deadline(deadline, self.client.stub().execute_plan(req)).await?;
         Ok(response.into_inner())
+    }
+
+    /// The `ValueError` of a failure `status` of the stream of a reattachable execution whose
+    /// `google.rpc.Status` does not match it, as the `_call_iter` of PySpark's iterator raises it
+    /// of `rpc_status.from_call` before its retries see the failure, which is not logged (see
+    /// [`crate::error::from_call_error`]).
+    fn mismatch(&self, status: &tonic::Status) -> Option<SparkError> {
+        if !self.reattachable {
+            return None;
+        }
+        crate::error::from_call_error(
+            status,
+            GrpcCall::ServerStreaming,
+            crate::error::StatusRead::Status,
+        )
     }
 
     /// Ends the stream with the error of `status`, as [`Self::fail`].
@@ -3855,7 +6254,7 @@ impl ReattachableResponseStream {
     /// Once releases are refused, the error is that of the refused release, as the reference's
     /// `_has_next` raises the error of its release of the failed execution.
     fn fail(&mut self, error: SparkError) -> SparkError {
-        self.done = true;
+        self.end();
         match self.release_all() {
             Ok(()) => error.with_operation_id(self.iter.operation_id()),
             Err(refused) => refused,
@@ -3889,17 +6288,35 @@ impl ReattachableResponseStream {
 
     /// Sends `request` in the background, as [`SparkConnectClient::spawn_release`] does.
     fn spawn_release(&self, request: ReleaseExecuteRequest) {
-        self.client
-            .spawn_release(self.client.execution_metadata(), request);
+        self.client.spawn_release(
+            self.metadata_map(),
+            request,
+            std::sync::Arc::clone(&self.stream_ended),
+        );
+    }
+
+    /// Ends the stream: nothing more is read of it, and its releases are those of an ended
+    /// stream, which the close of the session waits for.
+    fn end(&mut self) {
+        self.done = true;
+        self.stream_ended
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
 impl Drop for ReattachableResponseStream {
     /// A stream dropped before its result is complete, for example by a caller that stopped
     /// reading, still holds its execution on the server: release it, as the reference client
-    /// does when its iterator is closed. A release that is refused sends nothing.
+    /// does when its iterator is closed. A release that is refused sends nothing. In a child of a
+    /// `fork()`, the execution of a stream of the parent is the parent's, which reads and releases
+    /// it: the child releases nothing of it, and leaves its stream, of the parent's connection,
+    /// as it is (see [`crate::fork`]).
     fn drop(&mut self) {
-        let _ = self.release_all();
+        self.stream_ended
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        if self.generation == crate::fork::generation() {
+            let _ = self.release_all();
+        }
     }
 }
 
@@ -3932,6 +6349,21 @@ mod tests {
     }
 
     #[test]
+    fn the_roots_of_the_tls_channels_are_read_once_per_process() {
+        // As grpcio computes its default roots once: the system's store too is read as the first
+        // TLS channel of the process is made, and never again, so that every channel of the process
+        // trusts the same roots, of which the subchannels are shared (see
+        // `crate::connector::SubchannelArgs`).
+        let read = |roots: crate::connector::Roots<'static>| match roots {
+            crate::connector::Roots::Only(file) => (file.as_ptr(), None),
+            crate::connector::Roots::System { native, bundle } => {
+                (native.as_ptr().cast::<u8>(), bundle.map(<[u8]>::as_ptr))
+            }
+        };
+        assert_eq!(read(ssl_roots()), read(ssl_roots()));
+    }
+
+    #[test]
     fn only_a_roots_file_that_cannot_be_read_is_logged() {
         // As grpcio, which logs the error of a file that it cannot load and takes an empty one as
         // no file, silently.
@@ -3957,69 +6389,7 @@ mod tests {
             )),
             "{message}"
         );
-        assert!(
-            message.ends_with("); using the system's roots"),
-            "{message}"
-        );
-    }
-
-    #[test]
-    fn the_first_frame_of_the_server_is_its_header_and_the_payload_of_its_length() {
-        // A SETTINGS frame of one setting: the length 6 in its header, then 6 bytes, which may
-        // arrive in any reads.
-        let frame = [0, 0, 6, 4, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 100];
-        for split in 0..=frame.len() {
-            let mut first_frame = FirstFrame::default();
-            let (head, tail) = frame.split_at(split);
-            assert_eq!(first_frame.arrived(head), split == frame.len(), "{split}");
-            assert!(split == frame.len() || first_frame.arrived(tail), "{split}");
-        }
-        let mut first_frame = FirstFrame::default();
-        let whole = frame.map(|byte| first_frame.arrived(&[byte]));
-        assert_eq!(whole.iter().position(|&whole| whole), Some(frame.len() - 1));
-        // An empty SETTINGS frame is its header, and the bytes after a frame are of the next.
-        let empty = [0, 0, 0, 4, 0, 0, 0, 0, 0];
-        assert!(!FirstFrame::default().arrived(&empty[..8]));
-        assert!(FirstFrame::default().arrived(&empty));
-        assert!(FirstFrame::default().arrived(&[&empty[..], &[0, 0, 4]].concat()));
-    }
-
-    /// An error of the message `transport error` whose source is an I/O error, as tonic's
-    /// transport error of a connection that a read error ends.
-    #[derive(Debug)]
-    struct TransportError(std::io::Error);
-
-    impl std::fmt::Display for TransportError {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.write_str("transport error")
-        }
-    }
-
-    impl std::error::Error for TransportError {
-        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-            Some(&self.0)
-        }
-    }
-
-    #[test]
-    fn a_connection_whose_server_sends_no_settings_has_grpcio_s_details() {
-        let transport_error = |kind, message: &str| {
-            tonic::Status::from_error(Box::new(TransportError(std::io::Error::new(
-                kind,
-                message.to_string(),
-            ))))
-        };
-        let status = transport_error(std::io::ErrorKind::TimedOut, SETTINGS_TIMEOUT);
-        assert_eq!(status.message(), "transport error");
-        assert_eq!(status_details(&status), SETTINGS_TIMEOUT);
-        // Any other status keeps tonic's message.
-        for status in [
-            transport_error(std::io::ErrorKind::TimedOut, "Connection timed out"),
-            transport_error(std::io::ErrorKind::ConnectionReset, SETTINGS_TIMEOUT),
-            tonic::Status::unavailable("tcp connect error"),
-        ] {
-            assert_eq!(status_details(&status), status.message());
-        }
+        assert!(message.ends_with("); using the default roots"), "{message}");
     }
 
     fn hash_with_busy_blocking_pool(blobs: Vec<Vec<u8>>) -> (bool, Vec<String>) {
@@ -4325,6 +6695,54 @@ mod tests {
         drop(wait_inner);
         drop(outer);
         assert_eq!(client.running_operation_id(), None);
+    }
+
+    #[test]
+    fn test_an_execution_whose_failure_the_thread_converts_is_not_running() {
+        // As PySpark's `_handle_error`, which converts the failure of an execution in its `except
+        // Exception` clause: a signal during a call that a handler of a log of the conversion
+        // makes interrupts the execution of that call, if any, and never the converted one.
+        let client = connect_blocking("sc://example.com");
+        let registry = || std::sync::Arc::clone(&client.inflight_operations);
+        let failed = InflightGuard::register(registry(), "failed".to_string());
+        let _wait_failed = failed.waiting();
+        assert_eq!(client.running_operation_id().as_deref(), Some("failed"));
+        let failure = crate::error::grpcio_error(
+            &tonic::Status::internal("failed"),
+            GrpcCall::ServerStreaming,
+        );
+        let converting = Converting::start(
+            &failure,
+            client.operation_id_of_this_call(),
+            client.identity(),
+        );
+        assert_eq!(
+            converting_failure().and_then(|conversion| conversion.operation_id),
+            Some("failed".to_string())
+        );
+        // As a config read of a handler of a log of the conversion.
+        assert_eq!(client.running_operation_id(), None);
+        // As an execution of such a handler.
+        let nested = InflightGuard::register(registry(), "nested".to_string());
+        let wait_nested = nested.waiting();
+        assert_eq!(client.running_operation_id().as_deref(), Some("nested"));
+        drop(wait_nested);
+        drop(nested);
+        assert_eq!(client.running_operation_id(), None);
+        // Another thread's conversion is not of the calling thread.
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    assert!(converting_failure().is_none());
+                    let other = InflightGuard::register(registry(), "other".to_string());
+                    let _wait = other.waiting();
+                    assert_eq!(client.running_operation_id().as_deref(), Some("other"));
+                })
+                .join()
+                .unwrap();
+        });
+        drop(converting);
+        assert_eq!(client.running_operation_id().as_deref(), Some("failed"));
     }
 
     #[test]
@@ -4786,6 +7204,28 @@ mod tests {
         told: std::sync::Mutex<Vec<(std::thread::ThreadId, RetriesExceeded)>>,
         caught: std::sync::Mutex<Vec<(std::thread::ThreadId, String)>>,
         failing: std::sync::Mutex<std::collections::HashSet<std::thread::ThreadId>>,
+        /// What the logs of the retries and of the errors of grpc were told, by thread.
+        logged: std::sync::Mutex<Vec<(std::thread::ThreadId, String)>>,
+    }
+
+    impl SpentRetries {
+        fn log(&self, entry: String) {
+            let thread = std::thread::current().id();
+            self.logged.lock().unwrap().push((thread, entry));
+        }
+
+        /// What the logs of the calls of this thread were told, which is forgotten.
+        fn take_logged(&self) -> Vec<String> {
+            let thread = std::thread::current().id();
+            let mut logged = self.logged.lock().unwrap();
+            let ours = logged
+                .iter()
+                .filter(|(t, _)| *t == thread)
+                .map(|(_, entry)| entry.clone())
+                .collect();
+            logged.retain(|(t, _)| *t != thread);
+            ours
+        }
     }
 
     impl crate::retries::RetriesListener for SpentRetries {
@@ -4798,9 +7238,28 @@ mod tests {
             Ok(())
         }
 
-        fn caught(&self, error: SparkError) {
+        fn caught(&self, error: SparkError) -> Option<SparkError> {
             let thread = std::thread::current().id();
             self.caught.lock().unwrap().push((thread, error.message()));
+            None
+        }
+
+        fn retrying(&self, error: &str, wait_ms: i128, policy: &str) -> Result<()> {
+            let error = error.lines().next().unwrap_or_default();
+            self.log(format!("retrying {error} {wait_ms} {policy}"));
+            Ok(())
+        }
+
+        fn given_up(&self, error: &str) -> Result<()> {
+            let error = error.lines().next().unwrap_or_default();
+            self.log(format!("given up {error}"));
+            Ok(())
+        }
+
+        fn rpc_error(&self, error: &crate::error::GrpcioError) -> crate::retries::Delivery {
+            let class = error.text.lines().next().unwrap_or_default();
+            self.log(format!("rpc error {class} {:?}", error.code));
+            None
         }
     }
 
@@ -4846,11 +7305,16 @@ mod tests {
         }
     }
 
-    /// A client of an address that refuses its connections, of a retry policy of one quick retry.
-    async fn refused_client() -> SparkConnectClient {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
+    /// A client of an address that refuses its connections, of a retry policy of one quick retry,
+    /// and the socket that reserves the port while it lives: bound to it, with `SO_REUSEADDR`,
+    /// and never listening, so that a connection to it is refused at once, and no listener of
+    /// another test takes the port meanwhile, as a port that is freed goes to the next `bind` of
+    /// port 0.
+    async fn refused_client() -> (SparkConnectClient, tokio::net::TcpSocket) {
+        let reserved = tokio::net::TcpSocket::new_v4().unwrap();
+        reserved.set_reuseaddr(true).unwrap();
+        reserved.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let port = reserved.local_addr().unwrap().port();
         let env = crate::channel::set_env(&[("SPARK_CONNECT_AUTHENTICATE_TOKEN", None)]);
         let builder = ChannelBuilder::parse(&format!("sc://127.0.0.1:{port}")).unwrap();
         let mut client = SparkConnectClient::connect(&builder).await.unwrap();
@@ -4861,7 +7325,7 @@ mod tests {
             max_backoff_ms: Some(1),
             ..RetryPolicy::default()
         });
-        client
+        (client, reserved)
     }
 
     #[tokio::test]
@@ -4870,7 +7334,7 @@ mod tests {
         // failure that a policy retries are spent, before it raises the failure, and not of a
         // failure that no policy retries.
         let listener = SpentRetries::installed();
-        let client = refused_client().await;
+        let (client, _reserved) = refused_client().await;
         let error = client.interrupt_all().await.unwrap_err();
         assert_eq!(error.grpc_code, Some(tonic::Code::Unavailable as i32));
         assert!(
@@ -4898,7 +7362,7 @@ mod tests {
         // The error of the listener is that of the call, unconverted, as PySpark raises the
         // exception of the warning of a filter of "error".
         listener.fail(true);
-        let client = refused_client().await;
+        let (client, _reserved) = refused_client().await;
         assert_eq!(
             client.interrupt_all().await.unwrap_err().message(),
             "the warning"
@@ -4920,12 +7384,125 @@ mod tests {
         assert_eq!(listener.take(), (spent, vec!["the warning".to_string()]));
         // So does the read of the conf of the stack trace of an error of the server, which
         // PySpark's `_display_server_stack_trace` retries, and whose failure shows the trace.
-        assert_eq!(client.conf_while_raising("k").await, None);
-        assert!(client.display_server_stacktrace().await);
+        assert_eq!(client.conf_while_raising("k").await.unwrap(), None);
+        assert!(client.display_server_stacktrace().await.unwrap());
         let spent = vec![RetriesExceeded::Policy; 2];
         let caught = vec!["the warning".to_string(); 2];
         assert_eq!(listener.take(), (spent, caught));
         listener.fail(false);
+    }
+
+    #[tokio::test]
+    async fn the_listener_is_told_of_the_retries_and_the_errors_of_grpc_as_pyspark_logs_them() {
+        // As PySpark's `Retrying._wait`, which logs each retry and the failure that ends the
+        // retries, and its `_handle_rpc_error`, which logs each error of grpc that it converts.
+        let listener = SpentRetries::installed();
+        let (client, _reserved) = refused_client().await;
+        client.replace_retry_policy(RetryPolicy {
+            max_retries: Some(1),
+            initial_backoff_ms: 1,
+            jitter_ms: 0,
+            ..client.retry_policy()
+        });
+        client.interrupt_all().await.unwrap_err();
+        let error = "<_InactiveRpcError of RPC that terminated with:";
+        assert_eq!(
+            listener.take_logged(),
+            [
+                format!("retrying {error} 1 DefaultPolicy"),
+                format!("given up {error}"),
+                format!("rpc error {error} Unavailable"),
+            ]
+        );
+        listener.take();
+    }
+
+    /// A decider of the retries of a test, which retries each failure `retries` times after 1 ms,
+    /// then fails the call with `failure` if it has one, else gives the failure up; and counts
+    /// the calls that it started and the failures it decided.
+    struct Deciding {
+        retries: usize,
+        failure: Option<&'static str>,
+        started: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        decided: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    struct DecidingCall {
+        retries: usize,
+        failure: Option<&'static str>,
+        decided: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl crate::retries::RetryDecider for Deciding {
+        fn start(&self, _call: GrpcCall) -> Box<dyn crate::retries::CallRetries> {
+            self.started
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::new(DecidingCall {
+                retries: self.retries,
+                failure: self.failure,
+                decided: self.decided.clone(),
+            })
+        }
+    }
+
+    impl crate::retries::CallRetries for DecidingCall {
+        fn decide<'a>(
+            &'a mut self,
+            _status: &'a tonic::Status,
+        ) -> futures::future::BoxFuture<'a, crate::retries::Decision> {
+            use crate::retries::Decision;
+            self.decided
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let decision = if self.retries > 0 {
+                self.retries -= 1;
+                Decision::Retry(Duration::from_millis(1))
+            } else {
+                match self.failure {
+                    Some(failure) => Decision::Failed(Box::new(SparkError::value_msg(failure))),
+                    None => Decision::GiveUp,
+                }
+            };
+            Box::pin(async move { decision })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_decider_decides_the_retries_of_the_calls_in_place_of_the_policy() {
+        // As PySpark's `Retrying` of policies of methods of their own, which the Python binding
+        // runs: of each call, the retries that start with it, of each failure, the decision. The
+        // decider warns of spent retries itself, so the listener is told of none.
+        let listener = SpentRetries::installed();
+        let (client, _reserved) = refused_client().await;
+        let started = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let decided = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let decider = |retries, failure| {
+            std::sync::Arc::new(Deciding {
+                retries,
+                failure,
+                started: started.clone(),
+                decided: decided.clone(),
+            }) as std::sync::Arc<dyn crate::retries::RetryDecider>
+        };
+        client.set_retry_decider(Some(decider(2, None)));
+        let error = client.interrupt_all().await.unwrap_err();
+        assert_eq!(error.grpc_code, Some(tonic::Code::Unavailable as i32));
+        let count = |n: &std::sync::Arc<std::sync::atomic::AtomicUsize>| {
+            n.swap(0, std::sync::atomic::Ordering::SeqCst)
+        };
+        assert_eq!((count(&started), count(&decided)), (1, 3));
+        assert_eq!(listener.take(), (vec![], vec![]));
+        // The error of a decision is the error of the call; a clone has the decider, a client of
+        // a new session has none.
+        client.set_retry_decider(Some(decider(0, Some("of the decider"))));
+        let error = client.clone().interrupt_all().await.unwrap_err();
+        assert_eq!(error.message(), "of the decider");
+        assert_eq!((count(&started), count(&decided)), (1, 1));
+        let mut fresh = client.with_new_session_id();
+        fresh.set_retry_policy(RetryPolicy::no_retries());
+        fresh.interrupt_all().await.unwrap_err();
+        assert_eq!((count(&started), count(&decided)), (0, 0));
+        listener.take();
+        listener.take_logged();
     }
 
     #[tokio::test]
@@ -5209,18 +7786,395 @@ mod tests {
 
     #[test]
     fn a_closed_client_reopens_and_the_status_rpc_has_a_deadline() {
-        // As PySpark's `client._closed = False`, which sends the requests again, and its
-        // `RpcDeadlines.get_status`, of 10 minutes, and none when the deadlines are disabled.
+        // As PySpark's `client._closed`, which a set to True closes and a set to False opens, so
+        // the requests are sent again, and its `RpcDeadlines.get_status`, of 10 minutes, and none
+        // when the deadlines are disabled. The artifacts are sent while it is closed, as PySpark's
+        // ArtifactManager sends them of a stub of its own.
         let client = connect_blocking("sc://localhost");
-        client.close();
+        client.set_closed(true);
         assert!(client.is_closed() && client.ensure_open().is_err());
+        assert!(client.ensure_channel_open().is_ok());
         client.clone().reopen();
         assert!(!client.is_closed() && client.ensure_open().is_ok());
+        assert!(client.ensure_open_for_stream().is_ok());
         assert_eq!(
             RpcDeadlines::default().get_status,
             Some(Duration::from_secs(600))
         );
         assert_eq!(RpcDeadlines::disabled().get_status, None);
+    }
+
+    #[test]
+    fn a_client_that_close_closed_fails_with_the_error_of_a_closed_channel_when_open() {
+        // As PySpark's `close`, which closes its gRPC channel: its RPCs raise NO_ACTIVE_SESSION
+        // while the client is closed, and grpc's ValueError of a closed channel once it is open
+        // again, of the message of a server-streaming call and of that of the others, which the
+        // artifacts raise whether it is closed or not. A client of a new session is open.
+        let client = connect_blocking("sc://localhost");
+        client.close();
+        let closed = client.ensure_open().unwrap_err();
+        assert_eq!(closed.error_class, "NO_ACTIVE_SESSION");
+        assert_eq!(
+            client.ensure_open_for_stream().unwrap_err().error_class,
+            "NO_ACTIVE_SESSION"
+        );
+        let unary = "Cannot invoke RPC on closed channel!";
+        let artifacts = client.ensure_channel_open().unwrap_err();
+        assert_eq!(
+            artifacts.kind,
+            crate::error::SparkErrorKind::BuiltinValueError
+        );
+        assert_eq!(artifacts.message(), unary);
+        client.reopen();
+        assert_eq!(client.ensure_open().unwrap_err().message(), unary);
+        let streaming = client.ensure_open_for_stream().unwrap_err();
+        assert_eq!(
+            streaming.kind,
+            crate::error::SparkErrorKind::BuiltinValueError
+        );
+        assert_eq!(streaming.message(), "Cannot invoke RPC: Channel closed!");
+        let new = client.with_new_session_id();
+        assert!(new.ensure_open().is_ok() && new.ensure_channel_open().is_ok());
+    }
+
+    #[test]
+    fn a_session_change_marks_the_client_closed_of_an_open_channel() {
+        // As PySpark's `_closed = True` of a response of another server-side session, and of
+        // INVALID_HANDLE.SESSION_CHANGED: the channel stays open, so the artifacts are sent, and
+        // the client sends its requests again once it is open.
+        let client = connect_blocking("sc://localhost");
+        assert!(client.verify_response("", "server-a").is_ok());
+        assert!(client.verify_response("", "server-b").is_err());
+        assert!(client.is_closed() && client.ensure_open().is_err());
+        assert!(client.ensure_channel_open().is_ok());
+        client.reopen();
+        assert!(client.ensure_open().is_ok() && client.ensure_open_for_stream().is_ok());
+        #[derive(Clone, PartialEq, prost::Message)]
+        struct ErrorInfo {
+            #[prost(string, tag = "1")]
+            reason: String,
+            #[prost(map = "string, string", tag = "3")]
+            metadata: std::collections::HashMap<String, String>,
+        }
+        #[derive(Clone, PartialEq, prost::Message)]
+        struct RpcStatus {
+            #[prost(message, repeated, tag = "3")]
+            details: Vec<prost_types::Any>,
+        }
+        let info = ErrorInfo {
+            reason: "org.apache.spark.SparkSQLException".into(),
+            metadata: [(
+                "errorClass".to_string(),
+                "INVALID_HANDLE.SESSION_CHANGED".to_string(),
+            )]
+            .into(),
+        };
+        let details = RpcStatus {
+            details: vec![prost_types::Any {
+                type_url: "type.googleapis.com/google.rpc.ErrorInfo".into(),
+                value: info.encode_to_vec(),
+            }],
+        };
+        let status = tonic::Status::with_details(
+            tonic::Code::Internal,
+            "[INVALID_HANDLE.SESSION_CHANGED] changed",
+            details.encode_to_vec().into(),
+        );
+        let _ = client.grpc_error(status, GrpcCall::Unary);
+        assert!(client.is_closed() && client.ensure_channel_open().is_ok());
+        client.reopen();
+        assert!(client.ensure_open().is_ok());
+    }
+
+    #[test]
+    fn the_call_settings_of_a_thread_are_its_own_and_its_executions_keep_them() {
+        // As the `_rpc_deadlines`, `_allow_arrow_batch_chunking` and `_preferred_arrow_chunk_size`
+        // of the client that a thread of the binding calls: its calls read those that it was
+        // given, a request context given afterwards keeps them, a clone made for a call keeps them
+        // for the requests that it sends from other threads, a thread of no request context of
+        // the binding, as one of the transport that sends the requests of a call, takes those that
+        // a thread was given last, and None gives the thread the client's again.
+        let client = connect_blocking("sc://localhost/;user_id=alice");
+        let own = client.rpc_deadlines().clone();
+        let deadlines = RpcDeadlines {
+            analyze_plan: Some(Duration::from_secs(7)),
+            ..RpcDeadlines::disabled()
+        };
+        let chunking = ResultChunking {
+            allow_arrow_batch_chunking: false,
+            preferred_arrow_chunk_size: Some(4096),
+        };
+        // Of a thread of no request context: one of the client's session ID and user.
+        client.set_thread_call_settings(Some(deadlines.clone()), Some(chunking));
+        assert_eq!(client.call_rpc_deadlines(), deadlines);
+        assert_eq!(client.call_result_chunking(), chunking);
+        assert_eq!(client.client_session_id(), client.session_id());
+        assert_eq!(client.request_user_id().as_deref(), Some("alice"));
+        client.set_thread_request_context("thread-session".to_string(), None, vec![]);
+        assert_eq!(client.call_rpc_deadlines(), deadlines);
+        assert_eq!(client.client_session_id(), "thread-session");
+        let of_call = client.of_call_settings();
+        let other = client.clone();
+        let seen = std::thread::spawn(move || {
+            (
+                other.call_rpc_deadlines(),
+                other.call_result_chunking(),
+                of_call.call_rpc_deadlines(),
+                of_call.call_result_chunking(),
+            )
+        })
+        .join()
+        .unwrap();
+        assert_eq!(
+            seen,
+            (deadlines.clone(), chunking, deadlines.clone(), chunking)
+        );
+        // A call that ran during the call of the thread gives it its settings back.
+        let kept = client.thread_request_state();
+        client.set_thread_call_settings(None, None);
+        assert_eq!(client.call_rpc_deadlines(), own);
+        assert_eq!(client.call_result_chunking(), ResultChunking::default());
+        let other = client.clone();
+        let seen =
+            std::thread::spawn(move || (other.call_rpc_deadlines(), other.call_result_chunking()))
+                .join()
+                .unwrap();
+        assert_eq!(seen, (own.clone(), ResultChunking::default()));
+        client.restore_thread_request_state(kept);
+        assert_eq!(client.call_result_chunking(), chunking);
+        assert_eq!(client.call_rpc_deadlines(), deadlines);
+    }
+
+    #[test]
+    fn the_plan_compression_settings_are_those_of_pyspark_s_client() {
+        // As PySpark's `_plan_compression_threshold` and `_plan_compression_algorithm`: none
+        // before the lookup; those of a failed lookup and of `CANNOT_PARSE`, -1 and `NONE`; and
+        // those of a binding, of which the plans of more bytes than a threshold that is not
+        // negative are compressed of the algorithm `ZSTD`, none of another, and of no algorithm
+        // the settings are looked up again.
+        let client = connect_blocking("sc://localhost/");
+        assert_eq!(client.plan_compression_settings(), None);
+        assert_eq!(client.known_plan_compression(), None);
+        client.keep_plan_compression(PlanCompression::Disabled);
+        assert_eq!(
+            client.plan_compression_settings(),
+            Some(PlanCompressionSettings {
+                threshold: -1,
+                algorithm: Some("NONE".to_string()),
+            })
+        );
+        let settings = |threshold, algorithm: Option<&str>| PlanCompressionSettings {
+            threshold,
+            algorithm: algorithm.map(str::to_string),
+        };
+        for (threshold, algorithm, known) in [
+            (100, Some("ZSTD"), Some(Some(100))),
+            (0, Some("ZSTD"), Some(Some(0))),
+            (-1, Some("ZSTD"), Some(None)),
+            (100, Some("LZ4"), Some(None)),
+            (100, Some("NONE"), Some(None)),
+            (100, None, None),
+        ] {
+            client.set_plan_compression_settings(Some(settings(threshold, algorithm)));
+            assert_eq!(
+                client.known_plan_compression(),
+                known,
+                "{threshold} {algorithm:?}"
+            );
+            assert_eq!(
+                client.clone().plan_compression_settings(),
+                Some(settings(threshold, algorithm))
+            );
+        }
+        client.set_plan_compression_settings(None);
+        assert_eq!(client.known_plan_compression(), None);
+        assert_eq!(client.plan_compression_settings(), None);
+        client.keep_plan_compression(PlanCompression::Zstd { threshold: 9 });
+        assert_eq!(
+            client.plan_compression_settings(),
+            Some(settings(9, Some("ZSTD")))
+        );
+    }
+
+    #[test]
+    fn the_request_context_of_a_thread_is_its_own() {
+        // As the attributes of the client that a thread of the binding calls: the session ID, the
+        // user and the global extensions that a thread was given are those of its requests, and
+        // the other threads keep those of the client, until the thread ends.
+        let client = connect_blocking("sc://localhost/;user_id=alice");
+        let shared = client.client_session_id();
+        let global = prost_types::Any {
+            type_url: "type.googleapis.com/g".to_string(),
+            value: vec![],
+        };
+        client.set_thread_request_context(
+            "thread-session".to_string(),
+            Some("bob".to_string()),
+            vec![(String::new(), global.clone())],
+        );
+        assert_eq!(client.client_session_id(), "thread-session");
+        assert_eq!(client.request_user_id().as_deref(), Some("bob"));
+        assert_eq!(client.global_user_context_extensions().len(), 1);
+        let mut context = None;
+        client.extend_user_context(&mut context);
+        assert_eq!(context.unwrap().extensions, vec![global]);
+        let other = client.clone();
+        let seen = std::thread::spawn(move || {
+            (
+                other.client_session_id(),
+                other.request_user_id(),
+                other.global_user_context_extensions().len(),
+            )
+        })
+        .join()
+        .unwrap();
+        assert_eq!(seen, (shared, Some("alice".to_string()), 0));
+        assert_eq!(
+            client
+                .with_new_session_id_of_user(Some("carol".to_string()))
+                .user_id(),
+            Some("carol")
+        );
+        let other = client.clone();
+        std::thread::spawn(move || {
+            other.set_thread_request_context("gone".to_string(), None, vec![]);
+        })
+        .join()
+        .unwrap();
+        let contexts = client
+            .user_context_extensions
+            .lock()
+            .unwrap()
+            .request_by_thread
+            .len();
+        assert_eq!(contexts, 1);
+    }
+
+    #[test]
+    fn the_request_context_that_a_future_of_a_call_sets_is_the_callers() {
+        // A future of a call that runs on another thread, inside a `current_thread` runtime, is of
+        // the thread that calls: the request context and the user context extensions that it
+        // gives the thread are those that the requests of that thread read, on it as in the
+        // future, and they are forgotten when that thread ends.
+        let client = connect_blocking("sc://localhost/;user_id=alice");
+        let other = client.clone();
+        std::thread::spawn(move || {
+            let own = prost_types::Any {
+                type_url: "type.googleapis.com/own".to_string(),
+                value: vec![],
+            };
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let in_the_future = runtime.block_on(async {
+                crate::runtime::block_on(async {
+                    other.set_thread_request_context(
+                        "caller-session".to_string(),
+                        Some("bob".to_string()),
+                        vec![],
+                    );
+                    other.share_threadlocal_user_context_extensions(
+                        &SharedUserContextExtensions::new(vec![(
+                            "threadlocal_own".to_string(),
+                            own.clone(),
+                        )]),
+                    );
+                    (
+                        std::thread::current().id(),
+                        other.client_session_id(),
+                        other.threadlocal_user_context_extensions().len(),
+                    )
+                })
+            });
+            assert_ne!(in_the_future.0, std::thread::current().id());
+            assert_eq!(in_the_future.1, "caller-session");
+            assert_eq!(in_the_future.2, 1);
+            assert_eq!(other.client_session_id(), "caller-session");
+            assert_eq!(other.request_user_id().as_deref(), Some("bob"));
+            let mut context = None;
+            other.extend_user_context(&mut context);
+            assert_eq!(context.unwrap().extensions, vec![own]);
+        })
+        .join()
+        .unwrap();
+        let extensions = client.user_context_extensions.lock().unwrap();
+        assert!(extensions.request_by_thread.is_empty());
+        assert!(extensions.by_thread.is_empty());
+    }
+
+    #[test]
+    fn a_kept_request_state_of_a_thread_is_given_back() {
+        // As a binding keeps the context of the requests of a call around a call that runs during
+        // it, such as one of a progress handler.
+        let client = connect_blocking("sc://localhost/;user_id=alice");
+        let any = |name: &str| prost_types::Any {
+            type_url: format!("type.googleapis.com/{name}"),
+            value: vec![],
+        };
+        client.set_thread_request_context(
+            "outer".to_string(),
+            None,
+            vec![("global_outer".to_string(), any("outer"))],
+        );
+        let own = SharedUserContextExtensions::new(vec![("threadlocal_o".to_string(), any("o"))]);
+        client.share_threadlocal_user_context_extensions(&own);
+        let kept = client.thread_request_state();
+        client.set_thread_request_context("inner".to_string(), Some("bob".to_string()), vec![]);
+        client.clear_threadlocal_user_context_extensions();
+        assert_eq!(client.client_session_id(), "inner");
+        client.restore_thread_request_state(kept);
+        assert_eq!(client.client_session_id(), "outer");
+        assert_eq!(client.request_user_id(), None);
+        let mut context = None;
+        client.extend_user_context(&mut context);
+        assert_eq!(context.unwrap().extensions, vec![any("outer"), any("o")]);
+        // The list of the thread is the one that it shared, of the changes of the others.
+        own.replace(vec![]);
+        assert!(client.threadlocal_user_context_extensions().is_empty());
+        // A thread that had none has none again.
+        let kept = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let kept = client.thread_request_state();
+                    client.set_thread_request_context("other".to_string(), None, vec![]);
+                    client.restore_thread_request_state(kept);
+                    client.client_session_id()
+                })
+                .join()
+                .unwrap()
+        });
+        assert_eq!(kept, client.session_id());
+    }
+
+    #[test]
+    fn the_user_of_the_requests_is_set_apart_from_that_of_the_artifacts() {
+        // As PySpark's `client._user_id`, an attribute that its requests read, while its
+        // ArtifactManager keeps the user that the client was made with; the clients of new
+        // sessions take the user of the requests, unless the connection has one.
+        let client = connect_blocking("sc://localhost");
+        let original = client.user_id().map(String::from);
+        assert_eq!(client.request_user_id(), original);
+        client.clone().set_request_user_id(Some("bob".to_string()));
+        assert_eq!(client.request_user_id().as_deref(), Some("bob"));
+        assert_eq!(client.user_id().map(String::from), original);
+        assert_eq!(
+            client.new_user_context().user_id,
+            original.clone().unwrap_or_default()
+        );
+        let mut context = None;
+        client.fill_user_context(&mut context);
+        assert_eq!(context.unwrap().user_id, "bob");
+        let new = client.with_new_session_id();
+        assert_eq!(new.user_id(), Some("bob"));
+        assert_eq!(new.request_user_id().as_deref(), Some("bob"));
+        let named = connect_blocking("sc://localhost/;user_id=alice");
+        named.set_request_user_id(Some("bob".to_string()));
+        assert_eq!(named.with_new_session_id().user_id(), Some("alice"));
+        named.set_request_user_id(None);
+        let mut context = None;
+        named.fill_user_context(&mut context);
+        assert_eq!(context.unwrap().user_id, "");
     }
 
     #[test]
@@ -5286,13 +8240,13 @@ mod plan_compression_tests {
     #[test]
     fn plan_compression_is_zstd_above_the_threshold_of_the_confs() {
         assert_eq!(
-            plan_compression_of(Some("10485760"), Some("ZSTD")),
+            looked_up_plan_compression(Some("10485760"), Some("ZSTD")).0,
             PlanCompression::Zstd {
                 threshold: 10485760
             }
         );
         assert_eq!(
-            plan_compression_of(Some("0"), Some("ZSTD")),
+            looked_up_plan_compression(Some("0"), Some("ZSTD")).0,
             PlanCompression::Zstd { threshold: 0 }
         );
         for (threshold, algorithm) in [
@@ -5305,11 +8259,101 @@ mod plan_compression_tests {
             (Some("10"), None),
         ] {
             assert_eq!(
-                plan_compression_of(threshold, algorithm),
+                looked_up_plan_compression(threshold, algorithm).0,
                 PlanCompression::Disabled,
                 "threshold {threshold:?}, algorithm {algorithm:?}"
             );
         }
+    }
+
+    #[test]
+    fn the_lookup_of_the_plan_compression_logs_what_pyspark_logs_of_it() {
+        // As PySpark's `int(threshold)`, of its text: the threshold that it read, or the
+        // ValueError of a threshold that is not an integer, which disables the compression.
+        let texts = |threshold, algorithm| match looked_up_plan_compression(threshold, algorithm) {
+            (_, crate::client_log::Message::Text(text)) => text,
+            (compression, crate::client_log::Message::WithError { text, error }) => {
+                assert_eq!(compression, PlanCompression::Disabled);
+                assert_eq!(error.kind, SparkErrorKind::BuiltinValueError);
+                format!("{text} % {}", error.message())
+            }
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            texts(Some(" +1_000 "), Some("ZSTD")),
+            "Plan compression threshold: 1000, algorithm: ZSTD"
+        );
+        assert_eq!(
+            texts(None, None),
+            "Plan compression threshold: -1, algorithm: None"
+        );
+        assert_eq!(
+            texts(Some("-5"), Some("LZ4")),
+            "Plan compression threshold: -5, algorithm: LZ4"
+        );
+        assert_eq!(
+            texts(Some("10m"), Some("ZSTD")),
+            "Plan compression is disabled because the server does not support it. % invalid \
+             literal for int() with base 10: '10m'"
+        );
+        assert_eq!(
+            looked_up_plan_compression(Some("1_000"), Some("ZSTD")).0,
+            PlanCompression::Zstd { threshold: 1000 }
+        );
+        assert_eq!(python_str_repr("a'b"), "\"a'b\"");
+        assert_eq!(
+            python_str_repr("a'\"b\\\n\u{1}\u{85}"),
+            "'a\\'\"b\\\\\\n\\x01\\x85'"
+        );
+    }
+
+    #[test]
+    fn a_plan_is_compressed_as_python_zstandard_compresses_it_with_its_logs() {
+        // The frame of python-zstandard 0.25's `ZstdCompressor().compress` (zstd 1.5.7), of the
+        // size of its content, of the encoding of this relation, and what PySpark logs of it.
+        let mut data: Vec<u8> = (0..=255u8).cycle().take(256 * 8).collect();
+        data.extend("spark connect plan ".repeat(200).bytes());
+        let compressed = zstd::bulk::compress(&data, zstd::DEFAULT_COMPRESSION_LEVEL).unwrap();
+        let expected = "28b52ffd60d8150d09003411000102030405060708090a0b0c0d0e0f101112131415161718\
+                        191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d\
+                        3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162\
+                        636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f8081828384858687\
+                        88898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabac\
+                        adaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1\
+                        d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6\
+                        f7f8f9fafbfcfdfeff737061726b20636f6e6e65637420706c616e200200856de38700fd0e\
+                        fc740a";
+        let hex: String = compressed.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(hex, expected);
+
+        let relation = relation_with(vec![7; PAYLOAD]);
+        let encoded = relation.encode_to_vec();
+        let mut plan = root(&relation);
+        let logged = compress_over_threshold(&mut plan, encoded.len() - 1);
+        let Some(PlanOpType::CompressedOperation(operation)) = &plan.op_type else {
+            panic!("the plan over the threshold was not compressed");
+        };
+        let size = operation.data.len();
+        let ratio = 1.0 - size as f64 / encoded.len() as f64;
+        assert_eq!(logged.len(), 1);
+        assert!(
+            logged[0].starts_with(&format!(
+                "Plan compression: original_size={}, compressed_size={size}, \
+                 saving_ratio={ratio:.2}, duration_s=",
+                encoded.len()
+            )),
+            "{logged:?}"
+        );
+        let random = relation_with(incompressible(PAYLOAD));
+        let mut not_smaller = root(&random);
+        let logged = compress_over_threshold(&mut not_smaller, 0);
+        assert_eq!(logged.len(), 2, "{logged:?}");
+        assert_eq!(
+            logged[1],
+            "Plan compression not effective. Using original plan."
+        );
+        // Of no log, a plan that is not over the threshold.
+        assert!(compress_over_threshold(&mut root(&relation), encoded.len()).is_empty());
     }
 
     #[test]
@@ -5612,10 +8656,825 @@ mod request_fields_tests {
         tonic::Status::with_details(tonic::Code::Internal, "boom", status.encode_to_vec().into())
     }
 
-    /// As PySpark's hook, which would put in the plan of `to_proto`, which compresses it: the plan
-    /// that a hook puts in is compressed, and one that the hook keeps compressed is kept.
+    /// A server whose executions send responses of 256 KiB of Arrow data without end, as a large
+    /// result that the caller reads on slowly, and which answers the other RPCs at once.
+    #[derive(Clone)]
+    struct Flooding(Received);
+
+    impl NamedService for Flooding {
+        const NAME: &'static str = "spark.connect.SparkConnectService";
+    }
+
+    impl tonic::codegen::Service<http::Request<tonic::body::Body>> for Flooding {
+        type Response = http::Response<tonic::body::Body>;
+        type Error = std::convert::Infallible;
+        type Future = BoxFuture<Self::Response, Self::Error>;
+
+        fn poll_ready(
+            &mut self,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::result::Result<(), Self::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, request: http::Request<tonic::body::Body>) -> Self::Future {
+            let method = request
+                .uri()
+                .path()
+                .trim_start_matches("/spark.connect.SparkConnectService/")
+                .to_string();
+            let rpc = Rpc(self.0.clone(), method.clone());
+            Box::pin(async move {
+                let mut grpc = tonic::server::Grpc::new(BytesCodec);
+                Ok(match method.as_str() {
+                    "ExecutePlan" => grpc.server_streaming(Flood, request).await,
+                    _ => grpc.unary(rpc, request).await,
+                })
+            })
+        }
+    }
+
+    /// The execution of [`Flooding`], of responses without end.
+    struct Flood;
+
+    impl ServerStreamingService<Vec<u8>> for Flood {
+        type Response = Vec<u8>;
+        type ResponseStream =
+            futures::stream::BoxStream<'static, std::result::Result<Vec<u8>, tonic::Status>>;
+        type Future = BoxFuture<tonic::Response<Self::ResponseStream>, tonic::Status>;
+
+        fn call(&mut self, _: tonic::Request<Vec<u8>>) -> Self::Future {
+            use futures::StreamExt;
+            let response = ExecutePlanResponse {
+                server_side_session_id: SERVER_ID.to_string(),
+                response_type: Some(ResponseType::ArrowBatch(
+                    spark_connect_proto::execute_plan_response::ArrowBatch {
+                        row_count: 1,
+                        data: vec![0u8; 256 * 1024].into(),
+                        ..Default::default()
+                    },
+                )),
+                ..Default::default()
+            }
+            .encode_to_vec();
+            let frames = futures::stream::repeat_with(move || Ok(response.clone())).boxed();
+            Box::pin(async move { Ok(tonic::Response::new(frames)) })
+        }
+    }
+
+    /// A server whose responses are of metadata of the size of its mode: the status of a unary
+    /// call, of its trailers only, of details of `details` bytes; the headers of a response of
+    /// `header` bytes; the trailers of a stream, after a response, of `trailer` bytes.
+    #[derive(Clone, Copy)]
+    struct LargeMetadata {
+        details: usize,
+        header: usize,
+        trailer: usize,
+    }
+
+    impl NamedService for LargeMetadata {
+        const NAME: &'static str = "spark.connect.SparkConnectService";
+    }
+
+    impl UnaryService<Vec<u8>> for LargeMetadata {
+        type Response = Vec<u8>;
+        type Future = BoxFuture<tonic::Response<Vec<u8>>, tonic::Status>;
+
+        fn call(&mut self, _: tonic::Request<Vec<u8>>) -> Self::Future {
+            let this = *self;
+            Box::pin(async move {
+                if this.header > 0 {
+                    let mut response = tonic::Response::new(Vec::new());
+                    response
+                        .metadata_mut()
+                        .insert("x-big", "a".repeat(this.header).parse().unwrap());
+                    return Ok(response);
+                }
+                Err(tonic::Status::with_details(
+                    tonic::Code::Internal,
+                    "failed",
+                    vec![b'z'; this.details].into(),
+                ))
+            })
+        }
+    }
+
+    impl ServerStreamingService<Vec<u8>> for LargeMetadata {
+        type Response = Vec<u8>;
+        type ResponseStream =
+            futures::stream::BoxStream<'static, std::result::Result<Vec<u8>, tonic::Status>>;
+        type Future = BoxFuture<tonic::Response<Self::ResponseStream>, tonic::Status>;
+
+        fn call(&mut self, _: tonic::Request<Vec<u8>>) -> Self::Future {
+            use futures::StreamExt;
+            let trailer = self.trailer;
+            Box::pin(async move {
+                let mut status = tonic::Status::internal("failed");
+                status
+                    .metadata_mut()
+                    .insert("x-big", "a".repeat(trailer).parse().unwrap());
+                let frames = futures::stream::iter(vec![
+                    Ok(ExecutePlanResponse::default().encode_to_vec()),
+                    Err(status),
+                ])
+                .boxed();
+                Ok(tonic::Response::new(frames))
+            })
+        }
+    }
+
+    impl tonic::codegen::Service<http::Request<tonic::body::Body>> for LargeMetadata {
+        type Response = http::Response<tonic::body::Body>;
+        type Error = std::convert::Infallible;
+        type Future = BoxFuture<Self::Response, Self::Error>;
+
+        fn poll_ready(
+            &mut self,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::result::Result<(), Self::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, request: http::Request<tonic::body::Body>) -> Self::Future {
+            let this = *self;
+            let streaming = request.uri().path().ends_with("/ExecutePlan");
+            Box::pin(async move {
+                let mut grpc =
+                    tonic::server::Grpc::new(BytesCodec).max_encoding_message_size(usize::MAX);
+                Ok(if streaming {
+                    grpc.server_streaming(this, request).await
+                } else {
+                    grpc.unary(this, request).await
+                })
+            })
+        }
+    }
+
+    /// A client of a server of [`LargeMetadata`] of `mode`.
+    async fn client_of_large_metadata(mode: LargeMetadata) -> SparkConnectClient {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let incoming = futures::stream::unfold(listener, |listener| async {
+            Some((listener.accept().await.map(|(socket, _)| socket), listener))
+        });
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .http2_max_header_list_size(64 << 20)
+                .add_service(mode)
+                .serve_with_incoming(incoming)
+                .await
+                .unwrap();
+        });
+        let env = crate::channel::set_env(&[("SPARK_CONNECT_AUTHENTICATE_TOKEN", None)]);
+        let builder =
+            ChannelBuilder::parse(&format!("sc://127.0.0.1:{}/", address.port())).unwrap();
+        let mut client = SparkConnectClient::connect(&builder).await.unwrap();
+        drop(env);
+        client.set_retry_policy(RetryPolicy::no_retries());
+        client
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_response_of_metadata_past_the_hard_limit_of_grpc_fails_its_call_at_once() {
+        // As gRPC's core: RESOURCE_EXHAUSTED of its text, at once also of metadata far larger,
+        // of the status of a unary call, of the headers of a response, and of the trailers of a
+        // stream, where hyper ended the stream or the connection.
+        async fn at_once<F: std::future::Future>(what: F) -> F::Output {
+            tokio::time::timeout(Duration::from_secs(10), what)
+                .await
+                .expect("the call ends at once")
+        }
+        for details in [40_000, 400_000] {
+            let client = client_of_large_metadata(LargeMetadata {
+                details,
+                header: 0,
+                trailer: 0,
+            })
+            .await;
+            let status = at_once(
+                client
+                    .stub()
+                    .config(spark_connect_proto::ConfigRequest::default()),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(status.code(), tonic::Code::ResourceExhausted, "{status:?}");
+            assert!(crate::metadata::is_refused(&status));
+            assert!(
+                status
+                    .message()
+                    .starts_with("received metadata size exceeds hard limit (value length "),
+                "{status:?}"
+            );
+        }
+        let client = client_of_large_metadata(LargeMetadata {
+            details: 0,
+            header: 20_000,
+            trailer: 0,
+        })
+        .await;
+        let status = at_once(
+            client
+                .stub()
+                .config(spark_connect_proto::ConfigRequest::default()),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            status.message(),
+            "received metadata size exceeds hard limit (value length 20000 vs. 16384)"
+        );
+        let client = client_of_large_metadata(LargeMetadata {
+            details: 0,
+            header: 0,
+            trailer: 20_000,
+        })
+        .await;
+        let mut stream = at_once(client.stub().execute_plan(ExecutePlanRequest::default()))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(at_once(stream.message()).await.unwrap().is_some());
+        let status = at_once(stream.message()).await.unwrap_err();
+        assert_eq!(
+            status.message(),
+            "received metadata size exceeds hard limit (value length 20000 vs. 16384)"
+        );
+    }
+
+    /// A server of HTTP/2 that resets the stream of each call with the error code `reason`,
+    /// before the headers of its response, or after them if `after_headers`, as Spark's server of
+    /// grpc-java resets the stream of a call whose metadata the client's settings do not take.
+    async fn resetting_server(reason: u32, after_headers: bool) -> std::net::SocketAddr {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let frame = |kind: u8, flags: u8, stream: u32, payload: &[u8]| {
+            let length = (payload.len() as u32).to_be_bytes();
+            [
+                &length[1..],
+                &[kind, flags][..],
+                &stream.to_be_bytes()[..],
+                payload,
+            ]
+            .concat()
+        };
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    socket.write_all(&frame(4, 0, 0, &[])).await?;
+                    let mut preface = [0u8; 24];
+                    socket.read_exact(&mut preface).await?;
+                    loop {
+                        let mut header = [0u8; 9];
+                        socket.read_exact(&mut header).await?;
+                        let length = u32::from_be_bytes([0, header[0], header[1], header[2]]);
+                        let mut payload = vec![0u8; length as usize];
+                        socket.read_exact(&mut payload).await?;
+                        let (kind, flags) = (header[3], header[4]);
+                        let stream =
+                            u32::from_be_bytes([header[5] & 0x7f, header[6], header[7], header[8]]);
+                        match kind {
+                            4 if flags & 1 == 0 => socket.write_all(&frame(4, 1, 0, &[])).await?,
+                            1 => {
+                                if after_headers {
+                                    // `:status: 200`, indexed, and a literal `content-type`.
+                                    let block = [
+                                        &[0x88, 0x00, 12][..],
+                                        b"content-type",
+                                        &[16][..],
+                                        b"application/grpc",
+                                    ]
+                                    .concat();
+                                    socket.write_all(&frame(1, 4, stream, &block)).await?;
+                                }
+                                let reset = frame(3, 0, stream, &reason.to_be_bytes());
+                                socket.write_all(&reset).await?;
+                            }
+                            _ => {}
+                        }
+                    }
+                    #[allow(unreachable_code)]
+                    std::io::Result::Ok(())
+                });
+            }
+        });
+        address
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stream_that_the_server_resets_fails_as_grpcio_s_of_its_code_and_text() {
+        // As gRPC's core: of the code of the reason, and of its text, `Stream removed (RST_STREAM
+        // (Received RST_STREAM with error code <reason>))`, before the headers of the response or
+        // after them, of a unary call and of a stream.
+        for (reason, code) in [
+            (1, tonic::Code::Internal),
+            (2, tonic::Code::Internal),
+            (8, tonic::Code::Cancelled),
+            (11, tonic::Code::ResourceExhausted),
+            (12, tonic::Code::PermissionDenied),
+        ] {
+            for after_headers in [false, true] {
+                let address = resetting_server(reason, after_headers).await;
+                let env = crate::channel::set_env(&[("SPARK_CONNECT_AUTHENTICATE_TOKEN", None)]);
+                let builder =
+                    ChannelBuilder::parse(&format!("sc://127.0.0.1:{}/", address.port())).unwrap();
+                let client = SparkConnectClient::connect(&builder).await.unwrap();
+                drop(env);
+                let text = format!(
+                    "Stream removed (RST_STREAM (Received RST_STREAM with error code {reason}))"
+                );
+                let unary = client
+                    .stub()
+                    .config(spark_connect_proto::ConfigRequest::default())
+                    .await
+                    .unwrap_err();
+                let streaming = match client
+                    .stub()
+                    .execute_plan(ExecutePlanRequest::default())
+                    .await
+                {
+                    Ok(stream) => stream.into_inner().message().await.unwrap_err(),
+                    Err(status) => status,
+                };
+                for status in [unary, streaming] {
+                    let case = format!("{reason} {after_headers}: {status:?}");
+                    assert_eq!(crate::retries::grpc_python_code(&status), code, "{case}");
+                    assert_eq!(
+                        crate::connector::stream_removed_in(&status, true).as_deref(),
+                        Some(text.as_str()),
+                        "{case}"
+                    );
+                    // Of tonic's text in the Rust client's dialect.
+                    assert_eq!(crate::connector::stream_removed_in(&status, false), None);
+                }
+            }
+        }
+    }
+
+    /// As gRPC's channels, whose connection windows grow with the windows of their streams: the
+    /// results of the executions of a session that its caller does not read on, as of open
+    /// `toLocalIterator()`s, do not starve the calls of another session of the connection, nor
+    /// another execution of the session.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_unread_results_of_a_session_do_not_starve_the_other_calls_of_its_connection() {
+        let received: Received = Default::default();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let incoming = futures::stream::unfold(listener, |listener| async {
+            Some((listener.accept().await.map(|(socket, _)| socket), listener))
+        });
+        let service = Flooding(received);
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(service)
+                .serve_with_incoming(incoming)
+                .await
+                .unwrap();
+        });
+        let env = crate::channel::set_env(&[("SPARK_CONNECT_AUTHENTICATE_TOKEN", None)]);
+        let builder =
+            ChannelBuilder::parse(&format!("sc://127.0.0.1:{}/", address.port())).unwrap();
+        let client = SparkConnectClient::connect(&builder).await.unwrap();
+        drop(env);
+        let other = client.with_new_session_id();
+        let request = || ExecutePlanRequest {
+            session_id: client.session_id().to_string(),
+            plan: Some(Plan {
+                op_type: Some(PlanOpType::Root(Default::default())),
+            }),
+            ..Default::default()
+        };
+        // More unread results than hyper's window of a connection, 5 MiB, holds, of 2 MiB each.
+        let mut held = Vec::new();
+        for _ in 0..6 {
+            let stream = tokio::time::timeout(Duration::from_secs(10), async {
+                let mut stream = client.execute_plan(request()).await.unwrap();
+                stream.message().await.unwrap();
+                stream
+            })
+            .await
+            .expect("another execution of the session is not starved");
+            held.push(stream);
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        tokio::time::timeout(Duration::from_secs(10), other.get_configs(&["k"]))
+            .await
+            .expect("the call of the other session is not starved")
+            .unwrap();
+        drop(held);
+    }
+
+    #[test]
+    fn a_message_over_the_size_limit_of_a_call_is_grpcio_s_resource_exhausted() {
+        // tonic's status of a response that it does not read, and the client's of a request that
+        // it does not send, are grpc-python's RESOURCE_EXHAUSTED, of gRPC core's texts in the
+        // dialect of grpcio, of their length and limit.
+        let received = tonic::Status::out_of_range(
+            "Error, decoded message length too large: found 135266304 bytes, the limit is: \
+             134217728 bytes",
+        );
+        assert_eq!(
+            oversized(&received),
+            Some((Oversized::Received, 135266304, 134217728))
+        );
+        assert_eq!(
+            crate::retries::grpc_python_code(&received),
+            tonic::Code::ResourceExhausted
+        );
+        assert_eq!(
+            status_details_in(&received, true),
+            "Stream removed (CLIENT: Received message larger than max (135266304 vs. 134217728))"
+        );
+        assert_eq!(status_details_in(&received, false), received.message());
+        let sent = too_large_to_send(135266440);
+        assert_eq!(
+            oversized(&sent),
+            Some((
+                Oversized::Sent,
+                135266440,
+                GRPC_MAX_MESSAGE_LENGTH_DEFAULT as u64
+            ))
+        );
+        assert_eq!(
+            crate::retries::grpc_python_code(&sent),
+            tonic::Code::ResourceExhausted
+        );
+        assert_eq!(
+            status_details_in(&sent, true),
+            "CLIENT: Sent message larger than max (135266440 vs. 134217728)"
+        );
+        // Not another status, of another code or text, nor one of details, which a server sends,
+        // nor a server's of tonic's text of its own limit, as a server of tonic sends of a
+        // request over its limit of 4 MiB, nor a server's of the text of a request that the
+        // client did not send, which only the client's own is.
+        for other in [
+            tonic::Status::out_of_range("Error, decoded message length too large"),
+            tonic::Status::internal(received.message()),
+            tonic::Status::with_details(
+                tonic::Code::OutOfRange,
+                received.message(),
+                bytes::Bytes::from_static(&[8, 11]),
+            ),
+            tonic::Status::out_of_range(
+                "Error, decoded message length too large: found 5000000 bytes, the limit is: \
+                 4194304 bytes",
+            ),
+            tonic::Status::out_of_range(sent.message()),
+        ] {
+            assert_eq!(oversized(&other), None, "{other:?}");
+            assert_eq!(crate::retries::grpc_python_code(&other), other.code());
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn tonic_s_status_of_a_response_over_the_limit_and_a_request_over_it_are_oversized() {
+        // tonic's own text of a response that it does not read, of the limit of the stub, which
+        // `oversized` reads; and a request over the limit is refused before it is sent, of the
+        // same text of its encoding, where tonic's check there resets the stream of the call.
+        let received: Received = Default::default();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let incoming = futures::stream::unfold(listener, |listener| async {
+            Some((listener.accept().await.map(|(socket, _)| socket), listener))
+        });
+        let service = Flooding(received.clone());
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(service)
+                .serve_with_incoming(incoming)
+                .await
+                .unwrap();
+        });
+        let env = crate::channel::set_env(&[("SPARK_CONNECT_AUTHENTICATE_TOKEN", None)]);
+        let builder =
+            ChannelBuilder::parse(&format!("sc://127.0.0.1:{}/", address.port())).unwrap();
+        let client = SparkConnectClient::connect(&builder).await.unwrap();
+        drop(env);
+        let mut small =
+            SparkConnectServiceClient::new(client.channel().await).max_decoding_message_size(1024);
+        let mut stream = small
+            .execute_plan(ExecutePlanRequest::default())
+            .await
+            .unwrap()
+            .into_inner();
+        let status = stream.message().await.unwrap_err();
+        match oversized_of(&status, 1024) {
+            Some((Oversized::Received, length, 1024)) => assert!(length > 256 * 1024),
+            other => panic!("{other:?} of {status:?}"),
+        }
+        // Not of the limit of the client's calls.
+        assert_eq!(oversized(&status), None);
+        let big = spark_connect_proto::ConfigRequest {
+            client_type: Some("x".repeat(GRPC_MAX_MESSAGE_LENGTH_DEFAULT)),
+            ..Default::default()
+        };
+        let length = big.encoded_len();
+        let status = client.stub().config(big).await.unwrap_err();
+        assert_eq!(
+            oversized(&status),
+            Some((
+                Oversized::Sent,
+                length as u64,
+                GRPC_MAX_MESSAGE_LENGTH_DEFAULT as u64
+            ))
+        );
+        assert!(received
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|(method, _)| method != "Config"));
+        // Of the client, the error of RESOURCE_EXHAUSTED.
+        let error = client
+            .get_configs(&["x".repeat(GRPC_MAX_MESSAGE_LENGTH_DEFAULT).as_str()])
+            .await
+            .unwrap_err();
+        assert_eq!(error.grpc_code, Some(tonic::Code::ResourceExhausted as i32));
+    }
+
+    /// As gRPC's global subchannel pool, which the channels of PySpark's clients share: the
+    /// clients of the new sessions of a client, and every other client of the same target, have
+    /// one connection between them, which stays while one of them is open; a client of another
+    /// keepalive has its own, and so has each client of a token.
     #[tokio::test]
-    async fn the_plan_that_a_hook_puts_in_is_compressed_as_pyspark() {
+    async fn the_clients_of_a_target_share_the_connection_of_the_process_to_it() {
+        let received: Received = Default::default();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let accepted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = std::sync::Arc::clone(&accepted);
+        let incoming = futures::stream::unfold(listener, move |listener| {
+            let counted = std::sync::Arc::clone(&counted);
+            async move {
+                let socket = listener.accept().await.map(|(socket, _)| {
+                    counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    socket
+                });
+                Some((socket, listener))
+            }
+        });
+        let service = Recorder(received.clone(), Default::default());
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(service)
+                .serve_with_incoming(incoming)
+                .await
+                .unwrap();
+        });
+        let env = crate::channel::set_env(&[("SPARK_CONNECT_AUTHENTICATE_TOKEN", None)]);
+        let url = format!("sc://127.0.0.1:{}/", address.port());
+        let builder = ChannelBuilder::parse(&url).unwrap();
+        let client = SparkConnectClient::connect(&builder).await.unwrap();
+        let again = SparkConnectClient::connect(&builder).await.unwrap();
+        let other_keepalive =
+            ChannelBuilder::parse(&format!("{url};grpc_keepalive_time_ms=45000")).unwrap();
+        let apart = SparkConnectClient::connect(&other_keepalive).await.unwrap();
+        drop(env);
+        let accepted = || accepted.load(std::sync::atomic::Ordering::SeqCst);
+        client.get_configs(&["k"]).await.unwrap();
+        let sessions: Vec<_> = (0..5).map(|_| client.with_new_session_id()).collect();
+        for session in &sessions {
+            session.get_configs(&["k"]).await.unwrap();
+        }
+        again.get_configs(&["k"]).await.unwrap();
+        assert_eq!(accepted(), 1);
+        apart.get_configs(&["k"]).await.unwrap();
+        assert_eq!(accepted(), 2);
+        // A closed client of the channel does not end it for the others.
+        client.close();
+        sessions[0].get_configs(&["k"]).await.unwrap();
+        assert_eq!(accepted(), 2);
+        // A session of a token has a connection of its own, as grpcio's channel of credentials of
+        // its own, also a new session of it, and another of the same token.
+        let env = crate::channel::set_env(&[("SPARK_CONNECT_AUTHENTICATE_TOKEN", None)]);
+        let of_token =
+            ChannelBuilder::parse(&format!("sc://localhost:{}/;token=AAA", address.port()))
+                .unwrap();
+        let tokened = SparkConnectClient::connect(&of_token).await.unwrap();
+        let tokened_again = SparkConnectClient::connect(&of_token).await.unwrap();
+        drop(env);
+        tokened.get_configs(&["k"]).await.unwrap();
+        assert_eq!(accepted(), 3);
+        tokened_again.get_configs(&["k"]).await.unwrap();
+        assert_eq!(accepted(), 4);
+        tokened
+            .with_new_session_id()
+            .get_configs(&["k"])
+            .await
+            .unwrap();
+        assert_eq!(accepted(), 5);
+        // The clones of a client are of its session, of its channel.
+        tokened.clone().get_configs(&["k"]).await.unwrap();
+        assert_eq!(accepted(), 5);
+    }
+
+    /// The method, the `authorization` header and the port of the client of each request that a
+    /// server received, in order.
+    type Peers = std::sync::Arc<std::sync::Mutex<Vec<(String, Option<String>, u16)>>>;
+
+    /// A [`Recorder`] that records the connection of each request too, of the port of its client.
+    #[derive(Clone)]
+    struct PeerRecorder(Recorder, Peers);
+
+    impl NamedService for PeerRecorder {
+        const NAME: &'static str = "spark.connect.SparkConnectService";
+    }
+
+    impl tonic::codegen::Service<http::Request<tonic::body::Body>> for PeerRecorder {
+        type Response = http::Response<tonic::body::Body>;
+        type Error = std::convert::Infallible;
+        type Future = BoxFuture<Self::Response, Self::Error>;
+
+        fn poll_ready(
+            &mut self,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::result::Result<(), Self::Error>> {
+            self.0.poll_ready(cx)
+        }
+
+        fn call(&mut self, request: http::Request<tonic::body::Body>) -> Self::Future {
+            let method = request
+                .uri()
+                .path()
+                .trim_start_matches("/spark.connect.SparkConnectService/")
+                .to_string();
+            let authorization = request
+                .headers()
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                .map(String::from);
+            let port = request
+                .extensions()
+                .get::<tonic::transport::server::TcpConnectInfo>()
+                .and_then(|info| info.remote_addr())
+                .map_or(0, |address| address.port());
+            self.1.lock().unwrap().push((method, authorization, port));
+            self.0.call(request)
+        }
+    }
+
+    /// A server of a [`PeerRecorder`] on the loopback, its port, what it received of the
+    /// connections of the requests, and the count of the connections that it accepted.
+    async fn peer_server() -> (u16, Peers, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let accepted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = std::sync::Arc::clone(&accepted);
+        let incoming = futures::stream::unfold(listener, move |listener| {
+            let counted = std::sync::Arc::clone(&counted);
+            async move {
+                let socket = listener.accept().await.map(|(socket, _)| {
+                    counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    socket
+                });
+                Some((socket, listener))
+            }
+        });
+        let peers: Peers = Default::default();
+        let service = PeerRecorder(
+            Recorder(Default::default(), Default::default()),
+            peers.clone(),
+        );
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(service)
+                .serve_with_incoming(incoming)
+                .await
+                .unwrap();
+        });
+        (port, peers, accepted)
+    }
+
+    /// As grpcio's channels of the credentials of their tokens, each of which has subchannels of
+    /// its own (SPARK-62257): the calls of a client, and the releases of its executions in the
+    /// background, go over the connection of its own channel, of its own token, and those of
+    /// another client of another token over another.
+    #[tokio::test]
+    async fn the_calls_and_the_releases_of_a_client_go_over_the_connection_of_its_channel() {
+        let (port, peers, accepted) = peer_server().await;
+        let env = crate::channel::set_env(&[("SPARK_CONNECT_AUTHENTICATE_TOKEN", None)]);
+        // Of `localhost`, whose token is sent in plaintext (see `ChannelBuilder::secure`).
+        let client_of = |token: &str| {
+            ChannelBuilder::parse(&format!("sc://localhost:{port}/;token={token}")).unwrap()
+        };
+        let first = SparkConnectClient::connect(&client_of("AAA"))
+            .await
+            .unwrap();
+        let second = SparkConnectClient::connect(&client_of("BBB"))
+            .await
+            .unwrap();
+        drop(env);
+        let mut stream = first
+            .execute_plan_reattachable(ExecutePlanRequest {
+                session_id: first.session_id().to_string(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        while stream.message().await.unwrap().is_some() {}
+        drop(stream);
+        second.get_configs(&["k"]).await.unwrap();
+        first.wait_for_releases().await;
+        first.get_configs(&["k"]).await.unwrap();
+        assert_eq!(accepted.load(std::sync::atomic::Ordering::SeqCst), 2);
+        let peers = peers.lock().unwrap().clone();
+        let ports_of = |token: &str| -> std::collections::BTreeSet<u16> {
+            let bearer = format!("Bearer {token}");
+            peers
+                .iter()
+                .filter(|(_, authorization, _)| authorization.as_deref() == Some(bearer.as_str()))
+                .map(|(_, _, port)| *port)
+                .collect()
+        };
+        let (of_first, of_second) = (ports_of("AAA"), ports_of("BBB"));
+        assert_eq!((of_first.len(), of_second.len()), (1, 1), "{peers:?}");
+        assert!(of_first.is_disjoint(&of_second), "{peers:?}");
+        assert!(
+            peers
+                .iter()
+                .any(|(method, authorization, port)| method == "ReleaseExecute"
+                    && authorization.as_deref() == Some("Bearer AAA")
+                    && of_first.contains(port)),
+            "{peers:?}"
+        );
+    }
+
+    /// As grpcio's `close` of the channel of a client, which lets go of its subchannels (Q5 of
+    /// the probes of SPARK-62257): the connection of two clients stays while one of them is open,
+    /// and ends once the last one is closed, so that a new client of the target connects again.
+    #[tokio::test]
+    async fn the_close_of_the_last_client_of_a_connection_ends_it() {
+        let (port, _, accepted) = peer_server().await;
+        let env = crate::channel::set_env(&[("SPARK_CONNECT_AUTHENTICATE_TOKEN", None)]);
+        let builder = ChannelBuilder::parse(&format!("sc://127.0.0.1:{port}/")).unwrap();
+        let first = SparkConnectClient::connect(&builder).await.unwrap();
+        let second = first.with_new_session_id();
+        drop(env);
+        first.get_configs(&["k"]).await.unwrap();
+        second.get_configs(&["k"]).await.unwrap();
+        let accepted = || accepted.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(accepted(), 1);
+        first.close();
+        let third = second.with_new_session_id();
+        third.get_configs(&["k"]).await.unwrap();
+        assert_eq!(accepted(), 1);
+        second.close();
+        third.close();
+        let fourth = first.with_new_session_id();
+        fourth.get_configs(&["k"]).await.unwrap();
+        assert_eq!(accepted(), 2);
+    }
+
+    /// Of a server that sends its settings on each connection and closes it at once (P10 of the
+    /// review of SPARK-62257): a call of the Rust API fails of the end of the connection, of no
+    /// retry, of the connection of its channel's pass and one more at most, which tonic's
+    /// connector makes once the one held ended before the call took it, where the connector made
+    /// connections until one was open as it looked, and the client makes no connection more of
+    /// itself once the call failed.
+    #[tokio::test]
+    async fn a_call_of_a_server_that_closes_each_connection_at_once_makes_two_connections_at_most()
+    {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let accepted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = std::sync::Arc::clone(&accepted);
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let _ = stream.write_all(&[0, 0, 0, 4, 0, 0, 0, 0, 0]).await;
+                    let _ = stream.shutdown().await;
+                    let mut buffer = [0u8; 4096];
+                    while matches!(stream.read(&mut buffer).await, Ok(read) if read > 0) {}
+                });
+            }
+        });
+        let env = crate::channel::set_env(&[("SPARK_CONNECT_AUTHENTICATE_TOKEN", None)]);
+        let builder = ChannelBuilder::parse(&format!("sc://127.0.0.1:{port}/")).unwrap();
+        let mut client = SparkConnectClient::connect(&builder).await.unwrap();
+        drop(env);
+        client.set_retry_policy(crate::retries::RetryPolicy::no_retries());
+        client.set_rpc_deadlines(RpcDeadlines {
+            config: Some(Duration::from_secs(10)),
+            ..RpcDeadlines::default()
+        });
+        let accepted = || accepted.load(std::sync::atomic::Ordering::SeqCst);
+        let call = tokio::time::timeout(Duration::from_secs(5), client.get_configs(&["k"])).await;
+        assert!(matches!(call, Ok(Err(_))), "{call:?}");
+        let made = accepted();
+        assert!((1..=2).contains(&made), "{made}");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(accepted(), made);
+        client.close();
+    }
+
+    /// As PySpark's executions, which send the request that the hooks return as it is: a plan that
+    /// a hook puts in is sent as it is, over the threshold too, and the plan of the execution,
+    /// compressed once, before the hook, as `to_proto` compresses it, is kept so by a hook that
+    /// keeps it.
+    #[tokio::test]
+    async fn the_request_that_a_hook_returns_is_sent_as_it_is_as_pyspark() {
         let received: Received = Default::default();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -5647,22 +9506,33 @@ mod request_fields_tests {
             )),
             ..Default::default()
         };
+        let putting = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let puts = std::sync::Arc::clone(&putting);
+        let put = large.clone();
         client.set_execute_plan_hook(Some(std::sync::Arc::new(move |mut request| {
-            request.plan = Some(Plan {
-                op_type: Some(PlanOpType::Root(large.clone())),
-            });
+            if puts.load(std::sync::atomic::Ordering::SeqCst) {
+                request.plan = Some(Plan {
+                    op_type: Some(PlanOpType::Root(put.clone())),
+                });
+            }
             Ok(request)
         })));
-        let small = || ExecutePlanRequest {
+        let of = |relation: spark_connect_proto::Relation| ExecutePlanRequest {
             session_id: client.session_id().to_string(),
             plan: Some(Plan {
-                op_type: Some(PlanOpType::Root(Default::default())),
+                op_type: Some(PlanOpType::Root(relation)),
             }),
             ..Default::default()
         };
-        let mut stream = client.execute_plan(small()).await.unwrap();
+        let mut stream = client.execute_plan(of(Default::default())).await.unwrap();
         while stream.message().await.unwrap().is_some() {}
-        let mut stream = client.execute_plan_reattachable(small()).await.unwrap();
+        let mut stream = client
+            .execute_plan_reattachable(of(Default::default()))
+            .await
+            .unwrap();
+        while stream.message().await.unwrap().is_some() {}
+        putting.store(false, std::sync::atomic::Ordering::SeqCst);
+        let mut stream = client.execute_plan_reattachable(of(large)).await.unwrap();
         while stream.message().await.unwrap().is_some() {}
         let executions: Vec<_> = received
             .lock()
@@ -5671,14 +9541,22 @@ mod request_fields_tests {
             .filter(|(method, _)| method == "ExecutePlan")
             .map(|(_, bytes)| ExecutePlanRequest::decode(bytes.as_slice()).unwrap())
             .collect();
-        assert_eq!(executions.len(), 2);
-        for request in executions {
-            let op_type = request.plan.and_then(|plan| plan.op_type);
-            assert!(
-                matches!(op_type, Some(PlanOpType::CompressedOperation(_))),
-                "{op_type:?}"
-            );
-        }
+        assert_eq!(executions.len(), 3);
+        let op_types: Vec<_> = executions
+            .into_iter()
+            .map(|request| request.plan.and_then(|plan| plan.op_type))
+            .collect();
+        assert!(
+            matches!(
+                op_types.as_slice(),
+                [
+                    Some(PlanOpType::Root(_)),
+                    Some(PlanOpType::Root(_)),
+                    Some(PlanOpType::CompressedOperation(_))
+                ]
+            ),
+            "{op_types:?}"
+        );
     }
 
     #[tokio::test]
@@ -5784,6 +9662,96 @@ mod request_fields_tests {
                 assert!(matches!(op_type, Some(PlanOpType::Command(_))));
             }
         }
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_failure_while_the_thread_converts_another_of_its_client_is_not_converted() {
+        // As PySpark's `_handle_error`, which raises the error of a call as grpc gives it while
+        // the thread handles another failure of the client (`inside_error_handling` of the
+        // `thread_local` of the client), as of a call that a handler of a log of the conversion
+        // makes: neither the details of the error nor the configs of its stack trace are asked
+        // for, where they are of a failure of another client, or once the conversion ended.
+        let received: Received = Default::default();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let incoming = futures::stream::unfold(listener, |listener| async {
+            Some((listener.accept().await.map(|(socket, _)| socket), listener))
+        });
+        let service = Recorder(received.clone(), Default::default());
+        let server = tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(service)
+                .serve_with_incoming(incoming)
+                .await
+                .unwrap();
+        });
+        let env = crate::channel::set_env(&[("SPARK_CONNECT_AUTHENTICATE_TOKEN", None)]);
+        let builder =
+            ChannelBuilder::parse(&format!("sc://127.0.0.1:{}/;user_id=u1", address.port()))
+                .unwrap();
+        let client = SparkConnectClient::connect(&builder).await.unwrap();
+        drop(env);
+        let other = client.with_new_session_id();
+        let asked = || {
+            let mut received = received.lock().unwrap();
+            let methods: Vec<String> = received.drain(..).map(|(method, _)| method).collect();
+            methods
+        };
+        // The details, and the config of the stack trace of the server, which shows it as the
+        // server sends none.
+        let details_and_configs = vec!["FetchErrorDetails".to_string(), "Config".to_string()];
+        client.error_from_status(error_kept_under("error-1")).await;
+        assert_eq!(asked(), details_and_configs);
+        // Within the polls of a conversion of the client, as a call of a handler of one of its
+        // records.
+        crate::runtime::polling_conversion(client.identity(), async {
+            assert!(client.inside_error_handling());
+            assert!(!other.inside_error_handling());
+            let error = client.error_from_status(error_kept_under("error-2")).await;
+            assert_eq!(asked(), Vec::<String>::new());
+            assert_eq!(error.grpc_code, Some(tonic::Code::Internal as i32));
+            assert_eq!(error.server_stacktrace, None);
+            // Of a client of another session, whose `thread_local` is its own.
+            other.error_from_status(error_kept_under("error-3")).await;
+            assert_eq!(asked(), details_and_configs);
+            // Of a clone of the client, which shares it.
+            let error = client
+                .clone()
+                .error_from_status(error_kept_under("error-4"))
+                .await;
+            assert_eq!(asked(), Vec::<String>::new());
+            assert_eq!(error.server_stacktrace, None);
+            // Of another thread, which polls no conversion.
+            let elsewhere = client.clone();
+            std::thread::spawn(move || {
+                assert!(!elsewhere.inside_error_handling());
+            })
+            .join()
+            .unwrap();
+        })
+        .await;
+        assert!(!client.inside_error_handling());
+        client.error_from_status(error_kept_under("error-5")).await;
+        assert_eq!(asked(), details_and_configs);
+        // Of a conversion of a call that a watch waits for, of the Python binding, which blocks its
+        // thread: between the polls of the conversion too, as of a signal handler that a poll of
+        // the watch runs; but not of a conversion of no watch, of an async caller, whose other
+        // tasks the thread polls between the polls of the conversion.
+        let failure = crate::error::grpcio_error(
+            &tonic::Status::internal("failed"),
+            GrpcCall::ServerStreaming,
+        );
+        let watch: std::sync::Arc<crate::runtime::WaitWatch> =
+            std::sync::Arc::new(|| crate::runtime::Watch::Continue);
+        crate::runtime::with_wait_watch(watch, || {
+            let _converting = Converting::start(&failure, None, client.identity());
+            assert!(client.inside_error_handling());
+            assert!(!other.inside_error_handling());
+        });
+        let converting = Converting::start(&failure, None, client.identity());
+        assert!(!client.inside_error_handling());
+        drop(converting);
         server.abort();
     }
 
@@ -6466,11 +10434,19 @@ mod metadata_validation_tests {
     }
 
     #[test]
-    fn token_parameter_wins_over_an_authorization_parameter() {
+    fn the_token_follows_an_authorization_parameter() {
+        // As grpcio sends the metadata of a call, of PySpark's `ChannelBuilder.metadata()`, and
+        // then that of its call credentials, the token's: a server that reads the last value of a
+        // key, as grpc-java's `Metadata.get`, takes the token.
         let client = connect("sc://localhost/;authorization=Basic%20abc;token=tok").unwrap();
-        let metadata = client.execution_metadata();
-        let all: Vec<_> = metadata.get_all("authorization").iter().collect();
-        assert_eq!(all, ["Bearer tok"]);
+        for metadata in [client.execution_metadata(), {
+            let mut request = Request::new(());
+            client._attach_metadata(&mut request);
+            request.metadata().clone()
+        }] {
+            let all: Vec<_> = metadata.get_all("authorization").iter().collect();
+            assert_eq!(all, ["Basic abc", "Bearer tok"]);
+        }
     }
 
     #[test]
@@ -6495,5 +10471,139 @@ mod metadata_validation_tests {
         let metadata = other.execution_metadata();
         assert_eq!(metadata.get("authorization").unwrap(), "Bearer tok");
         assert_eq!(metadata.get("x-hdr").unwrap(), "v");
+    }
+}
+
+/// The error of a response that the client fails to decode, of its codec, and of a status of the
+/// server of the same text.
+#[cfg(test)]
+mod decode_failure_tests {
+    use super::*;
+    use crate::bytes_codec::BytesCodec;
+    use spark_connect_proto::analyze_plan_request::SparkVersion;
+    use tonic::codegen::{http, BoxFuture};
+    use tonic::server::{NamedService, UnaryService};
+
+    /// The status that a server sends of a request that it fails to decode, as a server of tonic
+    /// does: the code and the text of the client's own failure to decode a response.
+    const SERVERS_FAILURE: &str =
+        "failed to decode Protobuf message: AnalyzePlanRequest.plan: buffer underflow";
+
+    /// A server whose RPCs answer bytes that no response decodes of, or (`fails`) fail of the
+    /// status of a server that fails to decode the request.
+    #[derive(Clone)]
+    struct Undecodable {
+        fails: bool,
+    }
+
+    impl NamedService for Undecodable {
+        const NAME: &'static str = "spark.connect.SparkConnectService";
+    }
+
+    impl tonic::codegen::Service<http::Request<tonic::body::Body>> for Undecodable {
+        type Response = http::Response<tonic::body::Body>;
+        type Error = std::convert::Infallible;
+        type Future = BoxFuture<Self::Response, Self::Error>;
+
+        fn poll_ready(
+            &mut self,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::result::Result<(), Self::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, request: http::Request<tonic::body::Body>) -> Self::Future {
+            let rpc = self.clone();
+            Box::pin(async move {
+                let mut grpc = tonic::server::Grpc::new(BytesCodec);
+                Ok(grpc.unary(rpc, request).await)
+            })
+        }
+    }
+
+    impl UnaryService<Vec<u8>> for Undecodable {
+        type Response = Vec<u8>;
+        type Future = BoxFuture<tonic::Response<Vec<u8>>, tonic::Status>;
+
+        fn call(&mut self, _: tonic::Request<Vec<u8>>) -> Self::Future {
+            let fails = self.fails;
+            Box::pin(async move {
+                if fails {
+                    Err(tonic::Status::internal(SERVERS_FAILURE))
+                } else {
+                    // A field of the number 1 of a length past the end.
+                    Ok(tonic::Response::new(vec![0x0a, 0x05]))
+                }
+            })
+        }
+    }
+
+    /// The error of `AnalyzePlan` of a client of an [`Undecodable`] server.
+    async fn analyze_error(fails: bool) -> SparkError {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let incoming = futures::stream::unfold(listener, |listener| async {
+            Some((listener.accept().await.map(|(socket, _)| socket), listener))
+        });
+        let server = tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(Undecodable { fails })
+                .serve_with_incoming(incoming)
+                .await
+                .unwrap();
+        });
+        // As `recording_client`: no token nor user agent of the environment.
+        let env = crate::channel::set_env(&[
+            ("SPARK_CONNECT_AUTHENTICATE_TOKEN", None),
+            ("SPARK_CONNECT_USER_AGENT", None),
+        ]);
+        let builder =
+            ChannelBuilder::parse(&format!("sc://127.0.0.1:{}/", address.port())).unwrap();
+        let client = SparkConnectClient::connect(&builder).await.unwrap();
+        drop(env);
+        let request = AnalyzePlanRequest {
+            session_id: client.session_id().to_string(),
+            analyze: Some(Analyze::SparkVersion(SparkVersion {})),
+            ..Default::default()
+        };
+        let error = client.analyze_plan(request).await.unwrap_err();
+        server.abort();
+        error
+    }
+
+    #[tokio::test]
+    async fn a_response_that_does_not_decode_is_pysparks_error_of_it_and_a_servers_status_its_own()
+    {
+        // The status of the client's codec of a response that does not decode is PySpark's error
+        // of a response that grpcio fails to deserialize; the status of a server of the same code
+        // and text, as of its failure to decode a request, is the text of grpcio's error of it.
+        // The error of the Rust API is prost's of either.
+        let undecodable = analyze_error(false).await;
+        assert_eq!(
+            undecodable.pyspark_message.as_deref(),
+            Some(
+                "<_InactiveRpcError of RPC that terminated with:\n\
+                 \tstatus = StatusCode.INTERNAL\n\
+                 \tdetails = \"Exception deserializing response!\"\n\
+                 \tdebug_error_string = \"None\"\n>"
+            )
+        );
+        assert!(
+            undecodable
+                .message()
+                .contains("failed to decode Protobuf message: AnalyzePlanResponse"),
+            "{}",
+            undecodable.message()
+        );
+        let of_server = analyze_error(true).await;
+        assert_eq!(
+            of_server.pyspark_message,
+            Some(format!(
+                "<_InactiveRpcError of RPC that terminated with:\n\
+                 \tstatus = StatusCode.INTERNAL\n\tdetails = \"{SERVERS_FAILURE}\"\n\
+                 \tdebug_error_string = \"INTERNAL:{SERVERS_FAILURE}\"\n>"
+            ))
+        );
+        assert!(of_server.message().contains(SERVERS_FAILURE));
     }
 }

@@ -1,35 +1,44 @@
 //! PyO3 wrappers for window functions and specifications.
 
 use pyo3::prelude::*;
-use pyo3::types::PyTuple;
+use pyo3::types::{PyList, PyTuple};
 use spark_connect::column::Column;
-use spark_connect::expression::{Expression, ExpressionNode, NullOrdering, SortOrder};
-use spark_connect::window::{FrameBound, FrameType, WindowSpec};
+use spark_connect::expression::{ExpressionNode, SortOrder};
+use spark_connect::window::{FrameBound, WindowSpec};
+use spark_connect_core::error::SparkError;
 
 use crate::column::PyColumn;
 
+/// A column of `_to_cols`: a Column, or the core Column of `F.col` of a column name, which is made
+/// at once, of the origin of `col`, as no object of it is read but its expression.
+enum WindowColumn<'py> {
+    Object(Bound<'py, PyAny>),
+    Name(Column),
+}
+
 /// The columns of `Window.partitionBy` and `orderBy`, and of `TableArg.partitionBy` and
-/// `orderBy`, as PySpark Connect's `_to_cols`: a single list is the columns, each a Column or
-/// a column name (not a literal), else `NOT_EXPECTED_TYPE` of the argument `col`, as its
-/// `F._to_col`.
-pub(crate) fn window_columns(
-    cols: Vec<Bound<'_, PyAny>>,
-) -> PyResult<Vec<spark_connect::column::Column>> {
+/// `orderBy`, as PySpark Connect's `_to_cols`: a single list is the columns, each a Column or a
+/// column name (not a literal), whose Column is `F.col` of it, of the origin of `col` at the call
+/// site of `origin`, else `NOT_EXPECTED_TYPE` of the argument `col`, as its `F._to_col`.
+fn window_column_items<'py>(
+    cols: Vec<Bound<'py, PyAny>>,
+    origin: &crate::origin::CallSiteOrigin,
+) -> PyResult<Vec<WindowColumn<'py>>> {
     let cols = match cols.as_slice() {
         [only] if only.is_instance_of::<pyo3::types::PyList>() => {
             only.try_iter()?.collect::<PyResult<Vec<_>>>()?
         }
         _ => cols,
     };
-    cols.iter()
+    cols.into_iter()
         .map(|c| {
-            if let Ok(column) = c.extract::<PyRef<'_, crate::column::PyColumn>>() {
-                return Ok(column.column.clone());
+            if c.is_instance_of::<PyColumn>() {
+                return Ok(WindowColumn::Object(c));
             }
             if c.is_instance_of::<pyo3::types::PyString>() {
                 // As PySpark's `F._to_col`, by `col`, of its origin.
-                let _origin = crate::origin::with_origin("col")?;
-                return crate::plan_args::col(c);
+                let _origin = origin.with("col")?;
+                return Ok(WindowColumn::Name(crate::plan_args::col(&c)?));
             }
             let type_name = c.get_type().name()?.to_string();
             Err(crate::column::raise_pyspark(
@@ -46,28 +55,97 @@ pub(crate) fn window_columns(
         .collect()
 }
 
-/// Build partition expressions from ColumnOrName args (a bare string is a COLUMN
-/// NAME, not a literal — mirrors pyspark Window.partitionBy).
-fn to_partition_exprs(cols: Vec<Bound<'_, PyAny>>) -> PyResult<Vec<Expression>> {
-    Ok(window_columns(cols)?
-        .iter()
-        .map(|c| c.expression().clone())
-        .collect())
+/// The core expressions of the columns of [`window_column_items`], of the `_expr` of a Column.
+pub(crate) fn window_columns(cols: Vec<Bound<'_, PyAny>>) -> PyResult<Vec<Column>> {
+    window_column_items(cols, &crate::origin::CallSiteOrigin::new())?
+        .into_iter()
+        .map(|column| match column {
+            WindowColumn::Object(column) => crate::column::column_of(column.cast::<PyColumn>()?),
+            WindowColumn::Name(column) => Ok(column),
+        })
+        .collect()
 }
 
-/// Build sort orders from ColumnOrName args; a bare string becomes an ascending
-/// SortOrder over that column (not a string literal). A column that is not a sort order is
-/// ascending with nulls first, as `SortOrder(expr)` of PySpark defaults to.
-fn to_sort_orders(cols: Vec<Bound<'_, PyAny>>) -> PyResult<Vec<SortOrder>> {
-    let mut sort_orders = Vec::new();
-    for column in window_columns(cols)? {
-        if let ExpressionNode::SortOrder(sort) = column.expression().node() {
-            sort_orders.push((**sort).clone());
-        } else {
-            sort_orders.push(SortOrder::asc_nulls_first(column.expression().clone()));
-        }
-    }
-    Ok(sort_orders)
+/// The `_expr` of each Column of `cols` (see [`window_column_items`]), as PySpark's
+/// `[c._expr for c in _to_cols(cols)]`: of a column name, the `_ColumnExpression` of its `F.col`.
+fn expressions_of<'py>(
+    py: Python<'py>,
+    cols: Vec<Bound<'py, PyAny>>,
+) -> PyResult<Vec<Bound<'py, PyAny>>> {
+    // The `_expr` of the Column of `F._to_col` of a column name is read of the Column, of a patch
+    // of the attribute lookup of the class `Column`.
+    let unpatched = crate::column::column_class_is_original(py, false);
+    window_column_items(cols, &crate::origin::CallSiteOrigin::new())?
+        .into_iter()
+        .map(|column| match column {
+            WindowColumn::Object(column) => crate::column::expression_attr(&column),
+            WindowColumn::Name(column) if unpatched => {
+                Ok(crate::column::expression_object(py, column)?.into_any())
+            }
+            WindowColumn::Name(column) => {
+                crate::column::expression_attr(crate::column::column_object(py, column)?.as_any())
+            }
+        })
+        .collect()
+}
+
+/// The `_expr` of the sort order of each Column of `cols`, as PySpark's
+/// `[F._sort_col(c)._expr for c in _to_cols(cols)]`: a Column that is a sort order as it is, and
+/// another of its `asc()`, ascending with nulls first. The `asc()` of a column name, and of a
+/// Column of the class, which no subclass overrides, is made at once, as the class's `asc` makes it
+/// (`asc_nulls_first`, of its origin); that of another Column is the `asc()` that it has.
+pub(crate) fn sort_expressions_of<'py>(
+    py: Python<'py>,
+    cols: Vec<Bound<'py, PyAny>>,
+) -> PyResult<Vec<Bound<'py, PyAny>>> {
+    let origin = crate::origin::CallSiteOrigin::new();
+    // Of the class `Column` as the module made it, of no patch of its `asc` nor of its attribute
+    // lookup, which the `asc()` of PySpark's `_sort_col` would call.
+    let unpatched = crate::column::column_class_is_original(py, true);
+    let ascending = |column: Column| -> PyResult<Bound<'py, PyAny>> {
+        let _origin = origin.with("asc_nulls_first")?;
+        Ok(crate::column::expression_object(py, column.asc_nulls_first())?.into_any())
+    };
+    let ascending_of = |column: &Bound<'py, PyAny>| -> PyResult<Bound<'py, PyAny>> {
+        let sorted = column.call_method0(pyo3::intern!(py, "asc"))?;
+        crate::column::expression_attr(&sorted)
+    };
+    window_column_items(cols, &origin)?
+        .into_iter()
+        .map(|column| match column {
+            WindowColumn::Object(column) => {
+                let expression = crate::column::expression_attr(&column)?;
+                if is_sort_order(&expression) {
+                    return Ok(expression);
+                }
+                if unpatched && column.get_type().is(py.get_type::<PyColumn>()) {
+                    return ascending(crate::column::expression_value(&expression)?);
+                }
+                ascending_of(&column)
+            }
+            WindowColumn::Name(column) if unpatched => ascending(column),
+            // Of the Column of `F._to_col`, whose `_expr` `_sort_col` reads, and then its `asc()`.
+            WindowColumn::Name(column) => {
+                let column = crate::column::column_object(py, column)?;
+                crate::column::expression_attr(column.as_any())?;
+                ascending_of(column.as_any())
+            }
+        })
+        .collect()
+}
+
+/// Whether `expression` is the expression of a sort order of this client, as PySpark's
+/// `isinstance(expression, SortOrder)`, of its class of `pyspark.sql.connect.expressions`, which
+/// the drop-in's module does not have, as the sort orders are the core's.
+fn is_sort_order(expression: &Bound<'_, PyAny>) -> bool {
+    expression
+        .cast::<crate::column::PyColumnExpression>()
+        .is_ok_and(|expression| {
+            matches!(
+                expression.borrow().column().expression().node(),
+                ExpressionNode::SortOrder(_)
+            )
+        })
 }
 
 /// Python wrapper for a window frame bound.
@@ -112,36 +190,6 @@ const FOLLOWING_THRESHOLD: i64 = {
 const ROW_BOUNDARY_FIELD: &str = "spark.connect.Expression.Literal.integer";
 const RANGE_BOUNDARY_FIELD: &str = "spark.connect.Expression.Literal.long";
 
-/// A frame-bound argument once compared with the threshold of its side: a `FrameBound` as it
-/// is, the unbounded bound of its side past the threshold, or else the value of the argument.
-enum FrameArgument<'a, 'py> {
-    Bound(FrameBound),
-    Value(&'a Bound<'py, PyAny>),
-}
-
-/// The frame-bound argument `v`, the start of a frame if `start`, else its end, compared as
-/// PySpark's `rowsBetween` and `rangeBetween` compare it, with Python's `<=` and `>=`: a start of
-/// `Window._PRECEDING_THRESHOLD` (`-sys.maxsize`) or less is unbounded preceding and an end of
-/// `Window._FOLLOWING_THRESHOLD` (`sys.maxsize`) or more unbounded following, of any type, so
-/// also of a float such as `float("inf")`, and a type that does not compare with an int raises
-/// the `TypeError` of the comparison. A start of `Window.unboundedFollowing` or an end of
-/// `Window.unboundedPreceding` is a value.
-fn compared_frame_argument<'a, 'py>(
-    v: &'a Bound<'py, PyAny>,
-    start: bool,
-) -> PyResult<FrameArgument<'a, 'py>> {
-    if let Ok(fb) = v.extract::<PyFrameBound>() {
-        return Ok(FrameArgument::Bound(fb.bound));
-    }
-    if start && v.le(PRECEDING_THRESHOLD)? {
-        return Ok(FrameArgument::Bound(FrameBound::UnboundedPreceding));
-    }
-    if !start && v.ge(FOLLOWING_THRESHOLD)? {
-        return Ok(FrameArgument::Bound(FrameBound::UnboundedFollowing));
-    }
-    Ok(FrameArgument::Value(v))
-}
-
 /// The bound of the offset `n`: a negative one is preceding, and a positive one following. The
 /// offset of `Window.unboundedPreceding`, as the end of a range frame, is a following one, as
 /// the count of the rows that it precedes is beyond a long.
@@ -152,115 +200,6 @@ fn frame_bound_of(n: i64) -> FrameBound {
         n => n
             .checked_neg()
             .map_or(FrameBound::Following(n), FrameBound::Preceding),
-    }
-}
-
-/// PySpark's `VALUE_NOT_BETWEEN` of the boundary `name` of a row frame beyond an int32.
-fn boundary_not_between(py: Python<'_>, name: &str) -> PyErr {
-    crate::column::raise_pyspark(
-        py,
-        "PySparkValueError",
-        "VALUE_NOT_BETWEEN",
-        &[
-            ("arg_name", name),
-            ("min", &i32::MIN.to_string()),
-            ("max", &i32::MAX.to_string()),
-        ],
-    )
-}
-
-/// A frame bound as the window of the core holds it, or, of a bound that it does not hold, the
-/// error that the plan of PySpark's `WindowExpression` raises of it.
-enum ConvertedBound {
-    Held(FrameBound),
-    Unheld(PyErr),
-}
-
-/// The bound `name` of a frame argument, in a row frame if `rows`, else in a range frame, as the
-/// window of the core holds it: 0 (False too) is the current row, and another int of a long the
-/// offset of its sign, which the core converts when a request builds the plan, as the plan of
-/// PySpark's `WindowExpression` converts it then (an int beyond an int32 of a row frame fails
-/// with `VALUE_NOT_BETWEEN`). The core does not hold True, which PySpark sets in the int field of
-/// the literal, which protobuf's default (upb) backend refuses of a bool, nor an int beyond a
-/// long, of `VALUE_NOT_BETWEEN` in a row frame and of the `ValueError` of upb's long field in a
-/// range frame: these give the error.
-fn converted_frame_bound(
-    py: Python<'_>,
-    argument: FrameArgument<'_, '_>,
-    name: &str,
-    rows: bool,
-) -> PyResult<ConvertedBound> {
-    let value = match argument {
-        FrameArgument::Bound(bound) => return Ok(ConvertedBound::Held(bound)),
-        FrameArgument::Value(value) => value,
-    };
-    if value.is_instance_of::<pyo3::types::PyBool>() {
-        let field = if rows {
-            ROW_BOUNDARY_FIELD
-        } else {
-            RANGE_BOUNDARY_FIELD
-        };
-        return Ok(if value.is_truthy()? {
-            ConvertedBound::Unheld(crate::stat_arguments::bool_not_proto_int(field))
-        } else {
-            ConvertedBound::Held(FrameBound::CurrentRow)
-        });
-    }
-    Ok(match value.extract::<i64>() {
-        Ok(n) => ConvertedBound::Held(frame_bound_of(n)),
-        Err(_) if rows => ConvertedBound::Unheld(boundary_not_between(py, name)),
-        Err(_) => ConvertedBound::Unheld(crate::session::value_out_of_range(value)),
-    })
-}
-
-/// The error that a request raises of the held bound `bound` of a row frame, its start if
-/// `lower`, else its end, as the core converts it when it builds the plan
-/// (`to_proto_frame_boundary`): an offset beyond an int32 that is neither the current row nor
-/// the unbounded bound of its side is `VALUE_NOT_BETWEEN`. A range frame holds no failing bound.
-fn held_bound_error(py: Python<'_>, bound: &FrameBound, rows: bool, lower: bool) -> Option<PyErr> {
-    let offset = match bound {
-        FrameBound::UnboundedPreceding => i128::from(i64::MIN),
-        FrameBound::Preceding(n) => -i128::from(*n),
-        FrameBound::CurrentRow => 0,
-        FrameBound::Following(n) => i128::from(*n),
-        FrameBound::UnboundedFollowing => i128::from(i64::MAX),
-    };
-    let unbounded = i128::from(if lower { i64::MIN } else { i64::MAX });
-    let fails = rows && offset != 0 && offset != unbounded && i32::try_from(offset).is_err();
-    fails.then(|| boundary_not_between(py, if lower { "start" } else { "end" }))
-}
-
-/// The bounds of `rowsBetween(start, end)` if `rows`, else of `rangeBetween(start, end)`, a
-/// plain int (negative is preceding, positive following) or a `FrameBound` each, as PySpark's:
-/// it compares the start and then the end with the thresholds of their sides, and WindowFrame
-/// then asserts that the start and then the end that is not past its threshold is an int (a
-/// bool included), a bare `AssertionError` of a NumPy int, a float or a Decimal. The plan converts
-/// the start and then the end when a request builds it, as the window of the core does of the
-/// bounds that it holds (see [`converted_frame_bound`]). Of a bound that it does not hold, the
-/// error that PySpark's build raises first, of the start and then of the end, is raised here.
-fn frame_bounds(
-    py: Python<'_>,
-    start: &Bound<'_, PyAny>,
-    end: &Bound<'_, PyAny>,
-    rows: bool,
-) -> PyResult<(FrameBound, FrameBound)> {
-    let start = compared_frame_argument(start, true)?;
-    let end = compared_frame_argument(end, false)?;
-    for argument in [&start, &end] {
-        if let FrameArgument::Value(value) = argument {
-            if !value.is_instance_of::<pyo3::types::PyInt>() {
-                return Err(pyo3::exceptions::PyAssertionError::new_err(()));
-            }
-        }
-    }
-    let start = converted_frame_bound(py, start, "start", rows)?;
-    let end = converted_frame_bound(py, end, "end", rows)?;
-    match (start, end) {
-        (ConvertedBound::Held(start), ConvertedBound::Held(end)) => Ok((start, end)),
-        (ConvertedBound::Unheld(error), _) => Err(error),
-        (ConvertedBound::Held(start), ConvertedBound::Unheld(error)) => {
-            Err(held_bound_error(py, &start, rows, true).unwrap_or(error))
-        }
     }
 }
 
@@ -277,191 +216,551 @@ impl PyFrameBound {
     }
 }
 
-/// Python wrapper for a WindowSpec.
+// Python wrapper for a WindowSpec. As PySpark's plain class, it keeps its state in its
+// `__dict__`, its `_partitionSpec` and `_orderSpec`, lists of expressions, and its `_frame`, a
+// `WindowFrame` or None, which its methods read and give the new window specifications that they
+// make, and it is subclassed and constructed of PySpark's arguments (see `crate::state`).
+#[doc = connect_doc!(WindowSpec)]
 #[pyclass(
     name = "WindowSpec",
     module = "pyspark.sql.connect.window",
-    from_py_object,
+    subclass,
     weakref,
     dict
 )]
-pub struct PyWindowSpec {
-    pub(crate) spec: WindowSpec,
-    /// Set once the value is written, as `__traverse__` reads `spec`, which is not valid while
-    /// the object is created (see [`crate::gc::GcReady`]).
-    gc_ready: crate::gc::GcReady,
+pub struct PyWindowSpec {}
+
+/// A new window specification of the class, of `partition`, `order` and `frame`, as PySpark's
+/// methods make one of `WindowSpec(partitionSpec=..., orderSpec=..., frame=...)`, whose
+/// `__init__` checks them.
+fn new_window_spec<'py>(
+    py: Python<'py>,
+    partition: &Bound<'py, PyAny>,
+    order: &Bound<'py, PyAny>,
+    frame: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyWindowSpec>> {
+    let spec = Bound::new(py, PyWindowSpec {})?;
+    PyWindowSpec::__init__(&spec, partition, order, frame)?;
+    Ok(spec)
 }
 
-impl PyWindowSpec {
-    pub fn new(spec: WindowSpec) -> Self {
-        PyWindowSpec {
-            spec,
-            gc_ready: crate::gc::GcReady::new(),
+/// The `WindowFrame` of `pyspark.sql.connect.window` of `rows` (a ROWS frame, else a RANGE one)
+/// and of `start` and `end`, as PySpark's `rowsBetween` and `rangeBetween` make it, whose
+/// `__init__` asserts that they are ints.
+fn window_frame<'py>(
+    py: Python<'py>,
+    rows: bool,
+    start: &Bound<'py, PyAny>,
+    end: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
+    static WINDOW_FRAME: pyo3::sync::PyOnceLock<Py<pyo3::types::PyType>> =
+        pyo3::sync::PyOnceLock::new();
+    let class = WINDOW_FRAME.import(py, "pyspark.sql.connect.window", "WindowFrame")?;
+    // Of the parameters in their order, `isRowFrame`, `start` and `end`, which PySpark passes by
+    // name.
+    class.call1((rows, start, end))
+}
+
+/// The bound `value` of `rowsBetween` or `rangeBetween`, the start of the frame if `start`, else
+/// its end, as PySpark compares it with the threshold of its side, with Python's `<=` and `>=`: a
+/// start of `Window._PRECEDING_THRESHOLD` (`-sys.maxsize`) or less is `Window.unboundedPreceding`
+/// and an end of `Window._FOLLOWING_THRESHOLD` (`sys.maxsize`) or more `Window.unboundedFollowing`,
+/// of any type, so also of a float such as `float("inf")`, and a type that does not compare with
+/// an int raises the `TypeError` of the comparison. A `FrameBound` is its int.
+fn compared_bound<'py>(value: &Bound<'py, PyAny>, start: bool) -> PyResult<Bound<'py, PyAny>> {
+    let py = value.py();
+    let value = match value.cast::<PyFrameBound>() {
+        Ok(bound) => frame_bound_value(&bound.borrow().bound)
+            .into_pyobject(py)?
+            .into_any(),
+        Err(_) => value.clone(),
+    };
+    // An int of a long, compared at once, as Python compares ints (of i128, as a threshold may be
+    // the extreme of a long).
+    if value.is_exact_instance_of::<pyo3::types::PyInt>() {
+        if let Ok(n) = value.extract::<i64>() {
+            if start && i128::from(n) <= i128::from(PRECEDING_THRESHOLD) {
+                return Ok(UNBOUNDED_PRECEDING.into_pyobject(py)?.into_any());
+            }
+            if !start && i128::from(n) >= i128::from(FOLLOWING_THRESHOLD) {
+                return Ok(UNBOUNDED_FOLLOWING.into_pyobject(py)?.into_any());
+            }
+            return Ok(value);
         }
     }
-}
-
-impl Clone for PyWindowSpec {
-    /// A window specification of the same partitioning, ordering and frame, whose value is
-    /// written.
-    fn clone(&self) -> Self {
-        PyWindowSpec::new(self.spec.clone())
+    if start && value.le(PRECEDING_THRESHOLD)? {
+        return Ok(UNBOUNDED_PRECEDING.into_pyobject(py)?.into_any());
     }
+    if !start && value.ge(FOLLOWING_THRESHOLD)? {
+        return Ok(UNBOUNDED_FOLLOWING.into_pyobject(py)?.into_any());
+    }
+    Ok(value)
 }
 
 #[pymethods]
 impl PyWindowSpec {
-    /// Partition the window by the given columns.
-    #[pyo3(signature = (*cols))]
-    fn partitionBy(&self, cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyWindowSpec> {
-        let new_spec = self.spec.clone().partition_by(to_partition_exprs(cols)?);
-        Ok(PyWindowSpec::new(new_spec))
+    /// A window specification of no state yet, as PySpark Connect's
+    /// `WindowSpec.__new__(cls, partitionSpec, orderSpec, frame)`, which takes the arguments of
+    /// its `__init__` and is `object.__new__(cls)`: until `__init__` gives it its state, its
+    /// methods raise the `AttributeError` of the first attribute that they read, as PySpark's.
+    #[new]
+    #[pyo3(
+        signature = (partitionSpec, orderSpec, frame),
+        text_signature = "(partitionSpec, orderSpec, frame)"
+    )]
+    #[allow(non_snake_case)]
+    fn py_new(
+        partitionSpec: &Bound<'_, PyAny>,
+        orderSpec: &Bound<'_, PyAny>,
+        frame: &Bound<'_, PyAny>,
+    ) -> Self {
+        let _ = (partitionSpec, orderSpec, frame);
+        PyWindowSpec {}
     }
 
-    /// Order the window by the given columns.
-    #[pyo3(signature = (*cols))]
-    fn orderBy(&self, cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyWindowSpec> {
-        let new_spec = self.spec.clone().order_by(to_sort_orders(cols)?);
-        Ok(PyWindowSpec::new(new_spec))
-    }
-
-    /// Define a ROWS frame between start and end bounds (ints or FrameBounds).
-    fn rowsBetween(
-        &self,
-        py: Python<'_>,
-        start: &Bound<'_, PyAny>,
-        end: &Bound<'_, PyAny>,
-    ) -> PyResult<PyWindowSpec> {
-        let (start, end) = frame_bounds(py, start, end, true)?;
-        let new_spec = self.spec.clone().rows_between(start, end);
-        Ok(PyWindowSpec::new(new_spec))
-    }
-
-    /// Define a RANGE frame between start and end bounds (ints or FrameBounds).
-    fn rangeBetween(
-        &self,
-        py: Python<'_>,
-        start: &Bound<'_, PyAny>,
-        end: &Bound<'_, PyAny>,
-    ) -> PyResult<PyWindowSpec> {
-        let (start, end) = frame_bounds(py, start, end, false)?;
-        let new_spec = self.spec.clone().range_between(start, end);
-        Ok(PyWindowSpec::new(new_spec))
-    }
-
-    /// As `WindowSpec.__repr__` of PySpark Connect.
-    fn __repr__(&self) -> String {
-        self.spec.repr()
-    }
-
-    /// The expressions of the partitioning, as the `_partitionSpec` of PySpark Connect's
-    /// WindowSpec: a list of the `_expr` of each Column, whose `repr` is PySpark's.
-    #[getter]
-    fn _partitionSpec<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyList>> {
-        expression_list(py, self.spec.partition_spec.iter().cloned())
-    }
-
-    /// The sort orders of the ordering, as the `_orderSpec` of PySpark Connect's WindowSpec: a
-    /// list of the `_expr` of each sort order, ascending with nulls first of a Column that is not
-    /// one, whose `repr` is PySpark's, such as `a ASC NULLS FIRST`.
-    #[getter]
-    fn _orderSpec<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyList>> {
-        expression_list(
-            py,
-            self.spec
-                .order_spec
-                .iter()
-                .map(|sort| ExpressionNode::SortOrder(Box::new(sort.clone())).into()),
+    /// `WindowSpec(partitionSpec, orderSpec, frame)`, as PySpark Connect's `__init__`, which
+    /// asserts that the partitioning is a list of expressions, the ordering a list of sort orders
+    /// and the frame None or a `WindowFrame`, of a bare `AssertionError`, and keeps them as its
+    /// `_partitionSpec`, `_orderSpec` and `_frame`, as they are.
+    #[allow(non_snake_case)]
+    fn __init__(
+        slf: &Bound<'_, Self>,
+        partitionSpec: &Bound<'_, PyAny>,
+        orderSpec: &Bound<'_, PyAny>,
+        frame: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        let py = slf.py();
+        let assertion = || pyo3::exceptions::PyAssertionError::new_err(());
+        let Ok(partition) = partitionSpec.cast::<PyList>() else {
+            return Err(assertion());
+        };
+        for item in partition.iter() {
+            if !is_expression(&item)? {
+                return Err(assertion());
+            }
+        }
+        let Ok(order) = orderSpec.cast::<PyList>() else {
+            return Err(assertion());
+        };
+        for item in order.iter() {
+            if !is_sort_order(&item) {
+                return Err(assertion());
+            }
+        }
+        if !frame.is_none() && !is_window_frame(frame)? {
+            return Err(assertion());
+        }
+        crate::state::assign(
+            slf.as_any(),
+            &[
+                (pyo3::intern!(py, "_partitionSpec"), partitionSpec),
+                (pyo3::intern!(py, "_orderSpec"), orderSpec),
+                (pyo3::intern!(py, "_frame"), frame),
+            ],
         )
     }
 
-    /// The frame, as the `_frame` of PySpark Connect's WindowSpec: None without one, else the
-    /// `WindowFrame` of `pyspark.sql.connect.window` of its ROWS flag and its start and end, as
-    /// the ints of `Window`, such as `WindowFrame(ROW_FRAME, -1, 1)`.
-    #[getter]
-    fn _frame(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let Some((frame_type, start, end)) = &self.spec.frame_spec else {
-            return Ok(py.None());
-        };
-        Ok(py
-            .import("pyspark.sql.connect.window")?
-            .getattr("WindowFrame")?
-            .call1((
-                *frame_type == FrameType::Row,
-                frame_bound_value(start),
-                frame_bound_value(end),
-            ))?
-            .unbind())
-    }
-
-    /// A WindowSpec pickles as the partition and sort Columns and the frame of it, which the
-    /// function `pyspark.sql.connect._window_reduce.window_of` gives back as a WindowSpec built
-    /// through `Window`, also on a Python worker of the server, as PySpark's WindowSpec pickles
-    /// the Columns it holds. A sort order is given as the Column of its child and the method of
-    /// its direction and nulls, as an unpickled Column is not a sort order of its own.
-    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+    /// The arguments of `__new__` of the specification, as PySpark Connect's: its
+    /// `_partitionSpec`, `_orderSpec` and `_frame`.
+    fn __getnewargs__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyTuple>> {
         let py = slf.py();
-        let this = slf.borrow();
-        let column = |expr: &Expression| Py::new(py, PyColumn::new(Column::new(expr.clone())));
-        let partition = this
-            .spec
-            .partition_spec
-            .iter()
-            .map(column)
-            .collect::<PyResult<Vec<_>>>()?;
-        let order = this
-            .spec
-            .order_spec
-            .iter()
-            .map(|sort| {
-                let method = match (sort.ascending, sort.null_ordering) {
-                    (true, NullOrdering::First) => "asc_nulls_first",
-                    (true, NullOrdering::Last) => "asc_nulls_last",
-                    (false, NullOrdering::First) => "desc_nulls_first",
-                    (false, NullOrdering::Last) => "desc_nulls_last",
-                };
-                Ok((column(&sort.child)?, method))
-            })
-            .collect::<PyResult<Vec<_>>>()?;
-        // The frame as its ROWS flag and its start and end, as the ints of `Window`.
-        let frame = this
-            .spec
-            .frame_spec
-            .as_ref()
-            .map(|(frame_type, start, end)| {
-                (
-                    *frame_type == FrameType::Row,
-                    frame_bound_value(start),
-                    frame_bound_value(end),
-                )
-            });
-        let window_of = py
-            .import("pyspark.sql.connect.window")?
-            .getattr("_window_reduce")?
-            .getattr("window_of")?;
-        let args = (partition, order, frame).into_pyobject(py)?;
-        let reduce = PyTuple::new(py, [window_of, args.into_any()])?.into_any();
-        crate::group::reduce_with_state(&reduce, slf.as_any())
+        PyTuple::new(
+            py,
+            [
+                crate::state::attr(slf.as_any(), pyo3::intern!(py, "_partitionSpec"))?,
+                crate::state::attr(slf.as_any(), pyo3::intern!(py, "_orderSpec"))?,
+                crate::state::attr(slf.as_any(), pyo3::intern!(py, "_frame"))?,
+            ],
+        )
     }
 
-    /// As PySpark's window specification, a Python object that holds its partitioning and
-    /// ordering columns, which Python's garbage collector sees: the functions of the UDFs that the
-    /// specification alone keeps alive are reported, so that a reference cycle through them is
-    /// collected, as PySpark collects it.
-    fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
-        if !self.gc_ready.get() {
-            return Ok(());
-        }
-        crate::udf_command::visit_pickler_objects(self.spec.exclusive_pickler_objects(), &visit)
+    /// The state of the specification, its `__dict__`, as `object.__getstate__` gives that of
+    /// PySpark's plain object, which a copy and a pickle keep (see `state::getstate`).
+    fn __getstate__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        crate::state::getstate(slf.as_any())
     }
 
-    /// Break a reference cycle that the garbage collector found unreachable: the specification
-    /// drops its columns, and so the objects that `__traverse__` reported.
-    fn __clear__(&mut self) {
-        if self.gc_ready.get() {
-            self.spec = WindowSpec::new();
+    /// The reduce of the specification, as PySpark's plain object's from the protocol 2:
+    /// `copyreg.__newobj__` of its class and of the arguments of its `__getnewargs__`, and its
+    /// `__dict__`, so a copy shares the lists of its partitioning and its ordering and its frame,
+    /// and a deep copy and a pickle copy them. Of every protocol, as `__new__` takes the
+    /// arguments, which the default reduce below 2 does not give, as copyreg's of a class of a
+    /// native base fails.
+    fn __reduce_ex__<'py>(slf: &Bound<'py, Self>, protocol: i32) -> PyResult<Bound<'py, PyAny>> {
+        let _ = protocol;
+        let py = slf.py();
+        let newobj = py.import("copyreg")?.getattr("__newobj__")?;
+        let args = slf.call_method0(pyo3::intern!(py, "__getnewargs__"))?;
+        let mut items = vec![slf.get_type().into_any()];
+        items.extend(args.try_iter()?.collect::<PyResult<Vec<_>>>()?);
+        let state = crate::state::getstate(slf.as_any())?;
+        Ok(PyTuple::new(py, [newobj, PyTuple::new(py, items)?.into_any(), state])?.into_any())
+    }
+
+    // Partition the window by the given columns, as PySpark's
+    // `WindowSpec(partitionSpec=[c._expr for c in _to_cols(cols)], orderSpec=self._orderSpec,
+    // frame=self._frame)`, of the ordering and the frame of this one, as they are.
+    #[pyo3(signature = (*cols))]
+    #[doc = connect_doc!(WindowSpec.partitionBy)]
+    fn partitionBy<'py>(
+        slf: &Bound<'py, Self>,
+        cols: Vec<Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyWindowSpec>> {
+        let py = slf.py();
+        let partition = PyList::new(py, expressions_of(py, cols)?)?;
+        let order = crate::state::attr(slf.as_any(), pyo3::intern!(py, "_orderSpec"))?;
+        let frame = crate::state::attr(slf.as_any(), pyo3::intern!(py, "_frame"))?;
+        new_window_spec(py, partition.as_any(), &order, &frame)
+    }
+
+    // Order the window by the given columns, as PySpark's
+    // `WindowSpec(partitionSpec=self._partitionSpec, orderSpec=[F._sort_col(c)._expr ...],
+    // frame=self._frame)`.
+    #[pyo3(signature = (*cols))]
+    #[doc = connect_doc!(WindowSpec.orderBy)]
+    fn orderBy<'py>(
+        slf: &Bound<'py, Self>,
+        cols: Vec<Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyWindowSpec>> {
+        let py = slf.py();
+        let partition = crate::state::attr(slf.as_any(), pyo3::intern!(py, "_partitionSpec"))?;
+        let order = PyList::new(py, sort_expressions_of(py, cols)?)?;
+        let frame = crate::state::attr(slf.as_any(), pyo3::intern!(py, "_frame"))?;
+        new_window_spec(py, &partition, order.as_any(), &frame)
+    }
+
+    // Define a ROWS frame between start and end bounds, as PySpark's: of the ints of the bounds,
+    // compared with the thresholds of their sides, in a `WindowFrame` of a ROWS frame, of the
+    // partitioning and the ordering of this one.
+    #[doc = connect_doc!(WindowSpec.rowsBetween)]
+    fn rowsBetween<'py>(
+        slf: &Bound<'py, Self>,
+        start: &Bound<'py, PyAny>,
+        end: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyWindowSpec>> {
+        Self::between(slf, start, end, true)
+    }
+
+    // Define a RANGE frame between start and end bounds, as `rowsBetween` does a ROWS frame.
+    #[doc = connect_doc!(WindowSpec.rangeBetween)]
+    fn rangeBetween<'py>(
+        slf: &Bound<'py, Self>,
+        start: &Bound<'py, PyAny>,
+        end: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyWindowSpec>> {
+        Self::between(slf, start, end, false)
+    }
+
+    /// As `WindowSpec.__repr__` of PySpark Connect, of the `str` of each expression of its
+    /// partitioning and its ordering, and of its frame.
+    fn __repr__(slf: &Bound<'_, Self>) -> PyResult<String> {
+        let py = slf.py();
+        let joined = |items: &Bound<'_, PyAny>| -> PyResult<Option<String>> {
+            if items.len()? == 0 {
+                return Ok(None);
+            }
+            let texts = items
+                .try_iter()?
+                .map(|item| Ok(item?.str()?.to_cow()?.into_owned()))
+                .collect::<PyResult<Vec<String>>>()?;
+            Ok(Some(texts.join(", ")))
+        };
+        let mut parts = Vec::new();
+        let partition = crate::state::attr(slf.as_any(), pyo3::intern!(py, "_partitionSpec"))?;
+        if let Some(text) = joined(&partition)? {
+            parts.push(format!("PartitionBy({text})"));
+        }
+        let order = crate::state::attr(slf.as_any(), pyo3::intern!(py, "_orderSpec"))?;
+        if let Some(text) = joined(&order)? {
+            parts.push(format!("OrderBy({text})"));
+        }
+        let frame = crate::state::attr(slf.as_any(), pyo3::intern!(py, "_frame"))?;
+        if !frame.is_none() {
+            parts.push(frame.str()?.to_cow()?.into_owned());
+        }
+        Ok(format!("WindowSpec({})", parts.join(", ")))
+    }
+}
+
+impl PyWindowSpec {
+    /// `rowsBetween(start, end)` if `rows`, else `rangeBetween(start, end)`, as PySpark's: the
+    /// start and then the end compared with the thresholds of their sides, and the specification
+    /// of the partitioning and the ordering of this one and of the `WindowFrame` of them, which
+    /// asserts that each is an int.
+    fn between<'py>(
+        slf: &Bound<'py, Self>,
+        start: &Bound<'py, PyAny>,
+        end: &Bound<'py, PyAny>,
+        rows: bool,
+    ) -> PyResult<Bound<'py, PyWindowSpec>> {
+        let py = slf.py();
+        let start = compared_bound(start, true)?;
+        let end = compared_bound(end, false)?;
+        let partition = crate::state::attr(slf.as_any(), pyo3::intern!(py, "_partitionSpec"))?;
+        let order = crate::state::attr(slf.as_any(), pyo3::intern!(py, "_orderSpec"))?;
+        let frame = window_frame(py, rows, &start, &end)?;
+        new_window_spec(py, &partition, &order, &frame)
+    }
+}
+
+/// Whether `value` is an expression, of this client (a `_ColumnExpression`) or of PySpark's
+/// classes, as PySpark's `WindowSpec.__init__` asserts of its partitioning.
+fn is_expression(value: &Bound<'_, PyAny>) -> PyResult<bool> {
+    if value.is_instance_of::<crate::column::PyColumnExpression>() {
+        return Ok(true);
+    }
+    static EXPRESSION: pyo3::sync::PyOnceLock<Py<pyo3::types::PyType>> =
+        pyo3::sync::PyOnceLock::new();
+    let class = EXPRESSION.import(value.py(), "pyspark.sql.connect.expressions", "Expression")?;
+    value.is_instance(class)
+}
+
+/// Whether `value` is a `WindowFrame` of `pyspark.sql.connect.window`, as PySpark's
+/// `WindowSpec.__init__` asserts of its frame.
+fn is_window_frame(value: &Bound<'_, PyAny>) -> PyResult<bool> {
+    static WINDOW_FRAME: pyo3::sync::PyOnceLock<Py<pyo3::types::PyType>> =
+        pyo3::sync::PyOnceLock::new();
+    let class = WINDOW_FRAME.import(value.py(), "pyspark.sql.connect.window", "WindowFrame")?;
+    value.is_instance(class)
+}
+
+/// The window of the core of `window`, a window specification, of its `_partitionSpec`, its
+/// `_orderSpec` and its `_frame` as they are at the call, as PySpark's `WindowExpression.to_plan`
+/// reads them when a request builds its plan, and the error that such a build raises first of a
+/// bound of the frame that the window of the core does not hold, in place of which it holds the
+/// current row (see [`window_bound`]). The `over` of a Column makes its window expression of them
+/// (residue (a) of the design: the expression is a value of the call).
+pub(crate) fn window_spec_of(
+    window: &Bound<'_, PyAny>,
+) -> PyResult<(WindowSpec, Option<SparkError>, bool)> {
+    let py = window.py();
+    // Of its attribute lookup, as PySpark's reads of `self._windowSpec._partitionSpec`, which no
+    // `__getattr__` of the client's class reads again, so of no check of a recursion.
+    let partition = window.getattr(pyo3::intern!(py, "_partitionSpec"))?;
+    list_of_window(&partition)?;
+    let partition_spec = entries_of(&partition, |item| {
+        match item.cast::<crate::column::PyColumnExpression>() {
+            Ok(expression) => Ok(expression.borrow().column().expression().clone()),
+            Err(_) => Ok(expression_value(item)?.expression().clone()),
+        }
+    })?;
+    let order = window.getattr(pyo3::intern!(py, "_orderSpec"))?;
+    list_of_window(&order)?;
+    let order_spec = entries_of(&order, sort_order_of)?;
+    let mut spec = WindowSpec {
+        partition_spec,
+        order_spec,
+        frame_spec: None,
+    };
+    let frame = window.getattr(pyo3::intern!(py, "_frame"))?;
+    if frame.is_none() {
+        return Ok((spec, None, true));
+    }
+    let rows = frame
+        .getattr(pyo3::intern!(py, "_isRowFrame"))?
+        .is_truthy()?;
+    let (start, end) = (
+        frame.getattr(pyo3::intern!(py, "_start"))?,
+        frame.getattr(pyo3::intern!(py, "_end"))?,
+    );
+    // The core renders the offset of a bound, which is PySpark's rendering of an int of a long,
+    // and not of a bool or of an int of another class.
+    let rendered = [&start, &end].iter().all(|bound| {
+        bound.is_exact_instance_of::<pyo3::types::PyInt>() && bound.extract::<i64>().is_ok()
+    });
+    let start = window_bound(&start, true, rows)?;
+    let end = window_bound(&end, false, rows)?;
+    let mut error = None;
+    let mut held = |bound: Result<FrameBound, SparkError>| match bound {
+        Ok(bound) => bound,
+        Err(failure) => {
+            error.get_or_insert(failure);
+            FrameBound::CurrentRow
+        }
+    };
+    let (start, end) = (held(start), held(end));
+    spec = match rows {
+        true => spec.rows_between(start, end),
+        false => spec.range_between(start, end),
+    };
+    Ok((spec, error, rendered))
+}
+
+/// The core expression of `item`, an expression of a window specification: of this client, the
+/// `_expr` of a Column, or of PySpark's classes, of its `to_plan` (see `column::expression_value`).
+fn expression_value(item: &Bound<'_, PyAny>) -> PyResult<Column> {
+    crate::column::expression_value(item)
+}
+
+/// Check that `entries`, the partitioning or the ordering of a window, is a list, as PySpark's
+/// `WindowExpression.children` concatenates them to the list of its window function: of
+/// another object, the `TypeError` of that concatenation, which PySpark raises when a plan of the
+/// window expression is made (`_collect_references`), and the drop-in when the window expression
+/// is made of the window.
+fn list_of_window(entries: &Bound<'_, PyAny>) -> PyResult<()> {
+    if entries.is_instance_of::<PyList>() {
+        return Ok(());
+    }
+    let type_name = entries.get_type().name()?.to_string();
+    Err(pyo3::exceptions::PyTypeError::new_err(format!(
+        "can only concatenate list (not \"{type_name}\") to list"
+    )))
+}
+
+/// The values of `of` of the entries of `entries`, a list of a window specification, in their
+/// order, as PySpark iterates it: of a list, its items at once, and of another iterable, of its
+/// iterator.
+fn entries_of<T>(
+    entries: &Bound<'_, PyAny>,
+    of: impl Fn(&Bound<'_, PyAny>) -> PyResult<T>,
+) -> PyResult<Vec<T>> {
+    if let Ok(list) = entries.cast_exact::<PyList>() {
+        return list.iter().map(|item| of(&item)).collect();
+    }
+    entries.try_iter()?.map(|item| of(&item?)).collect()
+}
+
+/// The sort order of the core of `item`, an entry of the ordering of a window specification, as
+/// PySpark's `WindowExpression.to_plan` sends `s.to_plan(session).sort_order` of each: of a sort
+/// order of this client, its own; of another object, which the ordering holds once it is
+/// assigned, such as an `Expression` of the user's class, the sort order of its `to_plan`, of its
+/// child as it is sent, rendered as the `str` of its `_child`, as PySpark's `SortOrder.__repr__`
+/// renders it. Another expression is sorted ascending with nulls first, as the window of the core
+/// holds sort orders.
+fn sort_order_of(item: &Bound<'_, PyAny>) -> PyResult<SortOrder> {
+    use prost::Message;
+    use spark_connect_proto::expression::sort_order::{NullOrdering, SortDirection};
+    if let Ok(expression) = item.cast::<crate::column::PyColumnExpression>() {
+        let expression = expression.borrow();
+        let expression = expression.column().expression();
+        return Ok(match expression.node() {
+            ExpressionNode::SortOrder(sort) => (**sort).clone(),
+            _ => SortOrder::asc_nulls_first(expression.clone()),
+        });
+    }
+    let planned = crate::column::planned_expression(item)?;
+    // Decoded, and its child encoded again, then dropped, on a stack that holds its levels.
+    let sort = crate::on_grown_stack(|| {
+        spark_connect_proto::Expression::decode(planned.as_bytes()).map(|decoded| {
+            match decoded.expr_type {
+                Some(spark_connect_proto::expression::ExprType::SortOrder(sort)) => Some((
+                    sort.child
+                        .map(|child| child.encode_to_vec())
+                        .unwrap_or_default(),
+                    sort.direction != SortDirection::Descending as i32,
+                    sort.null_ordering == NullOrdering::SortNullsLast as i32,
+                )),
+                _ => None,
+            }
+        })
+    })
+    .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+    // A rendering that fails is the error of the rendering of the window expression, as of a
+    // Column (see `column::converted_expression`).
+    let rendered_column =
+        |bytes: &[u8], text: PyResult<Bound<'_, pyo3::types::PyString>>| match text
+            .and_then(|text| text.extract::<String>())
+        {
+            Ok(text) => crate::column::sent_column(bytes, text),
+            Err(error) => crate::column::unrenderable_column(
+                crate::column::sent_column(bytes, String::new())?,
+                error,
+            ),
+        };
+    let Some((child, ascending, nulls_last)) = sort else {
+        let expression = rendered_column(planned.as_bytes(), item.str())?;
+        return Ok(SortOrder::asc_nulls_first(expression.expression().clone()));
+    };
+    let py = item.py();
+    let rendered = match item.getattr(pyo3::intern!(py, "_child")) {
+        Ok(child) => child.str(),
+        Err(_) => item.str(),
+    };
+    let child = rendered_column(&child, rendered)?;
+    Ok(SortOrder {
+        child: child.expression().clone(),
+        ascending,
+        null_ordering: if nulls_last {
+            spark_connect::expression::NullOrdering::Last
+        } else {
+            spark_connect::expression::NullOrdering::First
+        },
+    })
+}
+
+/// The bound `value` of a frame, its start if `lower`, else its end, of a ROWS frame if `rows`,
+/// else of a RANGE one, as PySpark's `WindowExpression.to_plan` converts it as it builds the plan
+/// of the frame: 0 (False too) is the current row, the long of `Window.unboundedPreceding` as the
+/// start and of `Window.unboundedFollowing` as the end is unbounded, and else a ROWS frame sets an
+/// int of an int32 in the integer literal, and raises `VALUE_NOT_BETWEEN` of an int beyond, and a
+/// RANGE frame any other int in the long literal, as protobuf's default (upb) backend takes a value
+/// of an int field: a bool is its `TypeError`, an int beyond a long its `ValueError` (see
+/// `stat_arguments::proto_int`). The error is the one of the request that builds the plan.
+fn window_bound(
+    value: &Bound<'_, PyAny>,
+    lower: bool,
+    rows: bool,
+) -> PyResult<Result<FrameBound, SparkError>> {
+    let py = value.py();
+    // An int of a long, as `rowsBetween` and `rangeBetween` keep the bounds of ints, compared at
+    // once, as Python compares ints, and set as protobuf takes an int in the range of its field.
+    if value.is_exact_instance_of::<pyo3::types::PyInt>() {
+        if let Ok(n) = value.extract::<i64>() {
+            return Ok(int_bound(n, lower, rows));
         }
     }
+    if value.eq(0)? {
+        return Ok(Ok(FrameBound::CurrentRow));
+    }
+    if lower && value.eq(UNBOUNDED_PRECEDING)? {
+        return Ok(Ok(FrameBound::UnboundedPreceding));
+    }
+    if !lower && value.eq(UNBOUNDED_FOLLOWING)? {
+        return Ok(Ok(FrameBound::UnboundedFollowing));
+    }
+    let offset = if rows {
+        if !(value.ge(i32::MIN)? && value.le(i32::MAX)?) {
+            return Ok(Err(not_between(lower)));
+        }
+        crate::stat_arguments::proto_int::<i32>(value, ROW_BOUNDARY_FIELD).map(i64::from)
+    } else {
+        crate::stat_arguments::proto_int::<i64>(value, RANGE_BOUNDARY_FIELD)
+    };
+    Ok(match offset {
+        Ok(offset) => Ok(frame_bound_of(offset)),
+        Err(error) => Err(crate::dataframe::unbuildable_error(py, error)?),
+    })
+}
+
+/// The bound of `n`, an int of a long, as [`window_bound`] takes it.
+fn int_bound(n: i64, lower: bool, rows: bool) -> Result<FrameBound, SparkError> {
+    if n == 0 {
+        return Ok(FrameBound::CurrentRow);
+    }
+    if lower && n == UNBOUNDED_PRECEDING {
+        return Ok(FrameBound::UnboundedPreceding);
+    }
+    if !lower && n == UNBOUNDED_FOLLOWING {
+        return Ok(FrameBound::UnboundedFollowing);
+    }
+    if rows && i32::try_from(n).is_err() {
+        return Err(not_between(lower));
+    }
+    Ok(frame_bound_of(n))
+}
+
+/// PySpark's `VALUE_NOT_BETWEEN` of the start of a row frame if `lower`, else of its end, of a
+/// bound beyond an int.
+fn not_between(lower: bool) -> SparkError {
+    let name = if lower { "start" } else { "end" };
+    SparkError::value(
+        "VALUE_NOT_BETWEEN",
+        &[
+            ("arg_name", name),
+            ("min", &i32::MIN.to_string()),
+            ("max", &i32::MAX.to_string()),
+        ],
+    )
 }
 
 /// The int of the frame bound `bound`, as PySpark's `WindowFrame` keeps it: the sentinel of
@@ -476,123 +775,17 @@ fn frame_bound_value(bound: &FrameBound) -> i64 {
     }
 }
 
-/// The list of the `_expr` of a Column of each of `expressions`, as PySpark Connect's WindowSpec
-/// keeps the expressions of its partitioning and ordering.
-fn expression_list<'py>(
-    py: Python<'py>,
-    expressions: impl Iterator<Item = Expression>,
-) -> PyResult<Bound<'py, pyo3::types::PyList>> {
-    let items = expressions
-        .map(|expression| Bound::new(py, PyColumn::new(Column::new(expression)))?.getattr("_expr"))
-        .collect::<PyResult<Vec<_>>>()?;
-    pyo3::types::PyList::new(py, items)
-}
-
-/// Python wrapper for the Window static builder, `pyspark.sql.window.Window`. As PySpark's, it is
-/// subclassed by PySpark Connect's `pyspark.sql.connect.window.Window`, a class of its own, and is
-/// a plain class: its objects, and those of a subclass, construct as `object.__new__` makes
-/// PySpark's (see `reduce::check_plain_new`), take attributes and weak references, and pickle and
-/// copy as plain objects.
-#[pyclass(
-    name = "Window",
-    module = "pyspark.sql.window",
-    subclass,
-    weakref,
-    dict
-)]
-pub struct PyWindow;
-
-#[pymethods]
-impl PyWindow {
-    // As `object.__new__` of PySpark's class, of its signature `()`.
-    #[new]
-    #[classmethod]
-    #[pyo3(signature = (*args, **kwargs), text_signature = "()")]
-    fn new(
-        cls: &Bound<'_, pyo3::types::PyType>,
-        args: &Bound<'_, PyTuple>,
-        kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
-    ) -> PyResult<Self> {
-        crate::reduce::check_plain_new(cls, args, kwargs)?;
-        Ok(PyWindow)
-    }
-
-    // The reduce of a plain object (see `reduce::plain_reduce`).
-    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyTuple>> {
-        crate::reduce::plain_reduce(slf.as_any())
-    }
-
-    /// The start at or below which `rowsBetween` and `rangeBetween` make a frame unbounded
-    /// preceding, as PySpark's `max(-sys.maxsize, JVM_LONG_MIN)`.
-    #[classattr]
-    fn _PRECEDING_THRESHOLD() -> i64 {
-        PRECEDING_THRESHOLD
-    }
-
-    /// The end at or above which `rowsBetween` and `rangeBetween` make a frame unbounded
-    /// following, as PySpark's `min(sys.maxsize, JVM_LONG_MAX)`.
-    #[classattr]
-    fn _FOLLOWING_THRESHOLD() -> i64 {
-        FOLLOWING_THRESHOLD
-    }
-
-    /// UNBOUNDED PRECEDING sentinel (matches pyspark's integer value).
-    #[classattr]
-    fn unboundedPreceding() -> i64 {
-        UNBOUNDED_PRECEDING
-    }
-
-    /// CURRENT ROW sentinel.
-    #[classattr]
-    fn currentRow() -> i64 {
-        0
-    }
-
-    /// UNBOUNDED FOLLOWING sentinel (matches pyspark's integer value).
-    #[classattr]
-    fn unboundedFollowing() -> i64 {
-        UNBOUNDED_FOLLOWING
-    }
-
-    /// Create a WindowSpec partitioned by the given columns.
-    #[pyo3(signature = (*cols))]
-    #[staticmethod]
-    fn partitionBy(cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyWindowSpec> {
-        let spec = WindowSpec::new().partition_by(to_partition_exprs(cols)?);
-        Ok(PyWindowSpec::new(spec))
-    }
-
-    /// Create a WindowSpec ordered by the given columns.
-    #[pyo3(signature = (*cols))]
-    #[staticmethod]
-    fn orderBy(cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyWindowSpec> {
-        let spec = WindowSpec::new().order_by(to_sort_orders(cols)?);
-        Ok(PyWindowSpec::new(spec))
-    }
-
-    /// Create a WindowSpec with a ROWS frame between the given bounds.
-    #[staticmethod]
-    fn rowsBetween(
-        py: Python<'_>,
-        start: &Bound<'_, PyAny>,
-        end: &Bound<'_, PyAny>,
-    ) -> PyResult<PyWindowSpec> {
-        let (start, end) = frame_bounds(py, start, end, true)?;
-        Ok(PyWindowSpec::new(
-            WindowSpec::new().rows_between(start, end),
-        ))
-    }
-
-    /// Create a WindowSpec with a RANGE frame between the given bounds.
-    #[staticmethod]
-    fn rangeBetween(
-        py: Python<'_>,
-        start: &Bound<'_, PyAny>,
-        end: &Bound<'_, PyAny>,
-    ) -> PyResult<PyWindowSpec> {
-        let (start, end) = frame_bounds(py, start, end, false)?;
-        Ok(PyWindowSpec::new(
-            WindowSpec::new().range_between(start, end),
-        ))
-    }
+/// The window specification of no partitioning, ordering and frame, of which the static methods
+/// of `pyspark.sql.connect.window.Window` start, as PySpark Connect's `Window._spec`. The classic
+/// `pyspark.sql.window.Window` is PySpark's, whose static methods dispatch to those.
+#[pyfunction]
+#[pyo3(name = "_empty_window_spec")]
+pub(crate) fn empty_window_spec(py: Python<'_>) -> PyResult<Bound<'_, PyWindowSpec>> {
+    let none = py.None().into_bound(py);
+    new_window_spec(
+        py,
+        PyList::empty(py).as_any(),
+        PyList::empty(py).as_any(),
+        &none,
+    )
 }

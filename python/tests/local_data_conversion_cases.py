@@ -9,9 +9,9 @@ from pyspark.sql import types as T
 from row_conversion_cases import conversion_result
 
 # The rows, or the values of an array, of the part of the conversion that a case observes: steps
-# enough for another thread to wait for the GIL at its checkpoints, every 1,024 steps, for about
-# a tenth of a second at least. The parts that take each step faster take more.
-_COUNT = 262144
+# enough for the part to hold checkpoints, every 1,024 steps, at which another thread reads it
+# (see `LocalDataConversionProbe`). The parts that take each step faster take more.
+_COUNT = 16384
 
 
 def _deep(levels=80):
@@ -186,28 +186,21 @@ class TestLocalDataConversionInterrupts:
         data, schema, _, _, failure = _case(layout, 8)
         with pytest.raises(failure):
             spark.createDataFrame(data, schema)
-        # The other thread takes the GIL at the checkpoints that the operating system schedules
-        # it at, of which only some fall in the part: a conversion in which it read the part at
-        # none is run again, a few times, and so is one whose signal came only after it ended, as
-        # a read near the end of the part leaves no checkpoint after it. With no checkpoint, it
-        # reads it in none.
-        for _ in range(5):
-            data, schema, in_part, held, failure = _case(layout, _COUNT)
-            in_part.arm()
-            held.arm()
-            probe = LocalDataConversionProbe(in_part, held, cancel=cancel)
-            interrupted = False
-            with probe:
-                try:
-                    with pytest.raises(failure):
-                        probe.convert(lambda: spark.createDataFrame(data, schema))
-                except KeyboardInterrupt:
-                    interrupted = True
-            assert not probe.failures, probe.failures
-            if "progress" in probe.observed and not (
-                cancel and "late_or_unproven_signal" in probe.observed
-            ):
-                break
+        # The other thread reads the conversion at each of its checkpoints, where the conversion
+        # waits for it (see `LocalDataConversionProbe`), of no scheduling of the operating system:
+        # with no checkpoint in the part, it reads it in none.
+        data, schema, in_part, held, failure = _case(layout, _COUNT)
+        in_part.arm()
+        held.arm()
+        probe = LocalDataConversionProbe(in_part, held, cancel=cancel)
+        interrupted = False
+        with probe:
+            try:
+                with pytest.raises(failure):
+                    probe.convert(lambda: spark.createDataFrame(data, schema))
+            except KeyboardInterrupt:
+                interrupted = True
+        assert not probe.failures, probe.failures
         progress = probe.observed.get("progress")
         assert progress is not None, probe.observed
         assert progress["captured_at"] < probe.observed["conversion_ended_at"], probe.observed

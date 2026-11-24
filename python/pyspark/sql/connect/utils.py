@@ -14,8 +14,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""The utilities of the connect import path, as PySpark Connect's ``pyspark.sql.connect.utils``,
-from Apache Spark v4.3.0. ``check_dependencies`` checks the dependencies of this client."""
+# The utilities of the connect import path, as PySpark Connect's ``pyspark.sql.connect.utils``,
+# from Apache Spark v4.3.0. ``check_dependencies`` checks the dependencies of this client.
 
 import sys
 

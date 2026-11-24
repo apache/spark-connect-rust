@@ -9,7 +9,6 @@ reference (`_native_classes.native_class`).
 import json
 import os
 import shutil
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -32,10 +31,10 @@ def session():
 
 
 @pytest.mark.parametrize("name", CLASSES)
-def test_live_cases_are_pyspark_mls(name, session):
+def test_live_cases_are_pyspark_mls(name, session, tmp_path):
     # The saves go to a scratch directory of the local file system, of the server that the tests
     # run against on the same machine, as in CI.
-    ours = live_cases(name, session, tempfile.mkdtemp(prefix="evaluation-api-cases-"))
+    ours = live_cases(name, session, str(tmp_path))
     golden = CASES[name]["live"]
     assert sorted(ours) == sorted(golden)
     differ = {tag: (ours[tag], golden[tag]) for tag in golden if ours[tag] != golden[tag]}
@@ -43,7 +42,7 @@ def test_live_cases_are_pyspark_mls(name, session):
 
 
 @pytest.mark.parametrize("name", CLASSES)
-def test_objects_of_this_client_are_of_the_classes_of_pyspark_mls(name, session):
+def test_objects_of_this_client_are_of_the_classes_of_pyspark_mls(name, session, tmp_path):
     # Every evaluator that this client makes is of the class of its module (of PySpark's on official
     # PySpark), which is a subclass of every class of the MRO of PySpark's class
     # (test_ml_api_offline.py): an evaluator, its copy (of a param map too) and its load.
@@ -54,7 +53,7 @@ def test_objects_of_this_client_are_of_the_classes_of_pyspark_mls(name, session)
     evaluator = of_its_class(_cls(name)())
     of_its_class(evaluator.copy())
     of_its_class(evaluator.copy({evaluator.metricName: evaluator.getMetricName()}))
-    base = tempfile.mkdtemp(prefix="evaluation-api-classes-")
+    base = str(tmp_path)
     try:
         evaluator.write().overwrite().save(base + "/evaluator")
         of_its_class(_cls(name).load(base + "/evaluator"))

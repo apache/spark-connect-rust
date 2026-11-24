@@ -48,6 +48,13 @@ impl TableArg {
         }
     }
 
+    /// Whether the plan of this table argument is the plan of a relation built outside the core
+    /// whose build failed with `error` (see [`DataFrame::is_unbuilt_with`]). Not a stable API.
+    #[doc(hidden)]
+    pub fn is_unbuilt_with(&self, error: &SparkError) -> bool {
+        crate::plan::is_unbuilt_with(&self.subquery.plan, error)
+    }
+
     /// The relation of the plan of this table argument, of the plan IDs of the session of its
     /// DataFrame, as that DataFrame sends it, and the levels of the plan, which a pickle of the
     /// table argument keeps: [`DataFrame::from_sent_relation_levels`] gives back a DataFrame of
@@ -82,17 +89,13 @@ impl TableArg {
         TableArg { subquery }
     }
 
-    /// The objects of the picklers of the UDFs and the UDTFs of the plan and of the expressions
-    /// of this table argument that it alone keeps alive, as
-    /// [`DataFrame::exclusive_pickler_objects`] gives those of a DataFrame, which a Python
-    /// wrapper reports to Python's garbage collector, as PySpark's table argument, of Python
-    /// objects, holds the plan of its DataFrame: the plan once the DataFrame is gone, and the
-    /// partitioning and the ordering. Not a stable API.
+    /// The references of this table argument to the shared parts of its plan and of its
+    /// partitioning and ordering (see [`crate::gc`]). Not a stable API.
     #[doc(hidden)]
-    pub fn exclusive_pickler_objects(&self) -> Vec<&(dyn std::any::Any + Send + Sync)> {
-        crate::udf::exclusive_pickler_objects(vec![crate::udf::PicklerHolder::Subquery(
-            &self.subquery,
-        )])
+    pub fn held_parts(&self) -> Vec<crate::gc::PartRef<'_>> {
+        let mut held = Vec::new();
+        crate::gc::subquery_parts(&self.subquery, &mut held);
+        held
     }
 
     /// Drop the plan and the expressions of this table argument, as [`DataFrame::clear_plan`]
@@ -232,6 +235,23 @@ impl TableArg {
     pub fn to_column(&self) -> Column {
         Column::new(ExpressionNode::Subquery(Box::new(self.subquery.clone())).into())
     }
+
+    /// The table argument of `column`, if it is the Column of the subquery of a table argument
+    /// ([`TableArg::to_column`]), as PySpark's `TableArg(subquery_expr)` is of the subquery
+    /// expression that it is given. Not a stable API.
+    #[doc(hidden)]
+    pub fn of_column(column: &Column) -> Option<TableArg> {
+        match column.expression().node() {
+            ExpressionNode::Subquery(subquery)
+                if subquery.subquery_type == SubqueryType::TableArg =>
+            {
+                Some(TableArg {
+                    subquery: (**subquery).clone(),
+                })
+            }
+            _ => None,
+        }
+    }
 }
 
 impl From<TableArg> for Column {
@@ -286,6 +306,25 @@ mod tests {
         let subquery = subquery_proto(&t);
         assert_eq!(subquery.plan_id, 7);
         assert_eq!(subquery.table_arg_options, None);
+    }
+
+    #[test]
+    fn the_column_of_a_table_argument_gives_it_back_and_no_other_column_does() {
+        // As PySpark's `TableArg(t._subquery_expr)`, of the subquery of the table argument.
+        let t = arg().partition_by(vec![col("a")]).unwrap();
+        let back = TableArg::of_column(&t.to_column()).expect("a table argument");
+        assert!(back.is_partitioned());
+        assert_eq!(subquery_proto(&back), subquery_proto(&t));
+        assert!(TableArg::of_column(&col("a")).is_none());
+        let scalar = Column::new(
+            ExpressionNode::Subquery(Box::new(SubqueryExpression::new(
+                std::sync::Arc::new(base_plan()),
+                7,
+                SubqueryType::Scalar,
+            )))
+            .into(),
+        );
+        assert!(TableArg::of_column(&scalar).is_none());
     }
 
     #[test]

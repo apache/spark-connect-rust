@@ -9,7 +9,7 @@ use spark_connect::catalog::{
 use spark_connect_core::error::SparkError;
 
 use crate::dataframe::PyDataFrame;
-use crate::interrupt::interruptible;
+use crate::interrupt::interruptible_without_parts;
 
 /// PySpark's FutureWarning of the deprecated `dbName` of the catalog method `method`, of the line
 /// `line` of its `warnings.warn` in `pyspark.sql.connect.catalog` (see `warn_as_pyspark`).
@@ -201,8 +201,8 @@ fn named_tuples<T: NamedTuple>(py: Python<'_>, results: Vec<T>) -> PyResult<Vec<
 
 // Python wrapper for Spark Catalog. It has the default repr, as PySpark Connect's Catalog, which
 // defines none: `<pyspark.sql.connect.catalog.Catalog object at 0x...>`. As PySpark's plain class,
-// it is subclassed: a subclass constructs of the arguments of its own `__init__`, and its copies
-// and pickles are of its class.
+// it keeps its state in its `__dict__`, its `_sparkSession`, which its methods read when they make
+// their requests, and it is subclassed and constructed of PySpark's arguments (see `crate::state`).
 #[doc = connect_doc!(Catalog)]
 #[pyclass(
     name = "Catalog",
@@ -211,120 +211,81 @@ fn named_tuples<T: NamedTuple>(py: Python<'_>, results: Vec<T>) -> PyResult<Vec<
     weakref,
     dict
 )]
-pub struct PyCatalog {
-    pub(crate) catalog: Catalog,
-}
+pub struct PyCatalog {}
 
 impl PyCatalog {
-    pub fn new(catalog: Catalog) -> Self {
-        PyCatalog { catalog }
+    /// The core catalog of the session of `_sparkSession`, which PySpark's methods read as they
+    /// make their request, `DataFrame(plan, session=self._sparkSession)` of its `client`: of the
+    /// AttributeError of a catalog whose `__init__` never ran, and of the object that it holds
+    /// (see `state::session_of_value`).
+    fn catalog_of(slf: &Bound<'_, Self>) -> PyResult<Catalog> {
+        let py = slf.py();
+        let session = crate::state::attr(slf.as_any(), pyo3::intern!(py, "_sparkSession"))?;
+        Ok(crate::state::session_of_value(&session, pyo3::intern!(py, "client"))?.catalog())
     }
 
     /// `f` of the catalog without the GIL, as PySpark's requests to the server release it
     /// while they wait, so that other Python threads run and a signal interrupts the wait.
     fn detached<T: Send>(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         f: impl FnOnce(&Catalog) -> Result<T, Box<SparkError>> + Send,
     ) -> PyResult<T> {
-        interruptible(py, self.catalog.spark_session(), || f(&self.catalog))
+        let catalog = Self::catalog_of(slf)?;
+        interruptible_without_parts(slf.py(), catalog.spark_session(), || f(&catalog))
     }
 }
 
 #[pymethods]
 impl PyCatalog {
-    /// A catalog, as the `object.__new__` of PySpark's plain class: of any arguments, which
-    /// `__init__` takes, so that a subclass of another `__init__` is built as it is in PySpark. It
-    /// is of the first of them that is a session, or else of the session of no server until
-    /// `__init__` gives it one (see `session::constructor_session`). The class shows the signature
-    /// of `__init__`, as `inspect.signature` of PySpark's class does.
+    /// A catalog of no state, as the `object.__new__` of PySpark's plain class: of any arguments,
+    /// which `__init__` takes, so that a subclass of another `__init__` is built as it is in
+    /// PySpark. The class shows the signature of `__init__`, as `inspect.signature` of PySpark's
+    /// class does.
     #[new]
-    #[pyo3(signature = (*args, **kwargs), text_signature = "(sparkSession)")]
+    #[pyo3(signature = (*_args, **_kwargs), text_signature = "(sparkSession)")]
     fn py_new(
-        args: &Bound<'_, pyo3::types::PyTuple>,
-        kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
-    ) -> PyResult<Self> {
-        let session = crate::session::constructor_session(args, kwargs, "sparkSession")?;
-        Ok(PyCatalog::new(session.catalog()))
+        _args: &Bound<'_, pyo3::types::PyTuple>,
+        _kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
+    ) -> Self {
+        PyCatalog {}
     }
 
-    /// `Catalog(sparkSession)`, as PySpark Connect's `__init__`: a catalog of the session, another
-    /// object than `spark.catalog`, which the session keeps.
+    /// `Catalog(sparkSession)`, as PySpark Connect's `__init__`, which keeps its argument as it
+    /// is, as the `_sparkSession` of the catalog: another catalog than `spark.catalog`, which the
+    /// session keeps.
     #[allow(non_snake_case)]
-    fn __init__(slf: &Bound<'_, Self>, sparkSession: PyRef<'_, crate::session::PySparkSession>) {
-        let catalog = sparkSession.session.catalog();
-        // The catalog that it replaces is dropped once the object is not borrowed, as the drop of
-        // its session may run Python code.
-        let replaced = std::mem::replace(&mut slf.borrow_mut().catalog, catalog);
-        drop(replaced);
-    }
-
-    /// The shallow copy of the catalog, as PySpark's `copy.copy`: of the same session, and of the
-    /// class of this one, as the copy of PySpark's of a subclass is.
-    fn __copy__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, Self>> {
-        let catalog = PyCatalog::new(slf.borrow().catalog.clone());
-        let copy = crate::reduce::new_of_class(&slf.get_type(), catalog)?;
-        crate::group::copy_instance_state(copy.as_any(), slf.as_any())?;
-        Ok(copy)
-    }
-
-    /// The reduce of the catalog, as PySpark's pickle of a plain object of its session: a new
-    /// `Catalog` of its session, which unpickles with it, and not the catalog that the session
-    /// keeps (`spark.catalog`), whose attributes a copy or an unpickle would otherwise change. A
-    /// catalog of a subclass is made of its class as an unpickle of PySpark's makes it, by
-    /// `copyreg.__newobj__`, without its `__init__`, which may take other arguments.
-    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
-        use pyo3::types::PyTuple;
+    fn __init__(slf: &Bound<'_, Self>, sparkSession: &Bound<'_, PyAny>) -> PyResult<()> {
         let py = slf.py();
-        let session = crate::session::session_object(py, slf.borrow().catalog.spark_session())?;
-        let session = session.into_bound(py).into_any();
-        let cls = slf.get_type();
-        let reduce = if cls.is(py.get_type::<Self>()) {
-            let args = PyTuple::new(py, [session])?;
-            PyTuple::new(py, [cls.into_any(), args.into_any()])?
-        } else {
-            let newobj = py.import("copyreg")?.getattr("__newobj__")?;
-            let args = PyTuple::new(py, [cls.into_any(), session])?;
-            PyTuple::new(py, [newobj, args.into_any()])?
-        };
-        crate::group::reduce_with_state(reduce.as_any(), slf.as_any())
+        crate::state::assign(
+            slf.as_any(),
+            &[(pyo3::intern!(py, "_sparkSession"), sparkSession)],
+        )
     }
 
-    /// The state of a pickle of a catalog, which pickle sets on the catalog that `__new__` made
-    /// of no arguments: of PySpark's pickle, the `__dict__` of its plain object, whose
-    /// `_sparkSession` is the session of the catalog, and the other entries its instance
-    /// attributes, which are all that the state of the drop-in's pickle holds.
-    fn __setstate__(slf: &Bound<'_, Self>, state: &Bound<'_, pyo3::types::PyDict>) -> PyResult<()> {
-        let py = slf.py();
-        let state = state.copy()?;
-        if let Some(session) = state.get_item("_sparkSession")? {
-            if let Ok(session) = session.cast::<crate::session::PySparkSession>() {
-                Self::__init__(slf, session.borrow());
-                state.del_item("_sparkSession")?;
-            }
-        }
-        slf.getattr(pyo3::intern!(py, "__dict__"))?
-            .call_method1(pyo3::intern!(py, "update"), (state,))?;
-        Ok(())
+    /// The state of the catalog, its `__dict__`, as `object.__getstate__` gives that of PySpark's
+    /// plain object, which a copy and a pickle keep (see `state::getstate`).
+    fn __getstate__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        crate::state::getstate(slf.as_any())
     }
 
-    /// The session of the catalog, as PySpark Connect's `Catalog._sparkSession`.
-    #[getter]
-    fn _sparkSession(&self, py: Python<'_>) -> PyResult<Py<crate::session::PySparkSession>> {
-        crate::session::session_object(py, self.catalog.spark_session())
+    /// The reduce of the catalog, as PySpark's plain object's: `copyreg.__newobj__` of its class,
+    /// of its `__dict__`, so a copy is of the same `_sparkSession`, a deep copy and a pickle are of
+    /// the active session of its ID, and PySpark's pickle loads here (see `state::reduce_ex`).
+    fn __reduce_ex__<'py>(slf: &Bound<'py, Self>, protocol: i32) -> PyResult<Bound<'py, PyAny>> {
+        crate::state::reduce_ex(slf.as_any(), protocol)
     }
 
     // Get the current catalog.
     #[doc = connect_doc!(Catalog.currentCatalog)]
-    fn currentCatalog(&self, py: Python<'_>) -> PyResult<String> {
-        self.detached(py, |catalog| catalog.current_catalog().map_err(Box::new))
+    fn currentCatalog(slf: &Bound<'_, Self>) -> PyResult<String> {
+        Self::detached(slf, |catalog| catalog.current_catalog().map_err(Box::new))
     }
 
     // Set the current catalog.
     #[doc = connect_doc!(Catalog.setCurrentCatalog)]
-    fn setCurrentCatalog(&self, py: Python<'_>, catalogName: &Bound<'_, PyAny>) -> PyResult<()> {
+    fn setCurrentCatalog(slf: &Bound<'_, Self>, catalogName: &Bound<'_, PyAny>) -> PyResult<()> {
         let catalogName = crate::str_argument(catalogName)?;
-        self.detached(py, |catalog| {
+        Self::detached(slf, |catalog| {
             catalog.set_current_catalog(&catalogName).map_err(Box::new)
         })
     }
@@ -333,14 +294,14 @@ impl PyCatalog {
     #[pyo3(signature = (pattern=None))]
     #[doc = connect_doc!(Catalog.listCatalogs)]
     fn listCatalogs(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         pattern: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Vec<Py<PyAny>>> {
+        let py = slf.py();
         let pattern = pattern.map(crate::str_argument).transpose()?;
         named_tuples(
             py,
-            self.detached(py, |catalog| {
+            Self::detached(slf, |catalog| {
                 { catalog.list_catalogs_typed(pattern.as_deref()) }.map_err(Box::new)
             })?,
         )
@@ -348,15 +309,15 @@ impl PyCatalog {
 
     // Get current database.
     #[doc = connect_doc!(Catalog.currentDatabase)]
-    fn currentDatabase(&self, py: Python<'_>) -> PyResult<String> {
-        self.detached(py, |catalog| catalog.current_database().map_err(Box::new))
+    fn currentDatabase(slf: &Bound<'_, Self>) -> PyResult<String> {
+        Self::detached(slf, |catalog| catalog.current_database().map_err(Box::new))
     }
 
     // Set current database.
     #[doc = connect_doc!(Catalog.setCurrentDatabase)]
-    fn setCurrentDatabase(&self, py: Python<'_>, dbName: &Bound<'_, PyAny>) -> PyResult<()> {
+    fn setCurrentDatabase(slf: &Bound<'_, Self>, dbName: &Bound<'_, PyAny>) -> PyResult<()> {
         let dbName = crate::str_argument(dbName)?;
-        self.detached(py, |catalog| {
+        Self::detached(slf, |catalog| {
             catalog.set_current_database(&dbName).map_err(Box::new)
         })
     }
@@ -365,14 +326,14 @@ impl PyCatalog {
     #[pyo3(signature = (pattern=None))]
     #[doc = connect_doc!(Catalog.listDatabases)]
     fn listDatabases(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         pattern: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Vec<Py<PyAny>>> {
+        let py = slf.py();
         let pattern = pattern.map(crate::str_argument).transpose()?;
         named_tuples(
             py,
-            self.detached(py, |catalog| {
+            Self::detached(slf, |catalog| {
                 { catalog.list_databases_typed(pattern.as_deref()) }.map_err(Box::new)
             })?,
         )
@@ -380,18 +341,19 @@ impl PyCatalog {
 
     // Check if database exists.
     #[doc = connect_doc!(Catalog.databaseExists)]
-    fn databaseExists(&self, py: Python<'_>, dbName: &Bound<'_, PyAny>) -> PyResult<bool> {
+    fn databaseExists(slf: &Bound<'_, Self>, dbName: &Bound<'_, PyAny>) -> PyResult<bool> {
         let dbName = crate::str_argument(dbName)?;
-        self.detached(py, |catalog| {
+        Self::detached(slf, |catalog| {
             catalog.database_exists(&dbName).map_err(Box::new)
         })
     }
 
     // Get database info. Mirrors `Catalog.getDatabase(dbName) -> Database`.
     #[doc = connect_doc!(Catalog.getDatabase)]
-    fn getDatabase(&self, py: Python<'_>, dbName: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    fn getDatabase(slf: &Bound<'_, Self>, dbName: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let py = slf.py();
         let dbName = crate::str_argument(dbName)?;
-        self.detached(py, |catalog| {
+        Self::detached(slf, |catalog| {
             catalog.get_database_typed(&dbName).map_err(Box::new)
         })?
         .named_tuple(py)
@@ -402,16 +364,16 @@ impl PyCatalog {
     #[allow(non_snake_case)]
     #[doc = connect_doc!(Catalog.listTables)]
     fn listTables(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         dbName: Option<&Bound<'_, PyAny>>,
         pattern: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Vec<Py<PyAny>>> {
+        let py = slf.py();
         let dbName = dbName.map(crate::str_argument).transpose()?;
         let pattern = pattern.map(crate::str_argument).transpose()?;
         named_tuples(
             py,
-            self.detached(py, |catalog| {
+            Self::detached(slf, |catalog| {
                 { catalog.list_tables_typed(dbName.as_deref(), pattern.as_deref()) }
                     .map_err(Box::new)
             })?,
@@ -422,24 +384,25 @@ impl PyCatalog {
     #[pyo3(signature = (tableName, dbName=None))]
     #[doc = connect_doc!(Catalog.tableExists)]
     fn tableExists(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         tableName: &Bound<'_, PyAny>,
         dbName: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<bool> {
+        let py = slf.py();
         warn_db_name(py, "tableExists", 218, dbName)?;
         let tableName = crate::str_argument(tableName)?;
         let dbName = dbName.map(crate::str_argument).transpose()?;
-        self.detached(py, |catalog| {
+        Self::detached(slf, |catalog| {
             { catalog.table_exists_with_database(&tableName, dbName.as_deref()) }.map_err(Box::new)
         })
     }
 
     // Get table info. Mirrors `Catalog.getTable(tableName) -> Table`.
     #[doc = connect_doc!(Catalog.getTable)]
-    fn getTable(&self, py: Python<'_>, tableName: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    fn getTable(slf: &Bound<'_, Self>, tableName: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let py = slf.py();
         let tableName = crate::str_argument(tableName)?;
-        self.detached(py, |catalog| {
+        Self::detached(slf, |catalog| {
             catalog.get_table_typed(&tableName).map_err(Box::new)
         })?
         .named_tuple(py)
@@ -450,16 +413,16 @@ impl PyCatalog {
     #[allow(non_snake_case)]
     #[doc = connect_doc!(Catalog.listFunctions)]
     fn listFunctions(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         dbName: Option<&Bound<'_, PyAny>>,
         pattern: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Vec<Py<PyAny>>> {
+        let py = slf.py();
         let dbName = dbName.map(crate::str_argument).transpose()?;
         let pattern = pattern.map(crate::str_argument).transpose()?;
         named_tuples(
             py,
-            self.detached(py, |catalog| {
+            Self::detached(slf, |catalog| {
                 catalog
                     .list_functions_typed(dbName.as_deref(), pattern.as_deref())
                     .map_err(Box::new)
@@ -471,15 +434,15 @@ impl PyCatalog {
     #[pyo3(signature = (functionName, dbName=None))]
     #[doc = connect_doc!(Catalog.functionExists)]
     fn functionExists(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         functionName: &Bound<'_, PyAny>,
         dbName: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<bool> {
+        let py = slf.py();
         warn_db_name(py, "functionExists", 168, dbName)?;
         let functionName = crate::str_argument(functionName)?;
         let dbName = dbName.map(crate::str_argument).transpose()?;
-        self.detached(py, |catalog| {
+        Self::detached(slf, |catalog| {
             { catalog.function_exists_with_database(&functionName, dbName.as_deref()) }
                 .map_err(Box::new)
         })
@@ -487,9 +450,10 @@ impl PyCatalog {
 
     // Get function info. Mirrors `Catalog.getFunction(functionName) -> Function`.
     #[doc = connect_doc!(Catalog.getFunction)]
-    fn getFunction(&self, py: Python<'_>, functionName: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    fn getFunction(slf: &Bound<'_, Self>, functionName: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let py = slf.py();
         let functionName = crate::str_argument(functionName)?;
-        self.detached(py, |catalog| {
+        Self::detached(slf, |catalog| {
             catalog.get_function_typed(&functionName).map_err(Box::new)
         })?
         .named_tuple(py)
@@ -500,17 +464,17 @@ impl PyCatalog {
     #[allow(non_snake_case)]
     #[doc = connect_doc!(Catalog.listColumns)]
     fn listColumns(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         tableName: &Bound<'_, PyAny>,
         dbName: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Vec<Py<PyAny>>> {
+        let py = slf.py();
         warn_db_name(py, "listColumns", 195, dbName)?;
         let tableName = crate::str_argument(tableName)?;
         let dbName = dbName.map(crate::str_argument).transpose()?;
         named_tuples(
             py,
-            self.detached(py, |catalog| {
+            Self::detached(slf, |catalog| {
                 catalog
                     .list_columns_typed(&tableName, dbName.as_deref())
                     .map_err(Box::new)
@@ -529,8 +493,7 @@ impl PyCatalog {
     #[pyo3(signature = (tableName, storageLevel=None))]
     #[doc = connect_doc!(Catalog.cacheTable)]
     fn cacheTable(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         tableName: &Bound<'_, PyAny>,
         storageLevel: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<()> {
@@ -541,76 +504,76 @@ impl PyCatalog {
             }
             _ => None,
         };
-        self.detached(py, |catalog| {
+        Self::detached(slf, |catalog| {
             { catalog.cache_table_with_storage_level(&tableName, level) }.map_err(Box::new)
         })
     }
 
     // Uncache a table.
     #[doc = connect_doc!(Catalog.uncacheTable)]
-    fn uncacheTable(&self, py: Python<'_>, tableName: &Bound<'_, PyAny>) -> PyResult<()> {
+    fn uncacheTable(slf: &Bound<'_, Self>, tableName: &Bound<'_, PyAny>) -> PyResult<()> {
         let tableName = crate::str_argument(tableName)?;
-        self.detached(py, |catalog| {
+        Self::detached(slf, |catalog| {
             catalog.uncache_table(&tableName).map_err(Box::new)
         })
     }
 
     // Drop temporary view.
     #[doc = connect_doc!(Catalog.dropTempView)]
-    fn dropTempView(&self, py: Python<'_>, viewName: &Bound<'_, PyAny>) -> PyResult<bool> {
+    fn dropTempView(slf: &Bound<'_, Self>, viewName: &Bound<'_, PyAny>) -> PyResult<bool> {
         let viewName = crate::str_argument(viewName)?;
-        self.detached(py, |catalog| {
+        Self::detached(slf, |catalog| {
             catalog.drop_temp_view(&viewName).map_err(Box::new)
         })
     }
 
     // Drop a global temporary view.
     #[doc = connect_doc!(Catalog.dropGlobalTempView)]
-    fn dropGlobalTempView(&self, py: Python<'_>, viewName: &Bound<'_, PyAny>) -> PyResult<bool> {
+    fn dropGlobalTempView(slf: &Bound<'_, Self>, viewName: &Bound<'_, PyAny>) -> PyResult<bool> {
         let viewName = crate::str_argument(viewName)?;
-        self.detached(py, |catalog| {
+        Self::detached(slf, |catalog| {
             catalog.drop_global_temp_view(&viewName).map_err(Box::new)
         })
     }
 
     // Whether a table/view is cached.
     #[doc = connect_doc!(Catalog.isCached)]
-    fn isCached(&self, py: Python<'_>, tableName: &Bound<'_, PyAny>) -> PyResult<bool> {
+    fn isCached(slf: &Bound<'_, Self>, tableName: &Bound<'_, PyAny>) -> PyResult<bool> {
         let tableName = crate::str_argument(tableName)?;
-        self.detached(py, |catalog| {
+        Self::detached(slf, |catalog| {
             catalog.is_cached(&tableName).map_err(Box::new)
         })
     }
 
     // Remove all cached tables from the in-memory cache.
     #[doc = connect_doc!(Catalog.clearCache)]
-    fn clearCache(&self, py: Python<'_>) -> PyResult<()> {
-        self.detached(py, |catalog| catalog.clear_cache().map_err(Box::new))
+    fn clearCache(slf: &Bound<'_, Self>) -> PyResult<()> {
+        Self::detached(slf, |catalog| catalog.clear_cache().map_err(Box::new))
     }
 
     // Invalidate and refresh cached metadata for a table.
     #[doc = connect_doc!(Catalog.refreshTable)]
-    fn refreshTable(&self, py: Python<'_>, tableName: &Bound<'_, PyAny>) -> PyResult<()> {
+    fn refreshTable(slf: &Bound<'_, Self>, tableName: &Bound<'_, PyAny>) -> PyResult<()> {
         let tableName = crate::str_argument(tableName)?;
-        self.detached(py, |catalog| {
+        Self::detached(slf, |catalog| {
             catalog.refresh_table(&tableName).map_err(Box::new)
         })
     }
 
     // Invalidate and refresh cached data for any table at a path.
     #[doc = connect_doc!(Catalog.refreshByPath)]
-    fn refreshByPath(&self, py: Python<'_>, path: &Bound<'_, PyAny>) -> PyResult<()> {
+    fn refreshByPath(slf: &Bound<'_, Self>, path: &Bound<'_, PyAny>) -> PyResult<()> {
         let path = crate::str_argument(path)?;
-        self.detached(py, |catalog| {
+        Self::detached(slf, |catalog| {
             catalog.refresh_by_path(&path).map_err(Box::new)
         })
     }
 
     // Recover all the partitions of a table.
     #[doc = connect_doc!(Catalog.recoverPartitions)]
-    fn recoverPartitions(&self, py: Python<'_>, tableName: &Bound<'_, PyAny>) -> PyResult<()> {
+    fn recoverPartitions(slf: &Bound<'_, Self>, tableName: &Bound<'_, PyAny>) -> PyResult<()> {
         let tableName = crate::str_argument(tableName)?;
-        self.detached(py, |catalog| {
+        Self::detached(slf, |catalog| {
             catalog.recover_partitions(&tableName).map_err(Box::new)
         })
     }
@@ -624,8 +587,7 @@ impl PyCatalog {
     #[allow(non_snake_case, clippy::too_many_arguments)]
     #[doc = connect_doc!(Catalog.createTable)]
     fn createTable(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         tableName: &Bound<'_, PyAny>,
         path: Option<&Bound<'_, PyAny>>,
         source: Option<&Bound<'_, PyAny>>,
@@ -633,7 +595,8 @@ impl PyCatalog {
         description: Option<&Bound<'_, PyAny>>,
         extra: &Bound<'_, pyo3::types::PyTuple>,
         options: Option<&Bound<'_, pyo3::types::PyDict>>,
-    ) -> PyResult<PyDataFrame> {
+    ) -> PyResult<crate::dataframe::NewDataFrame> {
+        let py = slf.py();
         crate::options::check_keyword_keys(options)?;
         check_extra_positional("Catalog.createTable", 5, extra)?;
         let schema = table_schema(schema)?;
@@ -645,8 +608,10 @@ impl PyCatalog {
         let description = description.map(crate::str_argument).transpose()?;
         let schema = table_schema_proto(schema)?;
         let options = crate::options::str_kwargs_skip_none(options)?;
-        interruptible(py, self.catalog.spark_session(), || {
-            self.catalog
+        // Of the session that PySpark's `DataFrame(plan, session=self._sparkSession)` reads then.
+        let catalog = Self::catalog_of(slf)?;
+        interruptible_without_parts(py, catalog.spark_session(), || {
+            catalog
                 .create_table_with(
                     &tableName,
                     path.as_deref(),
@@ -669,16 +634,16 @@ impl PyCatalog {
     )]
     #[allow(non_snake_case, clippy::too_many_arguments)]
     #[doc = connect_doc!(Catalog.createExternalTable)]
-    fn createExternalTable(
-        &self,
-        py: Python<'_>,
-        tableName: &Bound<'_, PyAny>,
-        path: Option<&Bound<'_, PyAny>>,
-        source: Option<&Bound<'_, PyAny>>,
-        schema: Option<&Bound<'_, PyAny>>,
-        extra: &Bound<'_, pyo3::types::PyTuple>,
-        options: Option<&Bound<'_, pyo3::types::PyDict>>,
-    ) -> PyResult<PyDataFrame> {
+    fn createExternalTable<'py>(
+        slf: &Bound<'py, Self>,
+        tableName: &Bound<'py, PyAny>,
+        path: Option<&Bound<'py, PyAny>>,
+        source: Option<&Bound<'py, PyAny>>,
+        schema: Option<&Bound<'py, PyAny>>,
+        extra: &Bound<'py, pyo3::types::PyTuple>,
+        options: Option<&Bound<'py, pyo3::types::PyDict>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let py = slf.py();
         crate::options::check_keyword_keys(options)?;
         check_extra_positional("Catalog.createExternalTable", 4, extra)?;
         // Of the line of PySpark's `warnings.warn` in `pyspark.sql.connect.catalog`.
@@ -689,27 +654,13 @@ impl PyCatalog {
             "createExternalTable is deprecated since Spark 4.0, please use createTable instead.",
             &py.get_type::<pyo3::exceptions::PyFutureWarning>(),
         )?;
-        // As PySpark's `self.createTable(tableName, path, source, schema, **options)`, which
-        // binds a `description` of the options to the parameter of createTable.
-        let options = options.map(|options| options.copy()).transpose()?;
-        let mut description = None;
-        if let Some(options) = &options {
-            description = options.get_item("description")?;
-            if description.is_some() {
-                options.del_item("description")?;
-            }
-        }
-        let description = description.filter(|description| !description.is_none());
-        let none = pyo3::types::PyTuple::empty(py);
-        self.createTable(
-            py,
-            tableName,
-            path,
-            source,
-            schema,
-            description.as_ref(),
-            &none,
-            options.as_ref(),
+        // As PySpark's `self.createTable(tableName, path, source, schema, **options)`, a call of
+        // the method of the object, of a subclass too, which binds a `description` of the options
+        // to the parameter of createTable.
+        slf.call_method(
+            pyo3::intern!(py, "createTable"),
+            (tableName, path, source, schema),
+            options,
         )
     }
 
@@ -719,12 +670,12 @@ impl PyCatalog {
     #[allow(non_snake_case)]
     #[doc = connect_doc!(Catalog.registerFunction)]
     fn registerFunction<'a>(
-        &self,
-        py: Python<'a>,
+        slf: &Bound<'a, Self>,
         name: &str,
         f: Bound<'a, PyAny>,
         returnType: Option<Bound<'a, PyAny>>,
     ) -> PyResult<Bound<'a, PyAny>> {
+        let py = slf.py();
         // Of the line of PySpark's `warnings.warn` in `pyspark.sql.connect.catalog`.
         crate::errors::warn_as_pyspark(
             py,
@@ -733,11 +684,10 @@ impl PyCatalog {
             "Deprecated in 2.3.0. Use spark.udf.register instead.",
             &py.get_type::<pyo3::exceptions::PyFutureWarning>(),
         )?;
-        let session = crate::session::session_object(py, self.catalog.spark_session())?;
-        session
-            .bind(py)
-            .getattr("udf")?
-            .call_method1("register", (name, f, returnType))
+        // As PySpark's `self._sparkSession.udf.register(name, f, returnType)`.
+        crate::state::attr(slf.as_any(), pyo3::intern!(py, "_sparkSession"))?
+            .getattr(pyo3::intern!(py, "udf"))?
+            .call_method1(pyo3::intern!(py, "register"), (name, f, returnType))
     }
 
     // Create a database, with the `properties` of PySpark's protobuf map of strings, whose keys
@@ -752,8 +702,7 @@ impl PyCatalog {
     #[allow(non_snake_case)]
     #[doc = connect_doc!(Catalog.createDatabase)]
     fn createDatabase(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         dbName: &Bound<'_, PyAny>,
         ifNotExists: Option<&Bound<'_, PyAny>>,
         properties: Option<&Bound<'_, PyAny>>,
@@ -771,7 +720,7 @@ impl PyCatalog {
                 props.insert(crate::str_argument(&k)?, crate::str_argument(&v)?);
             }
         }
-        self.detached(py, |catalog| {
+        Self::detached(slf, |catalog| {
             { catalog.create_database(&dbName, ifNotExists, props) }.map_err(Box::new)
         })
     }
@@ -784,15 +733,14 @@ impl PyCatalog {
     #[allow(non_snake_case)]
     #[doc = connect_doc!(Catalog.dropDatabase)]
     fn dropDatabase(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         dbName: &Bound<'_, PyAny>,
         ifExists: Option<&Bound<'_, PyAny>>,
         cascade: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<()> {
         let dbName = constructor_name(dbName)?;
         let (ifExists, cascade) = (constructor_bool(ifExists)?, constructor_bool(cascade)?);
-        self.detached(py, |catalog| {
+        Self::detached(slf, |catalog| {
             { catalog.drop_database(&dbName, ifExists, cascade) }.map_err(Box::new)
         })
     }
@@ -805,15 +753,14 @@ impl PyCatalog {
     #[allow(non_snake_case)]
     #[doc = connect_doc!(Catalog.dropTable)]
     fn dropTable(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         tableName: &Bound<'_, PyAny>,
         ifExists: Option<&Bound<'_, PyAny>>,
         purge: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<()> {
         let tableName = constructor_name(tableName)?;
         let (ifExists, purge) = (constructor_bool(ifExists)?, constructor_bool(purge)?);
-        self.detached(py, |catalog| {
+        Self::detached(slf, |catalog| {
             catalog
                 .drop_table(&tableName, ifExists, purge)
                 .map_err(Box::new)
@@ -828,14 +775,13 @@ impl PyCatalog {
     #[allow(non_snake_case)]
     #[doc = connect_doc!(Catalog.dropView)]
     fn dropView(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         viewName: &Bound<'_, PyAny>,
         ifExists: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<()> {
         let viewName = constructor_name(viewName)?;
         let ifExists = constructor_bool(ifExists)?;
-        self.detached(py, |catalog| {
+        Self::detached(slf, |catalog| {
             catalog.drop_view(&viewName, ifExists).map_err(Box::new)
         })
     }
@@ -843,9 +789,9 @@ impl PyCatalog {
     // Truncate a table.
     #[allow(non_snake_case)]
     #[doc = connect_doc!(Catalog.truncateTable)]
-    fn truncateTable(&self, py: Python<'_>, tableName: &Bound<'_, PyAny>) -> PyResult<()> {
+    fn truncateTable(slf: &Bound<'_, Self>, tableName: &Bound<'_, PyAny>) -> PyResult<()> {
         let tableName = crate::str_argument(tableName)?;
-        self.detached(py, |catalog| {
+        Self::detached(slf, |catalog| {
             catalog.truncate_table(&tableName).map_err(Box::new)
         })
     }
@@ -858,14 +804,14 @@ impl PyCatalog {
     #[allow(non_snake_case)]
     #[doc = connect_doc!(Catalog.analyzeTable)]
     fn analyzeTable(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         tableName: &Bound<'_, PyAny>,
         noScan: crate::streaming::ProtoBool,
     ) -> PyResult<()> {
+        let py = slf.py();
         let tableName = crate::str_argument(tableName)?;
         let noScan = noScan.value(py)?;
-        self.detached(py, |catalog| {
+        Self::detached(slf, |catalog| {
             catalog.analyze_table(&tableName, noScan).map_err(Box::new)
         })
     }
@@ -879,14 +825,14 @@ impl PyCatalog {
     #[allow(non_snake_case)]
     #[doc = connect_doc!(Catalog.getCreateTableString)]
     fn getCreateTableString(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         tableName: &Bound<'_, PyAny>,
         asSerde: crate::streaming::ProtoBool,
     ) -> PyResult<String> {
+        let py = slf.py();
         let tableName = crate::str_argument(tableName)?;
         let asSerde = asSerde.value(py)?;
-        self.detached(py, |catalog| {
+        Self::detached(slf, |catalog| {
             { catalog.get_create_table_string(&tableName, asSerde) }.map_err(Box::new)
         })
     }
@@ -895,12 +841,12 @@ impl PyCatalog {
     #[allow(non_snake_case)]
     #[doc = connect_doc!(Catalog.getTableProperties)]
     fn getTableProperties<'py>(
-        &self,
-        py: Python<'py>,
+        slf: &Bound<'py, Self>,
         tableName: &Bound<'_, PyAny>,
     ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+        let py = slf.py();
         let tableName = crate::str_argument(tableName)?;
-        let props = self.detached(py, |catalog| {
+        let props = Self::detached(slf, |catalog| {
             catalog.get_table_properties(&tableName).map_err(Box::new)
         })?;
         let dict = pyo3::types::PyDict::new(py);
@@ -914,14 +860,14 @@ impl PyCatalog {
     #[allow(non_snake_case)]
     #[doc = connect_doc!(Catalog.listPartitions)]
     fn listPartitions(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         tableName: &Bound<'_, PyAny>,
     ) -> PyResult<Vec<Py<PyAny>>> {
+        let py = slf.py();
         let tableName = crate::str_argument(tableName)?;
         named_tuples(
             py,
-            self.detached(py, |catalog| {
+            Self::detached(slf, |catalog| {
                 catalog.list_partitions_typed(&tableName).map_err(Box::new)
             })?,
         )
@@ -933,19 +879,23 @@ impl PyCatalog {
     #[allow(non_snake_case)]
     #[doc = connect_doc!(Catalog.listViews)]
     fn listViews(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         dbName: Option<&Bound<'_, PyAny>>,
         pattern: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Vec<Py<PyAny>>> {
+        let py = slf.py();
         let dbName = match (dbName, pattern) {
-            (None, Some(_)) => Some(self.currentDatabase(py)?),
+            // As PySpark's `self.currentDatabase()`, of the method of the object.
+            (None, Some(_)) => Some(
+                slf.call_method0(pyo3::intern!(py, "currentDatabase"))?
+                    .extract::<String>()?,
+            ),
             (dbName, _) => dbName.map(crate::str_argument).transpose()?,
         };
         let pattern = pattern.map(crate::str_argument).transpose()?;
         named_tuples(
             py,
-            self.detached(py, |catalog| {
+            Self::detached(slf, |catalog| {
                 { catalog.list_views_typed(dbName.as_deref(), pattern.as_deref()) }
                     .map_err(Box::new)
             })?,

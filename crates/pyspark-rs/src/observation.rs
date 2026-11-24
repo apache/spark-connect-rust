@@ -123,16 +123,16 @@ impl PyObservation {
     #[doc = connect_doc!(Observation._on)]
     fn _on(
         slf: &Bound<'_, Self>,
-        df: PyRef<'_, PyDataFrame>,
-        exprs: Vec<PyRef<'_, PyColumn>>,
-    ) -> PyResult<PyDataFrame> {
-        let exprs: Vec<_> = exprs
+        df: &Bound<'_, PyDataFrame>,
+        exprs: Vec<Bound<'_, PyColumn>>,
+    ) -> PyResult<crate::dataframe::NewDataFrame> {
+        let df = crate::dataframe::PlanFrame::of(df)?;
+        let exprs = exprs
             .iter()
-            .map(|c| c.column.expression().clone())
-            .collect();
-        let observed = observe(slf.py(), &df, slf, exprs)?;
-        // The cached schema of the DataFrame, which observing does not change.
-        Ok(df.of_same_schema(observed))
+            .map(|c| Ok(crate::column::column_of(c)?.expression().clone()))
+            .collect::<PyResult<Vec<_>>>()?;
+        // As PySpark's `DataFrame(plan.CollectMetrics(...), df._session)`, of no `_cached_schema`.
+        observe(slf.py(), &df, slf, exprs)
     }
 
     /// `copy.copy`, as of PySpark's Observation, a plain object: an Observation of the class and
@@ -378,7 +378,7 @@ fn owner_observation<'py>(
 /// The clone of the state of `observation` that a plan holds, which keeps `observation` alive, as
 /// PySpark's plan holds the Observation itself: so the plan's Observations are the Python
 /// Observations, of their classes and attributes, and a DataFrame reports them to Python's
-/// garbage collector (`DataFrame::exclusive_observation_owners`).
+/// garbage collector (see `crate::gc`).
 fn held_by_the_plan(observation: &Bound<'_, PyObservation>) -> Observation {
     let owner: Arc<dyn std::any::Any + Send + Sync> =
         Arc::new(observation.clone().into_any().unbind());
@@ -481,11 +481,11 @@ fn copy_attributes(
 /// DataFrames of it set the metrics, as those of an Observation of their plans.
 pub(crate) fn observe(
     py: Python<'_>,
-    frame: &PyDataFrame,
+    frame: &crate::dataframe::PlanFrame<'_>,
     observation: &Bound<'_, PyObservation>,
     exprs: Vec<Expression>,
-) -> PyResult<PyDataFrame> {
-    let df = &frame.dataframe;
+) -> PyResult<crate::dataframe::NewDataFrame> {
+    let df = frame.plan();
     if !observation.getattr(intern!(py, "_result"))?.is_none() {
         return Err(raise_pyspark(
             py,
@@ -506,9 +506,22 @@ pub(crate) fn observe(
     // the text of a str name, in the place of the name of a plan without the mirror.
     observation.borrow_mut().inner = Observation::new(&crate::plan_args::rendered(&name)?);
     let inner = held_by_the_plan(observation);
-    // As PySpark's `Observation._on`, which reads the `isStreaming` of the DataFrame, asked once.
+    // As PySpark's `Observation._on`, which reads the `isStreaming` of the DataFrame, asked once:
+    // of the plan of the DataFrame, which the observed plan is built over and the request of
+    // `isStreaming` is built of, and of the expressions of the metrics.
+    let parts = df
+        .held_parts()
+        .into_iter()
+        .chain(exprs.iter().map(spark_connect::gc::PartRef::Expression));
+    // As PySpark's `Observation._on`, which reads `df.isStreaming`, its cached property.
+    let streaming = frame
+        .slf()
+        .as_any()
+        .getattr(intern!(py, "isStreaming"))?
+        .is_truthy()?;
+    let _in_use = crate::gc::in_use_of_values(py, parts);
     let observed = crate::interrupt::interruptible(py, &df.spark_session(), || {
-        df.observe_with_streaming(&inner, exprs, || frame.streaming_once())
+        df.observe_with_streaming(&inner, exprs, || Ok(streaming))
     })?;
     observation.setattr(intern!(py, "_result"), PyDict::new(py))?;
     mirror_into(observation)?;
@@ -516,7 +529,7 @@ pub(crate) fn observe(
     // deep copy of the plan copies with the memo of the call. The clones of its state that do not
     // keep it alive find it by its weak reference.
     keep_handle(observation)?;
-    Ok(PyDataFrame::new(observed))
+    Ok(frame.derived(observed))
 }
 
 /// Have the executions of `session` convert the metrics of the Observations of their plans as

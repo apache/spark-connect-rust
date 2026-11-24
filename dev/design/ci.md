@@ -16,14 +16,20 @@ The CI consists of these main workflows:
    and macOS universal2 wheels using the release recipe
 4. **Coverage** (`.github/workflows/coverage.yml`) - Rust and Python coverage, with regression
    floors
+5. **Experimental server frontend** (`.github/workflows/server-frontend.yml`) - Test the
+   optional Rust protocol frontend with stable Rust and MSRV 1.88
+6. **Experimental JVM server** (`.github/workflows/native-server.yml`) - Test and package
+   the JNI adapter on native Linux and macOS runners, with a pinned Spark JNI smoke test
 
 The other workflows are `lint.yml` (rustfmt, clippy, rustdoc, ruff), `generated-drift.yml`,
-`vendor-drift.yml`, `docs.yml`, `pandas-parity.yml`, `pipelines-parity.yml` and `release.yml`.
+`vendor-drift.yml`, `docs.yml`, `pandas-parity.yml`,
+`pipelines-parity.yml` and `release.yml`.
 
 Most workflows run on pushes and pull requests targeting `master` and `branch-*`. Several also
-accept manual dispatch. `docs.yml` and `wheel-build-checks.yml` run only when files matching their
-path filters change. The release wheel build checks cover changes to packaged Python sources,
-protocol definitions, dependencies and build configuration. `release.yml` runs on a schedule and on
+accept manual dispatch. `docs.yml`, `native-server.yml`, `wheel-build-checks.yml` and
+`server-frontend.yml` filter push and pull-request runs to matching paths. The release wheel
+build checks cover packaged Python sources, protocol definitions, dependencies and build
+configuration. `release.yml` runs on a schedule and on
 manual dispatch.
 
 ## Rust CI (`rust.yml`)
@@ -36,8 +42,10 @@ This workflow validates the pure-Rust implementation:
   (`apache-spark-connect-proto`, `apache-spark-connect-core`, `apache-spark-connect`,
   `apache-spark-connect-macros` and `apache-spark-connect-build`). `pyspark-rs` is not a
   default member, so the Python workflows build it separately.
-- **Test**: Runs `cargo test` on `apache-spark-connect` and `apache-spark-connect-core`, then
-  builds and tests `apache-spark-connect` with the `datafusion,polars` features
+- **Test**: Runs `cargo test` on `apache-spark-connect` and `apache-spark-connect-core`, then on
+  `apache-spark-connect-proto` on its own, whose prost has its limit of 100 nested messages there
+  (the tests of the crates before lift it), then builds and tests `apache-spark-connect` with the
+  `datafusion,polars` features
 - **No-stub audit**: Runs `scripts/audit_no_stubs.sh` to enforce the "100% coverage, zero stubs"
   rule (see [Design notes](architecture.md))
 - **Warnings**: The workflow sets `RUSTFLAGS` to `-D warnings`
@@ -68,6 +76,19 @@ The same workflow has four more jobs:
   `RUSTFLAGS` cleared
 
 This job should always pass; failures indicate incomplete implementation or test regressions.
+
+## Experimental server frontend (`server-frontend.yml`)
+
+This focused workflow runs on frontend, protocol, client and core crate changes,
+as well as workspace manifest, lockfile, Cargo configuration, toolchain and
+workflow changes. Each stable Rust and Rust 1.88.0 job has a 45-minute limit,
+runs `cargo test --locked -p spark-connect-server`,
+and checks the protocol crate with its `server` feature both off and on.
+The existing workspace lint job covers the frontend with its pinned Rust toolchain;
+test jobs do not promote warnings from a floating or older compiler to errors.
+Ubuntu 24.04 supplies a protobuf compiler with
+proto3 optional support. Tests use injected engine fixtures and require no execution backend;
+they cover frontend protocol behavior rather than Spark execution compatibility.
 
 ## Python Connect Parity (`build_python_connect.yml`)
 
@@ -292,6 +313,68 @@ value.
 
 On a push to `master` the job also publishes both numbers to the `badges` branch, which
 the README badges read.
+
+## Experimental JVM server CI (`native-server.yml`)
+
+The WIP `spark-connect-server` and `spark-connect-jni` crates are optional
+workspace members, excluded from default Cargo builds. Their dedicated workflow
+runs on changes to these crates, their protocol/client dependencies, workspace
+dependencies and build configuration. Its path filters also include `LICENSE`,
+`NOTICE`, both `scripts/gen_binary_licenses.py` and
+`scripts/gen_native_binary_licenses.py`, and their generator tests. Existing client
+workflows remain in place.
+
+The workflow uses native Linux and macOS runners for x86-64 and ARM64. Each job
+installs Rust 1.88, JDK 21 and the hash-locked `protoc-wheel-0==30.2` compiler,
+then runs the server and JNI Rust tests, strict native Clippy, Python
+acceptance/launcher and packaging tests, and the C bridge tests with
+and without sanitizers. It also runs the license-generator tests and
+`python3 -B scripts/gen_native_binary_licenses.py --check` for the four-target JNI
+dependency license bundle. LeakSanitizer is enabled on Linux; macOS runs
+AddressSanitizer and UndefinedBehaviorSanitizer without leak
+detection. The Rust tests use deterministic engine fixtures, and the JDK provides
+the C adapter's JNI headers. Workspace-wide lint also installs JDK 21 because its
+`--workspace` Clippy command includes the JNI crate.
+
+The license inventory records whole-file hashes for the `inputs` in
+`crates/spark-connect-server/jvm/native-licenses/dependencies.json`. Run
+`python3 scripts/gen_native_binary_licenses.py --check` before pushing. If it reports
+stale assets, run `python3 scripts/gen_native_binary_licenses.py` and commit the
+regenerated native-license assets, even when the JNI dependency closure is unchanged.
+Both CI and packaging reject stale hashes.
+
+Each platform job builds a release library, validates its binary architecture,
+packages it in a platform JAR with ZIP DEFLATE compression, and runs the
+dependency-free Java loader tests against a JNI fixture and the actual library. It
+uploads the JAR and SHA-256 sidecar as development CI artifacts. Linux builds use
+Ubuntu 22.04 and macOS builds set `MACOSX_DEPLOYMENT_TARGET=11.0`.
+
+A dependent job validates and combines all four artifacts into an all-platform
+native JAR and the two macOS artifacts into a macOS universal JAR. It checks
+loading the matching library from the all-platform JAR on Linux and uploads both
+JARs with checksum sidecars as separate artifacts. Two lightweight jobs then
+download the same macOS universal JAR and test loading it on native x86-64 and
+ARM64 macOS runners. The universal JAR retains both thin libraries under their
+platform resource paths; the existing loader selects the JVM's architecture.
+These jobs do not publish to Maven.
+
+A separate Ubuntu 22.04 job checks out Apache Spark at
+`250ccca3f2b5f043e20b415adf17bda5d202c60f`. It restores the built assembly JARs from
+a cache keyed on that revision, platform and JDK 21, or builds the assembly with
+Maven on a cache miss. The job compiles the full Spark-dependent Java adapter
+and runs `jvm/test-jni-smoke.sh` against the Linux library from the platform JAR.
+Under `-Xcheck:jni`, the smoke verifies real JNI start/query/stop, range schema and
+Arrow values, negotiated 1 KiB byte chunks with reassembly, a whole row larger
+than 3 MiB without chunking opt-in, `ResultComplete`, session release, listener
+rebind and continued use of the shared SparkContext. Pull-request runs supersede
+earlier runs for that PR; each push or manual run has its own concurrency group.
+
+The smoke uses the unmodified pinned Spark snapshot and does not exercise Arrow
+IPC input or replace the full `jvm/test-engine.sh` acceptance suite. The
+[server guide](../../crates/spark-connect-server/README.md) records selected
+assembly requirements and reproducible local commands. A passing native CI job
+alone does not establish compatibility with other Spark versions or full
+protocol support.
 
 ## Continuous improvement
 

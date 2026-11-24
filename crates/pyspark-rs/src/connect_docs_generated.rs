@@ -4,7 +4,10 @@
 //! The docstrings that PySpark Connect's modules give the methods of their classes of
 //! PySpark's classic classes (`format.__doc__ = PySparkDataStreamReader.format.__doc__`),
 //! of the classes of those modules that are native here, which take them of their `#[doc]`
-//! attributes.
+//! attributes; those of the native types of `pyspark.sql.types`; and those that
+//! `inspect.getdoc` finds of the classic classes of PySpark Connect's subclasses of them,
+//! of no docstrings of their own (`Column.alias`), of which the native classes are virtual
+//! subclasses.
 
 /// The docstring of the object `$name` of PySpark Connect's module, as PySpark has it at
 /// run time: `connect_doc!(DataStreamReader.format)`, of the textual scope of the modules
@@ -1361,6 +1364,13 @@ macro_rules! connect_doc {
             The data source class to be registered. It should be a subclass of DataSource.
         "#
     };
+    (DataSourceRegistration) => {
+        r#"
+    Wrapper for data source registration.
+
+    .. versionadded:: 4.0.0
+    "#
+    };
     (GroupedData . agg) => {
         r#"Compute aggregates and returns the result as a :class:`DataFrame`.
 
@@ -2672,6 +2682,7 @@ macro_rules! connect_doc {
         Support Spark Connect.
     "#
     };
+    (GroupedData . mean) => { connect_doc!(GroupedData . avg) };
     (MergeIntoWriter . whenMatched) => {
         r#"
         Initialize a `WhenMatched` action with a condition.
@@ -5118,6 +5129,38 @@ macro_rules! connect_doc {
         >>> spark.streams.removeListener(test_listener)
         "#
     };
+    (StreamingQueryListenerBus) => {
+        r#"
+    A client side listener bus that is responsible for buffering client side listeners,
+    receive listener events and invoke correct listener call backs.
+    "#
+    };
+    (StreamingQueryListenerBus . append) => {
+        r#"
+        Append a listener to the local listener bus. When the added listener is
+        the first listener, request the server to create the server side listener
+        and start a thread to handle query events.
+        "#
+    };
+    (StreamingQueryListenerBus . remove) => {
+        r#"
+        Remove the listener from the local listener bus.
+
+        When the listener is not presented in the listener bus, do nothing.
+
+        When the removed listener is the last listener, ask the server to remove
+        the server side listener.
+        As a result, the listener handling thread created before
+        will return after processing remaining listener events. This function blocks until
+        all events are processed.
+        "#
+    };
+    (StreamingQueryListenerBus . post_to_all) => {
+        r#"
+        Post listener events to all active listeners, note that if one listener throws,
+        it should not affect other listeners.
+        "#
+    };
     (DataStreamReader . format) => {
         r#"Specifies the input data source format.
 
@@ -6961,6 +7004,10573 @@ macro_rules! connect_doc {
         +-------+-----------------+---------------------+----------------+
         |WARNING|This is a warning|{func_name -> my_udf}|my_custom_logger|
         +-------+-----------------+---------------------+----------------+
+        "#
+    };
+    (DataType) => {
+        r#"Base class for data types."#
+    };
+    ("DataType") => { connect_doc!(DataType) };
+    (DataType . needConversion) => {
+        r#"
+        Does this type needs conversion between Python object and internal SQL object.
+
+        This is used to avoid the unnecessary conversion for ArrayType/MapType/StructType.
+        "#
+    };
+    (DataType . toInternal) => {
+        r#"
+        Converts a Python object into an internal SQL object.
+        "#
+    };
+    (DataType . fromInternal) => {
+        r#"
+        Converts an internal SQL object into a native Python object.
+        "#
+    };
+    (DataType . fromDDL) => {
+        r#"
+        Creates :class:`DataType` for a given DDL-formatted string.
+
+        .. versionadded:: 4.0.0
+
+        Parameters
+        ----------
+        ddl : str
+            DDL-formatted string representation of types, e.g.
+            :class:`pyspark.sql.types.DataType.simpleString`, except that top level struct
+            type can omit the ``struct<>`` for the compatibility reason with
+            ``spark.createDataFrame`` and Python UDFs.
+
+        Returns
+        -------
+        :class:`DataType`
+
+        Examples
+        --------
+        Create a StructType by the corresponding DDL formatted string.
+
+        >>> from pyspark.sql.types import DataType
+        >>> DataType.fromDDL("b string, a int")
+        StructType([StructField('b', StringType(), True), StructField('a', IntegerType(), True)])
+
+        Create a single DataType by the corresponding DDL formatted string.
+
+        >>> DataType.fromDDL("decimal(10,10)")
+        DecimalType(10,10)
+
+        Create a StructType by the legacy string format.
+
+        >>> DataType.fromDDL("b: string, a: int")
+        StructType([StructField('b', StringType(), True), StructField('a', IntegerType(), True)])
+        "#
+    };
+    (DataTypeSingleton) => {
+        r#"Metaclass for DataType"#
+    };
+    ("DataTypeSingleton") => { connect_doc!(DataTypeSingleton) };
+    (NullType) => {
+        r#"Null type.
+
+    The data type representing None, used for the types that cannot be inferred.
+    "#
+    };
+    ("NullType") => { connect_doc!(NullType) };
+    (NullType . needConversion) => { connect_doc!(DataType . needConversion) };
+    (NullType . toInternal) => { connect_doc!(DataType . toInternal) };
+    (NullType . fromInternal) => { connect_doc!(DataType . fromInternal) };
+    (NullType . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (AtomicType) => {
+        r#"An internal type used to represent everything that is not
+    null, UDTs, arrays, structs, and maps."#
+    };
+    ("AtomicType") => { connect_doc!(AtomicType) };
+    (AtomicType . needConversion) => { connect_doc!(DataType . needConversion) };
+    (AtomicType . toInternal) => { connect_doc!(DataType . toInternal) };
+    (AtomicType . fromInternal) => { connect_doc!(DataType . fromInternal) };
+    (AtomicType . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (NumericType) => {
+        r#"Numeric data types."#
+    };
+    ("NumericType") => { connect_doc!(NumericType) };
+    (NumericType . needConversion) => { connect_doc!(DataType . needConversion) };
+    (NumericType . toInternal) => { connect_doc!(DataType . toInternal) };
+    (NumericType . fromInternal) => { connect_doc!(DataType . fromInternal) };
+    (NumericType . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (IntegralType) => {
+        r#"Integral data types."#
+    };
+    ("IntegralType") => { connect_doc!(IntegralType) };
+    (IntegralType . needConversion) => { connect_doc!(DataType . needConversion) };
+    (IntegralType . toInternal) => { connect_doc!(DataType . toInternal) };
+    (IntegralType . fromInternal) => { connect_doc!(DataType . fromInternal) };
+    (IntegralType . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (FractionalType) => {
+        r#"Fractional data types."#
+    };
+    ("FractionalType") => { connect_doc!(FractionalType) };
+    (FractionalType . needConversion) => { connect_doc!(DataType . needConversion) };
+    (FractionalType . toInternal) => { connect_doc!(DataType . toInternal) };
+    (FractionalType . fromInternal) => { connect_doc!(DataType . fromInternal) };
+    (FractionalType . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (StringType) => {
+        r#"String data type.
+
+    Parameters
+    ----------
+    collation : str
+        name of the collation, default is UTF8_BINARY.
+    "#
+    };
+    ("StringType") => { connect_doc!(StringType) };
+    (StringType . needConversion) => { connect_doc!(DataType . needConversion) };
+    (StringType . toInternal) => { connect_doc!(DataType . toInternal) };
+    (StringType . fromInternal) => { connect_doc!(DataType . fromInternal) };
+    (StringType . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (CharType) => {
+        r#"Char data type
+
+    Parameters
+    ----------
+    length : int
+        the length limitation.
+    "#
+    };
+    ("CharType") => { connect_doc!(CharType) };
+    (CharType . needConversion) => { connect_doc!(DataType . needConversion) };
+    (CharType . toInternal) => { connect_doc!(DataType . toInternal) };
+    (CharType . fromInternal) => { connect_doc!(DataType . fromInternal) };
+    (CharType . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (VarcharType) => {
+        r#"Varchar data type
+
+    Parameters
+    ----------
+    length : int
+        the length limitation.
+    "#
+    };
+    ("VarcharType") => { connect_doc!(VarcharType) };
+    (VarcharType . needConversion) => { connect_doc!(DataType . needConversion) };
+    (VarcharType . toInternal) => { connect_doc!(DataType . toInternal) };
+    (VarcharType . fromInternal) => { connect_doc!(DataType . fromInternal) };
+    (VarcharType . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (BinaryType) => {
+        r#"Binary (byte array) data type."#
+    };
+    ("BinaryType") => { connect_doc!(BinaryType) };
+    (BinaryType . needConversion) => { connect_doc!(DataType . needConversion) };
+    (BinaryType . toInternal) => { connect_doc!(DataType . toInternal) };
+    (BinaryType . fromInternal) => { connect_doc!(DataType . fromInternal) };
+    (BinaryType . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (BooleanType) => {
+        r#"Boolean data type."#
+    };
+    ("BooleanType") => { connect_doc!(BooleanType) };
+    (BooleanType . needConversion) => { connect_doc!(DataType . needConversion) };
+    (BooleanType . toInternal) => { connect_doc!(DataType . toInternal) };
+    (BooleanType . fromInternal) => { connect_doc!(DataType . fromInternal) };
+    (BooleanType . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (DatetimeType) => {
+        r#"Super class of all datetime data type."#
+    };
+    ("DatetimeType") => { connect_doc!(DatetimeType) };
+    (DatetimeType . needConversion) => { connect_doc!(DataType . needConversion) };
+    (DatetimeType . toInternal) => { connect_doc!(DataType . toInternal) };
+    (DatetimeType . fromInternal) => { connect_doc!(DataType . fromInternal) };
+    (DatetimeType . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (DateType) => {
+        r#"Date (datetime.date) data type."#
+    };
+    ("DateType") => { connect_doc!(DateType) };
+    (DateType . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (AnyTimeType) => {
+        r#"A TIME type of any valid precision."#
+    };
+    ("AnyTimeType") => { connect_doc!(AnyTimeType) };
+    (AnyTimeType . needConversion) => { connect_doc!(DataType . needConversion) };
+    (AnyTimeType . toInternal) => { connect_doc!(DataType . toInternal) };
+    (AnyTimeType . fromInternal) => { connect_doc!(DataType . fromInternal) };
+    (AnyTimeType . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (TimeType) => {
+        r#"
+    Time (datetime.time) data type.
+
+    .. versionadded:: 4.1.0
+    "#
+    };
+    ("TimeType") => { connect_doc!(TimeType) };
+    (TimeType . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (TimestampType) => {
+        r#"Timestamp (datetime.datetime) data type."#
+    };
+    ("TimestampType") => { connect_doc!(TimestampType) };
+    (TimestampType . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (TimestampNTZType) => {
+        r#"Timestamp (datetime.datetime) data type without timezone information."#
+    };
+    ("TimestampNTZType") => { connect_doc!(TimestampNTZType) };
+    (TimestampNTZType . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (DecimalType) => {
+        r#"Decimal (decimal.Decimal) data type.
+
+    The DecimalType must have fixed precision (the maximum total number of digits)
+    and scale (the number of digits on the right of dot). For example, (5, 2) can
+    support the value from [-999.99 to 999.99].
+
+    The precision can be up to 38, the scale must be less or equal to precision.
+
+    When creating a DecimalType, the default precision and scale is (10, 0). When inferring
+    schema from decimal.Decimal objects, it will be DecimalType(38, 18).
+
+    Parameters
+    ----------
+    precision : int, optional
+        the maximum (i.e. total) number of digits (default: 10)
+    scale : int, optional
+        the number of digits on right side of dot. (default: 0)
+    "#
+    };
+    ("DecimalType") => { connect_doc!(DecimalType) };
+    (DecimalType . needConversion) => { connect_doc!(DataType . needConversion) };
+    (DecimalType . toInternal) => { connect_doc!(DataType . toInternal) };
+    (DecimalType . fromInternal) => { connect_doc!(DataType . fromInternal) };
+    (DecimalType . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (DoubleType) => {
+        r#"Double data type, representing double precision floats."#
+    };
+    ("DoubleType") => { connect_doc!(DoubleType) };
+    (DoubleType . needConversion) => { connect_doc!(DataType . needConversion) };
+    (DoubleType . toInternal) => { connect_doc!(DataType . toInternal) };
+    (DoubleType . fromInternal) => { connect_doc!(DataType . fromInternal) };
+    (DoubleType . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (FloatType) => {
+        r#"Float data type, representing single precision floats."#
+    };
+    ("FloatType") => { connect_doc!(FloatType) };
+    (FloatType . needConversion) => { connect_doc!(DataType . needConversion) };
+    (FloatType . toInternal) => { connect_doc!(DataType . toInternal) };
+    (FloatType . fromInternal) => { connect_doc!(DataType . fromInternal) };
+    (FloatType . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (SpatialType) => {
+        r#"Super class of all spatial data types: GeographyType and GeometryType."#
+    };
+    ("SpatialType") => { connect_doc!(SpatialType) };
+    (SpatialType . needConversion) => { connect_doc!(DataType . needConversion) };
+    (SpatialType . toInternal) => { connect_doc!(DataType . toInternal) };
+    (SpatialType . fromInternal) => { connect_doc!(DataType . fromInternal) };
+    (SpatialType . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (GeographyType) => {
+        r#"
+    The data type representing GEOGRAPHY values which are spatial objects, as defined in the Open
+    Geospatial Consortium (OGC) Simple Feature Access specification
+    (https://portal.ogc.org/files/?artifact_id=25355), with a geographic coordinate system.
+
+    .. versionadded:: 4.1.0
+    "#
+    };
+    ("GeographyType") => { connect_doc!(GeographyType) };
+    (GeographyType . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (GeometryType) => {
+        r#"
+    The data type representing GEOMETRY values which are spatial objects, as defined in the Open
+    Geospatial Consortium (OGC) Simple Feature Access specification
+    (https://portal.ogc.org/files/?artifact_id=25355), with a Cartesian coordinate system.
+
+    Parameters
+    ----------
+    srid : int or str
+        The Spatial Reference System Identifier (SRID) value for the GEOMETRY.
+
+    .. versionadded:: 4.1.0
+    "#
+    };
+    ("GeometryType") => { connect_doc!(GeometryType) };
+    (GeometryType . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (ByteType) => {
+        r#"Byte data type, representing signed 8-bit integers."#
+    };
+    ("ByteType") => { connect_doc!(ByteType) };
+    (ByteType . needConversion) => { connect_doc!(DataType . needConversion) };
+    (ByteType . toInternal) => { connect_doc!(DataType . toInternal) };
+    (ByteType . fromInternal) => { connect_doc!(DataType . fromInternal) };
+    (ByteType . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (IntegerType) => {
+        r#"Int data type, representing signed 32-bit integers."#
+    };
+    ("IntegerType") => { connect_doc!(IntegerType) };
+    (IntegerType . needConversion) => { connect_doc!(DataType . needConversion) };
+    (IntegerType . toInternal) => { connect_doc!(DataType . toInternal) };
+    (IntegerType . fromInternal) => { connect_doc!(DataType . fromInternal) };
+    (IntegerType . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (LongType) => {
+        r#"Long data type, representing signed 64-bit integers.
+
+    If the values are beyond the range of [-9223372036854775808, 9223372036854775807],
+    please use :class:`DecimalType`.
+    "#
+    };
+    ("LongType") => { connect_doc!(LongType) };
+    (LongType . needConversion) => { connect_doc!(DataType . needConversion) };
+    (LongType . toInternal) => { connect_doc!(DataType . toInternal) };
+    (LongType . fromInternal) => { connect_doc!(DataType . fromInternal) };
+    (LongType . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (ShortType) => {
+        r#"Short data type, representing signed 16-bit integers."#
+    };
+    ("ShortType") => { connect_doc!(ShortType) };
+    (ShortType . needConversion) => { connect_doc!(DataType . needConversion) };
+    (ShortType . toInternal) => { connect_doc!(DataType . toInternal) };
+    (ShortType . fromInternal) => { connect_doc!(DataType . fromInternal) };
+    (ShortType . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (AnsiIntervalType) => {
+        r#"The interval type which conforms to the ANSI SQL standard."#
+    };
+    ("AnsiIntervalType") => { connect_doc!(AnsiIntervalType) };
+    (AnsiIntervalType . needConversion) => { connect_doc!(DataType . needConversion) };
+    (AnsiIntervalType . toInternal) => { connect_doc!(DataType . toInternal) };
+    (AnsiIntervalType . fromInternal) => { connect_doc!(DataType . fromInternal) };
+    (AnsiIntervalType . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (DayTimeIntervalType) => {
+        r#"DayTimeIntervalType (datetime.timedelta)."#
+    };
+    ("DayTimeIntervalType") => { connect_doc!(DayTimeIntervalType) };
+    (DayTimeIntervalType . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (YearMonthIntervalType) => {
+        r#"YearMonthIntervalType, represents year-month intervals of the SQL standard
+
+    Notes
+    -----
+    This data type doesn't support collection: df.collect/take/head.
+    "#
+    };
+    ("YearMonthIntervalType") => { connect_doc!(YearMonthIntervalType) };
+    (YearMonthIntervalType . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (CalendarIntervalType) => {
+        r#"The data type representing calendar intervals.
+
+    The calendar interval is stored internally in three components:
+    - an integer value representing the number of `months` in this interval.
+    - an integer value representing the number of `days` in this interval.
+    - a long value representing the number of `microseconds` in this interval.
+    "#
+    };
+    ("CalendarIntervalType") => { connect_doc!(CalendarIntervalType) };
+    (CalendarIntervalType . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (ArrayType) => {
+        r#"Array data type.
+
+    Parameters
+    ----------
+    elementType : :class:`DataType`
+        :class:`DataType` of each element in the array.
+    containsNull : bool, optional
+        whether the array can contain null (None) values.
+
+    Examples
+    --------
+    >>> from pyspark.sql.types import ArrayType, StringType, StructField, StructType
+
+    The below example demonstrates how to create class:`ArrayType`:
+
+    >>> arr = ArrayType(StringType())
+
+    The array can contain null (None) values by default:
+
+    >>> ArrayType(StringType()) == ArrayType(StringType(), True)
+    True
+    >>> ArrayType(StringType(), False) == ArrayType(StringType())
+    False
+    "#
+    };
+    ("ArrayType") => { connect_doc!(ArrayType) };
+    (ArrayType . toNullable) => {
+        r#"
+        Returns the same data type but set all nullability fields are true
+        (`StructField.nullable`, `ArrayType.containsNull`, and `MapType.valueContainsNull`).
+
+        .. versionadded:: 4.0.0
+
+        Returns
+        -------
+        :class:`ArrayType`
+
+        Examples
+        --------
+        Example 1: Simple nullability conversion
+
+        >>> ArrayType(IntegerType(), containsNull=False).toNullable()
+        ArrayType(IntegerType(), True)
+
+        Example 2: Nested nullability conversion
+
+        >>> ArrayType(
+        ...     StructType([
+        ...         StructField("b", IntegerType(), nullable=False),
+        ...         StructField("c", ArrayType(IntegerType(), containsNull=False))
+        ...     ]),
+        ...     containsNull=False
+        ... ).toNullable()
+        ArrayType(StructType([StructField('b', IntegerType(), True),
+        StructField('c', ArrayType(IntegerType(), True), True)]), True)
+        "#
+    };
+    (ArrayType . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (MapType) => {
+        r#"Map data type.
+
+    Parameters
+    ----------
+    keyType : :class:`DataType`
+        :class:`DataType` of the keys in the map.
+    valueType : :class:`DataType`
+        :class:`DataType` of the values in the map.
+    valueContainsNull : bool, optional
+        indicates whether values can contain null (None) values.
+
+    Notes
+    -----
+    Keys in a map data type are not allowed to be null (None).
+
+    Examples
+    --------
+    >>> from pyspark.sql.types import IntegerType, FloatType, MapType, StringType
+
+    The below example demonstrates how to create class:`MapType`:
+
+    >>> map_type = MapType(StringType(), IntegerType())
+
+    The values of the map can contain null (``None``) values by default:
+
+    >>> (MapType(StringType(), IntegerType())
+    ...        == MapType(StringType(), IntegerType(), True))
+    True
+    >>> (MapType(StringType(), IntegerType(), False)
+    ...        == MapType(StringType(), FloatType()))
+    False
+    "#
+    };
+    ("MapType") => { connect_doc!(MapType) };
+    (MapType . toNullable) => {
+        r#"
+        Returns the same data type but set all nullability fields are true
+        (`StructField.nullable`, `ArrayType.containsNull`, and `MapType.valueContainsNull`).
+
+        .. versionadded:: 4.0.0
+
+        Returns
+        -------
+        :class:`MapType`
+
+        Examples
+        --------
+        Example 1: Simple nullability conversion
+
+        >>> MapType(IntegerType(), StringType(), valueContainsNull=False).toNullable()
+        MapType(IntegerType(), StringType(), True)
+
+        Example 2: Nested nullability conversion
+
+        >>> MapType(
+        ...     StringType(),
+        ...     MapType(
+        ...         IntegerType(),
+        ...         ArrayType(IntegerType(), containsNull=False),
+        ...         valueContainsNull=False
+        ...     ),
+        ...     valueContainsNull=False
+        ... ).toNullable()
+        MapType(StringType(), MapType(IntegerType(), ArrayType(IntegerType(), True), True), True)
+        "#
+    };
+    (MapType . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (StructField) => {
+        r#"A field in :class:`StructType`.
+
+    Parameters
+    ----------
+    name : str
+        name of the field.
+    dataType : :class:`DataType`
+        :class:`DataType` of the field.
+    nullable : bool, optional
+        whether the field can be null (None) or not.
+    metadata : dict, optional
+        a dict from string to simple type that can be toInternald to JSON automatically
+
+    Examples
+    --------
+    >>> from pyspark.sql.types import StringType, StructField
+    >>> (StructField("f1", StringType(), True)
+    ...      == StructField("f1", StringType(), True))
+    True
+    >>> (StructField("f1", StringType(), True)
+    ...      == StructField("f2", StringType(), True))
+    False
+    "#
+    };
+    ("StructField") => { connect_doc!(StructField) };
+    (StructField . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (StructType) => {
+        r#"Struct type, consisting of a list of :class:`StructField`.
+
+    This is the data type representing a :class:`Row`.
+
+    Iterating a :class:`StructType` will iterate over its :class:`StructField`\s.
+    A contained :class:`StructField` can be accessed by its name or position.
+
+    Examples
+    --------
+    >>> from pyspark.sql.types import *
+    >>> struct1 = StructType([StructField("f1", StringType(), True)])
+    >>> struct1["f1"]
+    StructField('f1', StringType(), True)
+    >>> struct1[0]
+    StructField('f1', StringType(), True)
+
+    >>> struct1 = StructType([StructField("f1", StringType(), True)])
+    >>> struct2 = StructType([StructField("f1", StringType(), True)])
+    >>> struct1 == struct2
+    True
+    >>> struct1 = StructType([StructField("f1", CharType(10), True)])
+    >>> struct2 = StructType([StructField("f1", CharType(10), True)])
+    >>> struct1 == struct2
+    True
+    >>> struct1 = StructType([StructField("f1", VarcharType(10), True)])
+    >>> struct2 = StructType([StructField("f1", VarcharType(10), True)])
+    >>> struct1 == struct2
+    True
+    >>> struct1 = StructType([StructField("f1", StringType(), True)])
+    >>> struct2 = StructType([StructField("f1", StringType(), True),
+    ...     StructField("f2", IntegerType(), False)])
+    >>> struct1 == struct2
+    False
+
+    The below example demonstrates how to create a DataFrame based on a struct created
+    using class:`StructType` and class:`StructField`:
+
+    >>> data = [("Alice", ["Java", "Scala"]), ("Bob", ["Python", "Scala"])]
+    >>> schema = StructType([
+    ...     StructField("name", StringType()),
+    ...     StructField("languagesSkills", ArrayType(StringType())),
+    ... ])
+    >>> df = spark.createDataFrame(data=data, schema=schema)
+    >>> df.printSchema()
+    root
+     |-- name: string (nullable = true)
+     |-- languagesSkills: array (nullable = true)
+     |    |-- element: string (containsNull = true)
+    >>> df.show()
+    +-----+---------------+
+    | name|languagesSkills|
+    +-----+---------------+
+    |Alice|  [Java, Scala]|
+    |  Bob|[Python, Scala]|
+    +-----+---------------+
+    "#
+    };
+    ("StructType") => { connect_doc!(StructType) };
+    (StructType . add) => {
+        r#"
+        Construct a :class:`StructType` by adding new elements to it, to define the schema.
+        The method accepts either:
+
+            a) A single parameter which is a :class:`StructField` object.
+            b) Between 2 and 4 parameters as (name, data_type, nullable (optional),
+               metadata(optional). The data_type parameter may be either a String or a
+               :class:`DataType` object.
+
+        Parameters
+        ----------
+        field : str or :class:`StructField`
+            Either the name of the field or a :class:`StructField` object
+        data_type : :class:`DataType`, optional
+            If present, the DataType of the :class:`StructField` to create
+        nullable : bool, optional
+            Whether the field to add should be nullable (default True)
+        metadata : dict, optional
+            Any additional metadata (default None)
+
+        Returns
+        -------
+        :class:`StructType`
+
+        Examples
+        --------
+        >>> from pyspark.sql.types import IntegerType, StringType, StructField, StructType
+        >>> struct1 = StructType().add("f1", StringType(), True).add("f2", StringType(), True, None)
+        >>> struct2 = StructType([StructField("f1", StringType(), True),
+        ...     StructField("f2", StringType(), True, None)])
+        >>> struct1 == struct2
+        True
+        >>> struct1 = StructType().add(StructField("f1", StringType(), True))
+        >>> struct2 = StructType([StructField("f1", StringType(), True)])
+        >>> struct1 == struct2
+        True
+        >>> struct1 = StructType().add("f1", "string", True)
+        >>> struct2 = StructType([StructField("f1", StringType(), True)])
+        >>> struct1 == struct2
+        True
+        "#
+    };
+    (StructType . toNullable) => {
+        r#"
+        Returns the same data type but set all nullability fields are true
+        (`StructField.nullable`, `ArrayType.containsNull`, and `MapType.valueContainsNull`).
+
+        .. versionadded:: 4.0.0
+
+        Returns
+        -------
+        :class:`StructType`
+
+        Examples
+        --------
+        Example 1: Simple nullability conversion
+
+        >>> StructType([StructField("a", IntegerType(), nullable=False)]).toNullable()
+        StructType([StructField('a', IntegerType(), True)])
+
+        Example 2: Nested nullability conversion
+
+        >>> StructType([
+        ...     StructField("a",
+        ...         StructType([
+        ...             StructField("b", IntegerType(), nullable=False),
+        ...             StructField("c", StructType([
+        ...                 StructField("d", IntegerType(), nullable=False)
+        ...             ]))
+        ...         ]),
+        ...         nullable=False)
+        ... ]).toNullable()
+        StructType([StructField('a', StructType([StructField('b', IntegerType(), True),
+        StructField('c', StructType([StructField('d', IntegerType(), True)]), True)]), True)])
+        "#
+    };
+    (StructType . fromJson) => {
+        r#"
+        Constructs :class:`StructType` from a schema defined in JSON format.
+
+        Below is a JSON schema it must adhere to::
+
+            {
+              "title":"StructType",
+              "description":"Schema of StructType in json format",
+              "type":"object",
+              "properties":{
+                 "fields":{
+                    "description":"Array of struct fields",
+                    "type":"array",
+                    "items":{
+                        "type":"object",
+                        "properties":{
+                           "name":{
+                              "description":"Name of the field",
+                              "type":"string"
+                           },
+                           "type":{
+                              "description": "Type of the field. Can either be
+                                              another nested StructType or primitive type",
+                              "type":"object/string"
+                           },
+                           "nullable":{
+                              "description":"If nulls are allowed",
+                              "type":"boolean"
+                           },
+                           "metadata":{
+                              "description":"Additional metadata to supply",
+                              "type":"object"
+                           },
+                           "required":[
+                              "name",
+                              "type",
+                              "nullable",
+                              "metadata"
+                           ]
+                        }
+                   }
+                }
+             }
+           }
+
+        Parameters
+        ----------
+        json : dict or a dict-like object e.g. JSON object
+            This "dict" must have "fields" key that returns an array of fields
+            each of which must have specific keys (name, type, nullable, metadata).
+
+        Returns
+        -------
+        :class:`StructType`
+
+        Examples
+        --------
+        >>> json_str = '''
+        ...  {
+        ...      "fields": [
+        ...          {
+        ...              "metadata": {},
+        ...              "name": "Person",
+        ...              "nullable": true,
+        ...              "type": {
+        ...                  "fields": [
+        ...                      {
+        ...                          "metadata": {},
+        ...                          "name": "name",
+        ...                          "nullable": false,
+        ...                          "type": "string"
+        ...                      },
+        ...                      {
+        ...                          "metadata": {},
+        ...                          "name": "surname",
+        ...                          "nullable": false,
+        ...                          "type": "string"
+        ...                      }
+        ...                  ],
+        ...                  "type": "struct"
+        ...              }
+        ...          }
+        ...      ],
+        ...      "type": "struct"
+        ...  }
+        ...  '''
+        >>> import json
+        >>> scheme = StructType.fromJson(json.loads(json_str))
+        >>> scheme.simpleString()
+        'struct<Person:struct<name:string,surname:string>>'
+        "#
+    };
+    (StructType . fieldNames) => {
+        r#"
+        Returns all field names in a list.
+
+        Examples
+        --------
+        >>> from pyspark.sql.types import StringType, StructField, StructType
+        >>> struct = StructType([StructField("f1", StringType(), True)])
+        >>> struct.fieldNames()
+        ['f1']
+        "#
+    };
+    (StructType . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (VariantType) => {
+        r#"
+    Variant data type, representing semi-structured values.
+
+    .. versionadded:: 4.0.0
+    "#
+    };
+    ("VariantType") => { connect_doc!(VariantType) };
+    (VariantType . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (UserDefinedType) => {
+        r#"User-defined type (UDT).
+
+    .. note:: WARN: Spark Internal Use Only
+    "#
+    };
+    ("UserDefinedType") => { connect_doc!(UserDefinedType) };
+    (UserDefinedType . sqlType) => {
+        r#"
+        Underlying SQL storage type for this UDT.
+        "#
+    };
+    (UserDefinedType . module) => {
+        r#"
+        The Python module of the UDT.
+        "#
+    };
+    (UserDefinedType . scalaUDT) => {
+        r#"
+        The class name of the paired Scala UDT (could be '', if there
+        is no corresponding one).
+        "#
+    };
+    (UserDefinedType . serialize) => {
+        r#"
+        Converts a user-type object into a SQL datum.
+        "#
+    };
+    (UserDefinedType . deserialize) => {
+        r#"
+        Converts a SQL datum into a user-type object.
+        "#
+    };
+    (UserDefinedType . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (VariantVal) => {
+        r#"
+    A class to represent a Variant value in Python.
+
+    .. versionadded:: 4.0.0
+
+    Parameters
+    ----------
+    value : bytes
+        The bytes representing the value component of the Variant.
+    metadata : bytes
+        The bytes representing the metadata component of the Variant.
+
+    Methods
+    -------
+    toPython()
+        Convert the VariantVal to a Python data structure.
+
+    Examples
+    --------
+    >>> from pyspark.sql import functions as sf
+    >>> df = spark.createDataFrame([ {'json': '''{ "a" : 1 }'''} ])
+    >>> v = df.select(sf.parse_json(df.json).alias("var")).head().var
+    >>> v.toPython()
+    {'a': 1}
+    >>> v.toJson()
+    '{"a":1}'
+    "#
+    };
+    ("VariantVal") => { connect_doc!(VariantVal) };
+    (VariantVal . toPython) => {
+        r#"
+        Convert the VariantVal to a Python data structure.
+
+        Returns
+        -------
+        Any
+            A Python object that represents the Variant.
+        "#
+    };
+    (VariantVal . toJson) => {
+        r#"
+        Convert the VariantVal to a JSON string. The zone ID represents the time zone that the
+        timestamp should be printed in. It is defaulted to UTC. The list of valid zone IDs can be
+        found by importing the `zoneinfo` module and running :code:`zoneinfo.available_timezones()`.
+
+        Returns
+        -------
+        str
+            A JSON string that represents the Variant.
+        "#
+    };
+    (VariantVal . parseJson) => {
+        r#"
+        Parse a JSON string and construct a VariantVal.
+
+        Returns
+        -------
+        VariantVal
+            A VariantVal representing the parsed Variant value.
+        "#
+    };
+    (Geography) => {
+        r#"
+    A class to represent a Geography value in Python.
+
+    .. versionadded:: 4.1.0
+
+    Parameters
+    ----------
+    wkb : bytes
+        The bytes representing the WKB of Geography.
+
+    srid : integer
+        The integer value representing SRID of Geography.
+
+    Methods
+    -------
+    getBytes()
+        Returns the WKB of Geography.
+
+    getSrid()
+        Returns the SRID of Geography.
+
+    Examples
+    --------
+    >>> g = Geography.fromWKB(bytes.fromhex('010100000000000000000031400000000000001c40'), 4326)
+    >>> g.getBytes().hex()
+    '010100000000000000000031400000000000001c40'
+    >>> g.getSrid()
+    4326
+    "#
+    };
+    ("Geography") => { connect_doc!(Geography) };
+    (Geography . getSrid) => {
+        r#"
+        Returns the SRID of Geography.
+        "#
+    };
+    (Geography . getBytes) => {
+        r#"
+        Returns the WKB of Geography.
+        "#
+    };
+    (Geography . fromWKB) => {
+        r#"
+        Construct Python Geography object from WKB.
+        :return: Python representation of the Geography type value.
+        "#
+    };
+    (Geometry) => {
+        r#"
+    A class to represent a Geometry value in Python.
+
+    .. versionadded:: 4.1.0
+
+    Parameters
+    ----------
+    wkb : bytes
+        The bytes representing the WKB of Geometry.
+
+    srid : integer
+        The integer value representing SRID of Geometry.
+
+    Methods
+    -------
+    getBytes()
+        Returns the WKB of Geometry.
+
+    getSrid()
+        Returns the SRID of Geometry.
+
+    Examples
+    --------
+    >>> g = Geometry.fromWKB(bytes.fromhex('010100000000000000000031400000000000001c40'), 0)
+    >>> g.getBytes().hex()
+    '010100000000000000000031400000000000001c40'
+    >>> g.getSrid()
+    0
+    "#
+    };
+    ("Geometry") => { connect_doc!(Geometry) };
+    (Geometry . getSrid) => {
+        r#"
+        Returns the SRID of Geometry.
+        "#
+    };
+    (Geometry . getBytes) => {
+        r#"
+        Returns the WKB of Geometry.
+        "#
+    };
+    (Geometry . fromWKB) => {
+        r#"
+        Construct Python Geometry object from WKB.
+        :return: Python representation of the Geometry type value.
+        "#
+    };
+    (Row) => {
+        r#"
+    A row in :class:`DataFrame`.
+    The fields in it can be accessed:
+
+    * like attributes (``row.key``)
+    * like dictionary values (``row[key]``)
+
+    ``key in row`` will search through row keys.
+
+    Row can be used to create a row object by using named arguments.
+    It is not allowed to omit a named argument to represent that the value is
+    None or missing. This should be explicitly set to None in this case.
+
+    .. versionchanged:: 3.0.0
+        Rows created from named arguments no longer have
+        field names sorted alphabetically and will be ordered in the position as
+        entered.
+
+    Examples
+    --------
+    >>> from pyspark.sql import Row
+    >>> row = Row(name="Alice", age=11)
+    >>> row
+    Row(name='Alice', age=11)
+    >>> row['name'], row['age']
+    ('Alice', 11)
+    >>> row.name, row.age
+    ('Alice', 11)
+    >>> 'name' in row
+    True
+    >>> 'wrong_key' in row
+    False
+
+    Row also can be used to create another Row like class, then it
+    could be used to create Row objects, such as
+
+    >>> Person = Row("name", "age")
+    >>> Person
+    <Row('name', 'age')>
+    >>> 'name' in Person
+    True
+    >>> 'wrong_key' in Person
+    False
+    >>> Person("Alice", 11)
+    Row(name='Alice', age=11)
+
+    This form can also be used to create rows as tuple values, i.e. with unnamed
+    fields.
+
+    >>> row1 = Row("Alice", 11)
+    >>> row2 = Row(name="Alice", age=11)
+    >>> row1 == row2
+    True
+    "#
+    };
+    ("Row") => { connect_doc!(Row) };
+    (Row . asDict) => {
+        r#"
+        Return as a dict
+
+        Parameters
+        ----------
+        recursive : bool, optional
+            turns the nested Rows to dict (default: False).
+
+        Notes
+        -----
+        If a row contains duplicate field names, e.g., the rows of a join
+        between two :class:`DataFrame` that both have the fields of same names,
+        one of the duplicate fields will be selected by ``asDict``. ``__getitem__``
+        will also return one of the duplicate fields, however returned value might
+        be different to ``asDict``.
+
+        Examples
+        --------
+        >>> from pyspark.sql import Row
+        >>> Row(name="Alice", age=11).asDict() == {'name': 'Alice', 'age': 11}
+        True
+        >>> row = Row(key=1, value=Row(name='a', age=2))
+        >>> row.asDict() == {'key': 1, 'value': Row(name='a', age=2)}
+        True
+        >>> row.asDict(True) == {'key': 1, 'value': {'name': 'a', 'age': 2}}
+        True
+        "#
+    };
+    (SparkSession) => {
+        r#"The entry point to programming Spark with the Dataset and DataFrame API.
+
+    A SparkSession can be used to create :class:`DataFrame`, register :class:`DataFrame` as
+    tables, execute SQL over tables, cache tables, and read parquet files.
+    To create a :class:`SparkSession`, use the following builder pattern:
+
+    .. versionchanged:: 3.4.0
+        Supports Spark Connect.
+
+    .. autoattribute:: builder
+       :annotation:
+
+    Examples
+    --------
+    Create a Spark session.
+
+    >>> spark = (
+    ...     SparkSession.builder
+    ...         .master("local")
+    ...         .appName("Word Count")
+    ...         .config("spark.some.config.option", "some-value")
+    ...         .getOrCreate()
+    ... )
+
+    Create a Spark session with Spark Connect.
+
+    >>> spark = (
+    ...     SparkSession.builder
+    ...         .remote("sc://localhost")
+    ...         .appName("Word Count")
+    ...         .config("spark.some.config.option", "some-value")
+    ...         .getOrCreate()
+    ... )  # doctest: +SKIP
+    "#
+    };
+    (SparkSession . Builder) => {
+        r#"Builder for :class:`SparkSession`."#
+    };
+    (SparkSession . Hook) => {
+        r#"A Hook can be used to inject behavior into the session."#
+    };
+    (SparkSession . builder) => {
+        r#"Builder for :class:`SparkSession`."#
+    };
+    (SparkSession . table) => {
+        r#"Returns the specified table as a :class:`DataFrame`.
+
+        .. versionadded:: 2.0.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        tableName : str
+            the table name to retrieve.
+
+        Returns
+        -------
+        :class:`DataFrame`
+
+        Notes
+        -----
+        In Spark Classic, a temporary view referenced in `spark.table` is resolved immediately,
+        while in Spark Connect it is lazily analyzed.
+        So in Spark Connect if a view is dropped, modified or replaced after `spark.table`, the
+        execution may fail or generate different results.
+
+        Examples
+        --------
+        >>> spark.range(5).createOrReplaceTempView("table1")
+        >>> spark.table("table1").sort("id").show()
+        +---+
+        | id|
+        +---+
+        |  0|
+        |  1|
+        |  2|
+        |  3|
+        |  4|
+        +---+
+        "#
+    };
+    (SparkSession . read) => {
+        r#"
+        Returns a :class:`DataFrameReader` that can be used to read data
+        in as a :class:`DataFrame`.
+
+        .. versionadded:: 2.0.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Returns
+        -------
+        :class:`DataFrameReader`
+
+        Examples
+        --------
+        >>> spark.read
+        <...DataFrameReader object ...>
+
+        Write a DataFrame into a JSON file and read it back.
+
+        >>> import tempfile
+        >>> with tempfile.TemporaryDirectory(prefix="read") as d:
+        ...     # Write a DataFrame into a JSON file
+        ...     spark.createDataFrame(
+        ...         [{"age": 100, "name": "Hyukjin Kwon"}]
+        ...     ).write.mode("overwrite").format("json").save(d)
+        ...
+        ...     # Read the JSON file as a DataFrame.
+        ...     spark.read.format('json').load(d).show()
+        +---+------------+
+        |age|        name|
+        +---+------------+
+        |100|Hyukjin Kwon|
+        +---+------------+
+        "#
+    };
+    (SparkSession . readStream) => {
+        r#"
+        Returns a :class:`DataStreamReader` that can be used to read data streams
+        as a streaming :class:`DataFrame`.
+
+        .. versionadded:: 2.0.0
+
+        .. versionchanged:: 3.5.0
+            Supports Spark Connect.
+
+        Notes
+        -----
+        This API is evolving.
+
+        Returns
+        -------
+        :class:`DataStreamReader`
+
+        Examples
+        --------
+        >>> spark.readStream
+        <pyspark...DataStreamReader object ...>
+
+        The example below uses Rate source that generates rows continuously.
+        After that, we operate a modulo by 3, and then write the stream out to the console.
+        The streaming query stops in 3 seconds.
+
+        >>> import time
+        >>> df = spark.readStream.format("rate").load()
+        >>> df = df.selectExpr("value % 3 as v")
+        >>> q = df.writeStream.format("console").start()
+        >>> time.sleep(3)
+        >>> q.stop()
+        "#
+    };
+    (SparkSession . tvf) => {
+        r#"
+        Returns a :class:`tvf.TableValuedFunction` that can be used to call a table-valued function
+        (TVF).
+
+        .. versionadded:: 4.0.0
+
+        Notes
+        -----
+        This API is evolving.
+
+        Returns
+        -------
+        :class:`tvf.TableValuedFunction`
+
+        Examples
+        --------
+        >>> spark.tvf
+        <pyspark...TableValuedFunction object ...>
+
+        >>> import pyspark.sql.functions as sf
+        >>> spark.tvf.explode(sf.array(sf.lit(1), sf.lit(2), sf.lit(3))).show()
+        +---+
+        |col|
+        +---+
+        |  1|
+        |  2|
+        |  3|
+        +---+
+        "#
+    };
+    (SparkSession . registerProgressHandler) => {
+        r#"
+        Register a progress handler to be called when a progress update is received from the server.
+
+        .. versionadded:: 4.0
+
+        Parameters
+        ----------
+        handler : ProgressHandler
+          A callable that follows the ProgressHandler interface. This handler will be called
+          on every progress update.
+
+        Examples
+        --------
+
+        >>> def progress_handler(stages, inflight_tasks, done):
+        ...     print(f"{len(stages)} Stages known, Done: {done}")
+        >>> spark.registerProgressHandler(progress_handler)
+        >>> res = spark.range(10).repartition(1).collect()  # doctest: +SKIP
+        3 Stages known, Done: False
+        3 Stages known, Done: True
+        >>> spark.clearProgressHandlers()
+        "#
+    };
+    (SparkSession . removeProgressHandler) => {
+        r#"
+        Remove a progress handler that was previously registered.
+
+        .. versionadded:: 4.0
+
+        Parameters
+        ----------
+        handler : ProgressHandler
+          The handler to remove if present in the list of progress handlers.
+        "#
+    };
+    (SparkSession . clearProgressHandlers) => {
+        r#"
+        Clear all registered progress handlers.
+
+        .. versionadded:: 4.0
+        "#
+    };
+    (SparkSession . createDataFrame) => {
+        r#"
+        Creates a :class:`DataFrame` from an :class:`RDD`, a list, a :class:`pandas.DataFrame`,
+        a :class:`numpy.ndarray`, or a :class:`pyarrow.Table`.
+
+        .. versionadded:: 2.0.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        .. versionchanged:: 4.0.0
+            Supports :class:`pyarrow.Table`.
+
+        Parameters
+        ----------
+        data : :class:`RDD` or iterable
+            an RDD of any kind of SQL data representation (:class:`Row`,
+            :class:`tuple`, ``int``, ``boolean``, ``dict``, etc.), or :class:`list`,
+            :class:`pandas.DataFrame`, :class:`numpy.ndarray`, or :class:`pyarrow.Table`.
+        schema : :class:`pyspark.sql.types.DataType`, str or list, optional
+            a :class:`pyspark.sql.types.DataType` or a datatype string or a list of
+            column names, default is None. The data type string format equals to
+            :class:`pyspark.sql.types.DataType.simpleString`, except that top level struct type can
+            omit the ``struct<>``.
+
+            When ``schema`` is a list of column names, the type of each column
+            will be inferred from ``data``.
+
+            When ``schema`` is ``None``, it will try to infer the schema (column names and types)
+            from ``data``, which should be an RDD of either :class:`Row`,
+            :class:`namedtuple`, or :class:`dict`.
+
+            When ``schema`` is :class:`pyspark.sql.types.DataType` or a datatype string, it must
+            match the real data, or an exception will be thrown at runtime. If the given schema is
+            not :class:`pyspark.sql.types.StructType`, it will be wrapped into a
+            :class:`pyspark.sql.types.StructType` as its only field, and the field name will be
+            "value". Each record will also be wrapped into a tuple, which can be converted to row
+            later.
+        samplingRatio : float, optional
+            the sample ratio of rows used for inferring. The first few rows will be used
+            if ``samplingRatio`` is ``None``. This option is effective only when the input is
+            :class:`RDD`.
+        verifySchema : bool, optional
+            verify data types of every row against schema. Enabled by default.
+            When the input is :class:`pyarrow.Table` or when the input class is
+            :class:`pandas.DataFrame` and `spark.sql.execution.arrow.pyspark.enabled` is enabled,
+            this option is not effective. It follows Arrow type coercion. This option is not
+            supported with Spark Connect.
+
+            .. versionadded:: 2.1.0
+
+        Returns
+        -------
+        :class:`DataFrame`
+
+        Notes
+        -----
+        Usage with `spark.sql.execution.arrow.pyspark.enabled=True` is experimental.
+
+        Examples
+        --------
+        Create a DataFrame from a list of tuples.
+
+        >>> spark.createDataFrame([('Alice', 1)]).show()
+        +-----+---+
+        |   _1| _2|
+        +-----+---+
+        |Alice|  1|
+        +-----+---+
+
+        Create a DataFrame from a list of dictionaries.
+
+        >>> d = [{'name': 'Alice', 'age': 1}]
+        >>> spark.createDataFrame(d).show()
+        +---+-----+
+        |age| name|
+        +---+-----+
+        |  1|Alice|
+        +---+-----+
+
+        Create a DataFrame with column names specified.
+
+        >>> spark.createDataFrame([('Alice', 1)], ['name', 'age']).show()
+        +-----+---+
+        | name|age|
+        +-----+---+
+        |Alice|  1|
+        +-----+---+
+
+        Create a DataFrame with the explicit schema specified.
+
+        >>> from pyspark.sql.types import *
+        >>> schema = StructType([
+        ...    StructField("name", StringType(), True),
+        ...    StructField("age", IntegerType(), True)])
+        >>> spark.createDataFrame([('Alice', 1)], schema).show()
+        +-----+---+
+        | name|age|
+        +-----+---+
+        |Alice|  1|
+        +-----+---+
+
+        Create a DataFrame with the schema in DDL formatted string.
+
+        >>> spark.createDataFrame([('Alice', 1)], "name: string, age: int").show()
+        +-----+---+
+        | name|age|
+        +-----+---+
+        |Alice|  1|
+        +-----+---+
+
+        Create an empty DataFrame.
+        When initializing an empty DataFrame in PySpark, it's mandatory to specify its schema,
+        as the DataFrame lacks data from which the schema can be inferred.
+
+        >>> spark.createDataFrame([], "name: string, age: int").show()
+        +----+---+
+        |name|age|
+        +----+---+
+        +----+---+
+
+        Create a DataFrame from Row objects.
+
+        >>> from pyspark.sql import Row
+        >>> Person = Row('name', 'age')
+        >>> df = spark.createDataFrame([Person("Alice", 1)])
+        >>> df.show()
+        +-----+---+
+        | name|age|
+        +-----+---+
+        |Alice|  1|
+        +-----+---+
+
+        Create a DataFrame from a pandas DataFrame.
+
+        >>> spark.createDataFrame(df.toPandas()).show()  # doctest: +SKIP
+        +-----+---+
+        | name|age|
+        +-----+---+
+        |Alice|  1|
+        +-----+---+
+
+        >>> pdf = pandas.DataFrame([[1, 2]])  # doctest: +SKIP
+        >>> spark.createDataFrame(pdf).show()  # doctest: +SKIP
+        +---+---+
+        |  0|  1|
+        +---+---+
+        |  1|  2|
+        +---+---+
+
+        Create a DataFrame from a PyArrow Table.
+
+        >>> spark.createDataFrame(df.toArrow()).show()  # doctest: +SKIP
+        +-----+---+
+        | name|age|
+        +-----+---+
+        |Alice|  1|
+        +-----+---+
+
+        >>> table = pyarrow.table({'0': [1], '1': [2]})  # doctest: +SKIP
+        >>> spark.createDataFrame(table).show()  # doctest: +SKIP
+        +---+---+
+        |  0|  1|
+        +---+---+
+        |  1|  2|
+        +---+---+
+        "#
+    };
+    (SparkSession . emptyDataFrame) => {
+        r#"Creates an empty :class:`DataFrame` with the specified schema.
+
+        .. versionadded:: 4.2.0
+
+        Parameters
+        ----------
+        schema : :class:`StructType` or str
+            a :class:`StructType` or a DDL-formatted string that describes the schema.
+
+        Returns
+        -------
+        :class:`DataFrame`
+            An empty DataFrame with the specified schema.
+
+        Examples
+        --------
+        Create an empty DataFrame with a StructType schema.
+
+        >>> from pyspark.sql.types import StructType, StructField, StringType, IntegerType
+        >>> schema = StructType([
+        ...     StructField("name", StringType(), True),
+        ...     StructField("age", IntegerType(), True)
+        ... ])
+        >>> df = spark.emptyDataFrame(schema)
+        >>> df.printSchema()
+        root
+         |-- name: string (nullable = true)
+         |-- age: integer (nullable = true)
+        >>> df.count()
+        0
+
+        Create an empty DataFrame with a DDL-formatted string schema.
+
+        >>> df = spark.emptyDataFrame("name STRING, age INT")
+        >>> df.printSchema()
+        root
+         |-- name: string (nullable = true)
+         |-- age: integer (nullable = true)
+        >>> df.count()
+        0
+        "#
+    };
+    (SparkSession . sql) => {
+        r#"Returns a :class:`DataFrame` representing the result of the given query.
+        When ``kwargs`` is specified, this method formats the given string by using the Python
+        standard formatter. The method binds named parameters to SQL literals or
+        positional parameters from `args`. It doesn't support named and positional parameters
+        in the same SQL query.
+
+        .. versionadded:: 2.0.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect and parameterized SQL.
+
+        .. versionchanged:: 3.5.0
+            Added positional parameters.
+
+        Parameters
+        ----------
+        sqlQuery : str
+            SQL query string.
+        args : dict or list
+            A dictionary of parameter names to Python objects or a list of Python objects
+            that can be converted to SQL literal expressions. See
+            `Supported Data Types`_ for supported value types in Python.
+            For example, dictionary keys: "rank", "name", "birthdate";
+            dictionary or list values: 1, "Steven", datetime.date(2023, 4, 2).
+            A value can be also a `Column` of a literal or collection constructor functions such
+            as `map()`, `array()`, `struct()`, in that case it is taken as is.
+
+            .. _Supported Data Types: https://spark.apache.org/docs/latest/sql-ref-datatypes.html
+
+            .. versionadded:: 3.4.0
+
+        kwargs : dict
+            Other variables that the user wants to set that can be referenced in the query
+
+            .. versionchanged:: 3.3.0
+               Added optional argument ``kwargs`` to specify the mapping of variables in the query.
+               This feature is experimental and unstable.
+
+        Returns
+        -------
+        :class:`DataFrame`
+
+        Notes
+        -----
+        In Spark Classic, a temporary view referenced in `spark.sql` is resolved immediately,
+        while in Spark Connect it is lazily analyzed.
+        So in Spark Connect if a view is dropped, modified or replaced after `spark.sql`, the
+        execution may fail or generate different results.
+
+        Examples
+        --------
+        Executing a SQL query.
+
+        >>> spark.sql("SELECT * FROM range(10) where id > 7").show()
+        +---+
+        | id|
+        +---+
+        |  8|
+        |  9|
+        +---+
+
+        Executing a SQL query with variables as Python formatter standard.
+
+        >>> spark.sql(
+        ...     "SELECT * FROM range(10) WHERE id > {bound1} AND id < {bound2}", bound1=7, bound2=9
+        ... ).show()
+        +---+
+        | id|
+        +---+
+        |  8|
+        +---+
+
+        >>> mydf = spark.range(10)
+        >>> spark.sql(
+        ...     "SELECT {col} FROM {mydf} WHERE id IN {x}",
+        ...     col=mydf.id, mydf=mydf, x=tuple(range(4))).show()
+        +---+
+        | id|
+        +---+
+        |  0|
+        |  1|
+        |  2|
+        |  3|
+        +---+
+
+        >>> spark.sql('''
+        ...   SELECT m1.a, m2.b
+        ...   FROM {table1} m1 INNER JOIN {table2} m2
+        ...   ON m1.key = m2.key
+        ...   ORDER BY m1.a, m2.b''',
+        ...   table1=spark.createDataFrame([(1, "a"), (2, "b")], ["a", "key"]),
+        ...   table2=spark.createDataFrame([(3, "a"), (4, "b"), (5, "b")], ["b", "key"])).show()
+        +---+---+
+        |  a|  b|
+        +---+---+
+        |  1|  3|
+        |  2|  4|
+        |  2|  5|
+        +---+---+
+
+        Also, it is possible to query using class:`Column` from :class:`DataFrame`.
+
+        >>> mydf = spark.createDataFrame([(1, 4), (2, 4), (3, 6)], ["A", "B"])
+        >>> spark.sql("SELECT {df.A}, {df[B]} FROM {df}", df=mydf).show()
+        +---+---+
+        |  A|  B|
+        +---+---+
+        |  1|  4|
+        |  2|  4|
+        |  3|  6|
+        +---+---+
+
+        And substitute named parameters with the `:` prefix by SQL literals.
+
+        >>> from pyspark.sql.functions import create_map, lit
+        >>> spark.sql(
+        ...   "SELECT *, element_at(:m, 'a') AS C FROM {df} WHERE {df[B]} > :minB",
+        ...   {"minB" : 5, "m" : create_map(lit('a'), lit(1))}, df=mydf).show()
+        +---+---+---+
+        |  A|  B|  C|
+        +---+---+---+
+        |  3|  6|  1|
+        +---+---+---+
+
+        Or positional parameters marked by `?` in the SQL query by SQL literals.
+
+        >>> from pyspark.sql.functions import array, lit
+        >>> spark.sql(
+        ...   "SELECT *, element_at(?, 1) AS C FROM {df} WHERE {df[B]} > ? and ? < {df[A]}",
+        ...   args=[array(lit(1), lit(2), lit(3)), 5, 2], df=mydf).show()
+        +---+---+---+
+        |  A|  B|  C|
+        +---+---+---+
+        |  3|  6|  1|
+        +---+---+---+
+        "#
+    };
+    (SparkSession . range) => {
+        r#"
+        Create a :class:`DataFrame` with single :class:`pyspark.sql.types.LongType` column named
+        ``id``, containing elements in a range from ``start`` to ``end`` (exclusive) with
+        step value ``step``.
+
+        .. versionadded:: 2.0.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        start : int
+            the start value
+        end : int, optional
+            the end value (exclusive)
+        step : int, optional
+            the incremental step (default: 1)
+        numPartitions : int, optional
+            the number of partitions of the DataFrame
+
+        Returns
+        -------
+        :class:`DataFrame`
+
+        Examples
+        --------
+        >>> spark.range(1, 7, 2).show()
+        +---+
+        | id|
+        +---+
+        |  1|
+        |  3|
+        |  5|
+        +---+
+
+        If only one argument is specified, it will be used as the end value.
+
+        >>> spark.range(3).show()
+        +---+
+        | id|
+        +---+
+        |  0|
+        |  1|
+        |  2|
+        +---+
+        "#
+    };
+    (SparkSession . catalog) => {
+        r#"Interface through which the user may create, drop, alter or query underlying
+        databases, tables, functions, etc.
+
+        .. versionadded:: 2.0.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Returns
+        -------
+        :class:`Catalog`
+
+        Examples
+        --------
+        >>> spark.catalog
+        <...Catalog object ...>
+
+        Create a temp view, show the list, and drop it.
+
+        >>> spark.range(1).createTempView("test_view")
+        >>> spark.catalog.listTables()  # doctest: +SKIP
+        [Table(name='test_view', catalog=None, namespace=[], description=None, ...
+        >>> _ = spark.catalog.dropTempView("test_view")
+        "#
+    };
+    (SparkSession . interruptAll) => {
+        r#"
+        Interrupt all operations of this session currently running on the connected server.
+
+        .. versionadded:: 3.5.0
+
+        .. versionchanged:: 4.0.0
+            Supports Spark Classic.
+
+        Returns
+        -------
+        list of str
+            List of operationIds of interrupted operations.
+
+        Notes
+        -----
+        There is still a possibility of operation finishing just as it is interrupted.
+        "#
+    };
+    (SparkSession . interruptTag) => {
+        r#"
+        Interrupt all operations of this session with the given operation tag.
+
+        .. versionadded:: 3.5.0
+
+        .. versionchanged:: 4.0.0
+            Supports Spark Classic.
+
+        Returns
+        -------
+        list of str
+            List of operationIds of interrupted operations.
+
+        Notes
+        -----
+        There is still a possibility of operation finishing just as it is interrupted.
+        "#
+    };
+    (SparkSession . interruptOperation) => {
+        r#"
+        Interrupt an operation of this session with the given operationId.
+
+        .. versionadded:: 3.5.0
+
+        .. versionchanged:: 4.0.0
+            Supports Spark Classic.
+
+        Returns
+        -------
+        list of str
+            List of operationIds of interrupted operations.
+
+        Notes
+        -----
+        There is still a possibility of operation finishing just as it is interrupted.
+        "#
+    };
+    (SparkSession . addTag) => {
+        r#"
+        Add a tag to be assigned to all the operations started by this thread in this session.
+
+        Often, a unit of execution in an application consists of multiple Spark executions.
+        Application programmers can use this method to group all those jobs together and give a
+        group tag. The application can use :meth:`SparkSession.interruptTag` to cancel all running
+        executions with this tag.
+
+        There may be multiple tags present at the same time, so different parts of application may
+        use different tags to perform cancellation at different levels of granularity.
+
+        .. versionadded:: 3.5.0
+
+        .. versionchanged:: 4.0.0
+            Supports Spark Classic.
+
+        Parameters
+        ----------
+        tag : str
+            The tag to be added. Cannot contain ',' (comma) character or be an empty string.
+        "#
+    };
+    (SparkSession . removeTag) => {
+        r#"
+        Remove a tag previously added to be assigned to all the operations started by this thread in
+        this session. Noop if such a tag was not added earlier.
+
+        .. versionadded:: 3.5.0
+
+        .. versionchanged:: 4.0.0
+            Supports Spark Classic.
+
+        Parameters
+        ----------
+        tag : list of str
+            The tag to be removed. Cannot contain ',' (comma) character or be an empty string.
+        "#
+    };
+    (SparkSession . getTags) => {
+        r#"
+        Get the tags that are currently set to be assigned to all the operations started by this
+        thread.
+
+        .. versionadded:: 3.5.0
+
+        .. versionchanged:: 4.0.0
+            Supports Spark Classic.
+
+        Returns
+        -------
+        set of str
+            Set of tags of interrupted operations.
+        "#
+    };
+    (SparkSession . clearTags) => {
+        r#"
+        Clear the current thread's operation tags.
+
+        .. versionadded:: 3.5.0
+
+        .. versionchanged:: 4.0.0
+            Supports Spark Classic.
+        "#
+    };
+    (SparkSession . stop) => {
+        r#"
+        Release the current session and close the GRPC connection to the Spark Connect server.
+        Reset the active session so that calls to getOrCreate() creates a new session.
+        If the session was created in local mode, the Spark Connect server running locally is also
+        terminated.
+
+        This API is best-effort and idempotent, i.e., if any of the operations fail, the API will
+        not produce an error. Stopping an already stopped session is a no-op.
+        "#
+    };
+    (SparkSession . is_stopped) => {
+        r#"
+        Returns if this session was stopped
+        "#
+    };
+    (SparkSession . conf) => {
+        r#"Runtime configuration interface for Spark.
+
+        This is the interface through which the user can get and set all Spark and Hadoop
+        configurations that are relevant to Spark SQL. When getting the value of a config,
+        this defaults to the value set in the underlying :class:`SparkContext`, if any.
+
+        .. versionadded:: 2.0.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Returns
+        -------
+        :class:`pyspark.sql.conf.RuntimeConfig`
+
+        Examples
+        --------
+        >>> spark.conf
+        <pyspark...RuntimeConf...>
+
+        Set a runtime configuration for the session
+
+        >>> spark.conf.set("key", "value")
+        >>> spark.conf.get("key")
+        'value'
+        "#
+    };
+    (SparkSession . streams) => {
+        r#"Returns a :class:`StreamingQueryManager` that allows managing all the
+        :class:`StreamingQuery` instances active on `this` context.
+
+        .. versionadded:: 2.0.0
+
+        .. versionchanged:: 3.5.0
+            Supports Spark Connect.
+
+        Notes
+        -----
+        This API is evolving.
+
+        Returns
+        -------
+        :class:`StreamingQueryManager`
+
+        Examples
+        --------
+        >>> spark.streams
+        <pyspark...StreamingQueryManager object ...>
+
+        Get the list of active streaming queries
+
+        >>> sq = spark.readStream.format(
+        ...     "rate").load().writeStream.format('memory').queryName('this_query').start()
+        >>> sqm = spark.streams
+        >>> [q.name for q in sqm.active]
+        ['this_query']
+        >>> sq.stop()
+        "#
+    };
+    (SparkSession . udf) => {
+        r#"Returns a :class:`UDFRegistration` for UDF registration.
+
+        .. versionadded:: 2.0.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Returns
+        -------
+        :class:`UDFRegistration`
+
+        Examples
+        --------
+        Register a Python UDF, and use it in SQL.
+
+        >>> strlen = spark.udf.register("strlen", lambda x: len(x))
+        >>> spark.sql("SELECT strlen('test')").show()
+        +------------+
+        |strlen(test)|
+        +------------+
+        |           4|
+        +------------+
+        "#
+    };
+    (SparkSession . udtf) => {
+        r#"Returns a :class:`UDTFRegistration` for UDTF registration.
+
+        .. versionadded:: 3.5.0
+
+        Returns
+        -------
+        :class:`UDTFRegistration`
+
+        Notes
+        -----
+        Supports Spark Connect.
+        "#
+    };
+    (SparkSession . dataSource) => {
+        r#"Returns a :class:`DataSourceRegistration` for data source registration.
+
+        .. versionadded:: 4.0.0
+
+        Returns
+        -------
+        :class:`DataSourceRegistration`
+
+        Notes
+        -----
+        This feature is experimental and unstable.
+        "#
+    };
+    (SparkSession . version) => {
+        r#"
+        The version of Spark on which this application is running.
+
+        .. versionadded:: 2.0.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Returns
+        -------
+        str
+            the version of Spark in string.
+
+        Examples
+        --------
+        >>> _ = spark.version
+        "#
+    };
+    (SparkSession . client) => {
+        r#"
+        Gives access to the Spark Connect client. In normal cases this is not necessary to be used
+        and only relevant for testing.
+
+        .. versionadded:: 3.4.0
+
+        Returns
+        -------
+        :class:`SparkConnectClient`
+
+        Notes
+        -----
+        This API is unstable, and a developer API. It returns non-API instance
+        :class:`SparkConnectClient`.
+        This is an API dedicated to Spark Connect client only. With regular Spark Session, it throws
+        an exception.
+        "#
+    };
+    (SparkSession . addArtifacts) => {
+        r#"
+        Add artifact(s) to the client session. Currently only local files are supported.
+
+        .. versionadded:: 3.5.0
+
+        .. versionchanged:: 4.0.0
+            Supports Spark Classic.
+
+        Parameters
+        ----------
+        *path : tuple of str
+            Artifact's URIs to add.
+        pyfile : bool
+            Whether to add them as Python dependencies such as .py, .egg, .zip or .jar files.
+            The pyfiles are directly inserted into the path when executing Python functions
+            in executors.
+        archive : bool
+            Whether to add them as archives such as .zip, .jar, .tar.gz, .tgz, or .tar files.
+            The archives are unpacked on the executor side automatically.
+        file : bool
+            Add a file to be downloaded with this Spark job on every node.
+            The ``path`` passed can only be a local file for now.
+        "#
+    };
+    (SparkSession . addArtifact) => {
+        r#"
+        Add artifact(s) to the client session. Currently only local files are supported.
+
+        .. versionadded:: 3.5.0
+
+        .. versionchanged:: 4.0.0
+            Supports Spark Classic.
+
+        Parameters
+        ----------
+        *path : tuple of str
+            Artifact's URIs to add.
+        pyfile : bool
+            Whether to add them as Python dependencies such as .py, .egg, .zip or .jar files.
+            The pyfiles are directly inserted into the path when executing Python functions
+            in executors.
+        archive : bool
+            Whether to add them as archives such as .zip, .jar, .tar.gz, .tgz, or .tar files.
+            The archives are unpacked on the executor side automatically.
+        file : bool
+            Add a file to be downloaded with this Spark job on every node.
+            The ``path`` passed can only be a local file for now.
+        "#
+    };
+    (SparkSession . copyFromLocalToFs) => {
+        r#"
+        Copy file from local to cloud storage file system.
+        If the file already exits in destination path, old file is overwritten.
+
+        .. versionadded:: 3.5.0
+
+        Parameters
+        ----------
+        local_path: str
+            Path to a local file. Directories are not supported.
+            The path can be either an absolute path or a relative path.
+        dest_path: str
+            The cloud storage path to the destination the file will
+            be copied to.
+            The path must be an an absolute path.
+
+        Notes
+        -----
+        This API is a developer API.
+        Also, this is an API dedicated to Spark Connect client only. With regular
+        Spark Session, it throws an exception.
+        "#
+    };
+    (SparkSession . profile) => {
+        r#"Returns a :class:`pyspark.sql.profile.Profile` for performance/memory profiling.
+
+        .. versionadded:: 4.0.0
+
+        Returns
+        -------
+        :class:`pyspark.sql.profile.Profile`
+
+        Notes
+        -----
+        Supports Spark Connect.
+        "#
+    };
+    (SparkSession . cloneSession) => {
+        r#"
+        Create a clone of this Spark Connect session on the server side. The server-side session
+        is cloned with all its current state (SQL configurations, temporary views, registered
+        functions, catalog state) copied over to a new independent session. The returned cloned
+        session is isolated from this session - any subsequent changes to either session's
+        server-side state will not be reflected in the other.
+
+        Parameters
+        ----------
+        new_session_id : str, optional
+            Custom session ID to use for the cloned session (must be a valid UUID).
+            If not provided, a new UUID will be generated.
+
+        Returns
+        -------
+        SparkSession
+            A new SparkSession instance with the cloned session.
+
+        Notes
+        -----
+        This creates a new server-side session with the specified or generated session ID
+        while preserving the current session's configuration and state.
+
+        .. note::
+            This is a developer API.
+        "#
+    };
+    (SparkSession . newSession) => {
+        r#"
+        Returns a new :class:`SparkSession` as a new session, that has separate SQLConf,
+        registered temporary views and UDFs, but shared table cache.
+
+        Unlike :meth:`cloneSession`, the returned session starts with empty state: no
+        configuration, temporary views, registered functions, or catalog state are copied
+        over from this session. This matches the Scala Connect ``newSession()`` semantics,
+        which creates a completely fresh session against the same server. Note one
+        difference from classic ``newSession()``: configurations set through
+        ``SparkSession.builder.config(...)`` when this session was created are not
+        reapplied to the new session; it starts from the server defaults.
+
+        .. versionadded:: 4.3.0
+
+        Returns
+        -------
+        :class:`SparkSession`
+            A new SparkSession bound to a fresh, independent server-side session.
+        "#
+    };
+    (SparkSession . Builder . channelBuilder) => {
+        r#"Uses custom :class:`ChannelBuilder` implementation, when there is a need
+            to customize the behavior for creation of GRPC connections.
+
+            .. versionadded:: 3.5.0
+
+            An example to use this class looks like this:
+
+            .. code-block:: python
+
+                from pyspark.sql.connect import SparkSession, ChannelBuilder
+
+                class CustomChannelBuilder(ChannelBuilder):
+                    ...
+
+                custom_channel_builder = CustomChannelBuilder(...)
+                spark = SparkSession.builder().channelBuilder(custom_channel_builder).getOrCreate()
+
+            Returns
+            -------
+            :class:`SparkSession.Builder`
+            "#
+    };
+    (SparkSession . Hook . on_execute_plan) => {
+        r#"Called before sending an ExecutePlanRequest.
+
+            The request is replaced with the one returned by this method.
+            "#
+    };
+    (Column) => {
+        r#"
+    A column in a DataFrame.
+
+    .. versionadded:: 1.3.0
+
+    .. versionchanged:: 3.4.0
+        Supports Spark Connect.
+
+    Examples
+    --------
+    Column instances can be created by
+
+    >>> df = spark.createDataFrame(
+    ...      [(2, "Alice"), (5, "Bob")], ["age", "name"])
+
+    Select a column out of a DataFrame
+    >>> df.name
+    Column<'name'>
+    >>> df["name"]
+    Column<'name'>
+
+    Create from an expression
+
+    >>> df.age + 1
+    Column<...>
+    >>> 1 / df.age
+    Column<...>
+    "#
+    };
+    (Column . eqNullSafe) => {
+        r#"
+        Equality test that is safe for null values.
+
+        .. versionadded:: 2.3.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        other
+            a value or :class:`Column`
+
+        Examples
+        --------
+        >>> from pyspark.sql import Row
+        >>> df1 = spark.createDataFrame([
+        ...     Row(id=1, value='foo'),
+        ...     Row(id=2, value=None)
+        ... ])
+        >>> df1.select(
+        ...     df1['value'] == 'foo',
+        ...     df1['value'].eqNullSafe('foo'),
+        ...     df1['value'].eqNullSafe(None)
+        ... ).show()
+        +-------------+---------------+----------------+
+        |(value = foo)|(value <=> foo)|(value <=> NULL)|
+        +-------------+---------------+----------------+
+        |         true|           true|           false|
+        |         NULL|          false|            true|
+        +-------------+---------------+----------------+
+        >>> df2 = spark.createDataFrame([
+        ...     Row(value = 'bar'),
+        ...     Row(value = None)
+        ... ])
+        >>> df1.join(df2, df1["value"] == df2["value"]).count()
+        0
+        >>> df1.join(df2, df1["value"].eqNullSafe(df2["value"])).count()
+        1
+        >>> df2 = spark.createDataFrame([
+        ...     Row(id=1, value=float('NaN')),
+        ...     Row(id=2, value=42.0),
+        ...     Row(id=3, value=None)
+        ... ])
+        >>> df2.select(
+        ...     df2['value'].eqNullSafe(None),
+        ...     df2['value'].eqNullSafe(float('NaN')),
+        ...     df2['value'].eqNullSafe(42.0)
+        ... ).show()
+        +----------------+---------------+----------------+
+        |(value <=> NULL)|(value <=> NaN)|(value <=> 42.0)|
+        +----------------+---------------+----------------+
+        |           false|           true|           false|
+        |           false|          false|            true|
+        |            true|          false|           false|
+        +----------------+---------------+----------------+
+
+        Notes
+        -----
+        Unlike Pandas, PySpark doesn't consider NaN values to be NULL. See the
+        `NaN Semantics <https://spark.apache.org/docs/latest/sql-ref-datatypes.html#nan-semantics>`_
+        for details.
+        "#
+    };
+    (Column . bitwiseOR) => {
+        r#"
+        Compute bitwise OR of this expression with another expression.
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        other
+            a value or :class:`Column` to calculate bitwise or(|) with
+            this :class:`Column`.
+
+        Examples
+        --------
+        >>> from pyspark.sql import Row
+        >>> df = spark.createDataFrame([Row(a=170, b=75)])
+        >>> df.select(df.a.bitwiseOR(df.b)).collect()
+        [Row((a | b)=235)]
+        "#
+    };
+    (Column . bitwiseAND) => {
+        r#"
+        Compute bitwise AND of this expression with another expression.
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        other
+            a value or :class:`Column` to calculate bitwise and(&) with
+            this :class:`Column`.
+
+        Examples
+        --------
+        >>> from pyspark.sql import Row
+        >>> df = spark.createDataFrame([Row(a=170, b=75)])
+        >>> df.select(df.a.bitwiseAND(df.b)).collect()
+        [Row((a & b)=10)]
+        "#
+    };
+    (Column . bitwiseXOR) => {
+        r#"
+        Compute bitwise XOR of this expression with another expression.
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        other
+            a value or :class:`Column` to calculate bitwise xor(^) with
+            this :class:`Column`.
+
+        Examples
+        --------
+        >>> from pyspark.sql import Row
+        >>> df = spark.createDataFrame([Row(a=170, b=75)])
+        >>> df.select(df.a.bitwiseXOR(df.b)).collect()
+        [Row((a ^ b)=225)]
+        "#
+    };
+    (Column . isNull) => {
+        r#"
+        True if the current expression is null.
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Examples
+        --------
+        >>> from pyspark.sql import Row
+        >>> df = spark.createDataFrame([Row(name='Tom', height=80), Row(name='Alice', height=None)])
+        >>> df.filter(df.height.isNull()).collect()
+        [Row(name='Alice', height=None)]
+        "#
+    };
+    (Column . isNotNull) => {
+        r#"
+        True if the current expression is NOT null.
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Examples
+        --------
+        >>> from pyspark.sql import Row
+        >>> df = spark.createDataFrame([Row(name='Tom', height=80), Row(name='Alice', height=None)])
+        >>> df.filter(df.height.isNotNull()).collect()
+        [Row(name='Tom', height=80)]
+        "#
+    };
+    (Column . isNaN) => {
+        r#"
+        True if the current expression is NaN.
+
+        .. versionadded:: 4.0.0
+
+        Examples
+        --------
+        >>> from pyspark.sql import Row
+        >>> df = spark.createDataFrame(
+        ...     [Row(name='Tom', height=80.0), Row(name='Alice', height=float('nan'))])
+        >>> df.filter(df.height.isNaN()).collect()
+        [Row(name='Alice', height=nan)]
+        "#
+    };
+    (Column . contains) => {
+        r#"
+        Contains the other element. Returns a boolean :class:`Column` based on a string match.
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        other
+            string in line. A value as a literal or a :class:`Column`.
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame(
+        ...      [(2, "Alice"), (5, "Bob")], ["age", "name"])
+        >>> df.filter(df.name.contains('o')).collect()
+        [Row(age=5, name='Bob')]
+        "#
+    };
+    (Column . startswith) => {
+        r#"
+        String starts with. Returns a boolean :class:`Column` based on a string match.
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        other : :class:`Column` or str
+            string at start of line (do not use a regex `^`)
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame(
+        ...      [(2, "Alice"), (5, "Bob")], ["age", "name"])
+        >>> df.filter(df.name.startswith('Al')).collect()
+        [Row(age=2, name='Alice')]
+        >>> df.filter(df.name.startswith('^Al')).collect()
+        []
+        "#
+    };
+    (Column . endswith) => {
+        r#"
+        String ends with. Returns a boolean :class:`Column` based on a string match.
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        other : :class:`Column` or str
+            string at end of line (do not use a regex `$`)
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame(
+        ...      [(2, "Alice"), (5, "Bob")], ["age", "name"])
+        >>> df.filter(df.name.endswith('ice')).collect()
+        [Row(age=2, name='Alice')]
+        >>> df.filter(df.name.endswith('ice$')).collect()
+        []
+        "#
+    };
+    (Column . when) => {
+        r#"
+        Evaluates a list of conditions and returns one of multiple possible result expressions.
+        If :func:`Column.otherwise` is not invoked, None is returned for unmatched conditions.
+
+        .. versionadded:: 1.4.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        condition : :class:`Column`
+            a boolean :class:`Column` expression.
+        value
+            a literal value, or a :class:`Column` expression.
+
+        Returns
+        -------
+        :class:`Column`
+            Column representing whether each element of Column is in conditions.
+
+        Examples
+        --------
+        Example 1: Using :func:`when` with conditions and values to create a new Column
+
+        >>> from pyspark.sql import functions as sf
+        >>> df = spark.createDataFrame([(2, "Alice"), (5, "Bob")], ["age", "name"])
+        >>> result = df.select(df.name, sf.when(df.age > 4, 1).when(df.age < 3, -1).otherwise(0))
+        >>> result.show()
+        +-----+------------------------------------------------------------+
+        | name|CASE WHEN (age > 4) THEN 1 WHEN (age < 3) THEN -1 ELSE 0 END|
+        +-----+------------------------------------------------------------+
+        |Alice|                                                          -1|
+        |  Bob|                                                           1|
+        +-----+------------------------------------------------------------+
+
+        Example 2: Chaining multiple :func:`when` conditions
+
+        >>> from pyspark.sql import functions as sf
+        >>> df = spark.createDataFrame([(1, "Alice"), (4, "Bob"), (6, "Charlie")], ["age", "name"])
+        >>> result = df.select(
+        ...     df.name,
+        ...     sf.when(df.age < 3, "Young").when(df.age < 5, "Middle-aged").otherwise("Old")
+        ... )
+        >>> result.show()
+        +-------+---------------------------------------------------------------------------+
+        |   name|CASE WHEN (age < 3) THEN Young WHEN (age < 5) THEN Middle-aged ELSE Old END|
+        +-------+---------------------------------------------------------------------------+
+        |  Alice|                                                                      Young|
+        |    Bob|                                                                Middle-aged|
+        |Charlie|                                                                        Old|
+        +-------+---------------------------------------------------------------------------+
+
+        Example 3: Using literal values as conditions
+
+        >>> from pyspark.sql import functions as sf
+        >>> df = spark.createDataFrame([(2, "Alice"), (5, "Bob")], ["age", "name"])
+        >>> result = df.select(
+        ...     df.name, sf.when(sf.lit(True), 1).otherwise(
+        ...         sf.raise_error("unreachable")).alias("when"))
+        >>> result.show()
+        +-----+----+
+        | name|when|
+        +-----+----+
+        |Alice|   1|
+        |  Bob|   1|
+        +-----+----+
+
+        See Also
+        --------
+        pyspark.sql.functions.when
+        "#
+    };
+    (Column . otherwise) => {
+        r#"
+        Evaluates a list of conditions and returns one of multiple possible result expressions.
+        If :func:`Column.otherwise` is not invoked, None is returned for unmatched conditions.
+
+        .. versionadded:: 1.4.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        value
+            a literal value, or a :class:`Column` expression.
+
+        Returns
+        -------
+        :class:`Column`
+            Column representing whether each element of Column is unmatched conditions.
+
+        Examples
+        --------
+        >>> from pyspark.sql import functions as sf
+        >>> df = spark.createDataFrame(
+        ...      [(2, "Alice"), (5, "Bob")], ["age", "name"])
+        >>> df.select(df.name, sf.when(df.age > 3, 1).otherwise(0)).show()
+        +-----+-------------------------------------+
+        | name|CASE WHEN (age > 3) THEN 1 ELSE 0 END|
+        +-----+-------------------------------------+
+        |Alice|                                    0|
+        |  Bob|                                    1|
+        +-----+-------------------------------------+
+
+        See Also
+        --------
+        pyspark.sql.functions.when
+        "#
+    };
+    (Column . like) => {
+        r#"
+        SQL like expression. Returns a boolean :class:`Column` based on a SQL LIKE match.
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        other : str
+            a SQL LIKE pattern
+
+        See Also
+        --------
+        pyspark.sql.Column.rlike
+
+        Returns
+        -------
+        :class:`Column`
+            Column of booleans showing whether each element
+            in the Column is matched by SQL LIKE pattern.
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame(
+        ...      [(2, "Alice"), (5, "Bob")], ["age", "name"])
+        >>> df.filter(df.name.like('Al%')).collect()
+        [Row(age=2, name='Alice')]
+        "#
+    };
+    (Column . rlike) => {
+        r#"
+        SQL RLIKE expression (LIKE with Regex). Returns a boolean :class:`Column` based on a regex
+        match.
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        other : str
+            an extended regex expression
+
+        Returns
+        -------
+        :class:`Column`
+            Column of booleans showing whether each element
+            in the Column is matched by extended regex expression.
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame(
+        ...      [(2, "Alice"), (5, "Bob")], ["age", "name"])
+        >>> df.filter(df.name.rlike('ice$')).collect()
+        [Row(age=2, name='Alice')]
+        "#
+    };
+    (Column . ilike) => {
+        r#"
+        SQL ILIKE expression (case insensitive LIKE). Returns a boolean :class:`Column`
+        based on a case insensitive match.
+
+        .. versionadded:: 3.3.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        other : str
+            a SQL LIKE pattern
+
+        See Also
+        --------
+        pyspark.sql.Column.rlike
+
+        Returns
+        -------
+        :class:`Column`
+            Column of booleans showing whether each element
+            in the Column is matched by SQL LIKE pattern.
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame(
+        ...      [(2, "Alice"), (5, "Bob")], ["age", "name"])
+        >>> df.filter(df.name.ilike('%Ice')).collect()
+        [Row(age=2, name='Alice')]
+        "#
+    };
+    (Column . substr) => {
+        r#"
+        Return a :class:`Column` which is a substring of the column.
+
+        .. versionadded:: 1.3.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        startPos : :class:`Column` or int
+            start position
+        length : :class:`Column` or int
+            length of the substring
+
+        Returns
+        -------
+        :class:`Column`
+            Column representing whether each element of Column is substr of origin Column.
+
+        Examples
+        --------
+
+        Example 1. Using integers for the input arguments.
+
+        >>> df = spark.createDataFrame(
+        ...      [(2, "Alice"), (5, "Bob")], ["age", "name"])
+        >>> df.select(df.name.substr(1, 3).alias("col")).collect()
+        [Row(col='Ali'), Row(col='Bob')]
+
+        Example 2. Using columns for the input arguments.
+
+        >>> df = spark.createDataFrame(
+        ...      [(3, 4, "Alice"), (2, 3, "Bob")], ["sidx", "eidx", "name"])
+        >>> df.select(df.name.substr(df.sidx, df.eidx).alias("col")).collect()
+        [Row(col='ice'), Row(col='ob')]
+        "#
+    };
+    (Column . alias) => {
+        r#"
+        Returns this column aliased with a new name or names (in the case of expressions that
+        return more than one column, such as explode).
+
+        .. versionadded:: 1.3.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        alias : str
+            desired column names (collects all positional arguments passed)
+
+        Other Parameters
+        ----------------
+        metadata: dict
+            a dict of information to be stored in ``metadata`` attribute of the
+            corresponding :class:`StructField <pyspark.sql.types.StructField>` (optional, keyword
+            only argument)
+
+            .. versionchanged:: 2.2.0
+               Added optional ``metadata`` argument.
+
+        Returns
+        -------
+        :class:`Column`
+            Column representing whether each element of Column is aliased with new name or names.
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame(
+        ...      [(2, "Alice"), (5, "Bob")], ["age", "name"])
+        >>> df.select(df.age.alias("age2")).collect()
+        [Row(age2=2), Row(age2=5)]
+        >>> df.select(df.age.alias("age3", metadata={'max': 99})).schema['age3'].metadata['max']
+        99
+        "#
+    };
+    (Column . asc) => {
+        r#"
+        Returns a sort expression based on the ascending order of the column.
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Examples
+        --------
+        >>> from pyspark.sql import Row
+        >>> df = spark.createDataFrame([('Tom', 80), ('Alice', None)], ["name", "height"])
+        >>> df.select(df.name).orderBy(df.name.asc()).collect()
+        [Row(name='Alice'), Row(name='Tom')]
+        "#
+    };
+    (Column . asc_nulls_first) => {
+        r#"
+        Returns a sort expression based on ascending order of the column, and null values
+        return before non-null values.
+
+        .. versionadded:: 2.4.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Examples
+        --------
+        >>> from pyspark.sql import Row
+        >>> df = spark.createDataFrame(
+        ...     [('Tom', 80), (None, 60), ('Alice', None)], ["name", "height"])
+        >>> df.select(df.name).orderBy(df.name.asc_nulls_first()).collect()
+        [Row(name=None), Row(name='Alice'), Row(name='Tom')]
+
+        "#
+    };
+    (Column . asc_nulls_last) => {
+        r#"
+        Returns a sort expression based on ascending order of the column, and null values
+        appear after non-null values.
+
+        .. versionadded:: 2.4.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Examples
+        --------
+        >>> from pyspark.sql import Row
+        >>> df = spark.createDataFrame(
+        ...     [('Tom', 80), (None, 60), ('Alice', None)], ["name", "height"])
+        >>> df.select(df.name).orderBy(df.name.asc_nulls_last()).collect()
+        [Row(name='Alice'), Row(name='Tom'), Row(name=None)]
+
+        "#
+    };
+    (Column . desc) => {
+        r#"
+        Returns a sort expression based on the descending order of the column.
+
+        .. versionadded:: 2.4.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Examples
+        --------
+        >>> from pyspark.sql import Row
+        >>> df = spark.createDataFrame([('Tom', 80), ('Alice', None)], ["name", "height"])
+        >>> df.select(df.name).orderBy(df.name.desc()).collect()
+        [Row(name='Tom'), Row(name='Alice')]
+        "#
+    };
+    (Column . desc_nulls_first) => {
+        r#"
+        Returns a sort expression based on the descending order of the column, and null values
+        appear before non-null values.
+
+        .. versionadded:: 2.4.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Examples
+        --------
+        >>> from pyspark.sql import Row
+        >>> df = spark.createDataFrame(
+        ...     [('Tom', 80), (None, 60), ('Alice', None)], ["name", "height"])
+        >>> df.select(df.name).orderBy(df.name.desc_nulls_first()).collect()
+        [Row(name=None), Row(name='Tom'), Row(name='Alice')]
+
+        "#
+    };
+    (Column . desc_nulls_last) => {
+        r#"
+        Returns a sort expression based on the descending order of the column, and null values
+        appear after non-null values.
+
+        .. versionadded:: 2.4.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Examples
+        --------
+        >>> from pyspark.sql import Row
+        >>> df = spark.createDataFrame(
+        ...     [('Tom', 80), (None, 60), ('Alice', None)], ["name", "height"])
+        >>> df.select(df.name).orderBy(df.name.desc_nulls_last()).collect()
+        [Row(name='Tom'), Row(name='Alice'), Row(name=None)]
+        "#
+    };
+    (Column . cast) => {
+        r#"
+        Casts the column into type ``dataType``.
+
+        .. versionadded:: 1.3.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        dataType : :class:`DataType` or str
+            a DataType or Python string literal with a DDL-formatted string
+            to use when parsing the column to the same type.
+
+        Returns
+        -------
+        :class:`Column`
+            Column representing whether each element of Column is cast into new type.
+
+        Examples
+        --------
+        >>> from pyspark.sql.types import StringType
+        >>> df = spark.createDataFrame(
+        ...      [(2, "Alice"), (5, "Bob")], ["age", "name"])
+        >>> df.select(df.age.cast("string").alias('ages')).collect()
+        [Row(ages='2'), Row(ages='5')]
+        >>> df.select(df.age.cast(StringType()).alias('ages')).collect()
+        [Row(ages='2'), Row(ages='5')]
+        "#
+    };
+    (Column . try_cast) => {
+        r#"
+        This is a special version of `cast` that performs the same operation, but returns a NULL
+        value instead of raising an error if the invoke method throws exception.
+
+        .. versionadded:: 4.0.0
+
+        Parameters
+        ----------
+        dataType : :class:`DataType` or str
+            a DataType or Python string literal with a DDL-formatted string
+            to use when parsing the column to the same type.
+
+        Returns
+        -------
+        :class:`Column`
+            Column representing whether each element of Column is cast into new type.
+
+        Examples
+        --------
+        Example 1: Cast with a Datatype
+
+        >>> from pyspark.sql.types import LongType
+        >>> df = spark.createDataFrame(
+        ...      [(2, "123"), (5, "Bob"), (3, None)], ["age", "name"])
+        >>> df.select(df.name.try_cast(LongType())).show()
+        +----+
+        |name|
+        +----+
+        | 123|
+        |NULL|
+        |NULL|
+        +----+
+
+        Example 2: Cast with a DDL string
+
+        >>> df = spark.createDataFrame(
+        ...      [(2, "123"), (5, "Bob"), (3, None)], ["age", "name"])
+        >>> df.select(df.name.try_cast("double")).show()
+        +-----+
+        | name|
+        +-----+
+        |123.0|
+        | NULL|
+        | NULL|
+        +-----+
+        "#
+    };
+    (Column . over) => {
+        r#"
+        Define a windowing column.
+
+        .. versionadded:: 1.4.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        window : :class:`WindowSpec`
+
+        Returns
+        -------
+        :class:`Column`
+
+        Examples
+        --------
+        >>> from pyspark.sql import Window
+        >>> window = (
+        ...     Window.partitionBy("name")
+        ...     .orderBy("age")
+        ...     .rowsBetween(Window.unboundedPreceding, Window.currentRow)
+        ... )
+        >>> from pyspark.sql.functions import rank, min, desc
+        >>> df = spark.createDataFrame(
+        ...      [(2, "Alice"), (5, "Bob")], ["age", "name"])
+        >>> df.withColumn(
+        ...      "rank", rank().over(window)
+        ... ).withColumn(
+        ...      "min", min('age').over(window)
+        ... ).sort(desc("age")).show()
+        +---+-----+----+---+
+        |age| name|rank|min|
+        +---+-----+----+---+
+        |  5|  Bob|   1|  5|
+        |  2|Alice|   1|  2|
+        +---+-----+----+---+
+        "#
+    };
+    (Column . transform) => {
+        r#"
+        Applies a transformation function to this column.
+
+        This method allows you to apply a function that takes a Column and returns a Column,
+        enabling method chaining and functional transformations.
+
+        .. versionadded:: 4.1.0
+
+        Parameters
+        ----------
+        f : callable
+            A function that takes a :class:`Column` and returns a :class:`Column`.
+
+        Returns
+        -------
+        :class:`Column`
+            The result of applying the function to this column.
+
+        Examples
+        --------
+        Example 1: Chain built-in functions
+
+        >>> from pyspark.sql.functions import trim, upper
+        >>> df = spark.createDataFrame([("  hello  ",), ("  world  ",)], ["text"])
+        >>> df.select(df.text.transform(trim).transform(upper).alias("result")).show()
+        +------+
+        |result|
+        +------+
+        | HELLO|
+        | WORLD|
+        +------+
+
+        Example 2: Use lambda functions
+
+        >>> df = spark.createDataFrame([(10,), (20,), (30,)], ["value"])
+        >>> df.select(
+        ...     df.value.transform(lambda c: c + 5)
+        ...     .transform(lambda c: c * 2)
+        ...     .transform(lambda c: c - 10).alias("result")
+        ... ).show()
+        +------+
+        |result|
+        +------+
+        |    20|
+        |    40|
+        |    60|
+        +------+
+        "#
+    };
+    (Column . outer) => {
+        r#"
+        Mark this column as an outer column if its expression refers to columns from an outer query.
+
+        This is used to trigger lazy analysis of Spark Classic DataFrame, so that we can use it
+        to build subquery expressions. Spark Connect DataFrame is always lazily analyzed and
+        does not need to use this function.
+
+        .. versionadded:: 4.0.0
+
+        See Also
+        --------
+        pyspark.sql.DataFrame.scalar
+        pyspark.sql.DataFrame.exists
+
+        Examples
+        --------
+        >>> from pyspark.sql import functions as sf
+        >>> employees = spark.createDataFrame(
+        ...     [
+        ...         (1, "Alice", 45000, 101), (2, "Bob", 54000, 101), (3, "Charlie", 29000, 102),
+        ...         (4, "David", 61000, 102), (5, "Eve", 48000, 101),
+        ...     ],
+        ...     ["id", "name", "salary", "department_id"],
+        ... )
+        >>> employees.alias("e1").where(
+        ...     sf.col("salary") > employees.alias("e2").where(
+        ...         sf.col("e2.department_id") == sf.col("e1.department_id").outer()
+        ...     ).select(sf.avg("salary")).scalar()
+        ... ).select("name", "salary", "department_id").orderBy("name").show()
+        +-----+------+-------------+
+        | name|salary|department_id|
+        +-----+------+-------------+
+        |  Bob| 54000|          101|
+        |David| 61000|          102|
+        +-----+------+-------------+
+        "#
+    };
+    (Column . isin) => {
+        r#"
+        A boolean expression that is evaluated to true if the value of this
+        expression is contained by the evaluated values of the arguments.
+
+        .. versionadded:: 1.5.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        .. versionchanged:: 4.1.0
+            Also takes a single :class:`DataFrame` to be used as IN subquery.
+
+        Parameters
+        ----------
+        cols : Any
+            The values to compare with the column values. The result will only be true at a location
+            if any value matches in the Column.
+
+        Returns
+        -------
+        :class:`Column`
+            Column of booleans showing whether each element in the Column is contained in cols.
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame([(2, "Alice"), (5, "Bob"), (8, "Mike")], ["age", "name"])
+
+        Example 1: Filter rows with names in the specified values
+
+        >>> df[df.name.isin("Bob", "Mike")].orderBy("age").show()
+        +---+----+
+        |age|name|
+        +---+----+
+        |  5| Bob|
+        |  8|Mike|
+        +---+----+
+
+        Example 2: Filter rows with ages in the specified list
+
+        >>> df[df.age.isin([1, 2, 3])].show()
+        +---+-----+
+        |age| name|
+        +---+-----+
+        |  2|Alice|
+        +---+-----+
+
+        Example 3: Filter rows with names not in the specified values
+
+        >>> df[~df.name.isin("Alice", "Bob")].show()
+        +---+----+
+        |age|name|
+        +---+----+
+        |  8|Mike|
+        +---+----+
+
+        Example 4: Take a :class:`DataFrame` and work as IN subquery
+
+        >>> df.where(df.age.isin(spark.range(6))).orderBy("age").show()
+        +---+-----+
+        |age| name|
+        +---+-----+
+        |  2|Alice|
+        |  5|  Bob|
+        +---+-----+
+
+        Example 5: Multiple values for IN subquery
+
+        >>> from pyspark.sql.functions import lit, struct
+        >>> df.where(struct(df.age, df.name).isin(spark.range(6).select("id", lit("Bob")))).show()
+        +---+----+
+        |age|name|
+        +---+----+
+        |  5| Bob|
+        +---+----+
+        "#
+    };
+    (Column . between) => {
+        r#"
+        Check if the current column's values are between the specified lower and upper
+        bounds, inclusive.
+
+        .. versionadded:: 1.3.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        lowerBound : :class:`Column`, int, float, string, bool, datetime, date or Decimal
+            The lower boundary value, inclusive.
+        upperBound : :class:`Column`, int, float, string, bool, datetime, date or Decimal
+            The upper boundary value, inclusive.
+
+        Returns
+        -------
+        :class:`Column`
+            A new column of boolean values indicating whether each element in the original
+            column is within the specified range (inclusive).
+
+        Examples
+        --------
+        Using between with integer values.
+
+        >>> df = spark.createDataFrame([(2, "Alice"), (5, "Bob")], ["age", "name"])
+        >>> df.select(df.name, df.age.between(2, 4)).show()
+        +-----+---------------------------+
+        | name|((age >= 2) AND (age <= 4))|
+        +-----+---------------------------+
+        |Alice|                       true|
+        |  Bob|                      false|
+        +-----+---------------------------+
+
+        Using between with string values.
+
+        >>> df = spark.createDataFrame([("Alice", "A"), ("Bob", "B")], ["name", "initial"])
+        >>> df.select(df.name, df.initial.between("A", "B")).show()
+        +-----+-----------------------------------+
+        | name|((initial >= A) AND (initial <= B))|
+        +-----+-----------------------------------+
+        |Alice|                               true|
+        |  Bob|                               true|
+        +-----+-----------------------------------+
+
+        Using between with float values.
+
+        >>> df = spark.createDataFrame(
+        ...     [(2.5, "Alice"), (5.5, "Bob")], ["height", "name"])
+        >>> df.select(df.name, df.height.between(2.0, 5.0)).show()
+        +-----+-------------------------------------+
+        | name|((height >= 2.0) AND (height <= 5.0))|
+        +-----+-------------------------------------+
+        |Alice|                                 true|
+        |  Bob|                                false|
+        +-----+-------------------------------------+
+
+        Using between with date values.
+
+        >>> import pyspark.sql.functions as sf
+        >>> df = spark.createDataFrame(
+        ...     [("Alice", "2023-01-01"), ("Bob", "2023-02-01")], ["name", "date"])
+        >>> df = df.withColumn("date", sf.to_date(df.date))
+        >>> df.select(df.name, df.date.between("2023-01-01", "2023-01-15")).show()
+        +-----+-----------------------------------------------+
+        | name|((date >= 2023-01-01) AND (date <= 2023-01-15))|
+        +-----+-----------------------------------------------+
+        |Alice|                                           true|
+        |  Bob|                                          false|
+        +-----+-----------------------------------------------+
+        >>> from datetime import date
+        >>> df.select(df.name, df.date.between(date(2023, 1, 1), date(2023, 1, 15))).show()
+        +-----+-------------------------------------------------------------+
+        | name|((date >= DATE '2023-01-01') AND (date <= DATE '2023-01-15'))|
+        +-----+-------------------------------------------------------------+
+        |Alice|                                                         true|
+        |  Bob|                                                        false|
+        +-----+-------------------------------------------------------------+
+
+        Using between with timestamp values.
+
+        >>> import pyspark.sql.functions as sf
+        >>> df = spark.createDataFrame(
+        ...     [("Alice", "2023-01-01 10:00:00"), ("Bob", "2023-02-01 10:00:00")],
+        ...     schema=["name", "timestamp"])
+        >>> df = df.withColumn("timestamp", sf.to_timestamp(df.timestamp))
+        >>> df.select(df.name, df.timestamp.between("2023-01-01", "2023-02-01")).show()
+        +-----+---------------------------------------------------------+
+        | name|((timestamp >= 2023-01-01) AND (timestamp <= 2023-02-01))|
+        +-----+---------------------------------------------------------+
+        |Alice|                                                     true|
+        |  Bob|                                                    false|
+        +-----+---------------------------------------------------------+
+        >>> df.select(df.name, df.timestamp.between("2023-01-01", "2023-02-01 12:00:00")).show()
+        +-----+------------------------------------------------------------------+
+        | name|((timestamp >= 2023-01-01) AND (timestamp <= 2023-02-01 12:00:00))|
+        +-----+------------------------------------------------------------------+
+        |Alice|                                                              true|
+        |  Bob|                                                              true|
+        +-----+------------------------------------------------------------------+
+        "#
+    };
+    (Column . getItem) => {
+        r#"
+        An expression that gets an item at position ``ordinal`` out of a list,
+        or gets an item by key out of a dict.
+
+        .. versionadded:: 1.3.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        key
+            a literal value, or a :class:`Column` expression.
+            The result will only be true at a location if the item matches in the column.
+
+             .. deprecated:: 3.0.0
+                 :class:`Column` as a parameter is deprecated.
+
+        Returns
+        -------
+        :class:`Column`
+            Column representing the item(s) got at position out of a list or by key out of a dict.
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame([([1, 2], {"key": "value"})], ["l", "d"])
+        >>> df.select(df.l.getItem(0), df.d.getItem("key")).show()
+        +----+------+
+        |l[0]|d[key]|
+        +----+------+
+        |   1| value|
+        +----+------+
+        "#
+    };
+    (Column . getField) => {
+        r#"
+        An expression that gets a field by name in a :class:`StructType`.
+
+        .. versionadded:: 1.3.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        name
+            a literal value, or a :class:`Column` expression.
+            The result will only be true at a location if the field matches in the Column.
+
+             .. deprecated:: 3.0.0
+                 :class:`Column` as a parameter is deprecated.
+        Returns
+        -------
+        :class:`Column`
+            Column representing whether each element of Column got by name.
+
+        Examples
+        --------
+        >>> from pyspark.sql import Row
+        >>> df = spark.createDataFrame([Row(r=Row(a=1, b="b"))])
+        >>> df.select(df.r.getField("b")).show()
+        +---+
+        |r.b|
+        +---+
+        |  b|
+        +---+
+        >>> df.select(df.r.a).show()
+        +---+
+        |r.a|
+        +---+
+        |  1|
+        +---+
+        "#
+    };
+    (Column . withField) => {
+        r#"
+        An expression that adds/replaces a field in :class:`StructType` by name.
+
+        .. versionadded:: 3.1.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        fieldName : str
+            a literal value.
+            The result will only be true at a location if any field matches in the Column.
+        col : :class:`Column`
+            A :class:`Column` expression for the column with `fieldName`.
+
+        Returns
+        -------
+        :class:`Column`
+            Column representing whether each element of Column
+            which field was added/replaced by fieldName.
+
+        Examples
+        --------
+        >>> from pyspark.sql import Row
+        >>> from pyspark.sql.functions import lit
+        >>> df = spark.createDataFrame([Row(a=Row(b=1, c=2))])
+        >>> df.withColumn('a', df['a'].withField('b', lit(3))).select('a.b').show()
+        +---+
+        |  b|
+        +---+
+        |  3|
+        +---+
+        >>> df.withColumn('a', df['a'].withField('d', lit(4))).select('a.d').show()
+        +---+
+        |  d|
+        +---+
+        |  4|
+        +---+
+        "#
+    };
+    (Column . dropFields) => {
+        r#"
+        An expression that drops fields in :class:`StructType` by name.
+        This is a no-op if the schema doesn't contain field name(s).
+
+        .. versionadded:: 3.1.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        fieldNames : str
+            Desired field names (collects all positional arguments passed)
+            The result will drop at a location if any field matches in the Column.
+
+        Returns
+        -------
+        :class:`Column`
+            Column representing whether each element of Column with field dropped by fieldName.
+
+        Examples
+        --------
+        >>> from pyspark.sql import Row
+        >>> from pyspark.sql.functions import col, lit
+        >>> df = spark.createDataFrame([
+        ...     Row(a=Row(b=1, c=2, d=3, e=Row(f=4, g=5, h=6)))])
+        >>> df.withColumn('a', df['a'].dropFields('b')).show()
+        +-----------------+
+        |                a|
+        +-----------------+
+        |{2, 3, {4, 5, 6}}|
+        +-----------------+
+
+        >>> df.withColumn('a', df['a'].dropFields('b', 'c')).show()
+        +--------------+
+        |             a|
+        +--------------+
+        |{3, {4, 5, 6}}|
+        +--------------+
+
+        This method supports dropping multiple nested fields directly e.g.
+
+        >>> df.withColumn("a", col("a").dropFields("e.g", "e.h")).show()
+        +--------------+
+        |             a|
+        +--------------+
+        |{1, 2, 3, {4}}|
+        +--------------+
+
+        However, if you are going to add/replace multiple nested fields,
+        it is preferred to extract out the nested struct before
+        adding/replacing multiple fields e.g.
+
+        >>> df.select(col("a").withField(
+        ...     "e", col("a.e").dropFields("g", "h")).alias("a")
+        ... ).show()
+        +--------------+
+        |             a|
+        +--------------+
+        |{1, 2, 3, {4}}|
+        +--------------+
+
+        "#
+    };
+    (WindowSpec) => {
+        r#"
+    A window specification that defines the partitioning, ordering,
+    and frame boundaries.
+
+    Use the static methods in :class:`Window` to create a :class:`WindowSpec`.
+
+    .. versionadded:: 1.4.0
+
+    .. versionchanged:: 3.4.0
+        Supports Spark Connect.
+    "#
+    };
+    (WindowSpec . partitionBy) => {
+        r#"
+        Defines the partitioning columns in a :class:`WindowSpec`.
+
+        .. versionadded:: 1.4.0
+
+        Parameters
+        ----------
+        cols : str, :class:`Column` or list
+            names of columns or expressions
+        "#
+    };
+    (WindowSpec . orderBy) => {
+        r#"
+        Defines the ordering columns in a :class:`WindowSpec`.
+
+        .. versionadded:: 1.4.0
+
+        Parameters
+        ----------
+        cols : str, :class:`Column` or list
+            names of columns or expressions
+        "#
+    };
+    (WindowSpec . rowsBetween) => {
+        r#"
+        Defines the frame boundaries, from `start` (inclusive) to `end` (inclusive).
+
+        Both `start` and `end` are relative positions from the current row.
+        For example, "0" means "current row", while "-1" means the row before
+        the current row, and "5" means the fifth row after the current row.
+
+        We recommend users use ``Window.unboundedPreceding``, ``Window.unboundedFollowing``,
+        and ``Window.currentRow`` to specify special boundary values, rather than using integral
+        values directly.
+
+        .. versionadded:: 1.4.0
+
+        Parameters
+        ----------
+        start : int
+            boundary start, inclusive.
+            The frame is unbounded if this is ``Window.unboundedPreceding``, or
+            any value less than or equal to max(-sys.maxsize, -9223372036854775808).
+        end : int
+            boundary end, inclusive.
+            The frame is unbounded if this is ``Window.unboundedFollowing``, or
+            any value greater than or equal to min(sys.maxsize, 9223372036854775807).
+        "#
+    };
+    (WindowSpec . rangeBetween) => {
+        r#"
+        Defines the frame boundaries, from `start` (inclusive) to `end` (inclusive).
+
+        Both `start` and `end` are relative from the current row. For example,
+        "0" means "current row", while "-1" means one off before the current row,
+        and "5" means the five off after the current row.
+
+        We recommend users use ``Window.unboundedPreceding``, ``Window.unboundedFollowing``,
+        and ``Window.currentRow`` to specify special boundary values, rather than using integral
+        values directly.
+
+        .. versionadded:: 1.4.0
+
+        Parameters
+        ----------
+        start : int
+            boundary start, inclusive.
+            The frame is unbounded if this is ``Window.unboundedPreceding``, or
+            any value less than or equal to max(-sys.maxsize, -9223372036854775808).
+        end : int
+            boundary end, inclusive.
+            The frame is unbounded if this is ``Window.unboundedFollowing``, or
+            any value greater than or equal to min(sys.maxsize, 9223372036854775807).
+        "#
+    };
+    (TableArg) => {
+        r#"
+    Represents a table argument in PySpark.
+
+    This class provides methods to specify partitioning, ordering, and
+    single-partition constraints when passing a DataFrame as a table argument
+    to TVF(Table-Valued Function)s including UDTF(User-Defined Table Function)s.
+    "#
+    };
+    (TableArg . partitionBy) => {
+        r#"
+        Partitions the data based on the specified columns.
+
+        This method partitions the table argument data by the specified columns.
+        It must be called before `orderBy()` and cannot be called after
+        `withSinglePartition()` has been called.
+
+        Parameters
+        ----------
+        cols : str, :class:`Column`, or list
+            Column names or :class:`Column` objects to partition by.
+
+        Returns
+        -------
+        :class:`TableArg`
+            A new `TableArg` instance with partitioning applied.
+
+        Examples
+        --------
+        >>> from pyspark.sql.functions import udtf
+        >>>
+        >>> @udtf(returnType="key: int, value: string")
+        ... class ProcessUDTF:
+        ...     def eval(self, row):
+        ...         yield row["key"], row["value"]
+        ...
+        >>> df = spark.createDataFrame(
+        ...     [(1, "a"), (1, "b"), (2, "c"), (2, "d")], ["key", "value"]
+        ... )
+        >>>
+        >>> # Partition by a single column
+        >>> result = ProcessUDTF(df.asTable().partitionBy("key"))
+        >>> result.show()
+        +---+-----+
+        |key|value|
+        +---+-----+
+        |  1|    a|
+        |  1|    b|
+        |  2|    c|
+        |  2|    d|
+        +---+-----+
+        >>>
+        >>> # Partition by multiple columns
+        >>> df2 = spark.createDataFrame(
+        ...     [(1, "x", 10), (1, "x", 20), (2, "y", 30)], ["key", "category", "value"]
+        ... )
+        >>> result2 = ProcessUDTF(df2.asTable().partitionBy("key", "category"))
+        >>> result2.show()
+        +---+-----+
+        |key|value|
+        +---+-----+
+        |  1|    x|
+        |  1|    x|
+        |  2|    y|
+        +---+-----+
+        "#
+    };
+    (TableArg . orderBy) => {
+        r#"
+        Orders the data within each partition by the specified columns.
+
+        This method orders the data within partitions. It must be called after
+        `partitionBy()` or `withSinglePartition()` has been called.
+
+        Parameters
+        ----------
+        cols : str, :class:`Column`, or list
+            Column names or :class:`Column` objects to order by. Columns can be
+            ordered in ascending or descending order using :meth:`Column.asc` or
+            :meth:`Column.desc`.
+
+        Returns
+        -------
+        :class:`TableArg`
+            A new `TableArg` instance with ordering applied.
+
+        Examples
+        --------
+        >>> from pyspark.sql.functions import udtf
+        >>>
+        >>> @udtf(returnType="key: int, value: string")
+        ... class ProcessUDTF:
+        ...     def eval(self, row):
+        ...         yield row["key"], row["value"]
+        ...
+        >>> df = spark.createDataFrame(
+        ...     [(1, "b"), (1, "a"), (2, "d"), (2, "c")], ["key", "value"]
+        ... )
+        >>>
+        >>> # Order by a single column within partitions
+        >>> result = ProcessUDTF(df.asTable().partitionBy("key").orderBy("value"))
+        >>> result.show()
+        +---+-----+
+        |key|value|
+        +---+-----+
+        |  1|    a|
+        |  1|    b|
+        |  2|    c|
+        |  2|    d|
+        +---+-----+
+        >>>
+        >>> # Order by multiple columns
+        >>> df2 = spark.createDataFrame(
+        ...     [(1, "a", 2), (1, "a", 1), (1, "b", 3)], ["key", "value", "num"]
+        ... )
+        >>> result2 = ProcessUDTF(df2.asTable().partitionBy("key").orderBy("value", "num"))
+        >>> result2.show()
+        +---+-----+
+        |key|value|
+        +---+-----+
+        |  1|    a|
+        |  1|    a|
+        |  1|    b|
+        +---+-----+
+        >>>
+        >>> # Order by descending order
+        >>> result3 = ProcessUDTF(df.asTable().partitionBy("key").orderBy(df.value.desc()))
+        >>> result3.show()
+        +---+-----+
+        |key|value|
+        +---+-----+
+        |  1|    b|
+        |  1|    a|
+        |  2|    d|
+        |  2|    c|
+        +---+-----+
+        "#
+    };
+    (TableArg . withSinglePartition) => {
+        r#"
+        Forces the data to be processed in a single partition.
+
+        This method indicates that all data should be treated as a single partition.
+        It cannot be called after `partitionBy()` has been called. `orderBy()` can
+        be called after this method to order the data within the single partition.
+
+        Returns
+        -------
+        :class:`TableArg`
+            A new `TableArg` instance with single partition constraint applied.
+
+        Examples
+        --------
+        >>> from pyspark.sql.functions import udtf
+        >>>
+        >>> @udtf(returnType="key: int, value: string")
+        ... class ProcessUDTF:
+        ...     def eval(self, row):
+        ...         yield row["key"], row["value"]
+        ...
+        >>> df = spark.createDataFrame(
+        ...     [(1, "a"), (2, "b"), (3, "c")], ["key", "value"]
+        ... )
+        >>>
+        >>> # Process all data in a single partition
+        >>> result = ProcessUDTF(df.asTable().withSinglePartition())
+        >>> result.show()
+        +---+-----+
+        |key|value|
+        +---+-----+
+        |  1|    a|
+        |  2|    b|
+        |  3|    c|
+        +---+-----+
+        >>>
+        >>> # Use withSinglePartition and orderBy together
+        >>> df2 = spark.createDataFrame(
+        ...     [(3, "c"), (1, "a"), (2, "b")], ["key", "value"]
+        ... )
+        >>> result2 = ProcessUDTF(df2.asTable().withSinglePartition().orderBy("key"))
+        >>> result2.show()
+        +---+-----+
+        |key|value|
+        +---+-----+
+        |  1|    a|
+        |  2|    b|
+        |  3|    c|
+        +---+-----+
+        "#
+    };
+    (DataFrame) => {
+        r#"A distributed collection of data grouped into named columns.
+
+    .. versionadded:: 1.3.0
+
+    .. versionchanged:: 3.4.0
+        Supports Spark Connect.
+
+    Examples
+    --------
+    A :class:`DataFrame` is equivalent to a relational table in Spark SQL,
+    and can be created using various functions in :class:`SparkSession`:
+
+    >>> people = spark.createDataFrame([
+    ...     {"deptId": 1, "age": 40, "name": "Hyukjin Kwon", "gender": "M", "salary": 50},
+    ...     {"deptId": 1, "age": 50, "name": "Takuya Ueshin", "gender": "M", "salary": 100},
+    ...     {"deptId": 2, "age": 60, "name": "Xinrong Meng", "gender": "F", "salary": 150},
+    ...     {"deptId": 3, "age": 20, "name": "Haejoon Lee", "gender": "M", "salary": 200}
+    ... ])
+
+    Once created, it can be manipulated using the various domain-specific-language
+    (DSL) functions defined in: :class:`DataFrame`, :class:`Column`.
+
+    To select a column from the :class:`DataFrame`, use the apply method:
+
+    >>> age_col = people.age
+
+    A more concrete example:
+
+    >>> # To create DataFrame using SparkSession
+    ... department = spark.createDataFrame([
+    ...     {"id": 1, "name": "PySpark"},
+    ...     {"id": 2, "name": "ML"},
+    ...     {"id": 3, "name": "Spark SQL"}
+    ... ])
+
+    >>> people.filter(people.age > 30).join(
+    ...     department, people.deptId == department.id).groupBy(
+    ...     department.name, "gender").agg(
+    ...         {"salary": "avg", "age": "max"}).sort("max(age)").show()
+    +-------+------+-----------+--------+
+    |   name|gender|avg(salary)|max(age)|
+    +-------+------+-----------+--------+
+    |PySpark|     M|       75.0|      50|
+    |     ML|     F|      150.0|      60|
+    +-------+------+-----------+--------+
+
+    Notes
+    -----
+    A DataFrame should only be created as described above. It should not be directly
+    created via using the constructor.
+    "#
+    };
+    (DataFrame . write) => {
+        r#"
+        Interface for saving the content of the non-streaming :class:`DataFrame` out into external
+        storage.
+
+        .. versionadded:: 1.4.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Returns
+        -------
+        :class:`DataFrameWriter`
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame([(2, "Alice"), (5, "Bob")], schema=["age", "name"])
+        >>> type(df.write)
+        <class '...readwriter.DataFrameWriter'>
+
+        Write the DataFrame as a table.
+
+        >>> _ = spark.sql("DROP TABLE IF EXISTS tab2")
+        >>> df.write.saveAsTable("tab2")
+        >>> _ = spark.sql("DROP TABLE tab2")
+        "#
+    };
+    (DataFrame . select) => {
+        r#"Projects a set of expressions and returns a new :class:`DataFrame`.
+
+        .. versionadded:: 1.3.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        cols : str, :class:`Column`, or list
+            column names (string) or expressions (:class:`Column`).
+            If one of the column names is '*', that column is expanded to include all columns
+            in the current :class:`DataFrame`.
+
+        Returns
+        -------
+        :class:`DataFrame`
+            A DataFrame with subset (or all) of columns.
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame([
+        ...     (2, "Alice"), (5, "Bob")], schema=["age", "name"])
+
+        Select all columns in the DataFrame.
+
+        >>> df.select('*').show()
+        +---+-----+
+        |age| name|
+        +---+-----+
+        |  2|Alice|
+        |  5|  Bob|
+        +---+-----+
+
+        Select a column with other expressions in the DataFrame.
+
+        >>> df.select(df.name, (df.age + 10).alias('age')).show()
+        +-----+---+
+        | name|age|
+        +-----+---+
+        |Alice| 12|
+        |  Bob| 15|
+        +-----+---+
+        "#
+    };
+    (DataFrame . selectExpr) => {
+        r#"Projects a set of SQL expressions and returns a new :class:`DataFrame`.
+
+        This is a variant of :func:`select` that accepts SQL expressions.
+
+        .. versionadded:: 1.3.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Returns
+        -------
+        :class:`DataFrame`
+            A DataFrame with new/old columns transformed by expressions.
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame([
+        ...     (2, "Alice"), (5, "Bob")], schema=["age", "name"])
+        >>> df.selectExpr("age * 2", "abs(age)").show()
+        +---------+--------+
+        |(age * 2)|abs(age)|
+        +---------+--------+
+        |        4|       2|
+        |       10|       5|
+        +---------+--------+
+        "#
+    };
+    (DataFrame . agg) => {
+        r#"Aggregate on the entire :class:`DataFrame` without groups
+        (shorthand for ``df.groupBy().agg()``).
+
+        .. versionadded:: 1.3.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        exprs : :class:`Column` or dict of key and value strings
+            Columns or expressions to aggregate DataFrame by.
+
+        Returns
+        -------
+        :class:`DataFrame`
+            Aggregated DataFrame.
+
+        Examples
+        --------
+        >>> from pyspark.sql import functions as sf
+        >>> df = spark.createDataFrame([(2, "Alice"), (5, "Bob")], schema=["age", "name"])
+        >>> df.agg({"age": "max"}).show()
+        +--------+
+        |max(age)|
+        +--------+
+        |       5|
+        +--------+
+        >>> df.agg(sf.min(df.age)).show()
+        +--------+
+        |min(age)|
+        +--------+
+        |       2|
+        +--------+
+        "#
+    };
+    (DataFrame . alias) => {
+        r#"Returns a new :class:`DataFrame` with an alias set.
+
+        .. versionadded:: 1.3.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        alias : str
+            an alias name to be set for the :class:`DataFrame`.
+
+        Returns
+        -------
+        :class:`DataFrame`
+            Aliased DataFrame.
+
+        Examples
+        --------
+        >>> from pyspark.sql import functions as sf
+        >>> df = spark.createDataFrame(
+        ...     [(14, "Tom"), (23, "Alice"), (16, "Bob")], ["age", "name"])
+        >>> df_as1 = df.alias("df_as1")
+        >>> df_as2 = df.alias("df_as2")
+        >>> joined_df = df_as1.join(df_as2,
+        ...     sf.col("df_as1.name") == sf.col("df_as2.name"), 'inner')
+        >>> joined_df.select(
+        ...     "df_as1.name", "df_as2.name", "df_as2.age"
+        ... ).sort(sf.desc("df_as1.name")).show()
+        +-----+-----+---+
+        | name| name|age|
+        +-----+-----+---+
+        |  Tom|  Tom| 14|
+        |  Bob|  Bob| 16|
+        |Alice|Alice| 23|
+        +-----+-----+---+
+        "#
+    };
+    (DataFrame . metadataColumn) => {
+        r#"
+        Selects a metadata column based on its logical column name and returns it as a
+        :class:`Column`.
+
+        A metadata column can be accessed this way even if the underlying data source defines a data
+        column with a conflicting name.
+
+        .. versionadded:: 4.0.0
+
+        Parameters
+        ----------
+        colName : str
+            string, metadata column name
+
+        Returns
+        -------
+        :class:`Column`
+        "#
+    };
+    (DataFrame . colRegex) => {
+        r#"
+        Selects column based on the column name specified as a regex and returns it
+        as :class:`Column`.
+
+        .. versionadded:: 2.3.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        colName : str
+            string, column name specified as a regex.
+
+        Returns
+        -------
+        :class:`Column`
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame([("a", 1), ("b", 2), ("c",  3)], ["Col1", "Col2"])
+        >>> df.select(df.colRegex("`(Col1)?+.+`")).show()
+        +----+
+        |Col2|
+        +----+
+        |   1|
+        |   2|
+        |   3|
+        +----+
+        "#
+    };
+    (DataFrame . dtypes) => {
+        r#"Returns all column names and their data types as a list.
+
+        .. versionadded:: 1.3.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Returns
+        -------
+        list
+            List of columns as tuple pairs.
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame(
+        ...     [(14, "Tom"), (23, "Alice"), (16, "Bob")], ["age", "name"])
+        >>> df.dtypes
+        [('age', 'bigint'), ('name', 'string')]
+        "#
+    };
+    (DataFrame . columns) => {
+        r#"
+        Retrieves the names of all columns in the :class:`DataFrame` as a list.
+
+        The order of the column names in the list reflects their order in the DataFrame.
+
+        .. versionadded:: 1.3.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Returns
+        -------
+        list
+            List of column names in the DataFrame.
+
+        Examples
+        --------
+        Example 1: Retrieve column names of a DataFrame
+
+        >>> df = spark.createDataFrame(
+        ...     [(14, "Tom", "CA"), (23, "Alice", "NY"), (16, "Bob", "TX")],
+        ...     ["age", "name", "state"]
+        ... )
+        >>> df.columns
+        ['age', 'name', 'state']
+
+        Example 2: Using column names to project specific columns
+
+        >>> selected_cols = [col for col in df.columns if col != "age"]
+        >>> df.select(selected_cols).show()
+        +-----+-----+
+        | name|state|
+        +-----+-----+
+        |  Tom|   CA|
+        |Alice|   NY|
+        |  Bob|   TX|
+        +-----+-----+
+
+        Example 3: Checking if a specific column exists in a DataFrame
+
+        >>> "state" in df.columns
+        True
+        >>> "salary" in df.columns
+        False
+
+        Example 4: Iterating over columns to apply a transformation
+
+        >>> import pyspark.sql.functions as sf
+        >>> for col_name in df.columns:
+        ...     df = df.withColumn(col_name, sf.upper(col_name))
+        >>> df.show()
+        +---+-----+-----+
+        |age| name|state|
+        +---+-----+-----+
+        | 14|  TOM|   CA|
+        | 23|ALICE|   NY|
+        | 16|  BOB|   TX|
+        +---+-----+-----+
+
+        Example 5: Renaming columns and checking the updated column names
+
+        >>> df = df.withColumnRenamed("name", "first_name")
+        >>> df.columns
+        ['age', 'first_name', 'state']
+
+        Example 6: Using the `columns` property to ensure two DataFrames have the
+        same columns before a union
+
+        >>> df2 = spark.createDataFrame(
+        ...     [(30, "Eve", "FL"), (40, "Sam", "WA")], ["age", "name", "location"])
+        >>> df.columns == df2.columns
+        False
+        "#
+    };
+    (DataFrame . sparkSession) => {
+        r#"Returns Spark session that created this :class:`DataFrame`.
+
+        .. versionadded:: 3.3.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Returns
+        -------
+        :class:`SparkSession`
+
+        Examples
+        --------
+        >>> df = spark.range(1)
+        >>> type(df.sparkSession)
+        <class '...session.SparkSession'>
+        "#
+    };
+    (DataFrame . count) => {
+        r#"Returns the number of rows in this :class:`DataFrame`.
+
+        .. versionadded:: 1.3.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Returns
+        -------
+        int
+            Number of rows.
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame(
+        ...     [(14, "Tom"), (23, "Alice"), (16, "Bob")], ["age", "name"])
+
+        Return the number of rows in the :class:`DataFrame`.
+
+        >>> df.count()
+        3
+        "#
+    };
+    (DataFrame . crossJoin) => {
+        r#"Returns the cartesian product with another :class:`DataFrame`.
+
+        .. versionadded:: 2.1.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        other : :class:`DataFrame`
+            Right side of the cartesian product.
+
+        Returns
+        -------
+        :class:`DataFrame`
+            Joined DataFrame.
+
+        Examples
+        --------
+        >>> from pyspark.sql import Row
+        >>> df = spark.createDataFrame(
+        ...     [(14, "Tom"), (23, "Alice"), (16, "Bob")], ["age", "name"])
+        >>> df2 = spark.createDataFrame(
+        ...     [Row(height=80, name="Tom"), Row(height=85, name="Bob")])
+        >>> df.crossJoin(df2.select("height")).select("age", "name", "height").show()
+        +---+-----+------+
+        |age| name|height|
+        +---+-----+------+
+        | 14|  Tom|    80|
+        | 14|  Tom|    85|
+        | 23|Alice|    80|
+        | 23|Alice|    85|
+        | 16|  Bob|    80|
+        | 16|  Bob|    85|
+        +---+-----+------+
+        "#
+    };
+    (DataFrame . zip) => {
+        r#"Combines the columns of this :class:`DataFrame` with another :class:`DataFrame`
+        side-by-side, preserving row alignment between the two inputs.
+
+        Both DataFrames must produce the same canonicalized plan after stripping outer
+        ``Project`` chains. In practice this means they derive from a common source through
+        chains of projection-only operations (:meth:`select`, :meth:`withColumn`,
+        :meth:`withColumnRenamed`, etc.); the chains may differ between the two sides, but
+        anything below them, including any :meth:`filter`, :meth:`orderBy`, :meth:`join`,
+        or aggregation, must be identical on both sides so the two sides stay row-aligned.
+        Non-scalar Python UDFs (e.g., ``GROUPED_MAP``) are not allowed on either side. An
+        :class:`AnalysisException` is thrown when the two DataFrames cannot be aligned.
+
+        .. versionadded:: 4.3.0
+
+        Parameters
+        ----------
+        other : :class:`DataFrame`
+            The DataFrame to combine with, which must derive from the same source as this
+            DataFrame.
+
+        Returns
+        -------
+        :class:`DataFrame`
+            A new DataFrame containing the columns of this DataFrame followed by the columns
+            of `other`.
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame([(1, 2, 3), (4, 5, 6)], ["a", "b", "c"])
+        >>> left = df.select("a")
+        >>> right = df.select("b")
+        >>> left.zip(right).show()
+        +---+---+
+        |  a|  b|
+        +---+---+
+        |  1|  2|
+        |  4|  5|
+        +---+---+
+        "#
+    };
+    (DataFrame . coalesce) => {
+        r#"
+        Returns a new :class:`DataFrame` that has exactly `numPartitions` partitions.
+
+        Similar to coalesce defined on an :class:`RDD`, this operation results in a
+        narrow dependency, e.g. if you go from 1000 partitions to 100 partitions,
+        there will not be a shuffle, instead each of the 100 new partitions will
+        claim 10 of the current partitions. If a larger number of partitions is requested,
+        it will stay at the current number of partitions.
+
+        However, if you're doing a drastic coalesce, e.g. to numPartitions = 1,
+        this may result in your computation taking place on fewer nodes than
+        you like (e.g. one node in the case of numPartitions = 1). To avoid this,
+        you can call repartition(). This will add a shuffle step, but means the
+        current upstream partitions will be executed in parallel (per whatever
+        the current partitioning is).
+
+        .. versionadded:: 1.4.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        numPartitions : int
+            specify the target number of partitions
+
+        Returns
+        -------
+        :class:`DataFrame`
+
+        Examples
+        --------
+        >>> from pyspark.sql import functions as sf
+        >>> spark.range(0, 10, 1, 3).select(
+        ...     sf.spark_partition_id().alias("partition")
+        ... ).distinct().sort("partition").show()
+        +---------+
+        |partition|
+        +---------+
+        |        0|
+        |        1|
+        |        2|
+        +---------+
+
+        >>> from pyspark.sql import functions as sf
+        >>> spark.range(0, 10, 1, 3).coalesce(1).select(
+        ...     sf.spark_partition_id().alias("partition")
+        ... ).distinct().sort("partition").show()
+        +---------+
+        |partition|
+        +---------+
+        |        0|
+        +---------+
+        "#
+    };
+    (DataFrame . repartition) => {
+        r#"
+        Returns a new :class:`DataFrame` partitioned by the given partitioning expressions. The
+        resulting :class:`DataFrame` is hash partitioned.
+
+        .. versionadded:: 1.3.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        numPartitions : int
+            can be an int to specify the target number of partitions or a Column.
+            If it is a Column, it will be used as the first partitioning column. If not specified,
+            the default number of partitions is used.
+        cols : str or :class:`Column`
+            partitioning columns.
+
+            .. versionchanged:: 1.6.0
+               Added optional arguments to specify the partitioning columns. Also made numPartitions
+               optional if partitioning columns are specified.
+
+        Returns
+        -------
+        :class:`DataFrame`
+            Repartitioned DataFrame.
+
+        Examples
+        --------
+        >>> from pyspark.sql import functions as sf
+        >>> df = spark.range(0, 64, 1, 9).withColumn(
+        ...     "name", sf.concat(sf.lit("name_"), sf.col("id").cast("string"))
+        ... ).withColumn(
+        ...     "age", sf.col("id") - 32
+        ... )
+        >>> df.select(
+        ...     sf.spark_partition_id().alias("partition")
+        ... ).distinct().sort("partition").show()
+        +---------+
+        |partition|
+        +---------+
+        |        0|
+        |        1|
+        |        2|
+        |        3|
+        |        4|
+        |        5|
+        |        6|
+        |        7|
+        |        8|
+        +---------+
+
+        Repartition the data into 10 partitions.
+
+        >>> df.repartition(10).select(
+        ...     sf.spark_partition_id().alias("partition")
+        ... ).distinct().sort("partition").show()
+        +---------+
+        |partition|
+        +---------+
+        |        0|
+        |        1|
+        |        2|
+        |        3|
+        |        4|
+        |        5|
+        |        6|
+        |        7|
+        |        8|
+        |        9|
+        +---------+
+
+        Repartition the data into 7 partitions by 'age' column.
+
+        >>> df.repartition(7, "age").select(
+        ...     sf.spark_partition_id().alias("partition")
+        ... ).distinct().sort("partition").show()
+        +---------+
+        |partition|
+        +---------+
+        |        0|
+        |        1|
+        |        2|
+        |        3|
+        |        4|
+        |        5|
+        |        6|
+        +---------+
+
+        Repartition the data into 3 partitions by 'age' and 'name' columns.
+
+        >>> df.repartition(3, "name", "age").select(
+        ...     sf.spark_partition_id().alias("partition")
+        ... ).distinct().sort("partition").show()
+        +---------+
+        |partition|
+        +---------+
+        |        0|
+        |        1|
+        |        2|
+        +---------+
+        "#
+    };
+    (DataFrame . repartitionByRange) => {
+        r#"
+        Returns a new :class:`DataFrame` partitioned by the given partitioning expressions. The
+        resulting :class:`DataFrame` is range partitioned.
+
+        .. versionadded:: 2.4.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        numPartitions : int
+            can be an int to specify the target number of partitions or a Column.
+            If it is a Column, it will be used as the first partitioning column. If not specified,
+            the default number of partitions is used.
+        cols : str or :class:`Column`
+            partitioning columns.
+
+        Returns
+        -------
+        :class:`DataFrame`
+            Repartitioned DataFrame.
+
+        Notes
+        -----
+        At least one partition-by expression must be specified.
+        When no explicit sort order is specified, "ascending nulls first" is assumed.
+
+        Due to performance reasons this method uses sampling to estimate the ranges.
+        Hence, the output may not be consistent, since sampling can return different values.
+        The sample size can be controlled by the config
+        `spark.sql.execution.rangeExchange.sampleSizePerPartition`.
+
+        Examples
+        --------
+        Repartition the data into 2 partitions by range in 'age' column.
+        For example, the first partition can have ``(14, "Tom")`` and ``(16, "Bob")``,
+        and the second partition would have ``(23, "Alice")``.
+
+        >>> from pyspark.sql import functions as sf
+        >>> spark.createDataFrame(
+        ...     [(14, "Tom"), (23, "Alice"), (16, "Bob")], ["age", "name"]
+        ... ).repartitionByRange(2, "age").select(
+        ...     "age", "name", sf.spark_partition_id()
+        ... ).show()
+        +---+-----+--------------------+
+        |age| name|SPARK_PARTITION_ID()|
+        +---+-----+--------------------+
+        | 14|  Tom|                   0|
+        | 16|  Bob|                   0|
+        | 23|Alice|                   1|
+        +---+-----+--------------------+
+        "#
+    };
+    (DataFrame . repartitionById) => {
+        r#"
+        Returns a new :class:`DataFrame` partitioned by the given partition ID expression.
+        Each row's target partition is determined directly by the value of the partition ID column.
+
+        .. versionadded:: 4.1.0
+
+        .. versionchanged:: 4.1.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        numPartitions : int
+            target number of partitions
+        partitionIdCol : str or :class:`Column`
+            column expression that evaluates to the target partition ID for each row.
+            Must be an integer type. Values are taken modulo numPartitions to determine
+            the final partition. Null values are sent to partition 0.
+
+        Returns
+        -------
+        :class:`DataFrame`
+            Repartitioned DataFrame.
+
+        Notes
+        -----
+        The partition ID expression must evaluate to an integer type.
+        Partition IDs are taken modulo numPartitions, so values outside the range [0, numPartitions)
+        are automatically mapped to valid partition IDs. If the partition ID expression evaluates to
+        a NULL value, the row is sent to partition 0.
+
+        This method provides direct control over partition placement, similar to RDD's
+        partitionBy with custom partitioners, but at the DataFrame level.
+
+        Examples
+        --------
+        Partition rows based on a computed partition ID:
+
+        >>> from pyspark.sql import functions as sf
+        >>> from pyspark.sql.functions import col
+        >>> df = spark.range(10).withColumn("partition_id", (col("id") % 3).cast("int"))
+        >>> repartitioned = df.repartitionById(3, "partition_id")
+        >>> repartitioned.select("id", "partition_id", sf.spark_partition_id()).orderBy("id").show()
+        +---+------------+--------------------+
+        | id|partition_id|SPARK_PARTITION_ID()|
+        +---+------------+--------------------+
+        |  0|           0|                   0|
+        |  1|           1|                   1|
+        |  2|           2|                   2|
+        |  3|           0|                   0|
+        |  4|           1|                   1|
+        |  5|           2|                   2|
+        |  6|           0|                   0|
+        |  7|           1|                   1|
+        |  8|           2|                   2|
+        |  9|           0|                   0|
+        +---+------------+--------------------+
+        "#
+    };
+    (DataFrame . dropDuplicates) => {
+        r#"Return a new :class:`DataFrame` with duplicate rows removed,
+        optionally only considering certain columns.
+
+        For a static batch :class:`DataFrame`, it just drops duplicate rows. For a streaming
+        :class:`DataFrame`, it will keep all data across triggers as intermediate state to drop
+        duplicates rows. You can use :func:`withWatermark` to limit how late the duplicate data can
+        be and the system will accordingly limit the state. In addition, data older than
+        watermark will be dropped to avoid any possibility of duplicates.
+
+        :func:`drop_duplicates` is an alias for :func:`dropDuplicates`.
+
+        .. versionadded:: 1.4.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        subset : list of column names, optional
+            List of columns to use for duplicate comparison (default All columns).
+
+        Returns
+        -------
+        :class:`DataFrame`
+            DataFrame without duplicates.
+
+        Examples
+        --------
+        >>> from pyspark.sql import Row
+        >>> df = spark.createDataFrame([
+        ...     Row(name='Alice', age=5, height=80),
+        ...     Row(name='Alice', age=5, height=80),
+        ...     Row(name='Alice', age=10, height=80)
+        ... ])
+
+        Deduplicate the same rows.
+
+        >>> df.dropDuplicates().show()
+        +-----+---+------+
+        | name|age|height|
+        +-----+---+------+
+        |Alice|  5|    80|
+        |Alice| 10|    80|
+        +-----+---+------+
+
+        Deduplicate values on 'name' and 'height' columns.
+
+        >>> df.dropDuplicates(['name', 'height']).show()
+        +-----+---+------+
+        | name|age|height|
+        +-----+---+------+
+        |Alice|  5|    80|
+        +-----+---+------+
+        "#
+    };
+    (DataFrame . drop_duplicates) => {
+        r#"Return a new :class:`DataFrame` with duplicate rows removed,
+        optionally only considering certain columns.
+
+        For a static batch :class:`DataFrame`, it just drops duplicate rows. For a streaming
+        :class:`DataFrame`, it will keep all data across triggers as intermediate state to drop
+        duplicates rows. You can use :func:`withWatermark` to limit how late the duplicate data can
+        be and the system will accordingly limit the state. In addition, data older than
+        watermark will be dropped to avoid any possibility of duplicates.
+
+        :func:`drop_duplicates` is an alias for :func:`dropDuplicates`.
+
+        .. versionadded:: 1.4.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        subset : list of column names, optional
+            List of columns to use for duplicate comparison (default All columns).
+
+        Returns
+        -------
+        :class:`DataFrame`
+            DataFrame without duplicates.
+
+        Examples
+        --------
+        >>> from pyspark.sql import Row
+        >>> df = spark.createDataFrame([
+        ...     Row(name='Alice', age=5, height=80),
+        ...     Row(name='Alice', age=5, height=80),
+        ...     Row(name='Alice', age=10, height=80)
+        ... ])
+
+        Deduplicate the same rows.
+
+        >>> df.dropDuplicates().show()
+        +-----+---+------+
+        | name|age|height|
+        +-----+---+------+
+        |Alice|  5|    80|
+        |Alice| 10|    80|
+        +-----+---+------+
+
+        Deduplicate values on 'name' and 'height' columns.
+
+        >>> df.dropDuplicates(['name', 'height']).show()
+        +-----+---+------+
+        | name|age|height|
+        +-----+---+------+
+        |Alice|  5|    80|
+        +-----+---+------+
+        "#
+    };
+    (DataFrame . dropDuplicatesWithinWatermark) => {
+        r#"Return a new :class:`DataFrame` with duplicate rows removed,
+         optionally only considering certain columns, within watermark.
+
+         This only works with streaming :class:`DataFrame`, and watermark for the input
+         :class:`DataFrame` must be set via :func:`withWatermark`.
+
+        For a streaming :class:`DataFrame`, this will keep all data across triggers as intermediate
+        state to drop duplicated rows. The state will be kept to guarantee the semantic, "Events
+        are deduplicated as long as the time distance of earliest and latest events are smaller
+        than the delay threshold of watermark." Users are encouraged to set the delay threshold of
+        watermark longer than max timestamp differences among duplicated events.
+
+        Note: too late data older than watermark will be dropped.
+
+         .. versionadded:: 3.5.0
+
+         Parameters
+         ----------
+         subset : List of column names, optional
+             List of columns to use for duplicate comparison (default All columns).
+
+         Returns
+         -------
+         :class:`DataFrame`
+             DataFrame without duplicates.
+
+         Notes
+         -----
+         Supports Spark Connect.
+
+         Examples
+         --------
+         >>> from pyspark.sql import Row
+         >>> from pyspark.sql.functions import timestamp_seconds
+         >>> df = spark.readStream.format("rate").load().selectExpr(
+         ...     "value % 5 AS value", "timestamp")
+         >>> df.select("value", df.timestamp.alias("time")).withWatermark("time", '10 minutes')
+         DataFrame[value: bigint, time: timestamp]
+
+         Deduplicate the same rows.
+
+         >>> df.dropDuplicatesWithinWatermark() # doctest: +SKIP
+
+         Deduplicate values on 'value' columns.
+
+         >>> df.dropDuplicatesWithinWatermark(['value'])  # doctest: +SKIP
+        "#
+    };
+    (DataFrame . distinct) => {
+        r#"Returns a new :class:`DataFrame` containing the distinct rows in this :class:`DataFrame`.
+
+        .. versionadded:: 1.3.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Returns
+        -------
+        :class:`DataFrame`
+            DataFrame with distinct records.
+
+        See Also
+        --------
+        DataFrame.dropDuplicates : Remove duplicate rows from this DataFrame.
+
+        Examples
+        --------
+        Remove duplicate rows from a DataFrame
+
+        >>> df = spark.createDataFrame(
+        ...     [(14, "Tom"), (23, "Alice"), (23, "Alice")], ["age", "name"])
+        >>> df.distinct().show()
+        +---+-----+
+        |age| name|
+        +---+-----+
+        | 14|  Tom|
+        | 23|Alice|
+        +---+-----+
+
+        Count the number of distinct rows in a DataFrame
+
+        >>> df.distinct().count()
+        2
+
+        Get distinct rows from a DataFrame with multiple columns
+
+        >>> df = spark.createDataFrame(
+        ...     [(14, "Tom", "M"), (23, "Alice", "F"), (23, "Alice", "F"), (14, "Tom", "M")],
+        ...     ["age", "name", "gender"])
+        >>> df.distinct().show()
+        +---+-----+------+
+        |age| name|gender|
+        +---+-----+------+
+        | 14|  Tom|     M|
+        | 23|Alice|     F|
+        +---+-----+------+
+
+        Get distinct values from a specific column in a DataFrame
+
+        >>> df.select("name").distinct().show()
+        +-----+
+        | name|
+        +-----+
+        |  Tom|
+        |Alice|
+        +-----+
+
+        Count the number of distinct values in a specific column
+
+        >>> df.select("name").distinct().count()
+        2
+
+        Get distinct values from multiple columns in DataFrame
+
+        >>> df.select("name", "gender").distinct().show()
+        +-----+------+
+        | name|gender|
+        +-----+------+
+        |  Tom|     M|
+        |Alice|     F|
+        +-----+------+
+
+        Get distinct rows from a DataFrame with null values
+
+        >>> df = spark.createDataFrame(
+        ...     [(14, "Tom", "M"), (23, "Alice", "F"), (23, "Alice", "F"), (14, "Tom", None)],
+        ...     ["age", "name", "gender"])
+        >>> df.distinct().show()
+        +---+-----+------+
+        |age| name|gender|
+        +---+-----+------+
+        | 14|  Tom|     M|
+        | 23|Alice|     F|
+        | 14|  Tom|  NULL|
+        +---+-----+------+
+
+        Get distinct non-null values from a DataFrame
+
+        >>> df.distinct().filter(df.gender.isNotNull()).show()
+        +---+-----+------+
+        |age| name|gender|
+        +---+-----+------+
+        | 14|  Tom|     M|
+        | 23|Alice|     F|
+        +---+-----+------+
+        "#
+    };
+    (DataFrame . drop) => {
+        r#"
+        Returns a new :class:`DataFrame` without specified columns.
+        This is a no-op if the schema doesn't contain the given column name(s).
+
+        .. versionadded:: 1.4.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        cols: str or :class:`Column`
+            A name of the column, or the :class:`Column` to be dropped.
+
+        Returns
+        -------
+        :class:`DataFrame`
+            A new :class:`DataFrame` without the specified columns.
+
+        Notes
+        -----
+        - When an input is a column name, it is treated literally without further interpretation.
+          Otherwise, it will try to match the equivalent expression.
+          So dropping a column by its name `drop(colName)` has a different semantic
+          with directly dropping the column `drop(col(colName))`.
+
+        Examples
+        --------
+        Example 1: Drop a column by name.
+
+        >>> df = spark.createDataFrame(
+        ...     [(14, "Tom"), (23, "Alice"), (16, "Bob")], ["age", "name"])
+        >>> df.drop('age').show()
+        +-----+
+        | name|
+        +-----+
+        |  Tom|
+        |Alice|
+        |  Bob|
+        +-----+
+
+        Example 2: Drop a column by :class:`Column` object.
+
+        >>> df.drop(df.age).show()
+        +-----+
+        | name|
+        +-----+
+        |  Tom|
+        |Alice|
+        |  Bob|
+        +-----+
+
+        Example 3: Drop the column that joined both DataFrames on.
+
+        >>> df2 = spark.createDataFrame([(80, "Tom"), (85, "Bob")], ["height", "name"])
+        >>> df.join(df2, df.name == df2.name).drop('name').sort('age').show()
+        +---+------+
+        |age|height|
+        +---+------+
+        | 14|    80|
+        | 16|    85|
+        +---+------+
+
+        >>> df3 = df.join(df2)
+        >>> df3.show()
+        +---+-----+------+----+
+        |age| name|height|name|
+        +---+-----+------+----+
+        | 14|  Tom|    80| Tom|
+        | 14|  Tom|    85| Bob|
+        | 23|Alice|    80| Tom|
+        | 23|Alice|    85| Bob|
+        | 16|  Bob|    80| Tom|
+        | 16|  Bob|    85| Bob|
+        +---+-----+------+----+
+
+        Example 4: Drop two column by the same name.
+
+        >>> df3.drop("name").show()
+        +---+------+
+        |age|height|
+        +---+------+
+        | 14|    80|
+        | 14|    85|
+        | 23|    80|
+        | 23|    85|
+        | 16|    80|
+        | 16|    85|
+        +---+------+
+
+        Example 5: Can not drop col('name') due to ambiguous reference.
+
+        >>> from pyspark.sql import functions as sf
+        >>> df3.drop(sf.col("name")).show()
+        Traceback (most recent call last):
+        ...
+        pyspark.errors.exceptions.captured.AnalysisException: [AMBIGUOUS_REFERENCE] Reference...
+
+        Example 6: Can not find a column matching the expression "a.b.c".
+
+        >>> from pyspark.sql import functions as sf
+        >>> df4 = df.withColumn("a.b.c", sf.lit(1))
+        >>> df4.show()
+        +---+-----+-----+
+        |age| name|a.b.c|
+        +---+-----+-----+
+        | 14|  Tom|    1|
+        | 23|Alice|    1|
+        | 16|  Bob|    1|
+        +---+-----+-----+
+
+        >>> df4.drop("a.b.c").show()
+        +---+-----+
+        |age| name|
+        +---+-----+
+        | 14|  Tom|
+        | 23|Alice|
+        | 16|  Bob|
+        +---+-----+
+
+        >>> df4.drop(sf.col("a.b.c")).show()
+        +---+-----+-----+
+        |age| name|a.b.c|
+        +---+-----+-----+
+        | 14|  Tom|    1|
+        | 23|Alice|    1|
+        | 16|  Bob|    1|
+        +---+-----+-----+
+        "#
+    };
+    (DataFrame . filter) => {
+        r#"Filters rows using the given condition.
+
+        :func:`where` is an alias for :func:`filter`.
+
+        .. versionadded:: 1.3.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        condition : :class:`Column` or str
+            A :class:`Column` of :class:`types.BooleanType`
+            or a string of SQL expressions.
+
+        Returns
+        -------
+        :class:`DataFrame`
+            A new DataFrame with rows that satisfy the condition.
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame([
+        ...     (2, "Alice", "Math"), (5, "Bob", "Physics"), (7, "Charlie", "Chemistry")],
+        ...     schema=["age", "name", "subject"])
+
+        Filter by :class:`Column` instances.
+
+        >>> df.filter(df.age > 3).show()
+        +---+-------+---------+
+        |age|   name|  subject|
+        +---+-------+---------+
+        |  5|    Bob|  Physics|
+        |  7|Charlie|Chemistry|
+        +---+-------+---------+
+        >>> df.where(df.age == 2).show()
+        +---+-----+-------+
+        |age| name|subject|
+        +---+-----+-------+
+        |  2|Alice|   Math|
+        +---+-----+-------+
+
+        Filter by SQL expression in a string.
+
+        >>> df.filter("age > 3").show()
+        +---+-------+---------+
+        |age|   name|  subject|
+        +---+-------+---------+
+        |  5|    Bob|  Physics|
+        |  7|Charlie|Chemistry|
+        +---+-------+---------+
+        >>> df.where("age = 2").show()
+        +---+-----+-------+
+        |age| name|subject|
+        +---+-----+-------+
+        |  2|Alice|   Math|
+        +---+-----+-------+
+
+        Filter by multiple conditions.
+
+        >>> df.filter((df.age > 3) & (df.subject == "Physics")).show()
+        +---+----+-------+
+        |age|name|subject|
+        +---+----+-------+
+        |  5| Bob|Physics|
+        +---+----+-------+
+        >>> df.filter((df.age == 2) | (df.subject == "Chemistry")).show()
+        +---+-------+---------+
+        |age|   name|  subject|
+        +---+-------+---------+
+        |  2|  Alice|     Math|
+        |  7|Charlie|Chemistry|
+        +---+-------+---------+
+
+        Filter by multiple conditions using SQL expression.
+
+        >>> df.filter("age > 3 AND name = 'Bob'").show()
+        +---+----+-------+
+        |age|name|subject|
+        +---+----+-------+
+        |  5| Bob|Physics|
+        +---+----+-------+
+
+        Filter using the :func:`Column.isin` function.
+
+        >>> df.filter(df.name.isin("Alice", "Bob")).show()
+        +---+-----+-------+
+        |age| name|subject|
+        +---+-----+-------+
+        |  2|Alice|   Math|
+        |  5|  Bob|Physics|
+        +---+-----+-------+
+
+        Filter by a list of values using the :func:`Column.isin` function.
+
+        >>> df.filter(df.subject.isin(["Math", "Physics"])).show()
+        +---+-----+-------+
+        |age| name|subject|
+        +---+-----+-------+
+        |  2|Alice|   Math|
+        |  5|  Bob|Physics|
+        +---+-----+-------+
+
+        Filter using the `~` operator to exclude certain values.
+
+        >>> df.filter(~df.name.isin(["Alice", "Charlie"])).show()
+        +---+----+-------+
+        |age|name|subject|
+        +---+----+-------+
+        |  5| Bob|Physics|
+        +---+----+-------+
+
+        Filter using the :func:`Column.isNotNull` function.
+
+        >>> df.filter(df.name.isNotNull()).show()
+        +---+-------+---------+
+        |age|   name|  subject|
+        +---+-------+---------+
+        |  2|  Alice|     Math|
+        |  5|    Bob|  Physics|
+        |  7|Charlie|Chemistry|
+        +---+-------+---------+
+
+        Filter using the :func:`Column.like` function.
+
+        >>> df.filter(df.name.like("Al%")).show()
+        +---+-----+-------+
+        |age| name|subject|
+        +---+-----+-------+
+        |  2|Alice|   Math|
+        +---+-----+-------+
+
+        Filter using the :func:`Column.contains` function.
+
+        >>> df.filter(df.name.contains("i")).show()
+        +---+-------+---------+
+        |age|   name|  subject|
+        +---+-------+---------+
+        |  2|  Alice|     Math|
+        |  7|Charlie|Chemistry|
+        +---+-------+---------+
+
+        Filter using the :func:`Column.between` function.
+
+        >>> df.filter(df.age.between(2, 5)).show()
+        +---+-----+-------+
+        |age| name|subject|
+        +---+-----+-------+
+        |  2|Alice|   Math|
+        |  5|  Bob|Physics|
+        +---+-----+-------+
+        "#
+    };
+    (DataFrame . first) => {
+        r#"Returns the first row as a :class:`Row`.
+
+        .. versionadded:: 1.3.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Returns
+        -------
+        :class:`Row`
+            First row if :class:`DataFrame` is not empty, otherwise ``None``.
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame([
+        ...     (2, "Alice"), (5, "Bob")], schema=["age", "name"])
+        >>> df.first()
+        Row(age=2, name='Alice')
+        "#
+    };
+    (DataFrame . groupBy) => {
+        r#"
+        Groups the :class:`DataFrame` by the specified columns so that aggregation
+        can be performed on them.
+        See :class:`GroupedData` for all the available aggregate functions.
+
+        :func:`groupby` is an alias for :func:`groupBy`.
+
+        .. versionadded:: 1.3.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        cols : list, str, int or :class:`Column`
+            The columns to group by.
+            Each element can be a column name (string) or an expression (:class:`Column`)
+            or a column ordinal (int, 1-based) or list of them.
+
+            .. versionchanged:: 4.0.0
+               Supports column ordinal.
+
+        Returns
+        -------
+        :class:`GroupedData`
+            A :class:`GroupedData` object representing the grouped data by the specified columns.
+
+        Notes
+        -----
+        A column ordinal starts from 1, which is different from the
+        0-based :meth:`__getitem__`.
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame([
+        ...     ("Alice", 2), ("Bob", 2), ("Bob", 2), ("Bob", 5)], schema=["name", "age"])
+
+        Example 1: Empty grouping columns triggers a global aggregation.
+
+        >>> df.groupBy().avg().show()
+        +--------+
+        |avg(age)|
+        +--------+
+        |    2.75|
+        +--------+
+
+        Example 2: Group-by 'name', and specify a dictionary to calculate the summation of 'age'.
+
+        >>> df.groupBy("name").agg({"age": "sum"}).sort("name").show()
+        +-----+--------+
+        | name|sum(age)|
+        +-----+--------+
+        |Alice|       2|
+        |  Bob|       9|
+        +-----+--------+
+
+        Example 3: Group-by 'name', and calculate maximum values.
+
+        >>> df.groupBy(df.name).max().sort("name").show()
+        +-----+--------+
+        | name|max(age)|
+        +-----+--------+
+        |Alice|       2|
+        |  Bob|       5|
+        +-----+--------+
+
+        Example 4: Also group-by 'name', but using the column ordinal.
+
+        >>> df.groupBy(1).max().sort("name").show()
+        +-----+--------+
+        | name|max(age)|
+        +-----+--------+
+        |Alice|       2|
+        |  Bob|       5|
+        +-----+--------+
+
+        Example 5: Group-by 'name' and 'age', and calculate the number of rows in each group.
+
+        >>> df.groupBy(["name", df.age]).count().sort("name", "age").show()
+        +-----+---+-----+
+        | name|age|count|
+        +-----+---+-----+
+        |Alice|  2|    1|
+        |  Bob|  2|    2|
+        |  Bob|  5|    1|
+        +-----+---+-----+
+
+        Example 6: Also Group-by 'name' and 'age', but using the column ordinal.
+
+        >>> df.groupBy([df.name, 2]).count().sort("name", "age").show()
+        +-----+---+-----+
+        | name|age|count|
+        +-----+---+-----+
+        |Alice|  2|    1|
+        |  Bob|  2|    2|
+        |  Bob|  5|    1|
+        +-----+---+-----+
+        "#
+    };
+    (DataFrame . groupby) => {
+        r#"
+        Groups the :class:`DataFrame` by the specified columns so that aggregation
+        can be performed on them.
+        See :class:`GroupedData` for all the available aggregate functions.
+
+        :func:`groupby` is an alias for :func:`groupBy`.
+
+        .. versionadded:: 1.3.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        cols : list, str, int or :class:`Column`
+            The columns to group by.
+            Each element can be a column name (string) or an expression (:class:`Column`)
+            or a column ordinal (int, 1-based) or list of them.
+
+            .. versionchanged:: 4.0.0
+               Supports column ordinal.
+
+        Returns
+        -------
+        :class:`GroupedData`
+            A :class:`GroupedData` object representing the grouped data by the specified columns.
+
+        Notes
+        -----
+        A column ordinal starts from 1, which is different from the
+        0-based :meth:`__getitem__`.
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame([
+        ...     ("Alice", 2), ("Bob", 2), ("Bob", 2), ("Bob", 5)], schema=["name", "age"])
+
+        Example 1: Empty grouping columns triggers a global aggregation.
+
+        >>> df.groupBy().avg().show()
+        +--------+
+        |avg(age)|
+        +--------+
+        |    2.75|
+        +--------+
+
+        Example 2: Group-by 'name', and specify a dictionary to calculate the summation of 'age'.
+
+        >>> df.groupBy("name").agg({"age": "sum"}).sort("name").show()
+        +-----+--------+
+        | name|sum(age)|
+        +-----+--------+
+        |Alice|       2|
+        |  Bob|       9|
+        +-----+--------+
+
+        Example 3: Group-by 'name', and calculate maximum values.
+
+        >>> df.groupBy(df.name).max().sort("name").show()
+        +-----+--------+
+        | name|max(age)|
+        +-----+--------+
+        |Alice|       2|
+        |  Bob|       5|
+        +-----+--------+
+
+        Example 4: Also group-by 'name', but using the column ordinal.
+
+        >>> df.groupBy(1).max().sort("name").show()
+        +-----+--------+
+        | name|max(age)|
+        +-----+--------+
+        |Alice|       2|
+        |  Bob|       5|
+        +-----+--------+
+
+        Example 5: Group-by 'name' and 'age', and calculate the number of rows in each group.
+
+        >>> df.groupBy(["name", df.age]).count().sort("name", "age").show()
+        +-----+---+-----+
+        | name|age|count|
+        +-----+---+-----+
+        |Alice|  2|    1|
+        |  Bob|  2|    2|
+        |  Bob|  5|    1|
+        +-----+---+-----+
+
+        Example 6: Also Group-by 'name' and 'age', but using the column ordinal.
+
+        >>> df.groupBy([df.name, 2]).count().sort("name", "age").show()
+        +-----+---+-----+
+        | name|age|count|
+        +-----+---+-----+
+        |Alice|  2|    1|
+        |  Bob|  2|    2|
+        |  Bob|  5|    1|
+        +-----+---+-----+
+        "#
+    };
+    (DataFrame . rollup) => {
+        r#"
+        Create a multi-dimensional rollup for the current :class:`DataFrame` using
+        the specified columns, allowing for aggregation on them.
+
+        .. versionadded:: 1.4.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        cols : list, str, int or :class:`Column`
+            The columns to roll-up by.
+            Each element should be a column name (string) or an expression (:class:`Column`)
+            or a column ordinal (int, 1-based) or list of them.
+
+            .. versionchanged:: 4.0.0
+               Supports column ordinal.
+
+        Returns
+        -------
+        :class:`GroupedData`
+            Rolled-up data based on the specified columns.
+
+        Notes
+        -----
+        A column ordinal starts from 1, which is different from the
+        0-based :meth:`__getitem__`.
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame([("Alice", 2), ("Bob", 5)], schema=["name", "age"])
+
+        Example 1: Rollup-by 'name', and calculate the number of rows in each dimensional.
+
+        >>> df.rollup("name").count().orderBy("name").show()
+        +-----+-----+
+        | name|count|
+        +-----+-----+
+        | NULL|    2|
+        |Alice|    1|
+        |  Bob|    1|
+        +-----+-----+
+
+        Example 2: Rollup-by 'name' and 'age',
+        and calculate the number of rows in each dimensional.
+
+        >>> df.rollup("name", df.age).count().orderBy("name", "age").show()
+        +-----+----+-----+
+        | name| age|count|
+        +-----+----+-----+
+        | NULL|NULL|    2|
+        |Alice|NULL|    1|
+        |Alice|   2|    1|
+        |  Bob|NULL|    1|
+        |  Bob|   5|    1|
+        +-----+----+-----+
+
+        Example 3: Also Rollup-by 'name' and 'age', but using the column ordinal.
+
+        >>> df.rollup(1, 2).count().orderBy(1, 2).show()
+        +-----+----+-----+
+        | name| age|count|
+        +-----+----+-----+
+        | NULL|NULL|    2|
+        |Alice|NULL|    1|
+        |Alice|   2|    1|
+        |  Bob|NULL|    1|
+        |  Bob|   5|    1|
+        +-----+----+-----+
+        "#
+    };
+    (DataFrame . cube) => {
+        r#"
+        Create a multi-dimensional cube for the current :class:`DataFrame` using
+        the specified columns, allowing aggregations to be performed on them.
+
+        .. versionadded:: 1.4.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        cols : list, str, int or :class:`Column`
+            The columns to cube by.
+            Each element should be a column name (string) or an expression (:class:`Column`)
+            or a column ordinal (int, 1-based) or list of them.
+
+            .. versionchanged:: 4.0.0
+               Supports column ordinal.
+
+        Returns
+        -------
+        :class:`GroupedData`
+            Cube of the data based on the specified columns.
+
+        Notes
+        -----
+        A column ordinal starts from 1, which is different from the
+        0-based :meth:`__getitem__`.
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame([("Alice", 2), ("Bob", 5)], schema=["name", "age"])
+
+        Example 1: Creating a cube on 'name',
+        and calculate the number of rows in each dimensional.
+
+        >>> df.cube("name").count().orderBy("name").show()
+        +-----+-----+
+        | name|count|
+        +-----+-----+
+        | NULL|    2|
+        |Alice|    1|
+        |  Bob|    1|
+        +-----+-----+
+
+        Example 2: Creating a cube on 'name' and 'age',
+        and calculate the number of rows in each dimensional.
+
+        >>> df.cube("name", df.age).count().orderBy("name", "age").show()
+        +-----+----+-----+
+        | name| age|count|
+        +-----+----+-----+
+        | NULL|NULL|    2|
+        | NULL|   2|    1|
+        | NULL|   5|    1|
+        |Alice|NULL|    1|
+        |Alice|   2|    1|
+        |  Bob|NULL|    1|
+        |  Bob|   5|    1|
+        +-----+----+-----+
+
+        Example 3: Also creating a cube on 'name' and 'age', but using the column ordinal.
+
+        >>> df.cube(1, 2).count().orderBy(1, 2).show()
+        +-----+----+-----+
+        | name| age|count|
+        +-----+----+-----+
+        | NULL|NULL|    2|
+        | NULL|   2|    1|
+        | NULL|   5|    1|
+        |Alice|NULL|    1|
+        |Alice|   2|    1|
+        |  Bob|NULL|    1|
+        |  Bob|   5|    1|
+        +-----+----+-----+
+        "#
+    };
+    (DataFrame . groupingSets) => {
+        r#"
+        Create multi-dimensional aggregation for the current :class:`DataFrame` using the specified
+        grouping sets, so we can run aggregation on them.
+
+        .. versionadded:: 4.0.0
+
+        Parameters
+        ----------
+        groupingSets : sequence of sequence of columns or str
+            Individual set of columns to group on.
+        cols : :class:`Column` or str
+            Additional grouping columns specified by users.
+            Those columns are shown as the output columns after aggregation.
+
+        Returns
+        -------
+        :class:`GroupedData`
+            Grouping sets of the data based on the specified columns.
+
+        Examples
+        --------
+        Example 1: Group by city and car_model, city, and all, and calculate the sum of quantity.
+
+        >>> from pyspark.sql import functions as sf
+        >>> df = spark.createDataFrame([
+        ...     (100, 'Fremont', 'Honda Civic', 10),
+        ...     (100, 'Fremont', 'Honda Accord', 15),
+        ...     (100, 'Fremont', 'Honda CRV', 7),
+        ...     (200, 'Dublin', 'Honda Civic', 20),
+        ...     (200, 'Dublin', 'Honda Accord', 10),
+        ...     (200, 'Dublin', 'Honda CRV', 3),
+        ...     (300, 'San Jose', 'Honda Civic', 5),
+        ...     (300, 'San Jose', 'Honda Accord', 8)
+        ... ], schema="id INT, city STRING, car_model STRING, quantity INT")
+
+        >>> df.groupingSets(
+        ...     [("city", "car_model"), ("city",), ()],
+        ...     "city", "car_model"
+        ... ).agg(sf.sum(sf.col("quantity")).alias("sum")).sort("city", "car_model").show()
+        +--------+------------+---+
+        |    city|   car_model|sum|
+        +--------+------------+---+
+        |    NULL|        NULL| 78|
+        |  Dublin|        NULL| 33|
+        |  Dublin|Honda Accord| 10|
+        |  Dublin|   Honda CRV|  3|
+        |  Dublin| Honda Civic| 20|
+        | Fremont|        NULL| 32|
+        | Fremont|Honda Accord| 15|
+        | Fremont|   Honda CRV|  7|
+        | Fremont| Honda Civic| 10|
+        |San Jose|        NULL| 13|
+        |San Jose|Honda Accord|  8|
+        |San Jose| Honda Civic|  5|
+        +--------+------------+---+
+
+        Example 2: Group by multiple columns and calculate both average and sum.
+
+        >>> df.groupingSets(
+        ...     [("city", "car_model"), ("city",), ()],
+        ...     "city", "car_model"
+        ... ).agg(
+        ...     sf.avg(sf.col("quantity")).alias("avg_quantity"),
+        ...     sf.sum(sf.col("quantity")).alias("sum_quantity")
+        ... ).sort("city", "car_model").show()
+        +--------+------------+------------------+------------+
+        |    city|   car_model|      avg_quantity|sum_quantity|
+        +--------+------------+------------------+------------+
+        |    NULL|        NULL|              9.75|          78|
+        |  Dublin|        NULL|              11.0|          33|
+        |  Dublin|Honda Accord|              10.0|          10|
+        |  Dublin|   Honda CRV|               3.0|           3|
+        |  Dublin| Honda Civic|              20.0|          20|
+        | Fremont|        NULL|10.666666666666666|          32|
+        | Fremont|Honda Accord|              15.0|          15|
+        | Fremont|   Honda CRV|               7.0|           7|
+        | Fremont| Honda Civic|              10.0|          10|
+        |San Jose|        NULL|               6.5|          13|
+        |San Jose|Honda Accord|               8.0|           8|
+        |San Jose| Honda Civic|               5.0|           5|
+        +--------+------------+------------------+------------+
+
+        See Also
+        --------
+        DataFrame.rollup : Compute hierarchical summaries at multiple levels.
+        "#
+    };
+    (DataFrame . head) => {
+        r#"Returns the first ``n`` rows.
+
+        .. versionadded:: 1.3.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Notes
+        -----
+        This method should only be used if the resulting array is expected
+        to be small, as all the data is loaded into the driver's memory.
+
+        Parameters
+        ----------
+        n : int, optional
+            default 1. Number of rows to return.
+
+        Returns
+        -------
+        If n is supplied, return a list of :class:`Row` of length n
+        or less if the DataFrame has fewer elements.
+        If n is missing, return a single Row.
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame([
+        ...     (2, "Alice"), (5, "Bob")], schema=["age", "name"])
+        >>> df.head()
+        Row(age=2, name='Alice')
+        >>> df.head(1)
+        [Row(age=2, name='Alice')]
+        >>> df.head(0)
+        []
+        "#
+    };
+    (DataFrame . take) => {
+        r#"Returns the first ``num`` rows as a :class:`list` of :class:`Row`.
+
+        .. versionadded:: 1.3.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        num : int
+            Number of records to return. Will return this number of records
+            or all records if the DataFrame contains less than this number of records..
+
+        Returns
+        -------
+        list
+            List of rows
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame(
+        ...     [(14, "Tom"), (23, "Alice"), (16, "Bob")], ["age", "name"])
+
+        Return the first 2 rows of the :class:`DataFrame`.
+
+        >>> df.take(2)
+        [Row(age=14, name='Tom'), Row(age=23, name='Alice')]
+        "#
+    };
+    (DataFrame . join) => {
+        r#"
+        Joins with another :class:`DataFrame`, using the given join expression.
+
+        .. versionadded:: 1.3.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        other : :class:`DataFrame`
+            Right side of the join
+        on : str, list or :class:`Column`, optional
+            a string for the join column name, a list of column names,
+            a join expression (Column), or a list of Columns.
+            If `on` is a string or a list of strings indicating the name of the join column(s),
+            the column(s) must exist on both sides, and this performs an equi-join.
+        how : str, optional
+            default ``inner``. Must be one of: ``inner``, ``cross``, ``outer``,
+            ``full``, ``fullouter``, ``full_outer``, ``left``, ``leftouter``, ``left_outer``,
+            ``right``, ``rightouter``, ``right_outer``, ``semi``, ``leftsemi``, ``left_semi``,
+            ``anti``, ``leftanti`` and ``left_anti``.
+
+        Returns
+        -------
+        :class:`DataFrame`
+            Joined DataFrame.
+
+        Examples
+        --------
+        The following examples demonstrate various join types among ``df1``, ``df2``, and ``df3``.
+
+        >>> import pyspark.sql.functions as sf
+        >>> from pyspark.sql import Row
+        >>> df = spark.createDataFrame([Row(name="Alice", age=2), Row(name="Bob", age=5)])
+        >>> df2 = spark.createDataFrame([Row(name="Tom", height=80), Row(name="Bob", height=85)])
+        >>> df3 = spark.createDataFrame([
+        ...     Row(name="Alice", age=10, height=80),
+        ...     Row(name="Bob", age=5, height=None),
+        ...     Row(name="Tom", age=None, height=None),
+        ...     Row(name=None, age=None, height=None),
+        ... ])
+
+        Inner join on columns (default)
+
+        >>> df.join(df2, "name").show()
+        +----+---+------+
+        |name|age|height|
+        +----+---+------+
+        | Bob|  5|    85|
+        +----+---+------+
+
+        >>> df.join(df3, ["name", "age"]).show()
+        +----+---+------+
+        |name|age|height|
+        +----+---+------+
+        | Bob|  5|  NULL|
+        +----+---+------+
+
+        Outer join on a single column with an explicit join condition.
+
+        When the join condition is explicited stated: `df.name == df2.name`, this will
+        produce all records where the names match, as well as those that don't (since
+        it's an outer join). If there are names in `df2` that are not present in `df`,
+        they will appear with `NULL` in the `name` column of `df`, and vice versa for `df2`.
+
+        >>> joined = df.join(df2, df.name == df2.name, "outer").sort(sf.desc(df.name))
+        >>> joined.show()
+        +-----+----+----+------+
+        | name| age|name|height|
+        +-----+----+----+------+
+        |  Bob|   5| Bob|    85|
+        |Alice|   2|NULL|  NULL|
+        | NULL|NULL| Tom|    80|
+        +-----+----+----+------+
+
+        To unambiguously select output columns, specify the dataframe along with the column name:
+
+        >>> joined.select(df.name, df2.height).show()
+        +-----+------+
+        | name|height|
+        +-----+------+
+        |  Bob|    85|
+        |Alice|  NULL|
+        | NULL|    80|
+        +-----+------+
+
+        However, in self-joins, direct column references can cause ambiguity:
+
+        >>> df.join(df, df.name == df.name, "outer").select(df.name).show() # doctest: +SKIP
+        Traceback (most recent call last):
+        ...
+        pyspark.errors.exceptions.captured.AnalysisException: Column name#0 are ambiguous...
+
+        A better approach is to assign aliases to the dataframes, and then reference
+        the output columns from the join operation using these aliases:
+
+        >>> df.alias("a").join(
+        ...     df.alias("b"), sf.col("a.name") == sf.col("b.name"), "outer"
+        ... ).sort(sf.desc("a.name")).select("a.name", "b.age").show()
+        +-----+---+
+        | name|age|
+        +-----+---+
+        |  Bob|  5|
+        |Alice|  2|
+        +-----+---+
+
+        Outer join on a single column with implicit join condition using column name
+
+        When you provide the column name directly as the join condition, Spark will treat
+        both name columns as one, and will not produce separate columns for `df.name` and
+        `df2.name`. This avoids having duplicate columns in the output.
+
+        >>> df.join(df2, "name", "outer").sort(sf.desc("name")).show()
+        +-----+----+------+
+        | name| age|height|
+        +-----+----+------+
+        |  Tom|NULL|    80|
+        |  Bob|   5|    85|
+        |Alice|   2|  NULL|
+        +-----+----+------+
+
+        Outer join on multiple columns
+
+        >>> df.join(df3, ["name", "age"], "outer").sort("name", "age").show()
+        +-----+----+------+
+        | name| age|height|
+        +-----+----+------+
+        | NULL|NULL|  NULL|
+        |Alice|   2|  NULL|
+        |Alice|  10|    80|
+        |  Bob|   5|  NULL|
+        |  Tom|NULL|  NULL|
+        +-----+----+------+
+
+        Left outer join on columns
+
+        >>> df.join(df2, "name", "left_outer").show()
+        +-----+---+------+
+        | name|age|height|
+        +-----+---+------+
+        |Alice|  2|  NULL|
+        |  Bob|  5|    85|
+        +-----+---+------+
+
+        Right outer join on columns
+
+        >>> df.join(df2, "name", "right_outer").show()
+        +----+----+------+
+        |name| age|height|
+        +----+----+------+
+        | Tom|NULL|    80|
+        | Bob|   5|    85|
+        +----+----+------+
+
+        Left semi join on columns
+
+        >>> df.join(df2, "name", "left_semi").show()
+        +----+---+
+        |name|age|
+        +----+---+
+        | Bob|  5|
+        +----+---+
+
+        Left anti join on columns
+
+        >>> df.join(df2, "name", "left_anti").show()
+        +-----+---+
+        | name|age|
+        +-----+---+
+        |Alice|  2|
+        +-----+---+
+        "#
+    };
+    (DataFrame . lateralJoin) => {
+        r#"
+        Lateral joins with another :class:`DataFrame`, using the given join expression.
+
+        A lateral join (also known as a correlated join) is a type of join where each row from
+        one DataFrame is used as input to a subquery or a derived table that computes a result
+        specific to that row. The right side `DataFrame` can reference columns from the current
+        row of the left side `DataFrame`, allowing for more complex and context-dependent results
+        than a standard join.
+
+        .. versionadded:: 4.0.0
+
+        Parameters
+        ----------
+        other : :class:`DataFrame`
+            Right side of the join
+        on : :class:`Column`, optional
+            a join expression (Column).
+        how : str, optional
+            default ``inner``. Must be one of: ``inner``, ``cross``, ``left``, ``leftouter``,
+            and ``left_outer``.
+
+        Returns
+        -------
+        :class:`DataFrame`
+            Joined DataFrame.
+
+        Examples
+        --------
+        Setup a sample DataFrame.
+
+        >>> from pyspark.sql import functions as sf
+        >>> from pyspark.sql import Row
+        >>> customers_data = [
+        ...     Row(customer_id=1, name="Alice"), Row(customer_id=2, name="Bob"),
+        ...     Row(customer_id=3, name="Charlie"), Row(customer_id=4, name="Diana")
+        ... ]
+        >>> customers = spark.createDataFrame(customers_data)
+        >>> orders_data = [
+        ...     Row(order_id=101, customer_id=1, order_date="2024-01-10",
+        ...         items=[Row(product="laptop", quantity=5), Row(product="mouse", quantity=12)]),
+        ...     Row(order_id=102, customer_id=1, order_date="2024-02-15",
+        ...         items=[Row(product="phone", quantity=2), Row(product="charger", quantity=15)]),
+        ...     Row(order_id=105, customer_id=1, order_date="2024-03-20",
+        ...         items=[Row(product="tablet", quantity=4)]),
+        ...     Row(order_id=103, customer_id=2, order_date="2024-01-12",
+        ...         items=[Row(product="tablet", quantity=8)]),
+        ...     Row(order_id=104, customer_id=2, order_date="2024-03-05",
+        ...         items=[Row(product="laptop", quantity=7)]),
+        ...     Row(order_id=106, customer_id=3, order_date="2024-04-05",
+        ...         items=[Row(product="monitor", quantity=1)]),
+        ... ]
+        >>> orders = spark.createDataFrame(orders_data)
+
+        Example 1 (use TVF): Expanding Items in Each Order into Separate Rows
+
+        >>> customers.join(orders, "customer_id").lateralJoin(
+        ...     spark.tvf.explode(sf.col("items").outer()).select("col.*")
+        ... ).select(
+        ...     "customer_id", "name", "order_id", "order_date", "product", "quantity"
+        ... ).orderBy("customer_id", "order_id", "product").show()
+        +-----------+-------+--------+----------+-------+--------+
+        |customer_id|   name|order_id|order_date|product|quantity|
+        +-----------+-------+--------+----------+-------+--------+
+        |          1|  Alice|     101|2024-01-10| laptop|       5|
+        |          1|  Alice|     101|2024-01-10|  mouse|      12|
+        |          1|  Alice|     102|2024-02-15|charger|      15|
+        |          1|  Alice|     102|2024-02-15|  phone|       2|
+        |          1|  Alice|     105|2024-03-20| tablet|       4|
+        |          2|    Bob|     103|2024-01-12| tablet|       8|
+        |          2|    Bob|     104|2024-03-05| laptop|       7|
+        |          3|Charlie|     106|2024-04-05|monitor|       1|
+        +-----------+-------+--------+----------+-------+--------+
+
+        Example 2 (use subquery): Finding the Two Most Recent Orders for Customer
+
+        >>> customers.alias("c").lateralJoin(
+        ...     orders.alias("o")
+        ...     .where(sf.col("o.customer_id") == sf.col("c.customer_id").outer())
+        ...     .select("order_id", "order_date")
+        ...     .orderBy(sf.col("order_date").desc())
+        ...     .limit(2),
+        ...     how="left"
+        ... ).orderBy("customer_id", "order_id").show()
+        +-----------+-------+--------+----------+
+        |customer_id|   name|order_id|order_date|
+        +-----------+-------+--------+----------+
+        |          1|  Alice|     102|2024-02-15|
+        |          1|  Alice|     105|2024-03-20|
+        |          2|    Bob|     103|2024-01-12|
+        |          2|    Bob|     104|2024-03-05|
+        |          3|Charlie|     106|2024-04-05|
+        |          4|  Diana|    NULL|      NULL|
+        +-----------+-------+--------+----------+
+        "#
+    };
+    (DataFrame . nearestByJoin) => {
+        r#"
+        Nearest-by top-K ranking join with another :class:`DataFrame`. For each row on the
+        left (query side), returns up to ``numResults`` rows from ``other`` (base side), ranked
+        by ``rankingExpression``.
+
+        The current implementation evaluates the full cross-product of left and right and
+        bounds memory per left row by ``numResults``. Index-backed approximate strategies
+        (transparent to ``approx`` mode) are planned for a future release; until then,
+        pre-filter ``other`` when it is large. Tie-breaking among rows with equal ranking
+        values is unspecified.
+
+        .. versionadded:: 4.2.0
+
+        Parameters
+        ----------
+        other : :class:`DataFrame`
+            Right (base side) of the join - the candidate pool searched for each row of this
+            DataFrame.
+        rankingExpression : :class:`Column`
+            Scalar expression used to rank candidate rows on the right side.
+        numResults : int
+            Maximum number of matches per query row. Must be between 1 and 100000.
+        mode : str
+            Search algorithm contract. Must be one of: ``approx``, ``exact``. ``approx`` allows
+            the optimizer to use indexed or other approximate strategies when available;
+            ``exact`` forces brute-force evaluation and requires the ranking expression to be
+            deterministic.
+        direction : str
+            ``"distance"`` (smallest value first) or ``"similarity"`` (largest value first).
+        joinType : str, keyword-only, optional
+            Default ``inner``. Must be one of: ``inner``, ``leftouter``.
+
+        Returns
+        -------
+        :class:`DataFrame`
+            Joined DataFrame.
+
+        Examples
+        --------
+        >>> from pyspark.sql import functions as sf
+        >>> users = spark.createDataFrame(
+        ...     [(1, 10.0), (2, 20.0), (3, 30.0)], ["user_id", "score"])
+        >>> products = spark.createDataFrame(
+        ...     [("A", 11.0), ("B", 22.0), ("C", 5.0)], ["product", "pscore"])
+        >>> users.nearestByJoin(
+        ...     products, -sf.abs(users.score - products.pscore), 1, "exact", "similarity"
+        ... ).select("user_id", "product").orderBy("user_id").show()
+        +-------+-------+
+        |user_id|product|
+        +-------+-------+
+        |      1|      A|
+        |      2|      B|
+        |      3|      B|
+        +-------+-------+
+        "#
+    };
+    (DataFrame . limit) => {
+        r#"Limits the result count to the number specified.
+
+        .. versionadded:: 1.3.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        num : int
+            Number of records to return. Will return this number of records
+            or all records if the DataFrame contains less than this number of records.
+
+        Returns
+        -------
+        :class:`DataFrame`
+            Subset of the records
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame(
+        ...     [(14, "Tom"), (23, "Alice"), (16, "Bob")], ["age", "name"])
+        >>> df.limit(1).show()
+        +---+----+
+        |age|name|
+        +---+----+
+        | 14| Tom|
+        +---+----+
+        >>> df.limit(0).show()
+        +---+----+
+        |age|name|
+        +---+----+
+        +---+----+
+        "#
+    };
+    (DataFrame . tail) => {
+        r#"
+        Returns the last ``num`` rows as a :class:`list` of :class:`Row`.
+
+        Running tail requires moving data into the application's driver process, and doing so with
+        a very large ``num`` can crash the driver process with OutOfMemoryError.
+
+        .. versionadded:: 3.0.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        num : int
+            Number of records to return. Will return this number of records
+            or all records if the DataFrame contains less than this number of records.
+
+        Returns
+        -------
+        list
+            List of rows
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame(
+        ...     [(14, "Tom"), (23, "Alice"), (16, "Bob")], ["age", "name"])
+
+        >>> df.tail(2)
+        [Row(age=23, name='Alice'), Row(age=16, name='Bob')]
+        "#
+    };
+    (DataFrame . sort) => {
+        r#"Returns a new :class:`DataFrame` sorted by the specified column(s).
+
+        .. versionadded:: 1.3.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        cols : int, str, list, or :class:`Column`, optional
+             list of :class:`Column` or column names or column ordinals to sort by.
+
+            .. versionchanged:: 4.0.0
+               Supports column ordinal.
+
+        Other Parameters
+        ----------------
+        ascending : bool or list, optional, default True
+            boolean or list of boolean.
+            Sort ascending vs. descending. Specify list for multiple sort orders.
+            If a list is specified, the length of the list must equal the length of the `cols`.
+
+        Returns
+        -------
+        :class:`DataFrame`
+            Sorted DataFrame.
+
+        Notes
+        -----
+        A column ordinal starts from 1, which is different from the
+        0-based :meth:`__getitem__`.
+        If a column ordinal is negative, it means sort descending.
+
+        Examples
+        --------
+        >>> from pyspark.sql import functions as sf
+        >>> df = spark.createDataFrame([
+        ...     (2, "Alice"), (5, "Bob")], schema=["age", "name"])
+
+        Sort the DataFrame in ascending order.
+
+        >>> df.sort(sf.asc("age")).show()
+        +---+-----+
+        |age| name|
+        +---+-----+
+        |  2|Alice|
+        |  5|  Bob|
+        +---+-----+
+
+        >>> df.sort(1).show()
+        +---+-----+
+        |age| name|
+        +---+-----+
+        |  2|Alice|
+        |  5|  Bob|
+        +---+-----+
+
+        Sort the DataFrame in descending order.
+
+        >>> df.sort(df.age.desc()).show()
+        +---+-----+
+        |age| name|
+        +---+-----+
+        |  5|  Bob|
+        |  2|Alice|
+        +---+-----+
+
+        >>> df.orderBy(df.age.desc()).show()
+        +---+-----+
+        |age| name|
+        +---+-----+
+        |  5|  Bob|
+        |  2|Alice|
+        +---+-----+
+
+        >>> df.sort("age", ascending=False).show()
+        +---+-----+
+        |age| name|
+        +---+-----+
+        |  5|  Bob|
+        |  2|Alice|
+        +---+-----+
+
+        >>> df.sort(-1).show()
+        +---+-----+
+        |age| name|
+        +---+-----+
+        |  5|  Bob|
+        |  2|Alice|
+        +---+-----+
+
+        Specify multiple columns
+
+        >>> from pyspark.sql import functions as sf
+        >>> df = spark.createDataFrame([
+        ...     (2, "Alice"), (2, "Bob"), (5, "Bob")], schema=["age", "name"])
+        >>> df.orderBy(sf.desc("age"), "name").show()
+        +---+-----+
+        |age| name|
+        +---+-----+
+        |  5|  Bob|
+        |  2|Alice|
+        |  2|  Bob|
+        +---+-----+
+
+        >>> df.orderBy(-1, "name").show()
+        +---+-----+
+        |age| name|
+        +---+-----+
+        |  5|  Bob|
+        |  2|Alice|
+        |  2|  Bob|
+        +---+-----+
+
+        >>> df.orderBy(-1, 2).show()
+        +---+-----+
+        |age| name|
+        +---+-----+
+        |  5|  Bob|
+        |  2|Alice|
+        |  2|  Bob|
+        +---+-----+
+
+        Specify multiple columns for sorting order at `ascending`.
+
+        >>> df.orderBy(["age", "name"], ascending=[False, False]).show()
+        +---+-----+
+        |age| name|
+        +---+-----+
+        |  5|  Bob|
+        |  2|  Bob|
+        |  2|Alice|
+        +---+-----+
+
+        >>> df.orderBy([1, "name"], ascending=[False, False]).show()
+        +---+-----+
+        |age| name|
+        +---+-----+
+        |  5|  Bob|
+        |  2|  Bob|
+        |  2|Alice|
+        +---+-----+
+
+        >>> df.orderBy([1, 2], ascending=[False, False]).show()
+        +---+-----+
+        |age| name|
+        +---+-----+
+        |  5|  Bob|
+        |  2|  Bob|
+        |  2|Alice|
+        +---+-----+
+        "#
+    };
+    (DataFrame . orderBy) => {
+        r#"Returns a new :class:`DataFrame` sorted by the specified column(s).
+
+        .. versionadded:: 1.3.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        cols : int, str, list, or :class:`Column`, optional
+             list of :class:`Column` or column names or column ordinals to sort by.
+
+            .. versionchanged:: 4.0.0
+               Supports column ordinal.
+
+        Other Parameters
+        ----------------
+        ascending : bool or list, optional, default True
+            boolean or list of boolean.
+            Sort ascending vs. descending. Specify list for multiple sort orders.
+            If a list is specified, the length of the list must equal the length of the `cols`.
+
+        Returns
+        -------
+        :class:`DataFrame`
+            Sorted DataFrame.
+
+        Notes
+        -----
+        A column ordinal starts from 1, which is different from the
+        0-based :meth:`__getitem__`.
+        If a column ordinal is negative, it means sort descending.
+
+        Examples
+        --------
+        >>> from pyspark.sql import functions as sf
+        >>> df = spark.createDataFrame([
+        ...     (2, "Alice"), (5, "Bob")], schema=["age", "name"])
+
+        Sort the DataFrame in ascending order.
+
+        >>> df.sort(sf.asc("age")).show()
+        +---+-----+
+        |age| name|
+        +---+-----+
+        |  2|Alice|
+        |  5|  Bob|
+        +---+-----+
+
+        >>> df.sort(1).show()
+        +---+-----+
+        |age| name|
+        +---+-----+
+        |  2|Alice|
+        |  5|  Bob|
+        +---+-----+
+
+        Sort the DataFrame in descending order.
+
+        >>> df.sort(df.age.desc()).show()
+        +---+-----+
+        |age| name|
+        +---+-----+
+        |  5|  Bob|
+        |  2|Alice|
+        +---+-----+
+
+        >>> df.orderBy(df.age.desc()).show()
+        +---+-----+
+        |age| name|
+        +---+-----+
+        |  5|  Bob|
+        |  2|Alice|
+        +---+-----+
+
+        >>> df.sort("age", ascending=False).show()
+        +---+-----+
+        |age| name|
+        +---+-----+
+        |  5|  Bob|
+        |  2|Alice|
+        +---+-----+
+
+        >>> df.sort(-1).show()
+        +---+-----+
+        |age| name|
+        +---+-----+
+        |  5|  Bob|
+        |  2|Alice|
+        +---+-----+
+
+        Specify multiple columns
+
+        >>> from pyspark.sql import functions as sf
+        >>> df = spark.createDataFrame([
+        ...     (2, "Alice"), (2, "Bob"), (5, "Bob")], schema=["age", "name"])
+        >>> df.orderBy(sf.desc("age"), "name").show()
+        +---+-----+
+        |age| name|
+        +---+-----+
+        |  5|  Bob|
+        |  2|Alice|
+        |  2|  Bob|
+        +---+-----+
+
+        >>> df.orderBy(-1, "name").show()
+        +---+-----+
+        |age| name|
+        +---+-----+
+        |  5|  Bob|
+        |  2|Alice|
+        |  2|  Bob|
+        +---+-----+
+
+        >>> df.orderBy(-1, 2).show()
+        +---+-----+
+        |age| name|
+        +---+-----+
+        |  5|  Bob|
+        |  2|Alice|
+        |  2|  Bob|
+        +---+-----+
+
+        Specify multiple columns for sorting order at `ascending`.
+
+        >>> df.orderBy(["age", "name"], ascending=[False, False]).show()
+        +---+-----+
+        |age| name|
+        +---+-----+
+        |  5|  Bob|
+        |  2|  Bob|
+        |  2|Alice|
+        +---+-----+
+
+        >>> df.orderBy([1, "name"], ascending=[False, False]).show()
+        +---+-----+
+        |age| name|
+        +---+-----+
+        |  5|  Bob|
+        |  2|  Bob|
+        |  2|Alice|
+        +---+-----+
+
+        >>> df.orderBy([1, 2], ascending=[False, False]).show()
+        +---+-----+
+        |age| name|
+        +---+-----+
+        |  5|  Bob|
+        |  2|  Bob|
+        |  2|Alice|
+        +---+-----+
+        "#
+    };
+    (DataFrame . sortWithinPartitions) => {
+        r#"Returns a new :class:`DataFrame` with each partition sorted by the specified column(s).
+
+        .. versionadded:: 1.6.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        cols : int, str, list or :class:`Column`, optional
+            list of :class:`Column` or column names or column ordinals to sort by.
+
+            .. versionchanged:: 4.0.0
+               Supports column ordinal.
+
+        Other Parameters
+        ----------------
+        ascending : bool or list, optional, default True
+            boolean or list of boolean.
+            Sort ascending vs. descending. Specify list for multiple sort orders.
+            If a list is specified, the length of the list must equal the length of the `cols`.
+
+        Returns
+        -------
+        :class:`DataFrame`
+            DataFrame sorted by partitions.
+
+        Notes
+        -----
+        A column ordinal starts from 1, which is different from the
+        0-based :meth:`__getitem__`.
+        If a column ordinal is negative, it means sort descending.
+
+        Examples
+        --------
+        >>> from pyspark.sql import functions as sf
+        >>> df = spark.createDataFrame([(2, "Alice"), (5, "Bob")], schema=["age", "name"])
+        >>> df.sortWithinPartitions("age", ascending=False)
+        DataFrame[age: bigint, name: string]
+
+        >>> df.coalesce(1).sortWithinPartitions(1).show()
+        +---+-----+
+        |age| name|
+        +---+-----+
+        |  2|Alice|
+        |  5|  Bob|
+        +---+-----+
+
+        >>> df.coalesce(1).sortWithinPartitions(-1).show()
+        +---+-----+
+        |age| name|
+        +---+-----+
+        |  5|  Bob|
+        |  2|Alice|
+        +---+-----+
+        "#
+    };
+    (DataFrame . sample) => {
+        r#"Returns a sampled subset of this :class:`DataFrame`.
+
+        .. versionadded:: 1.3.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        withReplacement : bool, optional
+            Sample with replacement or not (default ``False``).
+        fraction : float, optional
+            Fraction of rows to generate, range [0.0, 1.0].
+        seed : int, optional
+            Seed for sampling (default a random seed).
+
+        Returns
+        -------
+        :class:`DataFrame`
+            Sampled rows from given DataFrame.
+
+        Notes
+        -----
+        This is not guaranteed to provide exactly the fraction specified of the total
+        count of the given :class:`DataFrame`.
+
+        `fraction` is required and, `withReplacement` and `seed` are optional.
+
+        Examples
+        --------
+        >>> df = spark.range(0, 10, 1, 1)
+        >>> df.sample(0.5, 3).count() # doctest: +SKIP
+        7
+        >>> df.sample(fraction=0.5, seed=3).count()
+        4
+        >>> df.sample(withReplacement=True, fraction=0.5, seed=3).count()
+        2
+        >>> df.sample(1.0).count()
+        10
+        >>> df.sample(fraction=1.0).count()
+        10
+        >>> df.sample(False, fraction=1.0).count()
+        10
+        "#
+    };
+    (DataFrame . withColumnRenamed) => {
+        r#"
+        Returns a new :class:`DataFrame` by renaming an existing column.
+        This is a no-op if the schema doesn't contain the given column name.
+
+        .. versionadded:: 1.3.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        existing : str
+            The name of the existing column to be renamed.
+        new : str
+            The new name to be assigned to the column.
+
+        Returns
+        -------
+        :class:`DataFrame`
+            A new DataFrame with renamed column.
+
+        See Also
+        --------
+        DataFrame.withColumnsRenamed
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame([(2, "Alice"), (5, "Bob")], schema=["age", "name"])
+
+        Example 1: Rename a single column
+
+        >>> df.withColumnRenamed("age", "age2").show()
+        +----+-----+
+        |age2| name|
+        +----+-----+
+        |   2|Alice|
+        |   5|  Bob|
+        +----+-----+
+
+        Example 2: Rename a column that does not exist (no-op)
+
+        >>> df.withColumnRenamed("non_existing", "new_name").show()
+        +---+-----+
+        |age| name|
+        +---+-----+
+        |  2|Alice|
+        |  5|  Bob|
+        +---+-----+
+
+        Example 3: Rename multiple columns
+
+        >>> df.withColumnRenamed("age", "age2").withColumnRenamed("name", "name2").show()
+        +----+-----+
+        |age2|name2|
+        +----+-----+
+        |   2|Alice|
+        |   5|  Bob|
+        +----+-----+
+        "#
+    };
+    (DataFrame . withColumnsRenamed) => {
+        r#"
+        Returns a new :class:`DataFrame` by renaming multiple columns.
+        This is a no-op if the schema doesn't contain the given column names.
+
+        .. versionadded:: 3.4.0
+           Added support for multiple columns renaming
+
+        Parameters
+        ----------
+        colsMap : dict
+            A dict of existing column names and corresponding desired column names.
+            Currently, only a single map is supported.
+
+        Returns
+        -------
+        :class:`DataFrame`
+            DataFrame with renamed columns.
+
+        See Also
+        --------
+        DataFrame.withColumnRenamed
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame([(2, "Alice"), (5, "Bob")], schema=["age", "name"])
+
+        Example 1: Rename a single column
+
+        >>> df.withColumnsRenamed({"age": "age2"}).show()
+        +----+-----+
+        |age2| name|
+        +----+-----+
+        |   2|Alice|
+        |   5|  Bob|
+        +----+-----+
+
+        Example 2: Rename multiple columns
+
+        >>> df.withColumnsRenamed({"age": "age2", "name": "name2"}).show()
+        +----+-----+
+        |age2|name2|
+        +----+-----+
+        |   2|Alice|
+        |   5|  Bob|
+        +----+-----+
+
+        Example 3: Rename non-existing column (no-op)
+
+        >>> df.withColumnsRenamed({"non_existing": "new_name"}).show()
+        +---+-----+
+        |age| name|
+        +---+-----+
+        |  2|Alice|
+        |  5|  Bob|
+        +---+-----+
+
+        Example 4: Rename with an empty dictionary (no-op)
+
+        >>> df.withColumnsRenamed({}).show()
+        +---+-----+
+        |age| name|
+        +---+-----+
+        |  2|Alice|
+        |  5|  Bob|
+        +---+-----+
+        "#
+    };
+    (DataFrame . withColumns) => {
+        r#"
+        Returns a new :class:`DataFrame` by adding multiple columns or replacing the
+        existing columns that have the same names.
+
+        The colsMap is a map of column name and column, the column must only refer to attributes
+        supplied by this Dataset. It is an error to add columns that refer to some other Dataset.
+
+        .. versionadded:: 3.3.0
+           Added support for multiple columns adding
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        colsMap : dict
+            a dict of column name and :class:`Column`. Currently, only a single map is supported.
+
+        Returns
+        -------
+        :class:`DataFrame`
+            DataFrame with new or replaced columns.
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame([(2, "Alice"), (5, "Bob")], schema=["age", "name"])
+        >>> df.withColumns({'age2': df.age + 2, 'age3': df.age + 3}).show()
+        +---+-----+----+----+
+        |age| name|age2|age3|
+        +---+-----+----+----+
+        |  2|Alice|   4|   5|
+        |  5|  Bob|   7|   8|
+        +---+-----+----+----+
+        "#
+    };
+    (DataFrame . withColumn) => {
+        r#"
+        Returns a new :class:`DataFrame` by adding a column or replacing the
+        existing column that has the same name.
+
+        The column expression must be an expression over this :class:`DataFrame`; attempting to add
+        a column from some other :class:`DataFrame` will raise an error.
+
+        .. versionadded:: 1.3.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        colName : str
+            string, name of the new column.
+        col : :class:`Column`
+            a :class:`Column` expression for the new column.
+
+        Returns
+        -------
+        :class:`DataFrame`
+            DataFrame with new or replaced column.
+
+        Notes
+        -----
+        This method introduces a projection internally. Therefore, calling it multiple
+        times, for instance, via loops in order to add multiple columns can generate big
+        plans which can cause performance issues and even `StackOverflowException`.
+        To avoid this, use :func:`select` with multiple columns at once.
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame([(2, "Alice"), (5, "Bob")], schema=["age", "name"])
+        >>> df.withColumn('age2', df.age + 2).show()
+        +---+-----+----+
+        |age| name|age2|
+        +---+-----+----+
+        |  2|Alice|   4|
+        |  5|  Bob|   7|
+        +---+-----+----+
+        "#
+    };
+    (DataFrame . withMetadata) => {
+        r#"Returns a new :class:`DataFrame` by updating an existing column with metadata.
+
+        .. versionadded:: 3.3.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        columnName : str
+            string, name of the existing column to update the metadata.
+        metadata : dict
+            dict, new metadata to be assigned to df.schema[columnName].metadata
+
+        Returns
+        -------
+        :class:`DataFrame`
+            DataFrame with updated metadata column.
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame([(2, "Alice"), (5, "Bob")], schema=["age", "name"])
+        >>> df_meta = df.withMetadata('age', {'foo': 'bar'})
+        >>> df_meta.schema['age'].metadata
+        {'foo': 'bar'}
+        "#
+    };
+    (DataFrame . unpivot) => {
+        r#"
+        Unpivot a DataFrame from wide format to long format, optionally leaving
+        identifier columns set. This is the reverse to `groupBy(...).pivot(...).agg(...)`,
+        except for the aggregation, which cannot be reversed.
+
+        This function is useful to massage a DataFrame into a format where some
+        columns are identifier columns ("ids"), while all other columns ("values")
+        are "unpivoted" to the rows, leaving just two non-id columns, named as given
+        by `variableColumnName` and `valueColumnName`.
+
+        When no "id" columns are given, the unpivoted DataFrame consists of only the
+        "variable" and "value" columns.
+
+        The `values` columns must not be empty so at least one value must be given to be unpivoted.
+        When `values` is `None`, all non-id columns will be unpivoted.
+
+        All "value" columns must share a least common data type. Unless they are the same data type,
+        all "value" columns are cast to the nearest common data type. For instance, types
+        `IntegerType` and `LongType` are cast to `LongType`, while `IntegerType` and `StringType`
+        do not have a common data type and `unpivot` fails.
+
+        .. versionadded:: 3.4.0
+
+        Parameters
+        ----------
+        ids : str, Column, tuple, list
+            Column(s) to use as identifiers. Can be a single column or column name,
+            or a list or tuple for multiple columns.
+        values : str, Column, tuple, list, optional
+            Column(s) to unpivot. Can be a single column or column name, or a list or tuple
+            for multiple columns. If specified, must not be empty. If not specified, uses all
+            columns that are not set as `ids`.
+        variableColumnName : str
+            Name of the variable column.
+        valueColumnName : str
+            Name of the value column.
+
+        Returns
+        -------
+        :class:`DataFrame`
+            Unpivoted DataFrame.
+
+        Notes
+        -----
+        Supports Spark Connect.
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame(
+        ...     [(1, 11, 1.1), (2, 12, 1.2)],
+        ...     ["id", "int", "double"],
+        ... )
+        >>> df.show()
+        +---+---+------+
+        | id|int|double|
+        +---+---+------+
+        |  1| 11|   1.1|
+        |  2| 12|   1.2|
+        +---+---+------+
+
+        >>> from pyspark.sql import functions as sf
+        >>> df.unpivot(
+        ...     "id", ["int", "double"], "var", "val"
+        ... ).sort("id", sf.desc("var")).show()
+        +---+------+----+
+        | id|   var| val|
+        +---+------+----+
+        |  1|   int|11.0|
+        |  1|double| 1.1|
+        |  2|   int|12.0|
+        |  2|double| 1.2|
+        +---+------+----+
+
+        See Also
+        --------
+        DataFrame.melt
+        "#
+    };
+    (DataFrame . melt) => {
+        r#"
+        Unpivot a DataFrame from wide format to long format, optionally leaving
+        identifier columns set. This is the reverse to `groupBy(...).pivot(...).agg(...)`,
+        except for the aggregation, which cannot be reversed.
+
+        This function is useful to massage a DataFrame into a format where some
+        columns are identifier columns ("ids"), while all other columns ("values")
+        are "unpivoted" to the rows, leaving just two non-id columns, named as given
+        by `variableColumnName` and `valueColumnName`.
+
+        When no "id" columns are given, the unpivoted DataFrame consists of only the
+        "variable" and "value" columns.
+
+        The `values` columns must not be empty so at least one value must be given to be unpivoted.
+        When `values` is `None`, all non-id columns will be unpivoted.
+
+        All "value" columns must share a least common data type. Unless they are the same data type,
+        all "value" columns are cast to the nearest common data type. For instance, types
+        `IntegerType` and `LongType` are cast to `LongType`, while `IntegerType` and `StringType`
+        do not have a common data type and `unpivot` fails.
+
+        .. versionadded:: 3.4.0
+
+        Parameters
+        ----------
+        ids : str, Column, tuple, list
+            Column(s) to use as identifiers. Can be a single column or column name,
+            or a list or tuple for multiple columns.
+        values : str, Column, tuple, list, optional
+            Column(s) to unpivot. Can be a single column or column name, or a list or tuple
+            for multiple columns. If specified, must not be empty. If not specified, uses all
+            columns that are not set as `ids`.
+        variableColumnName : str
+            Name of the variable column.
+        valueColumnName : str
+            Name of the value column.
+
+        Returns
+        -------
+        :class:`DataFrame`
+            Unpivoted DataFrame.
+
+        Notes
+        -----
+        Supports Spark Connect.
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame(
+        ...     [(1, 11, 1.1), (2, 12, 1.2)],
+        ...     ["id", "int", "double"],
+        ... )
+        >>> df.show()
+        +---+---+------+
+        | id|int|double|
+        +---+---+------+
+        |  1| 11|   1.1|
+        |  2| 12|   1.2|
+        +---+---+------+
+
+        >>> from pyspark.sql import functions as sf
+        >>> df.unpivot(
+        ...     "id", ["int", "double"], "var", "val"
+        ... ).sort("id", sf.desc("var")).show()
+        +---+------+----+
+        | id|   var| val|
+        +---+------+----+
+        |  1|   int|11.0|
+        |  1|double| 1.1|
+        |  2|   int|12.0|
+        |  2|double| 1.2|
+        +---+------+----+
+
+        See Also
+        --------
+        DataFrame.melt
+        "#
+    };
+    (DataFrame . withWatermark) => {
+        r#"Defines an event time watermark for this :class:`DataFrame`. A watermark tracks a point
+        in time before which we assume no more late data is going to arrive.
+
+        Spark will use this watermark for several purposes:
+          - To know when a given time window aggregation can be finalized and thus can be emitted
+            when using output modes that do not allow updates.
+
+          - To minimize the amount of state that we need to keep for on-going aggregations.
+
+        The current watermark is computed by looking at the `MAX(eventTime)` seen across
+        all of the partitions in the query minus a user specified `delayThreshold`.  Due to the cost
+        of coordinating this value across partitions, the actual watermark used is only guaranteed
+        to be at least `delayThreshold` behind the actual event time.  In some cases we may still
+        process records that arrive more than `delayThreshold` late.
+
+        .. versionadded:: 2.1.0
+
+        .. versionchanged:: 3.5.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        eventTime : str
+            the name of the column that contains the event time of the row.
+        delayThreshold : str
+            the minimum delay to wait to data to arrive late, relative to the
+            latest record that has been processed in the form of an interval
+            (e.g. "1 minute" or "5 hours").
+
+        Returns
+        -------
+        :class:`DataFrame`
+            Watermarked DataFrame
+
+        Notes
+        -----
+        This is a feature only for Structured Streaming.
+
+        This API is evolving.
+
+        Examples
+        --------
+        >>> from pyspark.sql import Row
+        >>> from pyspark.sql.functions import timestamp_seconds
+        >>> df = spark.readStream.format("rate").load().selectExpr(
+        ...     "value % 5 AS value", "timestamp")
+        >>> df.select("value", df.timestamp.alias("time")).withWatermark("time", '10 minutes')
+        DataFrame[value: bigint, time: timestamp]
+
+        Group the data by window and value (0 - 4), and compute the count of each group.
+
+        >>> import time
+        >>> from pyspark.sql.functions import window
+        >>> query = (df
+        ...     .withWatermark("timestamp", "10 minutes")
+        ...     .groupBy(
+        ...         window(df.timestamp, "10 minutes", "5 minutes"),
+        ...         df.value)
+        ...     ).count().writeStream.outputMode("complete").format("console").start()
+        >>> time.sleep(3)
+        >>> query.stop()
+        "#
+    };
+    (DataFrame . hint) => {
+        r#"Specifies some hint on the current :class:`DataFrame`.
+
+        .. versionadded:: 2.2.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        name : str
+            A name of the hint.
+        parameters : str, list, float or int
+            Optional parameters.
+
+        Returns
+        -------
+        :class:`DataFrame`
+            Hinted DataFrame
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame([(2, "Alice"), (5, "Bob")], schema=["age", "name"])
+        >>> df2 = spark.createDataFrame([Row(height=80, name="Tom"), Row(height=85, name="Bob")])
+        >>> df.join(df2, "name").explain()  # doctest: +SKIP
+        == Physical Plan ==
+        ...
+        ... +- SortMergeJoin ...
+        ...
+
+        Explicitly trigger the broadcast hashjoin by providing the hint in ``df2``.
+
+        >>> df.join(df2.hint("broadcast"), "name").explain()
+        == Physical Plan ==
+        ...
+        ... +- BroadcastHashJoin ...
+        ...
+        "#
+    };
+    (DataFrame . randomSplit) => {
+        r#"Randomly splits this :class:`DataFrame` with the provided weights.
+
+        .. versionadded:: 1.4.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        weights : list
+            list of doubles as weights with which to split the :class:`DataFrame`.
+            Weights will be normalized if they don't sum up to 1.0.
+        seed : int, optional
+            The seed for sampling.
+
+        Returns
+        -------
+        list
+            List of DataFrames.
+
+        Examples
+        --------
+        >>> from pyspark.sql import Row
+        >>> df = spark.createDataFrame([
+        ...     Row(age=10, height=80, name="Alice"),
+        ...     Row(age=5, height=None, name="Bob"),
+        ...     Row(age=None, height=None, name="Tom"),
+        ...     Row(age=None, height=None, name=None),
+        ... ])
+
+        >>> splits = df.randomSplit([1.0, 2.0], 24)
+        >>> splits[0].count()
+        2
+        >>> splits[1].count()
+        2
+        "#
+    };
+    (DataFrame . observe) => {
+        r#"Define (named) metrics to observe on the DataFrame. This method returns an 'observed'
+        DataFrame that returns the same result as the input, with the following guarantees:
+
+        * It will compute the defined aggregates (metrics) on all the data that is flowing through
+            the Dataset at that point.
+
+        * It will report the value of the defined aggregate columns as soon as we reach a completion
+            point. A completion point is either the end of a query (batch mode) or the end of a
+            streaming epoch. The value of the aggregates only reflects the data processed since
+            the previous completion point.
+
+        The metrics columns must either contain a literal (e.g. lit(42)), or should contain one or
+        more aggregate functions (e.g. sum(a) or sum(a + b) + avg(c) - lit(1)). Expressions that
+        contain references to the input Dataset's columns must always be wrapped in an aggregate
+        function.
+
+        A user can observe these metrics by adding
+        Python's :class:`~pyspark.sql.streaming.StreamingQueryListener`,
+        Scala/Java's ``org.apache.spark.sql.streaming.StreamingQueryListener`` or Scala/Java's
+        ``org.apache.spark.sql.util.QueryExecutionListener`` to the spark session.
+
+        .. versionadded:: 3.3.0
+
+        .. versionchanged:: 3.5.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        observation : :class:`Observation` or str
+            `str` to specify the name, or an :class:`Observation` instance to obtain the metric.
+
+            .. versionchanged:: 3.4.0
+               Added support for `str` in this parameter.
+        exprs : :class:`Column`
+            column expressions (:class:`Column`).
+
+        Returns
+        -------
+        :class:`DataFrame`
+            the observed :class:`DataFrame`.
+
+        Notes
+        -----
+        When ``observation`` is :class:`Observation`, this method only supports batch queries.
+        When ``observation`` is a string, this method works for both batch and streaming queries.
+        Continuous execution is currently not supported yet.
+
+        Examples
+        --------
+        When ``observation`` is :class:`Observation`, only batch queries work as below.
+
+        >>> from pyspark.sql import Observation, functions as sf
+        >>> df = spark.createDataFrame([(2, "Alice"), (5, "Bob")], schema=["age", "name"])
+        >>> observation = Observation("my metrics")
+        >>> observed_df = df.observe(observation,
+        ...     sf.count(sf.lit(1)).alias("count"), sf.max("age"))
+        >>> observed_df.count()
+        2
+        >>> observation.get
+        {'count': 2, 'max(age)': 5}
+
+        When ``observation`` is a string, streaming queries also work as below.
+
+        >>> from pyspark.sql.streaming import StreamingQueryListener
+        >>> import time
+        >>> class MyErrorListener(StreamingQueryListener):
+        ...    def onQueryStarted(self, event):
+        ...        pass
+        ...
+        ...    def onQueryProgress(self, event):
+        ...        row = event.progress.observedMetrics.get("my_event")
+        ...        # Trigger if the number of errors exceeds 5 percent
+        ...        num_rows = row.rc
+        ...        num_error_rows = row.erc
+        ...        ratio = num_error_rows / num_rows
+        ...        if ratio > 0.05:
+        ...            # Trigger alert
+        ...            pass
+        ...
+        ...    def onQueryIdle(self, event):
+        ...        pass
+        ...
+        ...    def onQueryTerminated(self, event):
+        ...        pass
+        ...
+        >>> error_listener = MyErrorListener()
+        >>> spark.streams.addListener(error_listener)
+        >>> sdf = spark.readStream.format("rate").load().withColumn(
+        ...     "error", sf.col("value")
+        ... )
+        >>> # Observe row count (rc) and error row count (erc) in the streaming Dataset
+        ... observed_ds = sdf.observe(
+        ...     "my_event",
+        ...     sf.count(sf.lit(1)).alias("rc"),
+        ...     sf.count(sf.col("error")).alias("erc"))
+        >>> try:
+        ...     q = observed_ds.writeStream.format("console").start()
+        ...     time.sleep(5)
+        ...
+        ... finally:
+        ...     q.stop()
+        ...     spark.streams.removeListener(error_listener)
+        ...
+        "#
+    };
+    (DataFrame . show) => {
+        r#"
+        Prints the first ``n`` rows of the DataFrame to the console.
+
+        .. versionadded:: 1.3.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        n : int, optional, default 20
+            Number of rows to show.
+        truncate : bool or int, optional, default True
+            If set to ``True``, truncate strings longer than 20 chars.
+            If set to a number greater than one, truncates long strings to length ``truncate``
+            and align cells right.
+        vertical : bool, optional
+            If set to ``True``, print output rows vertically (one line per column value).
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame([
+        ...     (14, "Tom"), (23, "Alice"), (16, "Bob"), (19, "This is a super long name")],
+        ...     ["age", "name"])
+
+        Show :class:`DataFrame`
+
+        >>> df.show()
+        +---+--------------------+
+        |age|                name|
+        +---+--------------------+
+        | 14|                 Tom|
+        | 23|               Alice|
+        | 16|                 Bob|
+        | 19|This is a super l...|
+        +---+--------------------+
+
+        Show only top 2 rows.
+
+        >>> df.show(2)
+        +---+-----+
+        |age| name|
+        +---+-----+
+        | 14|  Tom|
+        | 23|Alice|
+        +---+-----+
+        only showing top 2 rows
+
+        Show full column content without truncation.
+
+        >>> df.show(truncate=False)
+        +---+-------------------------+
+        |age|name                     |
+        +---+-------------------------+
+        |14 |Tom                      |
+        |23 |Alice                    |
+        |16 |Bob                      |
+        |19 |This is a super long name|
+        +---+-------------------------+
+
+        Show :class:`DataFrame` where the maximum number of characters is 3.
+
+        >>> df.show(truncate=3)
+        +---+----+
+        |age|name|
+        +---+----+
+        | 14| Tom|
+        | 23| Ali|
+        | 16| Bob|
+        | 19| Thi|
+        +---+----+
+
+        Show :class:`DataFrame` vertically.
+
+        >>> df.show(vertical=True)
+        -RECORD 0--------------------
+        age  | 14
+        name | Tom
+        -RECORD 1--------------------
+        age  | 23
+        name | Alice
+        -RECORD 2--------------------
+        age  | 16
+        name | Bob
+        -RECORD 3--------------------
+        age  | 19
+        name | This is a super l...
+        "#
+    };
+    (DataFrame . union) => {
+        r#"Return a new :class:`DataFrame` containing the union of rows in this and another
+        :class:`DataFrame`.
+
+        .. versionadded:: 2.0.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        other : :class:`DataFrame`
+            Another :class:`DataFrame` that needs to be unioned.
+
+        Returns
+        -------
+        :class:`DataFrame`
+            A new :class:`DataFrame` containing the combined rows with corresponding columns.
+
+        See Also
+        --------
+        DataFrame.unionAll
+
+        Notes
+        -----
+        This method performs a SQL-style set union of the rows from both `DataFrame` objects,
+        with no automatic deduplication of elements.
+
+        Use the `distinct()` method to perform deduplication of rows.
+
+        The method resolves columns by position (not by name), following the standard behavior
+        in SQL.
+
+        Examples
+        --------
+        Example 1: Combining two DataFrames with the same schema
+
+        >>> df1 = spark.createDataFrame([(1, 'A'), (2, 'B')], ['id', 'value'])
+        >>> df2 = spark.createDataFrame([(3, 'C'), (4, 'D')], ['id', 'value'])
+        >>> df3 = df1.union(df2)
+        >>> df3.show()
+        +---+-----+
+        | id|value|
+        +---+-----+
+        |  1|    A|
+        |  2|    B|
+        |  3|    C|
+        |  4|    D|
+        +---+-----+
+
+        Example 2: Combining two DataFrames with different schemas
+
+        >>> from pyspark.sql import functions as sf
+        >>> df1 = spark.createDataFrame([(100001, 1), (100002, 2)], schema="id LONG, money INT")
+        >>> df2 = spark.createDataFrame([(3, 100003), (4, 100003)], schema="money INT, id LONG")
+        >>> df1 = df1.withColumn("age", sf.lit(30))
+        >>> df2 = df2.withColumn("age", sf.lit(40))
+        >>> df3 = df1.union(df2)
+        >>> df3.show()
+        +------+------+---+
+        |    id| money|age|
+        +------+------+---+
+        |100001|     1| 30|
+        |100002|     2| 30|
+        |     3|100003| 40|
+        |     4|100003| 40|
+        +------+------+---+
+
+        Example 3: Combining two DataFrames with mismatched columns
+
+        >>> df1 = spark.createDataFrame([(1, 2)], ["A", "B"])
+        >>> df2 = spark.createDataFrame([(3, 4)], ["C", "D"])
+        >>> df3 = df1.union(df2)
+        >>> df3.show()
+        +---+---+
+        |  A|  B|
+        +---+---+
+        |  1|  2|
+        |  3|  4|
+        +---+---+
+
+        Example 4: Combining duplicate rows from two different DataFrames
+
+        >>> df1 = spark.createDataFrame([(1, 'A'), (2, 'B'), (3, 'C')], ['id', 'value'])
+        >>> df2 = spark.createDataFrame([(3, 'C'), (4, 'D')], ['id', 'value'])
+        >>> df3 = df1.union(df2).distinct().sort("id")
+        >>> df3.show()
+        +---+-----+
+        | id|value|
+        +---+-----+
+        |  1|    A|
+        |  2|    B|
+        |  3|    C|
+        |  4|    D|
+        +---+-----+
+        "#
+    };
+    (DataFrame . unionAll) => {
+        r#"Return a new :class:`DataFrame` containing the union of rows in this and another
+        :class:`DataFrame`.
+
+        .. versionadded:: 1.3.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        other : :class:`DataFrame`
+            Another :class:`DataFrame` that needs to be combined
+
+        Returns
+        -------
+        :class:`DataFrame`
+            A new :class:`DataFrame` containing combined rows from both dataframes.
+
+        Notes
+        -----
+        This method combines all rows from both `DataFrame` objects with no automatic
+        deduplication of elements.
+
+        Use the `distinct()` method to perform deduplication of rows.
+
+        :func:`unionAll` is an alias to :func:`union`
+
+        See Also
+        --------
+        DataFrame.union
+        "#
+    };
+    (DataFrame . unionByName) => {
+        r#"Returns a new :class:`DataFrame` containing union of rows in this and another
+        :class:`DataFrame`.
+
+        This method performs a union operation on both input DataFrames, resolving columns by
+        name (rather than position). When `allowMissingColumns` is True, missing columns will
+        be filled with null.
+
+        .. versionadded:: 2.3.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        other : :class:`DataFrame`
+            Another :class:`DataFrame` that needs to be combined.
+        allowMissingColumns : bool, optional, default False
+           Specify whether to allow missing columns.
+
+           .. versionadded:: 3.1.0
+
+        Returns
+        -------
+        :class:`DataFrame`
+            A new :class:`DataFrame` containing the combined rows with corresponding
+            columns of the two given DataFrames.
+
+        Examples
+        --------
+        Example 1: Union of two DataFrames with same columns in different order.
+
+        >>> df1 = spark.createDataFrame([[1, 2, 3]], ["col0", "col1", "col2"])
+        >>> df2 = spark.createDataFrame([[4, 5, 6]], ["col1", "col2", "col0"])
+        >>> df1.unionByName(df2).show()
+        +----+----+----+
+        |col0|col1|col2|
+        +----+----+----+
+        |   1|   2|   3|
+        |   6|   4|   5|
+        +----+----+----+
+
+        Example 2: Union with missing columns and setting `allowMissingColumns=True`.
+
+        >>> df1 = spark.createDataFrame([[1, 2, 3]], ["col0", "col1", "col2"])
+        >>> df2 = spark.createDataFrame([[4, 5, 6]], ["col1", "col2", "col3"])
+        >>> df1.unionByName(df2, allowMissingColumns=True).show()
+        +----+----+----+----+
+        |col0|col1|col2|col3|
+        +----+----+----+----+
+        |   1|   2|   3|NULL|
+        |NULL|   4|   5|   6|
+        +----+----+----+----+
+
+        Example 3: Union of two DataFrames with few common columns.
+
+        >>> df1 = spark.createDataFrame([[1, 2, 3]], ["col0", "col1", "col2"])
+        >>> df2 = spark.createDataFrame([[4, 5, 6, 7]], ["col1", "col2", "col3", "col4"])
+        >>> df1.unionByName(df2, allowMissingColumns=True).show()
+        +----+----+----+----+----+
+        |col0|col1|col2|col3|col4|
+        +----+----+----+----+----+
+        |   1|   2|   3|NULL|NULL|
+        |NULL|   4|   5|   6|   7|
+        +----+----+----+----+----+
+
+        Example 4: Union of two DataFrames with completely different columns.
+
+        >>> df1 = spark.createDataFrame([[0, 1, 2]], ["col0", "col1", "col2"])
+        >>> df2 = spark.createDataFrame([[3, 4, 5]], ["col3", "col4", "col5"])
+        >>> df1.unionByName(df2, allowMissingColumns=True).show()
+        +----+----+----+----+----+----+
+        |col0|col1|col2|col3|col4|col5|
+        +----+----+----+----+----+----+
+        |   0|   1|   2|NULL|NULL|NULL|
+        |NULL|NULL|NULL|   3|   4|   5|
+        +----+----+----+----+----+----+
+        "#
+    };
+    (DataFrame . subtract) => {
+        r#"Return a new :class:`DataFrame` containing rows in this :class:`DataFrame`
+        but not in another :class:`DataFrame`.
+
+        .. versionadded:: 1.3.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        other : :class:`DataFrame`
+            Another :class:`DataFrame` that needs to be subtracted.
+
+        Returns
+        -------
+        :class:`DataFrame`
+            Subtracted DataFrame.
+
+        Notes
+        -----
+        This is equivalent to `EXCEPT DISTINCT` in SQL.
+
+        See Also
+        --------
+        DataFrame.exceptAll : Similar to `subtract`, but preserves duplicates.
+
+        Examples
+        --------
+        Example 1: Subtracting two DataFrames with the same schema
+
+        >>> df1 = spark.createDataFrame([("a", 1), ("a", 1), ("b", 3), ("c", 4)], ["C1", "C2"])
+        >>> df2 = spark.createDataFrame([("a", 1), ("a", 1), ("b", 3)], ["C1", "C2"])
+        >>> result_df = df1.subtract(df2)
+        >>> result_df.show()
+        +---+---+
+        | C1| C2|
+        +---+---+
+        |  c|  4|
+        +---+---+
+
+        Example 2: Subtracting two DataFrames with different schemas
+
+        >>> df1 = spark.createDataFrame([(1, "A"), (2, "B")], ["id", "value"])
+        >>> df2 = spark.createDataFrame([(2, "B"), (3, "C")], ["id", "value"])
+        >>> result_df = df1.subtract(df2)
+        >>> result_df.show()
+        +---+-----+
+        | id|value|
+        +---+-----+
+        |  1|    A|
+        +---+-----+
+
+        Example 3: Subtracting two DataFrames with mismatched columns
+
+        >>> df1 = spark.createDataFrame([(1, 2)], ["A", "B"])
+        >>> df2 = spark.createDataFrame([(1, 2)], ["C", "D"])
+        >>> result_df = df1.subtract(df2)
+        >>> result_df.show()
+        +---+---+
+        |  A|  B|
+        +---+---+
+        +---+---+
+        "#
+    };
+    (DataFrame . exceptAll) => {
+        r#"Return a new :class:`DataFrame` containing rows in this :class:`DataFrame` but
+        not in another :class:`DataFrame` while preserving duplicates.
+
+        This is equivalent to `EXCEPT ALL` in SQL.
+        As standard in SQL, this function resolves columns by position (not by name).
+
+        .. versionadded:: 2.4.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        other : :class:`DataFrame`
+            The other :class:`DataFrame` to compare to.
+
+        Returns
+        -------
+        :class:`DataFrame`
+
+        See Also
+        --------
+        DataFrame.subtract : Similar to `exceptAll`, but eliminates duplicates.
+
+        Examples
+        --------
+        >>> df1 = spark.createDataFrame(
+        ...         [("a", 1), ("a", 1), ("a", 1), ("a", 2), ("b",  3), ("c", 4)], ["C1", "C2"])
+        >>> df2 = spark.createDataFrame([("a", 1), ("b", 3)], ["C1", "C2"])
+        >>> df1.exceptAll(df2).show()
+        +---+---+
+        | C1| C2|
+        +---+---+
+        |  a|  1|
+        |  a|  1|
+        |  a|  2|
+        |  c|  4|
+        +---+---+
+
+        "#
+    };
+    (DataFrame . zipWithIndex) => {
+        r#"Returns a new :class:`DataFrame` by appending a column containing consecutive
+        0-based Long indices, similar to :meth:`RDD.zipWithIndex`.
+
+        The index column is appended as the last column of the resulting :class:`DataFrame`.
+
+        .. versionadded:: 4.2.0
+
+        Parameters
+        ----------
+        indexColName : str, default "index"
+            The name of the index column to append.
+
+        Returns
+        -------
+        :class:`DataFrame`
+            A new DataFrame with an appended index column.
+
+        Notes
+        -----
+        If a column with `indexColName` already exists in the schema, the resulting
+        :class:`DataFrame` will have duplicate column names. Selecting the duplicate column
+        by name will throw `AMBIGUOUS_REFERENCE`, and writing the :class:`DataFrame` will
+        throw `COLUMN_ALREADY_EXISTS`.
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame(
+        ...     [("a", 1), ("b", 2), ("c", 3)], ["letter", "number"])
+        >>> df.zipWithIndex().show()
+        +------+------+-----+
+        |letter|number|index|
+        +------+------+-----+
+        |     a|     1|    0|
+        |     b|     2|    1|
+        |     c|     3|    2|
+        +------+------+-----+
+
+        Custom index column name:
+
+        >>> df.zipWithIndex("row_id").show()
+        +------+------+------+
+        |letter|number|row_id|
+        +------+------+------+
+        |     a|     1|     0|
+        |     b|     2|     1|
+        |     c|     3|     2|
+        +------+------+------+
+        "#
+    };
+    (DataFrame . intersect) => {
+        r#"Return a new :class:`DataFrame` containing rows only in
+        both this :class:`DataFrame` and another :class:`DataFrame`.
+        Note that any duplicates are removed. To preserve duplicates
+        use :func:`intersectAll`.
+
+        .. versionadded:: 1.3.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        other : :class:`DataFrame`
+            Another :class:`DataFrame` that needs to be combined.
+
+        Returns
+        -------
+        :class:`DataFrame`
+            Combined DataFrame.
+
+        Notes
+        -----
+        This is equivalent to `INTERSECT` in SQL.
+
+        Examples
+        --------
+        Example 1: Intersecting two DataFrames with the same schema
+
+        >>> df1 = spark.createDataFrame([("a", 1), ("a", 1), ("b", 3), ("c", 4)], ["C1", "C2"])
+        >>> df2 = spark.createDataFrame([("a", 1), ("a", 1), ("b", 3)], ["C1", "C2"])
+        >>> result_df = df1.intersect(df2).sort("C1", "C2")
+        >>> result_df.show()
+        +---+---+
+        | C1| C2|
+        +---+---+
+        |  a|  1|
+        |  b|  3|
+        +---+---+
+
+        Example 2: Intersecting two DataFrames with different schemas
+
+        >>> df1 = spark.createDataFrame([(1, "A"), (2, "B")], ["id", "value"])
+        >>> df2 = spark.createDataFrame([(2, "B"), (3, "C")], ["id", "value"])
+        >>> result_df = df1.intersect(df2).sort("id", "value")
+        >>> result_df.show()
+        +---+-----+
+        | id|value|
+        +---+-----+
+        |  2|    B|
+        +---+-----+
+
+        Example 3: Intersecting all rows from two DataFrames with mismatched columns
+
+        >>> df1 = spark.createDataFrame([(1, 2), (1, 2), (3, 4)], ["A", "B"])
+        >>> df2 = spark.createDataFrame([(1, 2), (1, 2)], ["C", "D"])
+        >>> result_df = df1.intersect(df2).sort("A", "B")
+        >>> result_df.show()
+        +---+---+
+        |  A|  B|
+        +---+---+
+        |  1|  2|
+        +---+---+
+        "#
+    };
+    (DataFrame . intersectAll) => {
+        r#"Return a new :class:`DataFrame` containing rows in both this :class:`DataFrame`
+        and another :class:`DataFrame` while preserving duplicates.
+
+        This is equivalent to `INTERSECT ALL` in SQL. As standard in SQL, this function
+        resolves columns by position (not by name).
+
+        .. versionadded:: 2.4.0
+
+        Returns
+        -------
+        :class:`DataFrame`
+            Combined DataFrame.
+
+        Examples
+        --------
+        Example 1: Intersecting two DataFrames with the same schema
+
+        >>> df1 = spark.createDataFrame([("a", 1), ("a", 1), ("b", 3), ("c", 4)], ["C1", "C2"])
+        >>> df2 = spark.createDataFrame([("a", 1), ("a", 1), ("b", 3)], ["C1", "C2"])
+        >>> result_df = df1.intersectAll(df2).sort("C1", "C2")
+        >>> result_df.show()
+        +---+---+
+        | C1| C2|
+        +---+---+
+        |  a|  1|
+        |  a|  1|
+        |  b|  3|
+        +---+---+
+
+        Example 2: Intersecting two DataFrames with different schemas
+
+        >>> df1 = spark.createDataFrame([(1, "A"), (2, "B")], ["id", "value"])
+        >>> df2 = spark.createDataFrame([(2, "B"), (3, "C")], ["id", "value"])
+        >>> result_df = df1.intersectAll(df2).sort("id", "value")
+        >>> result_df.show()
+        +---+-----+
+        | id|value|
+        +---+-----+
+        |  2|    B|
+        +---+-----+
+
+        Example 3: Intersecting all rows from two DataFrames with mismatched columns
+
+        >>> df1 = spark.createDataFrame([(1, 2), (1, 2), (3, 4)], ["A", "B"])
+        >>> df2 = spark.createDataFrame([(1, 2), (1, 2)], ["C", "D"])
+        >>> result_df = df1.intersectAll(df2).sort("A", "B")
+        >>> result_df.show()
+        +---+---+
+        |  A|  B|
+        +---+---+
+        |  1|  2|
+        |  1|  2|
+        +---+---+
+        "#
+    };
+    (DataFrame . where) => {
+        r#"
+        :func:`where` is an alias for :func:`filter`.
+
+        .. versionadded:: 1.3.0
+        "#
+    };
+    (DataFrame . na) => {
+        r#"Returns a :class:`DataFrameNaFunctions` for handling missing values.
+
+        .. versionadded:: 1.3.1
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Returns
+        -------
+        :class:`DataFrameNaFunctions`
+
+        Examples
+        --------
+        >>> df = spark.sql("SELECT 1 AS c1, int(NULL) AS c2")
+        >>> type(df.na)
+        <class '...dataframe.DataFrameNaFunctions'>
+
+        Replace the missing values as 2.
+
+        >>> df.na.fill(2).show()
+        +---+---+
+        | c1| c2|
+        +---+---+
+        |  1|  2|
+        +---+---+
+        "#
+    };
+    (DataFrame . fillna) => {
+        r#"Returns a new :class:`DataFrame` which null values are filled with new value.
+        :func:`DataFrame.fillna` and :func:`DataFrameNaFunctions.fill` are
+        aliases of each other.
+
+        .. versionadded:: 1.3.1
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        value : int, float, string, bool or dict, the value to replace null values with.
+            If the value is a dict, then `subset` is ignored and `value` must be a mapping
+            from column name (string) to replacement value. The replacement value must be
+            an int, float, boolean, or string.
+        subset : str, tuple or list, optional
+            optional list of column names to consider.
+            Columns specified in subset that do not have matching data types are ignored.
+            For example, if `value` is a string, and subset contains a non-string column,
+            then the non-string column is simply ignored.
+
+        Returns
+        -------
+        :class:`DataFrame`
+            DataFrame with replaced null values.
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame([
+        ...     (10, 80.5, "Alice", None),
+        ...     (5, None, "Bob", None),
+        ...     (None, None, "Tom", None),
+        ...     (None, None, None, True)],
+        ...     schema=["age", "height", "name", "bool"])
+
+        Example 1: Fill all null values with 50 for numeric columns.
+
+        >>> df.na.fill(50).show()
+        +---+------+-----+----+
+        |age|height| name|bool|
+        +---+------+-----+----+
+        | 10|  80.5|Alice|NULL|
+        |  5|  50.0|  Bob|NULL|
+        | 50|  50.0|  Tom|NULL|
+        | 50|  50.0| NULL|true|
+        +---+------+-----+----+
+
+        Example 2: Fill all null values with ``False`` for boolean columns.
+
+        >>> df.na.fill(False).show()
+        +----+------+-----+-----+
+        | age|height| name| bool|
+        +----+------+-----+-----+
+        |  10|  80.5|Alice|false|
+        |   5|  NULL|  Bob|false|
+        |NULL|  NULL|  Tom|false|
+        |NULL|  NULL| NULL| true|
+        +----+------+-----+-----+
+
+        Example 3: Fill all null values with to 50 and "unknown" for
+            'age' and 'name' column respectively.
+
+        >>> df.na.fill({'age': 50, 'name': 'unknown'}).show()
+        +---+------+-------+----+
+        |age|height|   name|bool|
+        +---+------+-------+----+
+        | 10|  80.5|  Alice|NULL|
+        |  5|  NULL|    Bob|NULL|
+        | 50|  NULL|    Tom|NULL|
+        | 50|  NULL|unknown|true|
+        +---+------+-------+----+
+
+        Example 4: Fill all null values with "Spark" for 'name' column.
+
+        >>> df.na.fill(value = 'Spark', subset = 'name').show()
+        +----+------+-----+----+
+        | age|height| name|bool|
+        +----+------+-----+----+
+        |  10|  80.5|Alice|NULL|
+        |   5|  NULL|  Bob|NULL|
+        |NULL|  NULL|  Tom|NULL|
+        |NULL|  NULL|Spark|true|
+        +----+------+-----+----+
+        "#
+    };
+    (DataFrame . dropna) => {
+        r#"Returns a new :class:`DataFrame` omitting rows with null or NaN values.
+        :func:`DataFrame.dropna` and :func:`DataFrameNaFunctions.drop` are
+        aliases of each other.
+
+        .. versionadded:: 1.3.1
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        how : str, optional, the values that can be 'any' or 'all', default 'any'.
+            If 'any', drop a row if it contains any nulls.
+            If 'all', drop a row only if all its values are null.
+        thresh: int, optional, default None.
+            If specified, drop rows that have less than `thresh` non-null values.
+            This overwrites the `how` parameter.
+        subset : str, tuple or list, optional
+            optional list of column names to consider.
+
+        Returns
+        -------
+        :class:`DataFrame`
+            DataFrame with null only rows excluded.
+
+        Examples
+        --------
+        >>> from pyspark.sql import Row
+        >>> df = spark.createDataFrame([
+        ...     Row(age=10, height=80.0, name="Alice"),
+        ...     Row(age=5, height=float("nan"), name="Bob"),
+        ...     Row(age=None, height=None, name="Tom"),
+        ...     Row(age=None, height=float("nan"), name=None),
+        ... ])
+
+        Example 1: Drop the row if it contains any null or NaN.
+
+        >>> df.na.drop().show()
+        +---+------+-----+
+        |age|height| name|
+        +---+------+-----+
+        | 10|  80.0|Alice|
+        +---+------+-----+
+
+        Example 2: Drop the row only if all its values are null or NaN.
+
+        >>> df.na.drop(how='all').show()
+        +----+------+-----+
+        | age|height| name|
+        +----+------+-----+
+        |  10|  80.0|Alice|
+        |   5|   NaN|  Bob|
+        |NULL|  NULL|  Tom|
+        +----+------+-----+
+
+        Example 3: Drop rows that have less than `thresh` non-null and non-NaN values.
+
+        >>> df.na.drop(thresh=2).show()
+        +---+------+-----+
+        |age|height| name|
+        +---+------+-----+
+        | 10|  80.0|Alice|
+        |  5|   NaN|  Bob|
+        +---+------+-----+
+
+        Example 4: Drop rows with null and NaN values in the specified columns.
+
+        >>> df.na.drop(subset=['age', 'name']).show()
+        +---+------+-----+
+        |age|height| name|
+        +---+------+-----+
+        | 10|  80.0|Alice|
+        |  5|   NaN|  Bob|
+        +---+------+-----+
+        "#
+    };
+    (DataFrame . replace) => {
+        r#"Returns a new :class:`DataFrame` replacing a value with another value.
+        :func:`DataFrame.replace` and :func:`DataFrameNaFunctions.replace` are
+        aliases of each other.
+        Values to_replace and value must have the same type and can only be numerics, booleans,
+        or strings. Value can have None. When replacing, the new value will be cast
+        to the type of the existing column.
+        For numeric replacements all values to be replaced should have unique
+        floating point representation. In case of conflicts (for example with `{42: -1, 42.0: 1}`)
+        and arbitrary replacement will be used.
+
+        .. versionadded:: 1.4.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        to_replace : bool, int, float, string, list or dict, the value to be replaced.
+            If the value is a dict, then `value` is ignored or can be omitted, and `to_replace`
+            must be a mapping between a value and a replacement.
+        value : bool, int, float, string or None, optional
+            The replacement value must be a bool, int, float, string or None. If `value` is a
+            list, `value` should be of the same length and type as `to_replace`.
+            If `value` is a scalar and `to_replace` is a sequence, then `value` is
+            used as a replacement for each item in `to_replace`.
+        subset : list, optional
+            optional list of column names to consider.
+            Columns specified in subset that do not have matching data types are ignored.
+            For example, if `value` is a string, and subset contains a non-string column,
+            then the non-string column is simply ignored.
+
+        Returns
+        -------
+        :class:`DataFrame`
+            DataFrame with replaced values.
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame([
+        ...     (10, 80, "Alice"),
+        ...     (5, None, "Bob"),
+        ...     (None, 10, "Tom"),
+        ...     (None, None, None)],
+        ...     schema=["age", "height", "name"])
+
+        Example 1: Replace 10 to 20 in all columns.
+
+        >>> df.na.replace(10, 20).show()
+        +----+------+-----+
+        | age|height| name|
+        +----+------+-----+
+        |  20|    80|Alice|
+        |   5|  NULL|  Bob|
+        |NULL|    20|  Tom|
+        |NULL|  NULL| NULL|
+        +----+------+-----+
+
+        Example 2: Replace 'Alice' to null in all columns.
+
+        >>> df.na.replace('Alice', None).show()
+        +----+------+----+
+        | age|height|name|
+        +----+------+----+
+        |  10|    80|NULL|
+        |   5|  NULL| Bob|
+        |NULL|    10| Tom|
+        |NULL|  NULL|NULL|
+        +----+------+----+
+
+        Example 3: Replace 'Alice' to 'A', and 'Bob' to 'B' in the 'name' column.
+
+        >>> df.na.replace(['Alice', 'Bob'], ['A', 'B'], 'name').show()
+        +----+------+----+
+        | age|height|name|
+        +----+------+----+
+        |  10|    80|   A|
+        |   5|  NULL|   B|
+        |NULL|    10| Tom|
+        |NULL|  NULL|NULL|
+        +----+------+----+
+
+        Example 4: Replace 10 to 18 in the 'age' column.
+
+        >>> df.na.replace(10, 18, 'age').show()
+        +----+------+-----+
+        | age|height| name|
+        +----+------+-----+
+        |  18|    80|Alice|
+        |   5|  NULL|  Bob|
+        |NULL|    10|  Tom|
+        |NULL|  NULL| NULL|
+        +----+------+-----+
+        "#
+    };
+    (DataFrame . stat) => {
+        r#"Returns a :class:`DataFrameStatFunctions` for statistic functions.
+
+        .. versionadded:: 1.4.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Returns
+        -------
+        :class:`DataFrameStatFunctions`
+
+        Examples
+        --------
+        >>> import pyspark.sql.functions as f
+        >>> df = spark.range(3).withColumn("c", f.expr("id + 1"))
+        >>> type(df.stat)
+        <class '...dataframe.DataFrameStatFunctions'>
+        >>> df.stat.corr("id", "c")
+        1.0
+        "#
+    };
+    (DataFrame . summary) => {
+        r#"Computes specified statistics for numeric and string columns. Available statistics are:
+        - count
+        - mean
+        - stddev
+        - min
+        - max
+        - arbitrary approximate percentiles specified as a percentage (e.g., 75%)
+
+        If no statistics are given, this function computes count, mean, stddev, min,
+        approximate quartiles (percentiles at 25%, 50%, and 75%), and max.
+
+        .. versionadded:: 2.3.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        statistics : str, optional
+             Column names to calculate statistics by (default All columns).
+
+        Returns
+        -------
+        :class:`DataFrame`
+            A new DataFrame that provides statistics for the given DataFrame.
+
+        Notes
+        -----
+        This function is meant for exploratory data analysis, as we make no
+        guarantee about the backward compatibility of the schema of the resulting
+        :class:`DataFrame`.
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame(
+        ...     [("Bob", 13, 40.3, 150.5), ("Alice", 12, 37.8, 142.3), ("Tom", 11, 44.1, 142.2)],
+        ...     ["name", "age", "weight", "height"],
+        ... )
+        >>> df.select("age", "weight", "height").summary().show()
+        +-------+----+------------------+-----------------+
+        |summary| age|            weight|           height|
+        +-------+----+------------------+-----------------+
+        |  count|   3|                 3|                3|
+        |   mean|12.0| 40.73333333333333|            145.0|
+        | stddev| 1.0|3.1722757341273704|4.763402145525822|
+        |    min|  11|              37.8|            142.2|
+        |    25%|  11|              37.8|            142.2|
+        |    50%|  12|              40.3|            142.3|
+        |    75%|  13|              44.1|            150.5|
+        |    max|  13|              44.1|            150.5|
+        +-------+----+------------------+-----------------+
+
+        >>> df.select("age", "weight", "height").summary("count", "min", "25%", "75%", "max").show()
+        +-------+---+------+------+
+        |summary|age|weight|height|
+        +-------+---+------+------+
+        |  count|  3|     3|     3|
+        |    min| 11|  37.8| 142.2|
+        |    25%| 11|  37.8| 142.2|
+        |    75%| 13|  44.1| 150.5|
+        |    max| 13|  44.1| 150.5|
+        +-------+---+------+------+
+
+        See Also
+        --------
+        DataFrame.describe : Computes basic statistics for numeric and string columns.
+        "#
+    };
+    (DataFrame . describe) => {
+        r#"Computes basic statistics for numeric and string columns.
+
+        .. versionadded:: 1.3.1
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        This includes count, mean, stddev, min, and max. If no columns are
+        given, this function computes statistics for all numerical or string columns.
+
+        Notes
+        -----
+        This function is meant for exploratory data analysis, as we make no
+        guarantee about the backward compatibility of the schema of the resulting
+        :class:`DataFrame`.
+
+        Use summary for expanded statistics and control over which statistics to compute.
+
+        Parameters
+        ----------
+        cols : str, list, optional
+             Column name or list of column names to describe by (default All columns).
+
+        Returns
+        -------
+        :class:`DataFrame`
+            A new DataFrame that describes (provides statistics) given DataFrame.
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame(
+        ...     [("Bob", 13, 40.3, 150.5), ("Alice", 12, 37.8, 142.3), ("Tom", 11, 44.1, 142.2)],
+        ...     ["name", "age", "weight", "height"],
+        ... )
+        >>> df.describe(['age']).show()
+        +-------+----+
+        |summary| age|
+        +-------+----+
+        |  count|   3|
+        |   mean|12.0|
+        | stddev| 1.0|
+        |    min|  11|
+        |    max|  13|
+        +-------+----+
+
+        >>> df.describe(['age', 'weight', 'height']).show()
+        +-------+----+------------------+-----------------+
+        |summary| age|            weight|           height|
+        +-------+----+------------------+-----------------+
+        |  count|   3|                 3|                3|
+        |   mean|12.0| 40.73333333333333|            145.0|
+        | stddev| 1.0|3.1722757341273704|4.763402145525822|
+        |    min|  11|              37.8|            142.2|
+        |    max|  13|              44.1|            150.5|
+        +-------+----+------------------+-----------------+
+
+        See Also
+        --------
+        DataFrame.summary : Computes summary statistics for numeric and string columns.
+        "#
+    };
+    (DataFrame . cov) => {
+        r#"
+        Calculate the sample covariance for the given columns, specified by their names, as a
+        double value. :func:`DataFrame.cov` and :func:`DataFrameStatFunctions.cov` are aliases.
+
+        .. versionadded:: 1.4.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        col1 : str
+            The name of the first column
+        col2 : str
+            The name of the second column
+
+        Returns
+        -------
+        float
+            Covariance of two columns.
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame([(1, 12), (10, 1), (19, 8)], ["c1", "c2"])
+        >>> df.cov("c1", "c2")
+        -18.0
+        >>> df = spark.createDataFrame([(11, 12), (10, 11), (9, 10)], ["small", "bigger"])
+        >>> df.cov("small", "bigger")
+        1.0
+
+        "#
+    };
+    (DataFrame . corr) => {
+        r#"
+        Calculates the correlation of two columns of a :class:`DataFrame` as a double value.
+        Currently only supports the Pearson Correlation Coefficient.
+        :func:`DataFrame.corr` and :func:`DataFrameStatFunctions.corr` are aliases of each other.
+
+        .. versionadded:: 1.4.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        col1 : str
+            The name of the first column
+        col2 : str
+            The name of the second column
+        method : str, optional
+            The correlation method. Currently only supports "pearson"
+
+        Returns
+        -------
+        float
+            Pearson Correlation Coefficient of two columns.
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame([(1, 12), (10, 1), (19, 8)], ["c1", "c2"])
+        >>> df.corr("c1", "c2")
+        -0.3592106040535498
+        >>> df = spark.createDataFrame([(11, 12), (10, 11), (9, 10)], ["small", "bigger"])
+        >>> df.corr("small", "bigger")
+        1.0
+
+        "#
+    };
+    (DataFrame . approxQuantile) => {
+        r#"
+        Calculates the approximate quantiles of numerical columns of a
+        :class:`DataFrame`.
+
+        The result of this algorithm has the following deterministic bound:
+        If the :class:`DataFrame` has N elements and if we request the quantile at
+        probability `p` up to error `err`, then the algorithm will return
+        a sample `x` from the :class:`DataFrame` so that the *exact* rank of `x` is
+        close to (p * N). More precisely,
+
+          floor((p - err) * N) <= rank(x) <= ceil((p + err) * N).
+
+        This method implements a variation of the Greenwald-Khanna
+        algorithm (with some speed optimizations). The algorithm was first
+        present in [[https://doi.org/10.1145/375663.375670
+        Space-efficient Online Computation of Quantile Summaries]]
+        by Greenwald and Khanna.
+
+        .. versionadded:: 2.0.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        col: str, tuple or list
+            Can be a single column name, or a list of names for multiple columns.
+
+            .. versionchanged:: 2.2.0
+               Added support for multiple columns.
+        probabilities : list or tuple of floats
+            a list of quantile probabilities
+            Each number must be a float in the range [0, 1].
+            For example 0.0 is the minimum, 0.5 is the median, 1.0 is the maximum.
+        relativeError : float
+            The relative target precision to achieve
+            (>= 0). If set to zero, the exact quantiles are computed, which
+            could be very expensive. Note that values greater than 1 are
+            accepted but gives the same result as 1.
+
+        Returns
+        -------
+        list
+            the approximate quantiles at the given probabilities.
+
+            * If the input `col` is a string, the output is a list of floats.
+
+            * If the input `col` is a list or tuple of strings, the output is also a
+                list, but each element in it is a list of floats, i.e., the output
+                is a list of list of floats.
+
+        Notes
+        -----
+        Null values will be ignored in numerical columns before calculation.
+        For columns only containing null values, an empty list is returned.
+
+        Examples
+        --------
+        Example 1: Calculating quantiles for a single column
+
+        >>> data = [(1,), (2,), (3,), (4,), (5,)]
+        >>> df = spark.createDataFrame(data, ["values"])
+        >>> quantiles = df.approxQuantile("values", [0.0, 0.5, 1.0], 0.05)
+        >>> quantiles
+        [1.0, 3.0, 5.0]
+
+        Example 2: Calculating quantiles for multiple columns
+
+        >>> data = [(1, 10), (2, 20), (3, 30), (4, 40), (5, 50)]
+        >>> df = spark.createDataFrame(data, ["col1", "col2"])
+        >>> quantiles = df.approxQuantile(["col1", "col2"], [0.0, 0.5, 1.0], 0.05)
+        >>> quantiles
+        [[1.0, 3.0, 5.0], [10.0, 30.0, 50.0]]
+
+        Example 3: Handling null values
+
+        >>> data = [(1,), (None,), (3,), (4,), (None,)]
+        >>> df = spark.createDataFrame(data, ["values"])
+        >>> quantiles = df.approxQuantile("values", [0.0, 0.5, 1.0], 0.05)
+        >>> quantiles
+        [1.0, 3.0, 4.0]
+
+        Example 4: Calculating quantiles with low precision
+
+        >>> data = [(1,), (2,), (3,), (4,), (5,)]
+        >>> df = spark.createDataFrame(data, ["values"])
+        >>> quantiles = df.approxQuantile("values", [0.0, 0.2, 1.0], 0.1)
+        >>> quantiles
+        [1.0, 1.0, 5.0]
+        "#
+    };
+    (DataFrame . crosstab) => {
+        r#"
+        Computes a pair-wise frequency table of the given columns. Also known as a contingency
+        table.
+        The first column of each row will be the distinct values of `col1` and the column names
+        will be the distinct values of `col2`. The name of the first column will be `$col1_$col2`.
+        Pairs that have no occurrences will have zero as their counts.
+        :func:`DataFrame.crosstab` and :func:`DataFrameStatFunctions.crosstab` are aliases.
+
+        .. versionadded:: 1.4.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        col1 : str
+            The name of the first column. Distinct items will make the first item of
+            each row.
+        col2 : str
+            The name of the second column. Distinct items will make the column names
+            of the :class:`DataFrame`.
+
+        Returns
+        -------
+        :class:`DataFrame`
+            Frequency matrix of two columns.
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame([(1, 11), (1, 11), (3, 10), (4, 8), (4, 8)], ["c1", "c2"])
+        >>> df.crosstab("c1", "c2").sort("c1_c2").show()
+        +-----+---+---+---+
+        |c1_c2| 10| 11|  8|
+        +-----+---+---+---+
+        |    1|  0|  2|  0|
+        |    3|  1|  0|  0|
+        |    4|  0|  0|  2|
+        +-----+---+---+---+
+
+        "#
+    };
+    (DataFrame . freqItems) => {
+        r#"
+        Finding frequent items for columns, possibly with false positives. Using the
+        frequent element count algorithm described in
+        "https://doi.org/10.1145/762471.762473, proposed by Karp, Schenker, and Papadimitriou".
+        :func:`DataFrame.freqItems` and :func:`DataFrameStatFunctions.freqItems` are aliases.
+
+        .. versionadded:: 1.4.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        cols : list or tuple
+            Names of the columns to calculate frequent items for as a list or tuple of
+            strings.
+        support : float, optional
+            The frequency with which to consider an item 'frequent'. Default is 1%.
+            The support must be greater than 1e-4.
+
+        Returns
+        -------
+        :class:`DataFrame`
+            DataFrame with frequent items.
+
+        Notes
+        -----
+        This function is meant for exploratory data analysis, as we make no
+        guarantee about the backward compatibility of the schema of the resulting
+        :class:`DataFrame`.
+
+        Examples
+        --------
+        >>> from pyspark.sql import functions as sf
+        >>> df = spark.createDataFrame([(1, 11), (1, 11), (3, 10), (4, 8), (4, 8)], ["c1", "c2"])
+        >>> df = df.freqItems(["c1", "c2"])
+        >>> df.select([sf.sort_array(c).alias(c) for c in df.columns]).show()
+        +------------+------------+
+        |c1_freqItems|c2_freqItems|
+        +------------+------------+
+        |   [1, 3, 4]| [8, 10, 11]|
+        +------------+------------+
+        "#
+    };
+    (DataFrame . sampleBy) => {
+        r#"
+        Returns a stratified sample without replacement based on the
+        fraction given on each stratum.
+
+        .. versionadded:: 1.5.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        col : :class:`Column` or str
+            column that defines strata
+
+            .. versionchanged:: 3.0.0
+               Added sampling by a column of :class:`Column`
+        fractions : dict
+            sampling fraction for each stratum. If a stratum is not
+            specified, we treat its fraction as zero.
+        seed : int, optional
+            random seed
+
+        Returns
+        -------
+        a new :class:`DataFrame` that represents the stratified sample
+
+        Examples
+        --------
+        >>> from pyspark.sql import functions as sf
+        >>> dataset = spark.range(0, 100, 1, 5).select((sf.col("id") % 3).alias("key"))
+        >>> sampled = dataset.sampleBy("key", fractions={0: 0.1, 1: 0.2}, seed=0)
+        >>> sampled.groupBy("key").count().orderBy("key").show()
+        +---+-----+
+        |key|count|
+        +---+-----+
+        |  0|    4|
+        |  1|    9|
+        +---+-----+
+
+        >>> dataset.sampleBy(sf.col("key"), fractions={2: 1.0}, seed=0).count()
+        33
+        "#
+    };
+    (DataFrame . collect) => {
+        r#"Returns all the records in the DataFrame as a list of :class:`Row`.
+
+        .. versionadded:: 1.3.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Returns
+        -------
+        list
+            A list of :class:`Row` objects, each representing a row in the DataFrame.
+
+        See Also
+        --------
+        DataFrame.take : Returns the first `n` rows.
+        DataFrame.head : Returns the first `n` rows.
+        DataFrame.toPandas : Returns the data as a pandas DataFrame.
+        DataFrame.toArrow : Returns the data as a PyArrow Table.
+
+        Notes
+        -----
+        This method should only be used if the resulting list is expected to be small,
+        as all the data is loaded into the driver's memory.
+
+        Examples
+        --------
+        Example: Collecting all rows of a DataFrame
+
+        >>> df = spark.createDataFrame([(14, "Tom"), (23, "Alice"), (16, "Bob")], ["age", "name"])
+        >>> df.collect()
+        [Row(age=14, name='Tom'), Row(age=23, name='Alice'), Row(age=16, name='Bob')]
+
+        Example: Collecting all rows after filtering
+
+        >>> df = spark.createDataFrame([(14, "Tom"), (23, "Alice"), (16, "Bob")], ["age", "name"])
+        >>> df.filter(df.age > 15).collect()
+        [Row(age=23, name='Alice'), Row(age=16, name='Bob')]
+
+        Example: Collecting all rows after selecting specific columns
+
+        >>> df = spark.createDataFrame([(14, "Tom"), (23, "Alice"), (16, "Bob")], ["age", "name"])
+        >>> df.select("name").collect()
+        [Row(name='Tom'), Row(name='Alice'), Row(name='Bob')]
+
+        Example: Collecting all rows after applying a function to a column
+
+        >>> from pyspark.sql.functions import upper
+        >>> df = spark.createDataFrame([(14, "Tom"), (23, "Alice"), (16, "Bob")], ["age", "name"])
+        >>> df.select(upper(df.name)).collect()
+        [Row(upper(name)='TOM'), Row(upper(name)='ALICE'), Row(upper(name)='BOB')]
+
+        Example: Collecting all rows from a DataFrame and converting a specific column to a list
+
+        >>> df = spark.createDataFrame([(14, "Tom"), (23, "Alice"), (16, "Bob")], ["age", "name"])
+        >>> rows = df.collect()
+        >>> [row["name"] for row in rows]
+        ['Tom', 'Alice', 'Bob']
+
+        Example: Collecting all rows from a DataFrame and converting to a list of dictionaries
+
+        >>> df = spark.createDataFrame([(14, "Tom"), (23, "Alice"), (16, "Bob")], ["age", "name"])
+        >>> rows = df.collect()
+        >>> [row.asDict() for row in rows]
+        [{'age': 14, 'name': 'Tom'}, {'age': 23, 'name': 'Alice'}, {'age': 16, 'name': 'Bob'}]
+        "#
+    };
+    (DataFrame . toArrow) => {
+        r#"
+        Returns the contents of this :class:`DataFrame` as PyArrow ``pyarrow.Table``.
+
+        This is only available if PyArrow is installed and available.
+
+        .. versionadded:: 4.0.0
+
+        Notes
+        -----
+        This method should only be used if the resulting PyArrow ``pyarrow.Table`` is
+        expected to be small, as all the data is loaded into the driver's memory.
+
+        This API is a developer API.
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame([(2, "Alice"), (5, "Bob")], schema=["age", "name"])
+        >>> df.coalesce(1).toArrow()
+        pyarrow.Table
+        age: int64
+        name: string
+        ----
+        age: [[2,5]]
+        name: [["Alice","Bob"]]
+        "#
+    };
+    (DataFrame . toPandas) => {
+        r#"
+        Returns the contents of this :class:`DataFrame` as Pandas ``pandas.DataFrame``.
+
+        This is only available if Pandas is installed and available.
+
+        .. versionadded:: 1.3.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Notes
+        -----
+        This method should only be used if the resulting Pandas ``pandas.DataFrame`` is
+        expected to be small, as all the data is loaded into the driver's memory.
+
+        Usage with ``spark.sql.execution.arrow.pyspark.enabled=True`` is experimental.
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame([(2, "Alice"), (5, "Bob")], schema=["age", "name"])
+        >>> df.toPandas()
+           age   name
+        0    2  Alice
+        1    5    Bob
+        "#
+    };
+    (DataFrame . transpose) => {
+        r#"
+        Transposes a DataFrame such that the values in the specified index column become the new
+        columns of the DataFrame. If no index column is provided, the first column is used as
+        the default.
+
+        Please note:
+        - All columns except the index column must share a least common data type. Unless they
+        are the same data type, all columns are cast to the nearest common data type.
+        - The name of the column into which the original column names are transposed defaults
+        to "key".
+        - null values in the index column are excluded from the column names for the
+        transposed table, which are ordered in ascending order.
+
+        .. versionadded:: 4.0.0
+
+        Parameters
+        ----------
+        indexColumn : str or :class:`Column`, optional
+            The single column that will be treated as the index for the transpose operation. This
+            column will be used to transform the DataFrame such that the values of the indexColumn
+            become the new columns in the transposed DataFrame. If not provided, the first column of
+            the DataFrame will be used as the default.
+
+        Returns
+        -------
+        :class:`DataFrame`
+            Transposed DataFrame.
+
+        Notes
+        -----
+        Supports Spark Connect.
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame(
+        ...     [("A", 1, 2), ("B", 3, 4)],
+        ...     ["id", "val1", "val2"],
+        ... )
+        >>> df.show()
+        +---+----+----+
+        | id|val1|val2|
+        +---+----+----+
+        |  A|   1|   2|
+        |  B|   3|   4|
+        +---+----+----+
+
+        >>> df.transpose().show()
+        +----+---+---+
+        | key|  A|  B|
+        +----+---+---+
+        |val1|  1|  3|
+        |val2|  2|  4|
+        +----+---+---+
+
+        >>> df.transpose(df.id).show()
+        +----+---+---+
+        | key|  A|  B|
+        +----+---+---+
+        |val1|  1|  3|
+        |val2|  2|  4|
+        +----+---+---+
+        "#
+    };
+    (DataFrame . asTable) => {
+        r#"
+        Converts the DataFrame into a :class:`table_arg.TableArg` object, which can
+        be used as a table argument in a TVF(Table-Valued Function) including UDTF
+        (User-Defined Table Function).
+
+        After obtaining a TableArg from a DataFrame using this method, you can specify partitioning
+        and ordering for the table argument by calling methods such as `partitionBy`, `orderBy`, and
+        `withSinglePartition` on the `TableArg` instance.
+        - partitionBy: Partitions the data based on the specified columns. This method cannot
+        be called after withSinglePartition() has been called.
+        - orderBy: Orders the data within partitions based on the specified columns.
+        - withSinglePartition: Indicates that the data should be treated as a single partition.
+        This method cannot be called after partitionBy() has been called.
+
+        .. versionadded:: 4.0.0
+
+        Returns
+        -------
+        :class:`table_arg.TableArg`
+            A `TableArg` object representing a table argument.
+
+        Examples
+        --------
+        >>> from pyspark.sql.functions import udtf
+        >>>
+        >>> # Create a simple UDTF that processes table data
+        >>> @udtf(returnType="id: int, doubled: int")
+        ... class DoubleUDTF:
+        ...     def eval(self, row):
+        ...         yield row["id"], row["id"] * 2
+        ...
+        >>> # Create a DataFrame
+        >>> df = spark.createDataFrame([(1,), (2,), (3,)], ["id"])
+        >>>
+        >>> # Use asTable() to pass the DataFrame as a table argument to the UDTF
+        >>> result = DoubleUDTF(df.asTable())
+        >>> result.show()
+        +---+-------+
+        | id|doubled|
+        +---+-------+
+        |  1|      2|
+        |  2|      4|
+        |  3|      6|
+        +---+-------+
+        >>>
+        >>> # Use partitionBy and orderBy to control data partitioning and ordering
+        >>> df2 = spark.createDataFrame(
+        ...     [(1, "a"), (1, "b"), (2, "c"), (2, "d")], ["key", "value"]
+        ... )
+        >>>
+        >>> @udtf(returnType="key: int, value: string")
+        ... class ProcessUDTF:
+        ...     def eval(self, row):
+        ...         yield row["key"], row["value"]
+        ...
+        >>> # Partition by 'key' and order by 'value' within each partition
+        >>> result2 = ProcessUDTF(df2.asTable().partitionBy("key").orderBy("value"))
+        >>> result2.show()
+        +---+-----+
+        |key|value|
+        +---+-----+
+        |  1|    a|
+        |  1|    b|
+        |  2|    c|
+        |  2|    d|
+        +---+-----+
+        >>>
+        >>> # Use withSinglePartition to process all data in a single partition
+        >>> result3 = ProcessUDTF(df2.asTable().withSinglePartition().orderBy("value"))
+        >>> result3.show()
+        +---+-----+
+        |key|value|
+        +---+-----+
+        |  1|    a|
+        |  1|    b|
+        |  2|    c|
+        |  2|    d|
+        +---+-----+
+        "#
+    };
+    (DataFrame . scalar) => {
+        r#"
+        Return a `Column` object for a SCALAR Subquery containing exactly one row and one column.
+
+        The `scalar()` method is useful for extracting a `Column` object that represents a scalar
+        value from a DataFrame, especially when the DataFrame results from an aggregation or
+        single-value computation. This returned `Column` can then be used directly in `select`
+        clauses or as predicates in filters on the outer DataFrame, enabling dynamic data filtering
+        and calculations based on scalar values.
+
+        .. versionadded:: 4.0.0
+
+        Returns
+        -------
+        :class:`Column`
+            A `Column` object representing a SCALAR subquery.
+
+        Examples
+        --------
+        Setup a sample DataFrame.
+
+        >>> data = [
+        ...     (1, "Alice", 45000, 101), (2, "Bob", 54000, 101), (3, "Charlie", 29000, 102),
+        ...     (4, "David", 61000, 102), (5, "Eve", 48000, 101),
+        ... ]
+        >>> employees = spark.createDataFrame(data, ["id", "name", "salary", "department_id"])
+
+        Example 1 (non-correlated): Filter for employees with salary greater than the average
+        salary.
+
+        >>> from pyspark.sql import functions as sf
+        >>> employees.where(
+        ...     sf.col("salary") > employees.select(sf.avg("salary")).scalar()
+        ... ).select("name", "salary", "department_id").orderBy("name").show()
+        +-----+------+-------------+
+        | name|salary|department_id|
+        +-----+------+-------------+
+        |  Bob| 54000|          101|
+        |David| 61000|          102|
+        |  Eve| 48000|          101|
+        +-----+------+-------------+
+
+        Example 2 (correlated): Filter for employees with salary greater than the average salary
+        in their department.
+
+        >>> from pyspark.sql import functions as sf
+        >>> employees.alias("e1").where(
+        ...     sf.col("salary")
+        ...     > employees.alias("e2").where(
+        ...         sf.col("e2.department_id") == sf.col("e1.department_id").outer()
+        ...     ).select(sf.avg("salary")).scalar()
+        ... ).select("name", "salary", "department_id").orderBy("name").show()
+        +-----+------+-------------+
+        | name|salary|department_id|
+        +-----+------+-------------+
+        |  Bob| 54000|          101|
+        |David| 61000|          102|
+        +-----+------+-------------+
+
+        Example 3 (in select): Select the name, salary, and the proportion of the salary in the
+        department.
+
+        >>> from pyspark.sql import functions as sf
+        >>> employees.alias("e1").select(
+        ...     "name", "salary", "department_id",
+        ...     sf.format_number(
+        ...         sf.lit(100) * sf.col("salary") /
+        ...             employees.alias("e2").where(
+        ...                 sf.col("e2.department_id") == sf.col("e1.department_id").outer()
+        ...             ).select(sf.sum("salary")).scalar().alias("avg_salary"),
+        ...         1
+        ...     ).alias("salary_proportion_in_department")
+        ... ).orderBy("name").show()
+        +-------+------+-------------+-------------------------------+
+        |   name|salary|department_id|salary_proportion_in_department|
+        +-------+------+-------------+-------------------------------+
+        |  Alice| 45000|          101|                           30.6|
+        |    Bob| 54000|          101|                           36.7|
+        |Charlie| 29000|          102|                           32.2|
+        |  David| 61000|          102|                           67.8|
+        |    Eve| 48000|          101|                           32.7|
+        +-------+------+-------------+-------------------------------+
+        "#
+    };
+    (DataFrame . exists) => {
+        r#"
+        Return a `Column` object for an EXISTS Subquery.
+
+        The `exists` method provides a way to create a boolean column that checks for the presence
+        of related records in a subquery. When applied within a `DataFrame`, this method allows you
+        to filter rows based on whether matching records exist in the related dataset. The resulting
+        `Column` object can be used directly in filtering conditions or as a computed column.
+
+        .. versionadded:: 4.0.0
+
+        Returns
+        -------
+        :class:`Column`
+            A `Column` object representing an EXISTS subquery
+
+        Examples
+        --------
+        Setup sample data for customers and orders.
+
+        >>> data_customers = [
+        ...     (101, "Alice", "USA"), (102, "Bob", "Canada"), (103, "Charlie", "USA"),
+        ...     (104, "David", "Australia")
+        ... ]
+        >>> data_orders = [
+        ...     (1, 101, "2023-01-15", 250), (2, 102, "2023-01-20", 300),
+        ...     (3, 103, "2023-01-25", 400), (4, 101, "2023-02-05", 150)
+        ... ]
+        >>> customers = spark.createDataFrame(
+        ...     data_customers, ["customer_id", "customer_name", "country"])
+        >>> orders = spark.createDataFrame(
+        ...     data_orders, ["order_id", "customer_id", "order_date", "total_amount"])
+
+        Example 1: Filter for customers who have placed at least one order.
+
+        >>> from pyspark.sql import functions as sf
+        >>> customers.alias("c").where(
+        ...     orders.alias("o").where(
+        ...         sf.col("o.customer_id") == sf.col("c.customer_id").outer()
+        ...     ).exists()
+        ... ).orderBy("customer_id").show()
+        +-----------+-------------+-------+
+        |customer_id|customer_name|country|
+        +-----------+-------------+-------+
+        |        101|        Alice|    USA|
+        |        102|          Bob| Canada|
+        |        103|      Charlie|    USA|
+        +-----------+-------------+-------+
+
+        Example 2: Filter for customers who have never placed an order.
+
+        >>> from pyspark.sql import functions as sf
+        >>> customers.alias("c").where(
+        ...     ~orders.alias("o").where(
+        ...         sf.col("o.customer_id") == sf.col("c.customer_id").outer()
+        ...     ).exists()
+        ... ).orderBy("customer_id").show()
+        +-----------+-------------+---------+
+        |customer_id|customer_name|  country|
+        +-----------+-------------+---------+
+        |        104|        David|Australia|
+        +-----------+-------------+---------+
+
+        Example 3: Find Orders from Customers in the USA.
+
+        >>> from pyspark.sql import functions as sf
+        >>> orders.alias("o").where(
+        ...     customers.alias("c").where(
+        ...         (sf.col("c.customer_id") == sf.col("o.customer_id").outer())
+        ...         & (sf.col("country") == "USA")
+        ...     ).exists()
+        ... ).orderBy("order_id").show()
+        +--------+-----------+----------+------------+
+        |order_id|customer_id|order_date|total_amount|
+        +--------+-----------+----------+------------+
+        |       1|        101|2023-01-15|         250|
+        |       3|        103|2023-01-25|         400|
+        |       4|        101|2023-02-05|         150|
+        +--------+-----------+----------+------------+
+        "#
+    };
+    (DataFrame . schema) => {
+        r#"Returns the schema of this :class:`DataFrame` as a :class:`pyspark.sql.types.StructType`.
+
+        .. versionadded:: 1.3.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Returns
+        -------
+        :class:`StructType`
+
+        Examples
+        --------
+        Example 1: Retrieve the inferred schema of the current DataFrame.
+
+        >>> df = spark.createDataFrame(
+        ...     [(14, "Tom"), (23, "Alice"), (16, "Bob")], ["age", "name"])
+        >>> df.schema
+        StructType([StructField('age', LongType(), True),
+                    StructField('name', StringType(), True)])
+
+        Example 2: Retrieve the schema of the current DataFrame (DDL-formatted schema).
+
+        >>> df = spark.createDataFrame(
+        ...     [(14, "Tom"), (23, "Alice"), (16, "Bob")],
+        ...     "age INT, name STRING")
+        >>> df.schema
+        StructType([StructField('age', IntegerType(), True),
+                    StructField('name', StringType(), True)])
+
+        Example 3: Retrieve the specified schema of the current DataFrame.
+
+        >>> from pyspark.sql.types import StructType, StructField, StringType
+        >>> df = spark.createDataFrame(
+        ...     [("a",), ("b",), ("c",)],
+        ...     StructType([StructField("value", StringType(), False)]))
+        >>> df.schema
+        StructType([StructField('value', StringType(), False)])
+
+        "#
+    };
+    (DataFrame . printSchema) => {
+        r#"Prints out the schema in the tree format.
+        Optionally allows to specify how many levels to print if schema is nested.
+
+        .. versionadded:: 1.3.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        level : int, optional
+            How many levels to print for nested schemas.
+
+            .. versionadded:: 3.5.0
+
+        Examples
+        --------
+        Example 1: Printing the schema of a DataFrame with basic columns
+
+        >>> df = spark.createDataFrame(
+        ...     [(14, "Tom"), (23, "Alice"), (16, "Bob")], ["age", "name"])
+        >>> df.printSchema()
+        root
+         |-- age: long (nullable = true)
+         |-- name: string (nullable = true)
+
+        Example 2: Printing the schema with a specified level for nested columns
+
+        >>> df = spark.createDataFrame([(1, (2, 2))], ["a", "b"])
+        >>> df.printSchema(1)
+        root
+         |-- a: long (nullable = true)
+         |-- b: struct (nullable = true)
+
+        Example 3: Printing the schema with deeper nesting level
+
+        >>> df.printSchema(2)
+        root
+         |-- a: long (nullable = true)
+         |-- b: struct (nullable = true)
+         |    |-- _1: long (nullable = true)
+         |    |-- _2: long (nullable = true)
+
+        Example 4: Printing the schema of a DataFrame with nullable and non-nullable columns
+
+        >>> df = spark.range(1).selectExpr("id AS nonnullable", "NULL AS nullable")
+        >>> df.printSchema()
+        root
+         |-- nonnullable: long (nullable = false)
+         |-- nullable: void (nullable = true)
+        "#
+    };
+    (DataFrame . to) => {
+        r#"
+        Returns a new :class:`DataFrame` where each row is reconciled to match the specified
+        schema.
+
+        .. versionadded:: 3.4.0
+
+        Parameters
+        ----------
+        schema : :class:`StructType`
+            Specified schema.
+
+        Returns
+        -------
+        :class:`DataFrame`
+            Reconciled DataFrame.
+
+        Notes
+        -----
+        * Reorder columns and/or inner fields by name to match the specified schema.
+
+        * Project away columns and/or inner fields that are not needed by the specified schema.
+            Missing columns and/or inner fields (present in the specified schema but not input
+            DataFrame) lead to failures.
+
+        * Cast the columns and/or inner fields to match the data types in the specified schema,
+            if the types are compatible, e.g., numeric to numeric (error if overflows), but
+            not string to int.
+
+        * Carry over the metadata from the specified schema, while the columns and/or inner fields
+            still keep their own metadata if not overwritten by the specified schema.
+
+        * Fail if the nullability is not compatible. For example, the column and/or inner field
+            is nullable but the specified schema requires them to be not nullable.
+
+        Supports Spark Connect.
+
+        Examples
+        --------
+        >>> from pyspark.sql.types import StructField, StringType
+        >>> df = spark.createDataFrame([("a", 1)], ["i", "j"])
+        >>> df.schema
+        StructType([StructField('i', StringType(), True), StructField('j', LongType(), True)])
+
+        >>> schema = StructType([StructField("j", StringType()), StructField("i", StringType())])
+        >>> df2 = df.to(schema)
+        >>> df2.schema
+        StructType([StructField('j', StringType(), True), StructField('i', StringType(), True)])
+        >>> df2.show()
+        +---+---+
+        |  j|  i|
+        +---+---+
+        |  1|  a|
+        +---+---+
+        "#
+    };
+    (DataFrame . toDF) => {
+        r#"Returns a new :class:`DataFrame` with new specified column names
+
+        .. versionadded:: 1.6.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        *cols : tuple
+            a tuple of string new column name. The length of the
+            list needs to be the same as the number of columns in the initial
+            :class:`DataFrame`
+
+        Returns
+        -------
+        :class:`DataFrame`
+            DataFrame with new column names.
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame([(14, "Tom"), (23, "Alice"),
+        ...     (16, "Bob")], ["age", "name"])
+        >>> df.toDF('f1', 'f2').show()
+        +---+-----+
+        | f1|   f2|
+        +---+-----+
+        | 14|  Tom|
+        | 23|Alice|
+        | 16|  Bob|
+        +---+-----+
+        "#
+    };
+    (DataFrame . transform) => {
+        r#"Returns a new :class:`DataFrame`. Concise syntax for chaining custom transformations.
+
+        .. versionadded:: 3.0.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        func : function
+            a function that takes and returns a :class:`DataFrame`.
+        *args
+            Positional arguments to pass to func.
+
+            .. versionadded:: 3.3.0
+        **kwargs
+            Keyword arguments to pass to func.
+
+            .. versionadded:: 3.3.0
+
+        Returns
+        -------
+        :class:`DataFrame`
+            Transformed DataFrame.
+
+        Examples
+        --------
+        >>> from pyspark.sql import functions as sf
+        >>> df = spark.createDataFrame([(1, 1.0), (2, 2.0)], ["int", "float"])
+        >>> def cast_all_to_int(input_df):
+        ...     return input_df.select([sf.col(c).cast("int") for c in input_df.columns])
+        ...
+        >>> def sort_columns_asc(input_df):
+        ...     return input_df.select(*sorted(input_df.columns))
+        ...
+        >>> df.transform(cast_all_to_int).transform(sort_columns_asc).show()
+        +-----+---+
+        |float|int|
+        +-----+---+
+        |    1|  1|
+        |    2|  2|
+        +-----+---+
+
+        >>> def add_n(input_df, n):
+        ...     cols = [(sf.col(c) + n).alias(c) for c in input_df.columns]
+        ...     return input_df.select(cols)
+        ...
+        >>> df.transform(add_n, 1).transform(add_n, n=10).show()
+        +---+-----+
+        |int|float|
+        +---+-----+
+        | 12| 12.0|
+        | 13| 13.0|
+        +---+-----+
+        "#
+    };
+    (DataFrame . explain) => {
+        r#"Prints the (logical and physical) plans to the console for debugging purposes.
+
+        .. versionadded:: 1.3.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        extended : bool, optional
+            default ``False``. If ``False``, prints only the physical plan.
+            When this is a string without specifying the ``mode``, it works as the mode is
+            specified.
+        mode : str, optional
+            specifies the expected output format of plans.
+
+            * ``simple``: Print only a physical plan.
+            * ``extended``: Print both logical and physical plans.
+            * ``codegen``: Print a physical plan and generated codes if they are available.
+            * ``cost``: Print a logical plan and statistics if they are available.
+            * ``formatted``: Split explain output into two sections: a physical plan outline                 and node details.
+
+            .. versionchanged:: 3.0.0
+               Added optional argument `mode` to specify the expected output format of plans.
+
+        Examples
+        --------
+        Example 1: Print out the physical plan only (default).
+
+        >>> df = spark.createDataFrame(
+        ...     [(14, "Tom"), (23, "Alice"), (16, "Bob")], ["age", "name"])
+        >>> df.explain()  # doctest: +SKIP
+        == Physical Plan ==
+        *(1) Scan ExistingRDD[age...,name...]
+
+        Example 2: Print out all parsed, analyzed, optimized, and physical plans.
+
+        >>> df.explain(extended=True)
+        == Parsed Logical Plan ==
+        ...
+        == Analyzed Logical Plan ==
+        ...
+        == Optimized Logical Plan ==
+        ...
+        == Physical Plan ==
+        ...
+
+        Example 3: Print out the plans with two sections: a physical plan outline and node details.
+
+        >>> df.explain(mode="formatted")  # doctest: +SKIP
+        == Physical Plan ==
+        * Scan ExistingRDD (...)
+        (1) Scan ExistingRDD [codegen id : ...]
+        Output [2]: [age..., name...]
+        ...
+
+        Example 4: Print a logical plan and statistics if they are available.
+
+        >>> df.explain(mode="cost")
+        == Optimized Logical Plan ==
+        ...Statistics...
+        ...
+        "#
+    };
+    (DataFrame . createTempView) => {
+        r#"Creates a local temporary view with this :class:`DataFrame`.
+
+        The lifetime of this temporary table is tied to the :class:`SparkSession`
+        that was used to create this :class:`DataFrame`.
+        throws :class:`TempTableAlreadyExistsException`, if the view name already exists in the
+        catalog.
+
+        .. versionadded:: 2.0.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        name : str
+            Name of the view.
+
+        Examples
+        --------
+        Example 1: Creating and querying a local temporary view
+
+        >>> df = spark.createDataFrame([(2, "Alice"), (5, "Bob")], schema=["age", "name"])
+        >>> df.createTempView("people")
+        >>> spark.sql("SELECT * FROM people").show()
+        +---+-----+
+        |age| name|
+        +---+-----+
+        |  2|Alice|
+        |  5|  Bob|
+        +---+-----+
+
+        Example 2: Attempting to create a temporary view with an existing name
+
+        >>> df.createTempView("people")  # doctest: +IGNORE_EXCEPTION_DETAIL
+        Traceback (most recent call last):
+        ...
+        AnalysisException: "Temporary table 'people' already exists;"
+
+        Example 3: Creating and dropping a local temporary view
+
+        >>> spark.catalog.dropTempView("people")
+        True
+        >>> df.createTempView("people")
+
+        Example 4: Creating temporary views with multiple DataFrames with
+        :meth:`SparkSession.table`
+
+        >>> df1 = spark.createDataFrame([(1, "John"), (2, "Jane")], schema=["id", "name"])
+        >>> df2 = spark.createDataFrame([(3, "Jake"), (4, "Jill")], schema=["id", "name"])
+        >>> df1.createTempView("table1")
+        >>> df2.createTempView("table2")
+        >>> result_df = spark.table("table1").union(spark.table("table2"))
+        >>> result_df.show()
+        +---+----+
+        | id|name|
+        +---+----+
+        |  1|John|
+        |  2|Jane|
+        |  3|Jake|
+        |  4|Jill|
+        +---+----+
+        "#
+    };
+    (DataFrame . createOrReplaceTempView) => {
+        r#"Creates or replaces a local temporary view with this :class:`DataFrame`.
+
+        .. versionadded:: 2.0.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        name : str
+            Name of the view.
+
+        Notes
+        -----
+        The lifetime of this temporary table is tied to the :class:`SparkSession`
+        that was used to create this :class:`DataFrame`.
+
+        Examples
+        --------
+        Example 1: Creating a local temporary view named 'people'.
+
+        >>> df = spark.createDataFrame([(2, "Alice"), (5, "Bob")], schema=["age", "name"])
+        >>> df.createOrReplaceTempView("people")
+
+        Example 2: Replacing the local temporary view.
+
+        >>> df2 = df.filter(df.age > 3)
+        >>> # Replace the local temporary view with the filtered DataFrame
+        >>> df2.createOrReplaceTempView("people")
+        >>> # Query the temporary view
+        >>> df3 = spark.sql("SELECT * FROM people")
+        >>> # Check if the DataFrames are equal
+        ... assert sorted(df3.collect()) == sorted(df2.collect())
+
+        Example 3: Dropping the temporary view.
+
+        >>> # Drop the local temporary view
+        ... spark.catalog.dropTempView("people")
+        True
+        "#
+    };
+    (DataFrame . createGlobalTempView) => {
+        r#"Creates a global temporary view with this :class:`DataFrame`.
+
+        .. versionadded:: 2.1.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        name : str
+            Name of the view.
+
+        Notes
+        -----
+        The lifetime of this temporary view is tied to this Spark application.
+        throws :class:`TempTableAlreadyExistsException`, if the view name already exists in the
+        catalog.
+
+        Examples
+        --------
+        Example 1: Creating and querying a global temporary view
+
+        >>> df = spark.createDataFrame([(2, "Alice"), (5, "Bob")], schema=["age", "name"])
+        >>> df.createGlobalTempView("people")
+        >>> df2 = spark.sql("SELECT * FROM global_temp.people")
+        >>> df2.show()
+        +---+-----+
+        |age| name|
+        +---+-----+
+        |  2|Alice|
+        |  5|  Bob|
+        +---+-----+
+
+        Example 2: Attempting to create a duplicate global temporary view
+
+        >>> df.createGlobalTempView("people")  # doctest: +IGNORE_EXCEPTION_DETAIL
+        Traceback (most recent call last):
+        ...
+        AnalysisException: "Temporary table 'people' already exists;"
+
+        Example 3: Dropping a global temporary view
+
+        >>> spark.catalog.dropGlobalTempView("people")
+        True
+        "#
+    };
+    (DataFrame . createOrReplaceGlobalTempView) => {
+        r#"Creates or replaces a global temporary view using the given name.
+
+        The lifetime of this temporary view is tied to this Spark application.
+
+        .. versionadded:: 2.2.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        name : str
+            Name of the view.
+
+        Examples
+        --------
+        Example 1: Creating a global temporary view with a DataFrame
+
+        >>> df = spark.createDataFrame([(2, "Alice"), (5, "Bob")], schema=["age", "name"])
+        >>> df.createOrReplaceGlobalTempView("people")
+
+        Example 2: Replacing a global temporary view with a filtered DataFrame
+
+        >>> df2 = df.filter(df.age > 3)
+        >>> df2.createOrReplaceGlobalTempView("people")
+        >>> df3 = spark.table("global_temp.people")
+        >>> sorted(df3.collect()) == sorted(df2.collect())
+        True
+
+        Example 3: Dropping a global temporary view
+        >>> spark.catalog.dropGlobalTempView("people")
+        True
+        "#
+    };
+    (DataFrame . cache) => {
+        r#"Persists the :class:`DataFrame` with the default storage level (`MEMORY_AND_DISK_DESER`).
+
+        .. versionadded:: 1.3.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Notes
+        -----
+        The default storage level has changed to `MEMORY_AND_DISK_DESER` to match Scala in 3.0.
+
+        Cached data is shared across all Spark sessions on the cluster.
+
+        Returns
+        -------
+        :class:`DataFrame`
+            Cached DataFrame.
+
+        Examples
+        --------
+        >>> df = spark.range(1)
+        >>> df.cache()
+        DataFrame[id: bigint]
+
+        >>> df.explain()
+        == Physical Plan ==
+        InMemoryTableScan ...
+        "#
+    };
+    (DataFrame . persist) => {
+        r#"Sets the storage level to persist the contents of the :class:`DataFrame` across
+        operations after the first time it is computed. This can only be used to assign
+        a new storage level if the :class:`DataFrame` does not have a storage level set yet.
+        If no storage level is specified defaults to (`MEMORY_AND_DISK_DESER`)
+
+        .. versionadded:: 1.3.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Notes
+        -----
+        The default storage level has changed to `MEMORY_AND_DISK_DESER` to match Scala in 3.0.
+
+        Cached data is shared across all Spark sessions on the cluster.
+
+        Parameters
+        ----------
+        storageLevel : :class:`StorageLevel`
+            Storage level to set for persistence. Default is MEMORY_AND_DISK_DESER.
+
+        Returns
+        -------
+        :class:`DataFrame`
+            Persisted DataFrame.
+
+        Examples
+        --------
+        >>> df = spark.range(1)
+        >>> df.persist()
+        DataFrame[id: bigint]
+
+        >>> df.explain()
+        == Physical Plan ==
+        InMemoryTableScan ...
+
+        Persists the data in the disk by specifying the storage level.
+
+        >>> from pyspark.storagelevel import StorageLevel
+        >>> df.persist(StorageLevel.DISK_ONLY)
+        DataFrame[id: bigint]
+        "#
+    };
+    (DataFrame . storageLevel) => {
+        r#"Get the :class:`DataFrame`'s current storage level.
+
+        .. versionadded:: 2.1.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Returns
+        -------
+        :class:`StorageLevel`
+            Currently defined storage level.
+
+        Examples
+        --------
+        >>> df1 = spark.range(10)
+        >>> df1.storageLevel
+        StorageLevel(False, False, False, False, 1)
+        >>> df1.cache().storageLevel
+        StorageLevel(True, True, False, True, 1)
+
+        >>> df2 = spark.range(5)
+        >>> df2.persist(StorageLevel.DISK_ONLY_2).storageLevel
+        StorageLevel(True, False, False, False, 2)
+        "#
+    };
+    (DataFrame . unpersist) => {
+        r#"Marks the :class:`DataFrame` as non-persistent, and remove all blocks for it from
+        memory and disk.
+
+        .. versionadded:: 1.3.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Notes
+        -----
+        `blocking` default has changed to ``False`` to match Scala in 2.0.
+
+        Cached data is shared across all Spark sessions on the cluster, so unpersisting it
+        affects all sessions.
+
+        Parameters
+        ----------
+        blocking : bool
+            Whether to block until all blocks are deleted.
+
+        Returns
+        -------
+        :class:`DataFrame`
+            Unpersisted DataFrame.
+
+        Examples
+        --------
+        >>> df = spark.range(1)
+        >>> df.persist()
+        DataFrame[id: bigint]
+        >>> df.unpersist()
+        DataFrame[id: bigint]
+        >>> df = spark.range(1)
+        >>> df.unpersist(True)
+        DataFrame[id: bigint]
+        "#
+    };
+    (DataFrame . toLocalIterator) => {
+        r#"
+        Returns an iterator that contains all of the rows in this :class:`DataFrame`.
+        The iterator will consume as much memory as the largest partition in this
+        :class:`DataFrame`. With prefetch it may consume up to the memory of the 2 largest
+        partitions.
+
+        .. versionadded:: 2.0.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        prefetchPartitions : bool, optional
+            If Spark should pre-fetch the next partition before it is needed.
+
+            .. versionchanged:: 3.4.0
+                This argument does not take effect for Spark Connect.
+
+        Returns
+        -------
+        Iterator
+            Iterator of rows.
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame(
+        ...     [(14, "Tom"), (23, "Alice"), (16, "Bob")], ["age", "name"])
+        >>> list(df.toLocalIterator())
+        [Row(age=14, name='Tom'), Row(age=23, name='Alice'), Row(age=16, name='Bob')]
+        "#
+    };
+    (DataFrame . pandas_api) => {
+        r#"
+        Converts the existing DataFrame into a pandas-on-Spark DataFrame.
+
+        .. versionadded:: 3.2.0
+
+        .. versionchanged:: 3.5.0
+            Supports Spark Connect.
+
+        If a pandas-on-Spark DataFrame is converted to a Spark DataFrame and then back
+        to pandas-on-Spark, it will lose the index information and the original index
+        will be turned into a normal column.
+
+        This is only available if Pandas is installed and available.
+
+        Parameters
+        ----------
+        index_col: str or list of str, optional
+            Index column of table in Spark.
+
+        Returns
+        -------
+        :class:`PandasOnSparkDataFrame`
+
+        See Also
+        --------
+        pyspark.pandas.frame.DataFrame.to_spark
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame(
+        ...     [(14, "Tom"), (23, "Alice"), (16, "Bob")], ["age", "name"])
+
+        >>> df.pandas_api()
+           age   name
+        0   14    Tom
+        1   23  Alice
+        2   16    Bob
+
+        We can specify the index columns.
+
+        >>> df.pandas_api(index_col="age")
+              name
+        age
+        14     Tom
+        23   Alice
+        16     Bob
+        "#
+    };
+    (DataFrame . registerTempTable) => {
+        r#"Registers this :class:`DataFrame` as a temporary table using the given name.
+
+        The lifetime of this temporary table is tied to the :class:`SparkSession`
+        that was used to create this :class:`DataFrame`.
+
+        .. versionadded:: 1.3.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        .. deprecated:: 2.0.0
+            Use :meth:`DataFrame.createOrReplaceTempView` instead.
+
+        Parameters
+        ----------
+        name : str
+            Name of the temporary table to register.
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame([(2, "Alice"), (5, "Bob")], schema=["age", "name"])
+        >>> df.registerTempTable("people")
+        >>> df2 = spark.sql("SELECT * FROM people")
+        >>> sorted(df.collect()) == sorted(df2.collect())
+        True
+        >>> spark.catalog.dropTempView("people")
+        True
+
+        "#
+    };
+    (DataFrame . mapInPandas) => {
+        r#"
+        Maps an iterator of batches in the current :class:`DataFrame` using a Python native
+        function that is performed on pandas DataFrames both as input and output,
+        and returns the result as a :class:`DataFrame`.
+
+        This method applies the specified Python function to an iterator of
+        `pandas.DataFrame`\s, each representing a batch of rows from the original DataFrame.
+        The returned iterator of `pandas.DataFrame`\s are combined as a :class:`DataFrame`.
+        The size of the function's input and output can be different. Each `pandas.DataFrame`
+        size can be controlled by `spark.sql.execution.arrow.maxRecordsPerBatch`.
+
+        .. versionadded:: 3.0.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        func : function
+            a Python native function that takes an iterator of `pandas.DataFrame`\s, and
+            outputs an iterator of `pandas.DataFrame`\s.
+        schema : :class:`pyspark.sql.types.DataType` or str
+            the return type of the `func` in PySpark. The value can be either a
+            :class:`pyspark.sql.types.DataType` object or a DDL-formatted type string.
+        barrier : bool, optional, default False
+            Use barrier mode execution, ensuring that all Python workers in the stage will be
+            launched concurrently.
+
+            .. versionadded:: 3.5.0
+
+        profile : :class:`pyspark.resource.ResourceProfile`. The optional ResourceProfile
+            to be used for mapInPandas.
+
+            .. versionadded:: 4.0.0
+
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame([(1, 21), (2, 30)], ("id", "age"))
+
+        Filter rows with id equal to 1:
+
+        >>> def filter_func(iterator):
+        ...     for pdf in iterator:
+        ...         yield pdf[pdf.id == 1]
+        ...
+        >>> df.mapInPandas(filter_func, df.schema).show()
+        +---+---+
+        | id|age|
+        +---+---+
+        |  1| 21|
+        +---+---+
+
+        Compute the mean age for each id:
+
+        >>> def mean_age(iterator):
+        ...     for pdf in iterator:
+        ...         yield pdf.groupby("id").mean().reset_index()
+        ...
+        >>> df.mapInPandas(mean_age, "id: bigint, age: double").show()
+        +---+----+
+        | id| age|
+        +---+----+
+        |  1|21.0|
+        |  2|30.0|
+        +---+----+
+
+        Add a new column with the double of the age:
+
+        >>> def double_age(iterator):
+        ...     for pdf in iterator:
+        ...         pdf["double_age"] = pdf["age"] * 2
+        ...         yield pdf
+        ...
+        >>> df.mapInPandas(
+        ...     double_age, "id: bigint, age: bigint, double_age: bigint").show()
+        +---+---+----------+
+        | id|age|double_age|
+        +---+---+----------+
+        |  1| 21|        42|
+        |  2| 30|        60|
+        +---+---+----------+
+
+        Set ``barrier`` to ``True`` to force the ``mapInPandas`` stage running in the
+        barrier mode, it ensures all Python workers in the stage will be
+        launched concurrently.
+
+        >>> df.mapInPandas(filter_func, df.schema, barrier=True).collect()
+        [Row(id=1, age=21)]
+
+        See Also
+        --------
+        pyspark.sql.functions.pandas_udf
+        DataFrame.mapInArrow
+        "#
+    };
+    (DataFrame . mapInArrow) => {
+        r#"
+        Maps an iterator of batches in the current :class:`DataFrame` using a Python native
+        function that is performed on `pyarrow.RecordBatch`\s both as input and output,
+        and returns the result as a :class:`DataFrame`.
+
+        This method applies the specified Python function to an iterator of
+        `pyarrow.RecordBatch`\s, each representing a batch of rows from the original DataFrame.
+        The returned iterator of `pyarrow.RecordBatch`\s are combined as a :class:`DataFrame`.
+        The size of the function's input and output can be different. Each `pyarrow.RecordBatch`
+        size can be controlled by `spark.sql.execution.arrow.maxRecordsPerBatch`.
+
+        .. versionadded:: 3.3.0
+
+        Parameters
+        ----------
+        func : function
+            a Python native function that takes an iterator of `pyarrow.RecordBatch`\s, and
+            outputs an iterator of `pyarrow.RecordBatch`\s.
+        schema : :class:`pyspark.sql.types.DataType` or str
+            the return type of the `func` in PySpark. The value can be either a
+            :class:`pyspark.sql.types.DataType` object or a DDL-formatted type string.
+        barrier : bool, optional, default False
+            Use barrier mode execution, ensuring that all Python workers in the stage will be
+            launched concurrently.
+
+            .. versionadded:: 3.5.0
+
+        profile : :class:`pyspark.resource.ResourceProfile`. The optional ResourceProfile
+            to be used for mapInArrow.
+
+            .. versionadded:: 4.0.0
+
+        Examples
+        --------
+        >>> import pyarrow as pa
+        >>> df = spark.createDataFrame([(1, 21), (2, 30)], ("id", "age"))
+        >>> def filter_func(iterator):
+        ...     for batch in iterator:
+        ...         yield batch.filter(pa.compute.field("id") == 1)
+        >>> df.mapInArrow(filter_func, df.schema).show()
+        +---+---+
+        | id|age|
+        +---+---+
+        |  1| 21|
+        +---+---+
+
+        Set ``barrier`` to ``True`` to force the ``mapInArrow`` stage running in the
+        barrier mode, it ensures all Python workers in the stage will be
+        launched concurrently.
+
+        >>> df.mapInArrow(filter_func, df.schema, barrier=True).collect()
+        [Row(id=1, age=21)]
+
+        See Also
+        --------
+        pyspark.sql.functions.pandas_udf
+        DataFrame.mapInPandas
+        "#
+    };
+    (DataFrame . foreach) => {
+        r#"Applies the ``f`` function to all :class:`Row` of this :class:`DataFrame`.
+
+        This is a shorthand for ``df.rdd.foreach()``.
+
+        .. versionadded:: 1.3.0
+
+        .. versionchanged:: 4.0.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        f : function
+            A function that accepts one parameter which will
+            receive each row to process.
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame(
+        ...     [(14, "Tom"), (23, "Alice"), (16, "Bob")], ["age", "name"])
+        >>> def func(person):
+        ...     print(person.name)
+        ...
+        >>> df.foreach(func)
+        "#
+    };
+    (DataFrame . foreachPartition) => {
+        r#"Applies the ``f`` function to each partition of this :class:`DataFrame`.
+
+        This a shorthand for ``df.rdd.foreachPartition()``.
+
+        .. versionadded:: 1.3.0
+
+        .. versionchanged:: 4.0.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        f : function
+            A function that accepts one parameter which will receive
+            each partition to process.
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame(
+        ...     [(14, "Tom"), (23, "Alice"), (16, "Bob")], ["age", "name"])
+        >>> def func(itr):
+        ...     for person in itr:
+        ...         print(person.name)
+        ...
+        >>> df.foreachPartition(func)
+        "#
+    };
+    (DataFrame . writeStream) => {
+        r#"
+        Interface for saving the content of the streaming :class:`DataFrame` out into external
+        storage.
+
+        .. versionadded:: 2.0.0
+
+        .. versionchanged:: 3.5.0
+            Supports Spark Connect.
+
+        Notes
+        -----
+        This API is evolving.
+
+        Returns
+        -------
+        :class:`DataStreamWriter`
+
+        Examples
+        --------
+        >>> import time
+        >>> import tempfile
+        >>> df = spark.readStream.format("rate").load()
+        >>> type(df.writeStream)
+        <class '...streaming.readwriter.DataStreamWriter'>
+
+        >>> with tempfile.TemporaryDirectory(prefix="writeStream") as d:
+        ...     # Create a table with Rate source.
+        ...     query = df.writeStream.toTable(
+        ...         "my_table", checkpointLocation=d)
+        ...     time.sleep(3)
+        ...     query.stop()
+        "#
+    };
+    (DataFrame . sameSemantics) => {
+        r#"
+        Returns `True` when the logical query plans inside both :class:`DataFrame`\s are equal and
+        therefore return the same results.
+
+        .. versionadded:: 3.1.0
+
+        .. versionchanged:: 3.5.0
+            Supports Spark Connect.
+
+        Notes
+        -----
+        The equality comparison here is simplified by tolerating the cosmetic differences
+        such as attribute names.
+
+        This API can compare both :class:`DataFrame`\s very fast but can still return
+        `False` on the :class:`DataFrame` that return the same results, for instance, from
+        different plans. Such false negative semantic can be useful when caching as an example.
+
+        This API is a developer API.
+
+        Parameters
+        ----------
+        other : :class:`DataFrame`
+            The other DataFrame to compare against.
+
+        Returns
+        -------
+        bool
+            Whether these two DataFrames are similar.
+
+        Examples
+        --------
+        >>> df1 = spark.range(10)
+        >>> df2 = spark.range(10)
+        >>> df1.withColumn("col1", df1.id * 2).sameSemantics(df2.withColumn("col1", df2.id * 2))
+        True
+        >>> df1.withColumn("col1", df1.id * 2).sameSemantics(df2.withColumn("col1", df2.id + 2))
+        False
+        >>> df1.withColumn("col1", df1.id * 2).sameSemantics(df2.withColumn("col0", df2.id * 2))
+        True
+        "#
+    };
+    (DataFrame . writeTo) => {
+        r#"
+        Create a write configuration builder for v2 sources.
+
+        This builder is used to configure and execute write operations.
+
+        For example, to append or create or replace existing tables.
+
+        .. versionadded:: 3.1.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        table : str
+            Target table name to write to.
+
+        Returns
+        -------
+        :class:`DataFrameWriterV2`
+            DataFrameWriterV2 to use further to specify how to save the data
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame(
+        ...     [(14, "Tom"), (23, "Alice"), (16, "Bob")], ["age", "name"])
+        >>> df.writeTo("catalog.db.table").append()  # doctest: +SKIP
+        >>> df.writeTo(                              # doctest: +SKIP
+        ...     "catalog.db.table"
+        ... ).partitionedBy("col").createOrReplace()
+        "#
+    };
+    (DataFrame . mergeInto) => {
+        r#"
+        Merges a set of updates, insertions, and deletions based on a source table into
+        a target table.
+
+        .. versionadded:: 4.0.0
+
+        Parameters
+        ----------
+        table : str
+            Target table name to merge into.
+        condition : :class:`Column`
+            The condition that determines whether a row in the target table matches one in the
+            source DataFrame.
+
+        Returns
+        -------
+        :class:`MergeIntoWriter`
+            MergeIntoWriter to use further to specify how to merge the source DataFrame
+            into the target table.
+
+        Examples
+        --------
+        >>> from pyspark.sql.functions import expr
+        >>> source = spark.createDataFrame(
+        ...     [(14, "Tom"), (23, "Alice"), (16, "Bob")], ["id", "name"])
+        >>> (source.mergeInto("target", "id")  # doctest: +SKIP
+        ...     .whenMatched().update({ "name": source.name })
+        ...     .whenNotMatched().insertAll()
+        ...     .whenNotMatchedBySource().delete()
+        ...     .merge())
+
+        Notes
+        -----
+        This method does not support streaming queries.
+        "#
+    };
+    (DataFrame . offset) => {
+        r#"Returns a new :class: `DataFrame` by skipping the first `n` rows.
+
+        .. versionadded:: 3.4.0
+
+        .. versionchanged:: 3.5.0
+            Supports classic PySpark.
+
+        Parameters
+        ----------
+        num : int
+            Number of records to skip.
+
+        Returns
+        -------
+        :class:`DataFrame`
+            Subset of the records
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame(
+        ...     [(14, "Tom"), (23, "Alice"), (16, "Bob")], ["age", "name"])
+        >>> df.offset(1).show()
+        +---+-----+
+        |age| name|
+        +---+-----+
+        | 23|Alice|
+        | 16|  Bob|
+        +---+-----+
+        >>> df.offset(10).show()
+        +---+----+
+        |age|name|
+        +---+----+
+        +---+----+
+        "#
+    };
+    (DataFrame . checkpoint) => {
+        r#"Returns a checkpointed version of this :class:`DataFrame`. Checkpointing can be
+        used to truncate the logical plan of this :class:`DataFrame`, which is especially
+        useful in iterative algorithms where the plan may grow exponentially. It will be
+        saved to files inside the checkpoint directory set with
+        :meth:`SparkContext.setCheckpointDir`, or `spark.checkpoint.dir` configuration.
+
+        .. versionadded:: 2.1.0
+
+        .. versionchanged:: 4.0.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        eager : bool, optional, default True
+            Whether to checkpoint this :class:`DataFrame` immediately.
+
+        Returns
+        -------
+        :class:`DataFrame`
+            Checkpointed DataFrame.
+
+        Notes
+        -----
+        This API is experimental.
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame([
+        ...     (14, "Tom"), (23, "Alice"), (16, "Bob")], ["age", "name"])
+        >>> df.checkpoint(False)  # doctest: +SKIP
+        DataFrame[age: bigint, name: string]
+        "#
+    };
+    (DataFrame . localCheckpoint) => {
+        r#"Returns a locally checkpointed version of this :class:`DataFrame`. Checkpointing can
+        be used to truncate the logical plan of this :class:`DataFrame`, which is especially
+        useful in iterative algorithms where the plan may grow exponentially. Local checkpoints
+        are stored in the executors using the caching subsystem and therefore they are not
+        reliable.
+
+        .. versionadded:: 2.3.0
+
+        .. versionchanged:: 4.0.0
+            Supports Spark Connect.
+            Added storageLevel parameter.
+
+        Parameters
+        ----------
+        eager : bool, optional, default True
+            Whether to checkpoint this :class:`DataFrame` immediately.
+
+        storageLevel : :class:`StorageLevel`, optional, default None
+            The StorageLevel with which the checkpoint will be stored.
+            If not specified, default for RDD local checkpoints.
+
+        Returns
+        -------
+        :class:`DataFrame`
+            Checkpointed DataFrame.
+
+        Notes
+        -----
+        This API is experimental.
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame([
+        ...     (14, "Tom"), (23, "Alice"), (16, "Bob")], ["age", "name"])
+        >>> df.localCheckpoint(False)
+        DataFrame[age: bigint, name: string]
+        "#
+    };
+    (DataFrame . toJSON) => {
+        r#"Converts a :class:`DataFrame` into a :class:`RDD` of string or :class:`DataFrame`.
+
+        Each row is turned into a JSON document as one element in the returned RDD
+        or DataFrame.
+
+        .. versionadded:: 1.3.0
+
+        .. versionchanged:: 4.2.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        use_unicode : bool, optional, default True
+            Whether to convert to unicode or not. Note that this argument is disallowed
+            in Spark Connect mode.
+
+        Returns
+        -------
+        :class:`RDD` (in Classic mode) or :class:`DataFrame` (in connect mode)
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame([(2, "Alice"), (5, "Bob")], schema=["age", "name"])
+        >>> df.toJSON().first()  # doctest: +SKIP
+        '{"age":2,"name":"Alice"}'
+        "#
+    };
+    (DataFrame . rdd) => {
+        r#"Returns the content as an :class:`pyspark.RDD` of :class:`Row`.
+
+            .. versionadded:: 1.3.0
+
+            Returns
+            -------
+            :class:`RDD`
+
+            Examples
+            --------
+            >>> df = spark.range(1)
+            >>> type(df.rdd)
+            <class 'pyspark.core.rdd.RDD'>
+            "#
+    };
+    (DataFrame . executionInfo) => {
+        r#"
+        Returns a ExecutionInfo object after the query was executed.
+
+        The executionInfo method allows to introspect information about the actual
+        query execution after the successful execution. Accessing this member before
+        the query execution will return None.
+
+        If the same DataFrame is executed multiple times, the execution info will be
+        overwritten by the latest operation.
+
+        .. versionadded:: 4.0.0
+
+        Returns
+        -------
+        An instance of ExecutionInfo or None when the value is not set yet.
+
+        Notes
+        -----
+        This is an API dedicated to Spark Connect client only. With regular Spark Session, it throws
+        an exception.
+        "#
+    };
+    (DataFrame . plot) => {
+        r#"
+        Returns a :class:`plot.core.PySparkPlotAccessor` for plotting functions.
+
+        .. versionadded:: 4.0.0
+
+        Returns
+        -------
+        :class:`plot.core.PySparkPlotAccessor`
+
+        Notes
+        -----
+        This API is experimental.
+        It provides two ways to create plots:
+        1. Chaining style (e.g., `df.plot.line(...)`).
+        2. Explicit style (e.g., `df.plot(kind="line", ...)`).
+
+        Examples
+        --------
+        >>> data = [("A", 10, 1.5), ("B", 30, 2.5), ("C", 20, 3.5)]
+        >>> columns = ["category", "int_val", "float_val"]
+        >>> df = spark.createDataFrame(data, columns)
+        >>> type(df.plot)
+        <class 'pyspark.sql.plot.core.PySparkPlotAccessor'>
+        >>> df.plot.line(x="category", y=["int_val", "float_val"])  # doctest: +SKIP
+        >>> df.plot(kind="line", x="category", y=["int_val", "float_val"])  # doctest: +SKIP
+        "#
+    };
+    (DataFrameNaFunctions) => {
+        r#"Functionality for working with missing data in :class:`DataFrame`.
+
+    .. versionadded:: 1.4.0
+
+    .. versionchanged:: 3.4.0
+        Supports Spark Connect.
+    "#
+    };
+    (DataFrameNaFunctions . fill) => {
+        r#"Returns a new :class:`DataFrame` which null values are filled with new value.
+        :func:`DataFrame.fillna` and :func:`DataFrameNaFunctions.fill` are
+        aliases of each other.
+
+        .. versionadded:: 1.3.1
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        value : int, float, string, bool or dict, the value to replace null values with.
+            If the value is a dict, then `subset` is ignored and `value` must be a mapping
+            from column name (string) to replacement value. The replacement value must be
+            an int, float, boolean, or string.
+        subset : str, tuple or list, optional
+            optional list of column names to consider.
+            Columns specified in subset that do not have matching data types are ignored.
+            For example, if `value` is a string, and subset contains a non-string column,
+            then the non-string column is simply ignored.
+
+        Returns
+        -------
+        :class:`DataFrame`
+            DataFrame with replaced null values.
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame([
+        ...     (10, 80.5, "Alice", None),
+        ...     (5, None, "Bob", None),
+        ...     (None, None, "Tom", None),
+        ...     (None, None, None, True)],
+        ...     schema=["age", "height", "name", "bool"])
+
+        Example 1: Fill all null values with 50 for numeric columns.
+
+        >>> df.na.fill(50).show()
+        +---+------+-----+----+
+        |age|height| name|bool|
+        +---+------+-----+----+
+        | 10|  80.5|Alice|NULL|
+        |  5|  50.0|  Bob|NULL|
+        | 50|  50.0|  Tom|NULL|
+        | 50|  50.0| NULL|true|
+        +---+------+-----+----+
+
+        Example 2: Fill all null values with ``False`` for boolean columns.
+
+        >>> df.na.fill(False).show()
+        +----+------+-----+-----+
+        | age|height| name| bool|
+        +----+------+-----+-----+
+        |  10|  80.5|Alice|false|
+        |   5|  NULL|  Bob|false|
+        |NULL|  NULL|  Tom|false|
+        |NULL|  NULL| NULL| true|
+        +----+------+-----+-----+
+
+        Example 3: Fill all null values with to 50 and "unknown" for
+            'age' and 'name' column respectively.
+
+        >>> df.na.fill({'age': 50, 'name': 'unknown'}).show()
+        +---+------+-------+----+
+        |age|height|   name|bool|
+        +---+------+-------+----+
+        | 10|  80.5|  Alice|NULL|
+        |  5|  NULL|    Bob|NULL|
+        | 50|  NULL|    Tom|NULL|
+        | 50|  NULL|unknown|true|
+        +---+------+-------+----+
+
+        Example 4: Fill all null values with "Spark" for 'name' column.
+
+        >>> df.na.fill(value = 'Spark', subset = 'name').show()
+        +----+------+-----+----+
+        | age|height| name|bool|
+        +----+------+-----+----+
+        |  10|  80.5|Alice|NULL|
+        |   5|  NULL|  Bob|NULL|
+        |NULL|  NULL|  Tom|NULL|
+        |NULL|  NULL|Spark|true|
+        +----+------+-----+----+
+        "#
+    };
+    (DataFrameNaFunctions . drop) => {
+        r#"Returns a new :class:`DataFrame` omitting rows with null or NaN values.
+        :func:`DataFrame.dropna` and :func:`DataFrameNaFunctions.drop` are
+        aliases of each other.
+
+        .. versionadded:: 1.3.1
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        how : str, optional, the values that can be 'any' or 'all', default 'any'.
+            If 'any', drop a row if it contains any nulls.
+            If 'all', drop a row only if all its values are null.
+        thresh: int, optional, default None.
+            If specified, drop rows that have less than `thresh` non-null values.
+            This overwrites the `how` parameter.
+        subset : str, tuple or list, optional
+            optional list of column names to consider.
+
+        Returns
+        -------
+        :class:`DataFrame`
+            DataFrame with null only rows excluded.
+
+        Examples
+        --------
+        >>> from pyspark.sql import Row
+        >>> df = spark.createDataFrame([
+        ...     Row(age=10, height=80.0, name="Alice"),
+        ...     Row(age=5, height=float("nan"), name="Bob"),
+        ...     Row(age=None, height=None, name="Tom"),
+        ...     Row(age=None, height=float("nan"), name=None),
+        ... ])
+
+        Example 1: Drop the row if it contains any null or NaN.
+
+        >>> df.na.drop().show()
+        +---+------+-----+
+        |age|height| name|
+        +---+------+-----+
+        | 10|  80.0|Alice|
+        +---+------+-----+
+
+        Example 2: Drop the row only if all its values are null or NaN.
+
+        >>> df.na.drop(how='all').show()
+        +----+------+-----+
+        | age|height| name|
+        +----+------+-----+
+        |  10|  80.0|Alice|
+        |   5|   NaN|  Bob|
+        |NULL|  NULL|  Tom|
+        +----+------+-----+
+
+        Example 3: Drop rows that have less than `thresh` non-null and non-NaN values.
+
+        >>> df.na.drop(thresh=2).show()
+        +---+------+-----+
+        |age|height| name|
+        +---+------+-----+
+        | 10|  80.0|Alice|
+        |  5|   NaN|  Bob|
+        +---+------+-----+
+
+        Example 4: Drop rows with null and NaN values in the specified columns.
+
+        >>> df.na.drop(subset=['age', 'name']).show()
+        +---+------+-----+
+        |age|height| name|
+        +---+------+-----+
+        | 10|  80.0|Alice|
+        |  5|   NaN|  Bob|
+        +---+------+-----+
+        "#
+    };
+    (DataFrameNaFunctions . replace) => {
+        r#"Returns a new :class:`DataFrame` replacing a value with another value.
+        :func:`DataFrame.replace` and :func:`DataFrameNaFunctions.replace` are
+        aliases of each other.
+        Values to_replace and value must have the same type and can only be numerics, booleans,
+        or strings. Value can have None. When replacing, the new value will be cast
+        to the type of the existing column.
+        For numeric replacements all values to be replaced should have unique
+        floating point representation. In case of conflicts (for example with `{42: -1, 42.0: 1}`)
+        and arbitrary replacement will be used.
+
+        .. versionadded:: 1.4.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        to_replace : bool, int, float, string, list or dict, the value to be replaced.
+            If the value is a dict, then `value` is ignored or can be omitted, and `to_replace`
+            must be a mapping between a value and a replacement.
+        value : bool, int, float, string or None, optional
+            The replacement value must be a bool, int, float, string or None. If `value` is a
+            list, `value` should be of the same length and type as `to_replace`.
+            If `value` is a scalar and `to_replace` is a sequence, then `value` is
+            used as a replacement for each item in `to_replace`.
+        subset : list, optional
+            optional list of column names to consider.
+            Columns specified in subset that do not have matching data types are ignored.
+            For example, if `value` is a string, and subset contains a non-string column,
+            then the non-string column is simply ignored.
+
+        Returns
+        -------
+        :class:`DataFrame`
+            DataFrame with replaced values.
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame([
+        ...     (10, 80, "Alice"),
+        ...     (5, None, "Bob"),
+        ...     (None, 10, "Tom"),
+        ...     (None, None, None)],
+        ...     schema=["age", "height", "name"])
+
+        Example 1: Replace 10 to 20 in all columns.
+
+        >>> df.na.replace(10, 20).show()
+        +----+------+-----+
+        | age|height| name|
+        +----+------+-----+
+        |  20|    80|Alice|
+        |   5|  NULL|  Bob|
+        |NULL|    20|  Tom|
+        |NULL|  NULL| NULL|
+        +----+------+-----+
+
+        Example 2: Replace 'Alice' to null in all columns.
+
+        >>> df.na.replace('Alice', None).show()
+        +----+------+----+
+        | age|height|name|
+        +----+------+----+
+        |  10|    80|NULL|
+        |   5|  NULL| Bob|
+        |NULL|    10| Tom|
+        |NULL|  NULL|NULL|
+        +----+------+----+
+
+        Example 3: Replace 'Alice' to 'A', and 'Bob' to 'B' in the 'name' column.
+
+        >>> df.na.replace(['Alice', 'Bob'], ['A', 'B'], 'name').show()
+        +----+------+----+
+        | age|height|name|
+        +----+------+----+
+        |  10|    80|   A|
+        |   5|  NULL|   B|
+        |NULL|    10| Tom|
+        |NULL|  NULL|NULL|
+        +----+------+----+
+
+        Example 4: Replace 10 to 18 in the 'age' column.
+
+        >>> df.na.replace(10, 18, 'age').show()
+        +----+------+-----+
+        | age|height| name|
+        +----+------+-----+
+        |  18|    80|Alice|
+        |   5|  NULL|  Bob|
+        |NULL|    10|  Tom|
+        |NULL|  NULL| NULL|
+        +----+------+-----+
+        "#
+    };
+    (DataFrameStatFunctions) => {
+        r#"Functionality for statistic functions with :class:`DataFrame`.
+
+    .. versionadded:: 1.4.0
+
+    .. versionchanged:: 3.4.0
+        Supports Spark Connect.
+    "#
+    };
+    (DataFrameStatFunctions . cov) => {
+        r#"
+        Calculate the sample covariance for the given columns, specified by their names, as a
+        double value. :func:`DataFrame.cov` and :func:`DataFrameStatFunctions.cov` are aliases.
+
+        .. versionadded:: 1.4.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        col1 : str
+            The name of the first column
+        col2 : str
+            The name of the second column
+
+        Returns
+        -------
+        float
+            Covariance of two columns.
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame([(1, 12), (10, 1), (19, 8)], ["c1", "c2"])
+        >>> df.cov("c1", "c2")
+        -18.0
+        >>> df = spark.createDataFrame([(11, 12), (10, 11), (9, 10)], ["small", "bigger"])
+        >>> df.cov("small", "bigger")
+        1.0
+
+        "#
+    };
+    (DataFrameStatFunctions . corr) => {
+        r#"
+        Calculates the correlation of two columns of a :class:`DataFrame` as a double value.
+        Currently only supports the Pearson Correlation Coefficient.
+        :func:`DataFrame.corr` and :func:`DataFrameStatFunctions.corr` are aliases of each other.
+
+        .. versionadded:: 1.4.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        col1 : str
+            The name of the first column
+        col2 : str
+            The name of the second column
+        method : str, optional
+            The correlation method. Currently only supports "pearson"
+
+        Returns
+        -------
+        float
+            Pearson Correlation Coefficient of two columns.
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame([(1, 12), (10, 1), (19, 8)], ["c1", "c2"])
+        >>> df.corr("c1", "c2")
+        -0.3592106040535498
+        >>> df = spark.createDataFrame([(11, 12), (10, 11), (9, 10)], ["small", "bigger"])
+        >>> df.corr("small", "bigger")
+        1.0
+
+        "#
+    };
+    (DataFrameStatFunctions . approxQuantile) => {
+        r#"
+        Calculates the approximate quantiles of numerical columns of a
+        :class:`DataFrame`.
+
+        The result of this algorithm has the following deterministic bound:
+        If the :class:`DataFrame` has N elements and if we request the quantile at
+        probability `p` up to error `err`, then the algorithm will return
+        a sample `x` from the :class:`DataFrame` so that the *exact* rank of `x` is
+        close to (p * N). More precisely,
+
+          floor((p - err) * N) <= rank(x) <= ceil((p + err) * N).
+
+        This method implements a variation of the Greenwald-Khanna
+        algorithm (with some speed optimizations). The algorithm was first
+        present in [[https://doi.org/10.1145/375663.375670
+        Space-efficient Online Computation of Quantile Summaries]]
+        by Greenwald and Khanna.
+
+        .. versionadded:: 2.0.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        col: str, tuple or list
+            Can be a single column name, or a list of names for multiple columns.
+
+            .. versionchanged:: 2.2.0
+               Added support for multiple columns.
+        probabilities : list or tuple of floats
+            a list of quantile probabilities
+            Each number must be a float in the range [0, 1].
+            For example 0.0 is the minimum, 0.5 is the median, 1.0 is the maximum.
+        relativeError : float
+            The relative target precision to achieve
+            (>= 0). If set to zero, the exact quantiles are computed, which
+            could be very expensive. Note that values greater than 1 are
+            accepted but gives the same result as 1.
+
+        Returns
+        -------
+        list
+            the approximate quantiles at the given probabilities.
+
+            * If the input `col` is a string, the output is a list of floats.
+
+            * If the input `col` is a list or tuple of strings, the output is also a
+                list, but each element in it is a list of floats, i.e., the output
+                is a list of list of floats.
+
+        Notes
+        -----
+        Null values will be ignored in numerical columns before calculation.
+        For columns only containing null values, an empty list is returned.
+
+        Examples
+        --------
+        Example 1: Calculating quantiles for a single column
+
+        >>> data = [(1,), (2,), (3,), (4,), (5,)]
+        >>> df = spark.createDataFrame(data, ["values"])
+        >>> quantiles = df.approxQuantile("values", [0.0, 0.5, 1.0], 0.05)
+        >>> quantiles
+        [1.0, 3.0, 5.0]
+
+        Example 2: Calculating quantiles for multiple columns
+
+        >>> data = [(1, 10), (2, 20), (3, 30), (4, 40), (5, 50)]
+        >>> df = spark.createDataFrame(data, ["col1", "col2"])
+        >>> quantiles = df.approxQuantile(["col1", "col2"], [0.0, 0.5, 1.0], 0.05)
+        >>> quantiles
+        [[1.0, 3.0, 5.0], [10.0, 30.0, 50.0]]
+
+        Example 3: Handling null values
+
+        >>> data = [(1,), (None,), (3,), (4,), (None,)]
+        >>> df = spark.createDataFrame(data, ["values"])
+        >>> quantiles = df.approxQuantile("values", [0.0, 0.5, 1.0], 0.05)
+        >>> quantiles
+        [1.0, 3.0, 4.0]
+
+        Example 4: Calculating quantiles with low precision
+
+        >>> data = [(1,), (2,), (3,), (4,), (5,)]
+        >>> df = spark.createDataFrame(data, ["values"])
+        >>> quantiles = df.approxQuantile("values", [0.0, 0.2, 1.0], 0.1)
+        >>> quantiles
+        [1.0, 1.0, 5.0]
+        "#
+    };
+    (DataFrameStatFunctions . crosstab) => {
+        r#"
+        Computes a pair-wise frequency table of the given columns. Also known as a contingency
+        table.
+        The first column of each row will be the distinct values of `col1` and the column names
+        will be the distinct values of `col2`. The name of the first column will be `$col1_$col2`.
+        Pairs that have no occurrences will have zero as their counts.
+        :func:`DataFrame.crosstab` and :func:`DataFrameStatFunctions.crosstab` are aliases.
+
+        .. versionadded:: 1.4.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        col1 : str
+            The name of the first column. Distinct items will make the first item of
+            each row.
+        col2 : str
+            The name of the second column. Distinct items will make the column names
+            of the :class:`DataFrame`.
+
+        Returns
+        -------
+        :class:`DataFrame`
+            Frequency matrix of two columns.
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame([(1, 11), (1, 11), (3, 10), (4, 8), (4, 8)], ["c1", "c2"])
+        >>> df.crosstab("c1", "c2").sort("c1_c2").show()
+        +-----+---+---+---+
+        |c1_c2| 10| 11|  8|
+        +-----+---+---+---+
+        |    1|  0|  2|  0|
+        |    3|  1|  0|  0|
+        |    4|  0|  0|  2|
+        +-----+---+---+---+
+
+        "#
+    };
+    (DataFrameStatFunctions . freqItems) => {
+        r#"
+        Finding frequent items for columns, possibly with false positives. Using the
+        frequent element count algorithm described in
+        "https://doi.org/10.1145/762471.762473, proposed by Karp, Schenker, and Papadimitriou".
+        :func:`DataFrame.freqItems` and :func:`DataFrameStatFunctions.freqItems` are aliases.
+
+        .. versionadded:: 1.4.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        cols : list or tuple
+            Names of the columns to calculate frequent items for as a list or tuple of
+            strings.
+        support : float, optional
+            The frequency with which to consider an item 'frequent'. Default is 1%.
+            The support must be greater than 1e-4.
+
+        Returns
+        -------
+        :class:`DataFrame`
+            DataFrame with frequent items.
+
+        Notes
+        -----
+        This function is meant for exploratory data analysis, as we make no
+        guarantee about the backward compatibility of the schema of the resulting
+        :class:`DataFrame`.
+
+        Examples
+        --------
+        >>> from pyspark.sql import functions as sf
+        >>> df = spark.createDataFrame([(1, 11), (1, 11), (3, 10), (4, 8), (4, 8)], ["c1", "c2"])
+        >>> df = df.freqItems(["c1", "c2"])
+        >>> df.select([sf.sort_array(c).alias(c) for c in df.columns]).show()
+        +------------+------------+
+        |c1_freqItems|c2_freqItems|
+        +------------+------------+
+        |   [1, 3, 4]| [8, 10, 11]|
+        +------------+------------+
+        "#
+    };
+    (DataFrameStatFunctions . sampleBy) => {
+        r#"
+        Returns a stratified sample without replacement based on the
+        fraction given on each stratum.
+
+        .. versionadded:: 1.5.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        col : :class:`Column` or str
+            column that defines strata
+
+            .. versionchanged:: 3.0.0
+               Added sampling by a column of :class:`Column`
+        fractions : dict
+            sampling fraction for each stratum. If a stratum is not
+            specified, we treat its fraction as zero.
+        seed : int, optional
+            random seed
+
+        Returns
+        -------
+        a new :class:`DataFrame` that represents the stratified sample
+
+        Examples
+        --------
+        >>> from pyspark.sql import functions as sf
+        >>> dataset = spark.range(0, 100, 1, 5).select((sf.col("id") % 3).alias("key"))
+        >>> sampled = dataset.sampleBy("key", fractions={0: 0.1, 1: 0.2}, seed=0)
+        >>> sampled.groupBy("key").count().orderBy("key").show()
+        +---+-----+
+        |key|count|
+        +---+-----+
+        |  0|    4|
+        |  1|    9|
+        +---+-----+
+
+        >>> dataset.sampleBy(sf.col("key"), fractions={2: 1.0}, seed=0).count()
+        33
         "#
     };
 }

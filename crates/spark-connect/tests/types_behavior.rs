@@ -189,8 +189,7 @@ fn json_value_shape() {
 
 // Every variant with a representative payload.
 fn all_variants() -> Vec<DataType> {
-    use spark_connect::types::StructField;
-    use std::collections::BTreeMap;
+    use spark_connect::types::{Metadata, StructField};
     // Canonical default-collation name: the proto/JSON round-trips the default as
     // "UTF8_BINARY" (empty string is an accepted alias that normalizes to it).
     let str_t = DataType::String {
@@ -200,7 +199,7 @@ fn all_variants() -> Vec<DataType> {
         name: n.to_string(),
         data_type: dt,
         nullable: true,
-        metadata: BTreeMap::new(),
+        metadata: Metadata::new(),
     };
     vec![
         DataType::Null,
@@ -270,15 +269,14 @@ fn json_round_trip_is_lossless() {
 
 #[test]
 fn struct_type_helpers() {
-    use spark_connect::types::StructField;
-    use std::collections::BTreeMap;
+    use spark_connect::types::{Metadata, StructField};
     let st = DataType::Struct {
         fields: vec![
             StructField {
                 name: "a".into(),
                 data_type: DataType::Integer,
                 nullable: true,
-                metadata: BTreeMap::new(),
+                metadata: Metadata::new(),
             },
             StructField {
                 name: "b".into(),
@@ -286,7 +284,7 @@ fn struct_type_helpers() {
                     collation: String::new(),
                 },
                 nullable: false,
-                metadata: BTreeMap::new(),
+                metadata: Metadata::new(),
             },
         ],
     };
@@ -368,15 +366,14 @@ fn struct_to_ddl_tree_and_nullable() {
 /// The expected strings are the output of `StructType.toDDL()` of PySpark 4.3.0 on a server.
 #[test]
 fn struct_to_ddl_quotes_names_and_writes_sql_types() {
-    use spark_connect::types::StructField;
-    use std::collections::BTreeMap;
+    use spark_connect::types::{Metadata, StructField};
 
     fn field(name: &str, data_type: DataType, nullable: bool) -> StructField {
         StructField {
             name: name.to_string(),
             data_type,
             nullable,
-            metadata: BTreeMap::new(),
+            metadata: Metadata::new(),
         }
     }
     fn commented(name: &str, data_type: DataType, nullable: bool, comment: &str) -> StructField {

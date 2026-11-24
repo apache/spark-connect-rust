@@ -102,14 +102,14 @@ impl DataFrameReader {
     /// is empty, as PySpark's reader sends its `""` of no schema, which the server reads as none.
     pub fn load_paths<S: Into<String>>(self, paths: impl IntoIterator<Item = S>) -> DataFrame {
         let plan = LogicalPlan::Read {
-            read_type: ReadType::DataSource {
+            read_type: Box::new(ReadType::DataSource {
                 format: self.format,
                 schema: Some(self.schema),
                 options: self.options,
                 paths: paths.into_iter().map(Into::into).collect(),
                 predicates: vec![],
                 source_name: None,
-            },
+            }),
             is_streaming: false,
         };
         DataFrame::new(self.session, plan)
@@ -137,7 +137,7 @@ impl DataFrameReader {
         if self.schema.starts_with('{') {
             if let Some(error) = parse_schema_error(&self.schema) {
                 let plan = LogicalPlan::Parse {
-                    input: Arc::clone(&input.plan),
+                    input: input.shared_plan(),
                     format,
                     schema: None,
                     options: self.options,
@@ -153,7 +153,7 @@ impl DataFrameReader {
             Some(self.session.parse_ddl(&self.schema)?)
         };
         let plan = LogicalPlan::Parse {
-            input: Arc::clone(&input.plan),
+            input: input.shared_plan(),
             format,
             schema,
             options: self.options,
@@ -164,10 +164,10 @@ impl DataFrameReader {
     /// Read from a named table.
     pub fn table(self, table_name: &str) -> DataFrame {
         let plan = LogicalPlan::Read {
-            read_type: ReadType::NamedTable {
+            read_type: Box::new(ReadType::NamedTable {
                 table_name: table_name.to_string(),
                 options: self.options,
-            },
+            }),
             is_streaming: false,
         };
         DataFrame::new(self.session, plan)
@@ -214,14 +214,14 @@ impl DataFrameReader {
             .insert("dbtable".to_string(), table.to_string());
 
         let plan = LogicalPlan::Read {
-            read_type: ReadType::DataSource {
+            read_type: Box::new(ReadType::DataSource {
                 format: self.format,
                 schema: Some(self.schema),
                 options: self.options,
                 paths: vec![],
                 predicates: predicates.unwrap_or_default(),
                 source_name: None,
-            },
+            }),
             is_streaming: false,
         };
         DataFrame::new(self.session, plan)
@@ -389,11 +389,11 @@ impl DataFrameWriter {
         self.session.clone()
     }
 
-    /// Whether this writer writes the plan of `dataframe`, which it shares (see
-    /// [`DataFrame::shares_plan_with`]). Not a stable API.
+    /// The references of this writer to the shared parts of the plan that it writes (see
+    /// [`crate::gc`]). Not a stable API.
     #[doc(hidden)]
-    pub fn shares_plan_with(&self, dataframe: &DataFrame) -> bool {
-        Arc::ptr_eq(&self.input_plan, &dataframe.plan)
+    pub fn held_parts(&self) -> Vec<crate::gc::PartRef<'_>> {
+        vec![crate::gc::PartRef::Plan(&self.input_plan)]
     }
 
     /// Drop the plan that this writer writes, as [`DataFrame::clear_plan`] drops the plan of a
@@ -709,27 +709,17 @@ impl DataFrameWriterV2 {
         self.session.clone()
     }
 
-    /// Whether this writer writes the plan of `dataframe`, which it shares (see
-    /// [`DataFrame::shares_plan_with`]). Not a stable API.
+    /// The references of this writer to the shared parts of the plan that it writes and of its
+    /// partitioning columns (see [`crate::gc`]). Not a stable API.
     #[doc(hidden)]
-    pub fn shares_plan_with(&self, dataframe: &DataFrame) -> bool {
-        Arc::ptr_eq(&self.input_plan, &dataframe.plan)
-    }
-
-    /// The objects of the picklers of the UDFs of the partitioning columns of this writer that it
-    /// alone keeps alive, as [`DataFrame::exclusive_pickler_objects`] gives those of a DataFrame,
-    /// which a Python wrapper reports to Python's garbage collector, as PySpark's writer, of
-    /// Python objects, holds the Columns of `partitionedBy`. The plan that it writes is not
-    /// visited: the wrapper of its DataFrame, which the wrapper of the writer keeps, reports what
-    /// it holds. Not a stable API.
-    #[doc(hidden)]
-    pub fn exclusive_pickler_objects(&self) -> Vec<&(dyn std::any::Any + Send + Sync)> {
-        crate::udf::exclusive_pickler_objects(
+    pub fn held_parts(&self) -> Vec<crate::gc::PartRef<'_>> {
+        let mut held = vec![crate::gc::PartRef::Plan(&self.input_plan)];
+        held.extend(
             self.partition_cols
                 .iter()
-                .map(|column| crate::udf::PicklerHolder::Expression(column.expression()))
-                .collect(),
-        )
+                .map(|column| crate::gc::PartRef::Expression(column.expression())),
+        );
+        held
     }
 
     /// Drop the plan that this writer writes and its partitioning columns, as
@@ -1141,13 +1131,12 @@ mod tests {
             .option("password", "secret")
             .jdbc("jdbc:mysql://localhost:3306/db", "table_name", None);
 
-        match df.plan.as_ref() {
-            LogicalPlan::Read {
-                read_type:
-                    ReadType::DataSource {
-                        options, format, ..
-                    },
-                ..
+        let LogicalPlan::Read { read_type, .. } = df.plan.as_ref() else {
+            panic!("expected Read plan");
+        };
+        match read_type.as_ref() {
+            ReadType::DataSource {
+                options, format, ..
             } => {
                 assert_eq!(format.as_deref(), Some("jdbc"));
                 assert_eq!(
@@ -1172,13 +1161,12 @@ mod tests {
             Some(predicates.clone()),
         );
 
-        match df.plan.as_ref() {
-            LogicalPlan::Read {
-                read_type:
-                    ReadType::DataSource {
-                        predicates: preds, ..
-                    },
-                ..
+        let LogicalPlan::Read { read_type, .. } = df.plan.as_ref() else {
+            panic!("expected Read plan with predicates");
+        };
+        match read_type.as_ref() {
+            ReadType::DataSource {
+                predicates: preds, ..
             } => {
                 assert_eq!(preds.len(), 2);
             }
@@ -1312,13 +1300,12 @@ mod tests {
             .options(opts)
             .load(Some("/data.csv"));
 
-        match df.plan.as_ref() {
-            LogicalPlan::Read {
-                read_type:
-                    ReadType::DataSource {
-                        options, format, ..
-                    },
-                ..
+        let LogicalPlan::Read { read_type, .. } = df.plan.as_ref() else {
+            panic!("expected Read plan");
+        };
+        match read_type.as_ref() {
+            ReadType::DataSource {
+                options, format, ..
             } => {
                 assert_eq!(format.as_deref(), Some("csv"));
                 assert_eq!(options.get("delimiter").map(String::as_str), Some(";"));

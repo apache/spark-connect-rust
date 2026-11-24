@@ -55,18 +55,17 @@ pub(crate) fn record_batches_to_pyarrow(
         // Unwinding across that extern "C" boundary aborts Python instead of raising an
         // exception. Check before export, then reuse the collected batches for IPC without
         // another request.
-        let bytes = py
-            .detach(|| -> arrow::error::Result<Vec<u8>> {
-                let mut bytes = Vec::new();
-                let mut writer = FileWriter::try_new(&mut bytes, &schema)?;
-                for batch in &batches {
-                    writer.write(batch)?;
-                }
-                writer.finish()?;
-                drop(writer);
-                Ok(bytes)
-            })
-            .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+        let bytes = crate::gc::detach_without_parts(py, || -> arrow::error::Result<Vec<u8>> {
+            let mut bytes = Vec::new();
+            let mut writer = FileWriter::try_new(&mut bytes, &schema)?;
+            for batch in &batches {
+                writer.write(batch)?;
+            }
+            writer.finish()?;
+            drop(writer);
+            Ok(bytes)
+        })
+        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
         return Ok(py
             .import("pyarrow")?
             .getattr("ipc")?

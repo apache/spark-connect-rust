@@ -99,21 +99,16 @@ impl WindowSpec {
         crate::expression::window_spec_repr(&self.partition_spec, &self.order_spec, frame.as_ref())
     }
 
-    /// The objects of the picklers of the UDFs of the partitioning and the ordering of this
-    /// window specification that it alone keeps alive, as
-    /// [`crate::expression::Expression::exclusive_pickler_objects`] gives those of an expression,
-    /// which a Python wrapper reports to Python's garbage collector, as PySpark's window
-    /// specification, of Python objects, holds its columns. Not a stable API.
+    /// The references of this window specification to the shared parts of its partitioning and
+    /// its ordering (see [`crate::gc`]). Not a stable API.
     #[doc(hidden)]
-    pub fn exclusive_pickler_objects(&self) -> Vec<&(dyn std::any::Any + Send + Sync)> {
+    pub fn held_parts(&self) -> Vec<crate::gc::PartRef<'_>> {
         let orders = self.order_spec.iter().map(|sort| &sort.child);
-        crate::udf::exclusive_pickler_objects(
-            self.partition_spec
-                .iter()
-                .chain(orders)
-                .map(crate::udf::PicklerHolder::Expression)
-                .collect(),
-        )
+        self.partition_spec
+            .iter()
+            .chain(orders)
+            .map(crate::gc::PartRef::Expression)
+            .collect()
     }
 
     /// Create a new empty WindowSpec.

@@ -106,3 +106,70 @@ def test_python_fit_override_can_delegate_to_rust(frame, native_operations_only)
     lr = RecordingLR(maxIter=20, regParam=0.1)
     assert type(lr.fit(frame, {lr.maxIter: 2})) is LogisticRegressionModel
     assert calls == [2] and lr.getMaxIter() == 20
+
+
+def test_standard_pipeline_and_tuning_use_native_logistic(session, tmp_path):
+    from pyspark import _pyspark
+    from pyspark.ml import Pipeline, PipelineModel
+    from pyspark.ml.evaluation import BinaryClassificationEvaluator
+    from pyspark.ml.feature import VectorAssembler
+    from pyspark.ml.tuning import CrossValidator, ParamGridBuilder
+
+    data = session.createDataFrame(
+        [(float(i % 2), float(i % 2), (i // 2) % 2) for i in range(40)],
+        ["label", "x", "fold"],
+    )
+    lr = LogisticRegression(maxIter=3)
+    pipeline = Pipeline(stages=[VectorAssembler(inputCols=["x"], outputCol="features"), lr])
+    validator = CrossValidator(
+        estimator=pipeline,
+        estimatorParamMaps=ParamGridBuilder().addGrid(lr.regParam, [0.1, 0.2]).build(),
+        evaluator=BinaryClassificationEvaluator(),
+        numFolds=2,
+        foldCol="fold",
+        parallelism=1,
+    )
+    model = validator.fit(data)
+    assert isinstance(model.bestModel.stages[-1], _pyspark.LogisticRegressionModel)
+    predictions = model.transform(data).select("prediction").collect()
+    assert sorted(row.prediction for row in predictions) == [0.0] * 20 + [1.0] * 20
+    path = str(tmp_path / "pipeline")
+    model.bestModel.write().overwrite().save(path)
+    restored = PipelineModel.load(path)
+    assert isinstance(restored.stages[-1], _pyspark.LogisticRegressionModel)
+    restored_predictions = restored.transform(data).select("prediction").collect()
+    assert sorted(row.prediction for row in restored_predictions) == [0.0] * 20 + [1.0] * 20
+
+
+def test_live_standard_logistic_without_optional_python_dependencies(session, tmp_path):
+    from _standard_logistic_cases import without_optional_dependencies
+
+    without_optional_dependencies(f"""
+import gc
+import os
+from pyspark import _pyspark
+from pyspark.sql import SparkSession
+from pyspark.ml.classification import LogisticRegression, LogisticRegressionModel
+from pyspark.ml.linalg import Vectors
+
+spark = SparkSession.builder.remote(os.environ["SPARK_REMOTE"]).getOrCreate()
+try:
+    data = spark.createDataFrame(
+        [(float(i >= 2), Vectors.dense([float(i)])) for i in range(4)],
+        ["label", "features"],
+    )
+    estimator = LogisticRegression(maxIter=10, regParam=0.1)
+    model = estimator.fit(data)
+    assert isinstance(model, _pyspark.LogisticRegressionModel)
+    assert model.summary.accuracy > 0.9
+    assert model.evaluate(data).accuracy > 0.9
+    path = {str(tmp_path / "dependency-free-model")!r}
+    model.write().overwrite().save(path)
+    restored = LogisticRegressionModel.load(path)
+    predictions = restored.transform(data).select("prediction")
+    del restored
+    gc.collect()
+    assert sorted(row.prediction for row in predictions.collect()) == [0.0, 0.0, 1.0, 1.0]
+finally:
+    spark.stop()
+""")

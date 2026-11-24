@@ -13,7 +13,7 @@ from pyspark._pyspark import KolmogorovSmirnovTest as _KolmogorovSmirnovTest
 from pyspark._pyspark import Summarizer as _Summarizer
 from pyspark._pyspark import SummaryBuilder as _SummaryBuilder
 from pyspark._pyspark import _register_public_class
-from pyspark.ml._native_classes import _del
+from pyspark.ml._native_classes import _del_of
 from pyspark.ml.common import _java2py, _py2java  # noqa: F401
 from pyspark.ml.linalg import Matrix, Vector
 from pyspark.ml.util import invoke_helper_relation  # noqa: F401
@@ -470,7 +470,7 @@ class SummaryBuilder(_SummaryBuilder, JavaWrapper):
         """
         return _SummaryBuilder.summary(self, featuresCol, weightCol)
 
-    __del__ = _del
+    __del__ = _del_of(JavaWrapper)
 
 
 _register_public_class(_SummaryBuilder, SummaryBuilder)

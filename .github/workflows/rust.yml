@@ -78,6 +78,12 @@ jobs:
         # Test the core transport and pure-Rust client crates
         run: cargo test -p apache-spark-connect -p apache-spark-connect-core --release
 
+      - name: Cargo test (spark-connect-proto)
+        # On its own, of prost's limit of 100 nested messages, which the tests of the crates above
+        # lift (`no-recursion-limit`): the tests of the scan of the depth of a response compare it
+        # with prost's own decode, which they can only of the limit.
+        run: cargo test -p apache-spark-connect-proto --release
+
       - name: Cargo build/test with optional conversion features (datafusion, polars)
         # Exercises the to_datafusion()/to_polars() conversions, which are gated
         # behind off-by-default features whose deps are pulled from crates.io.

@@ -21,8 +21,6 @@ use spark_connect::ml::{join_path, k_fold, save_metadata, train_validation_split
 use spark_connect::SparkSession;
 use spark_connect_core::error::{SparkError, SparkErrorKind};
 
-use crate::interrupt::interruptible_outcome;
-
 /// The classes of the metadata of the validators, PySpark's, of which PySpark loads what this
 /// client saves.
 const CROSS_VALIDATOR_CLASS: &str = "pyspark.ml.tuning.CrossValidator";
@@ -72,6 +70,9 @@ struct ParamValues {
     set: Vec<(&'static str, Py<PyAny>)>,
     own_defaults: params_api::OwnDefaults,
     sorted_defaults: bool,
+    /// Whether the value of the validator is written, which its `__traverse__` checks first (see
+    /// `crate::gc::GcReady`).
+    gc_ready: crate::gc::GcReady,
 }
 
 impl ParamValues {
@@ -80,6 +81,7 @@ impl ParamValues {
             set: Vec::new(),
             own_defaults: Vec::new(),
             sorted_defaults: false,
+            gc_ready: crate::gc::GcReady::new(),
         }
     }
 
@@ -117,6 +119,7 @@ impl ParamValues {
                 .collect(),
             own_defaults: params_api::clone_own_defaults(py, &self.own_defaults),
             sorted_defaults: self.sorted_defaults,
+            gc_ready: crate::gc::GcReady::new(),
         }
     }
 
@@ -178,6 +181,12 @@ trait Validator: params_api::ParamsHolder + params_api::NativeInstance {
 /// `values`, the uid `uid`, and the fields `$field` that a duplicate shares.
 macro_rules! validator {
     ($ty:ty, $class:expr, [$($default:literal),*], [$($field:ident),*]) => {
+        validator!($ty, $class, [$($default),*], [$($field),*], []);
+    };
+    (
+        $ty:ty, $class:expr, [$($default:literal),*], [$($field:ident),*],
+        [$($attribute:literal),*]
+    ) => {
         impl params_api::ParamsHolder for $ty {
             fn set_value(&self, py: Python<'_>, name: &str) -> PyResult<Option<Py<PyAny>>> {
                 Ok(self.values.get(py, name))
@@ -214,6 +223,10 @@ macro_rules! validator {
         }
 
         impl params_api::NativeInstance for $ty {
+            fn state_attributes(&self) -> &'static [&'static str] {
+                &[$($attribute),*]
+            }
+
             fn duplicate(&self, py: Python<'_>) -> PyResult<Py<Self>> {
                 crate::ml::object::new_py(
                     py,
@@ -231,6 +244,32 @@ macro_rules! validator {
 
             fn set_uid(&mut self, uid: &str) {
                 self.uid = uid.to_string();
+            }
+        }
+
+        impl $ty {
+            /// Visit the Python objects that the validator holds, of Python's garbage collector, as
+            /// PySpark's holds its param maps and its attributes: the values of its params (its
+            /// estimator, evaluator and param maps) and of `$field`.
+            fn gc_traverse(&self, visit: &pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
+                if !self.values.gc_ready.get() {
+                    return Ok(());
+                }
+                params_api::visit_values(&self.values.set, visit)?;
+                params_api::visit_values(&self.values.own_defaults, visit)?;
+                $( visit.call(&self.$field)?; )*
+                Ok(())
+            }
+
+            /// Break a reference cycle that the garbage collector found unreachable: the validator
+            /// drops the values of its params and its attributes, for None.
+            fn gc_clear(&mut self) {
+                if !self.values.gc_ready.get() {
+                    return;
+                }
+                self.values.set.clear();
+                self.values.own_defaults.clear();
+                $( self.$field = Python::attach(|py| py.None()); )*
             }
         }
 
@@ -298,7 +337,8 @@ validator!(
     PyCrossValidatorModel,
     CROSS_VALIDATOR_MODEL_CLASS,
     ["seed", "numFolds", "foldCol"],
-    [best_model, avg_metrics, sub_models, std_metrics]
+    [best_model, avg_metrics, sub_models, std_metrics],
+    ["bestModel", "avgMetrics", "subModels", "stdMetrics"]
 );
 
 /// PySpark's `TrainValidationSplit`: the validation of an estimator over its param maps on one
@@ -343,7 +383,8 @@ validator!(
     PyTrainValidationSplitModel,
     TRAIN_VALIDATION_SPLIT_MODEL_CLASS,
     ["seed", "trainRatio"],
-    [best_model, validation_metrics, sub_models]
+    [best_model, validation_metrics, sub_models],
+    ["bestModel", "validationMetrics", "subModels"]
 );
 
 /// `value or []`, of which PySpark's models keep their metrics.
@@ -535,8 +576,8 @@ fn copy_values<F: Validator, T: Validator>(
 /// The DataFrame of `dataset`, of which a validator's split reads `select`: an object without it
 /// raises its AttributeError, as the split of PySpark does (of a pandas DataFrame).
 fn split_dataframe(dataset: &Bound<'_, PyAny>) -> PyResult<DataFrame> {
-    if let Ok(df) = dataset.extract::<PyRef<'_, PyDataFrame>>() {
-        return Ok(df.dataframe.clone());
+    if let Ok(df) = dataset.cast::<PyDataFrame>() {
+        return Ok(crate::dataframe::Frame::of(df)?.dataframe.clone());
     }
     dataset.getattr("select")?;
     Err(PyTypeError::new_err(format!(
@@ -564,7 +605,7 @@ fn split_seed<T: Validator>(slf: &Bound<'_, T>) -> PyResult<Option<i64>> {
 
 /// The Python DataFrame of `df`.
 fn py_dataframe<'py>(py: Python<'py>, df: DataFrame) -> PyResult<Bound<'py, PyAny>> {
-    Ok(Bound::new(py, PyDataFrame::new(df))?.into_any())
+    Ok(PyDataFrame::new(df).into_pyobject(py)?.into_any())
 }
 
 /// The result of a split of the core, whose errors of values (an empty fold) are PySpark's
@@ -605,9 +646,13 @@ fn cross_validator_folds<'py>(
     let df = split_dataframe(dataset)?;
     let uid = slf.try_borrow()?.uid.clone();
     let session = df.spark_session();
-    let folds = split_result(interruptible_outcome(py, &session, || {
-        k_fold(&df, n_folds, &fold_col, seed, &uid).map_err(Box::new)
-    })?)?;
+    // Of the plan of the dataset, which the folds are built over.
+    let folds = split_result(crate::interrupt::interruptible_outcome_of_values(
+        py,
+        &session,
+        df.held_parts(),
+        || k_fold(&df, n_folds, &fold_col, seed, &uid).map_err(Box::new),
+    )?)?;
     folds
         .into_iter()
         .map(|(train, validation)| Ok((py_dataframe(py, train)?, py_dataframe(py, validation)?)))
@@ -941,6 +986,16 @@ native_pymethods! {
         "seed" => ("getSeed", get_seed, param_seed),
     ];
 
+    /// Visit the Python objects that the validator holds, of Python's garbage collector.
+    fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
+        self.gc_traverse(&visit)
+    }
+
+    /// Break a reference cycle that the garbage collector found unreachable.
+    fn __clear__(&mut self) {
+        self.gc_clear();
+    }
+
     #[new]
     #[pyo3(
         signature = (*args, **kwargs),
@@ -1087,24 +1142,36 @@ native_pymethods! {
         "seed" => ("getSeed", get_seed, param_seed),
     ];
 
+    /// Visit the Python objects that the validator holds, of Python's garbage collector.
+    fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
+        self.gc_traverse(&visit)
+    }
+
+    /// Break a reference cycle that the garbage collector found unreachable.
+    fn __clear__(&mut self) {
+        self.gc_clear();
+    }
+
     /// `CrossValidatorModel(bestModel, ...)`, of a uid of the class of the object, as
     /// `Identifiable._randomUID` names it (`MyCrossValidatorModel_...` of a Python subclass).
     #[new]
     #[classmethod]
-    #[pyo3(signature = (bestModel, avgMetrics=None, subModels=None, stdMetrics=None))]
+    #[pyo3(signature = (bestModel=None, avgMetrics=None, subModels=None, stdMetrics=None))]
     #[allow(non_snake_case)]
     fn new(
         cls: &Bound<'_, pyo3::types::PyType>,
-        bestModel: Py<PyAny>,
+        bestModel: Option<Py<PyAny>>,
         avgMetrics: Option<&Bound<'_, PyAny>>,
         subModels: Option<Py<PyAny>>,
         stdMetrics: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
         let py = cls.py();
+        // Of no `bestModel`, of None, as `copyreg.__newobj__` makes PySpark's object of no
+        // `__init__`, whose state gives its attributes (see `params_api::set_state`).
         Self::of_class(
             py,
             &cls.name()?.to_string(),
-            bestModel,
+            bestModel.unwrap_or_else(|| py.None()),
             avgMetrics,
             subModels.unwrap_or_else(|| py.None()),
             stdMetrics,
@@ -1207,6 +1274,16 @@ native_pymethods! {
         "seed" => ("getSeed", get_seed, param_seed),
         "trainRatio" => ("getTrainRatio", get_train_ratio, param_train_ratio),
     ];
+
+    /// Visit the Python objects that the validator holds, of Python's garbage collector.
+    fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
+        self.gc_traverse(&visit)
+    }
+
+    /// Break a reference cycle that the garbage collector found unreachable.
+    fn __clear__(&mut self) {
+        self.gc_clear();
+    }
 
     #[new]
     #[pyo3(
@@ -1352,23 +1429,34 @@ native_pymethods! {
         "trainRatio" => ("getTrainRatio", get_train_ratio, param_train_ratio),
     ];
 
+    /// Visit the Python objects that the validator holds, of Python's garbage collector.
+    fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
+        self.gc_traverse(&visit)
+    }
+
+    /// Break a reference cycle that the garbage collector found unreachable.
+    fn __clear__(&mut self) {
+        self.gc_clear();
+    }
+
     /// `TrainValidationSplitModel(bestModel, ...)`, of a uid of the class of the object, as
     /// `Identifiable._randomUID` names it (`MyTrainValidationSplitModel_...` of a Python subclass).
     #[new]
     #[classmethod]
-    #[pyo3(signature = (bestModel, validationMetrics=None, subModels=None))]
+    #[pyo3(signature = (bestModel=None, validationMetrics=None, subModels=None))]
     #[allow(non_snake_case)]
     fn new(
         cls: &Bound<'_, pyo3::types::PyType>,
-        bestModel: Py<PyAny>,
+        bestModel: Option<Py<PyAny>>,
         validationMetrics: Option<&Bound<'_, PyAny>>,
         subModels: Option<Py<PyAny>>,
     ) -> PyResult<Self> {
         let py = cls.py();
+        // Of no `bestModel`, of None (see `PyCrossValidatorModel::new`).
         Self::of_class(
             py,
             &cls.name()?.to_string(),
-            bestModel,
+            bestModel.unwrap_or_else(|| py.None()),
             validationMetrics,
             subModels.unwrap_or_else(|| py.None()),
         )
@@ -1668,7 +1756,8 @@ fn save_impl<T: Validator>(
         .collect::<PyResult<Vec<_>>>()?;
     let uid: String = instance.as_any().getattr("uid")?.extract()?;
     let class = super::pipeline_api::metadata_class::<T>(instance.as_any(), T::METADATA_CLASS)?;
-    interruptible(py, session, || {
+    // Of strings.
+    crate::interrupt::interruptible_without_parts(py, session, || {
         let version = session.version()?;
         let mut metadata = Metadata::new(&class, &uid, &version, param_map, default_param_map);
         metadata.extra = extra;
@@ -2121,9 +2210,9 @@ fn load_train_validation_split_model(
 
 /// Register the validators and their models.
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<PyCrossValidator>()?;
-    m.add_class::<PyCrossValidatorModel>()?;
-    m.add_class::<PyTrainValidationSplit>()?;
-    m.add_class::<PyTrainValidationSplitModel>()?;
+    super::object::register_class::<PyCrossValidator>(m)?;
+    super::object::register_class::<PyCrossValidatorModel>(m)?;
+    super::object::register_class::<PyTrainValidationSplit>(m)?;
+    super::object::register_class::<PyTrainValidationSplitModel>(m)?;
     Ok(())
 }

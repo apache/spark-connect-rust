@@ -14,35 +14,36 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""Logical plans under the connect import path.
-
-The Rust core builds the plans of the DataFrame API. ``LogicalPlan`` is PySpark Connect's, from
-Apache Spark v4.3.0, the base of the plans that the modules of PySpark build themselves, such as
-those of ``pyspark.ml.connect.proto``: a plan of a child, of a ``plan(session)`` that is its
-``spark.connect.Relation``, which ``DataFrame(plan, session)`` sends as it is, and of a
-``to_proto(session)`` that is the ``spark.connect.Plan`` of it. It has no
-``_collect_references``, ``print`` or ``_repr_html_``, which are of the plans and the Columns of
-PySpark Connect's DataFrame, which the core builds. ``_DataFramePlan`` is the plan of a
-DataFrame of the core, its ``DataFrame._plan``. ``Read``, ``Range``, ``SQL``, ``SubqueryAlias``,
-``CachedRemoteRelation`` and ``RemoveRemoteCachedRelation`` are PySpark Connect's, which
-``pyspark.testing.connectutils`` and ``pyspark.sql.connect.conversion`` build DataFrames of. The
-messages are those of ``pyspark.sql.connect.proto``.
-"""
+# Logical plans under the connect import path.
+#
+# The Rust core builds the plans of the DataFrame API. ``LogicalPlan`` is PySpark Connect's, from
+# Apache Spark v4.3.0, the base of the plans that the modules of PySpark build themselves, such as
+# those of ``pyspark.ml.connect.proto``: a plan of a child, of a ``plan(session)`` that is its
+# ``spark.connect.Relation``, which ``DataFrame(plan, session)`` sends as it is, and of a
+# ``to_proto(session)`` that is the ``spark.connect.Plan`` of it. It has no
+# ``_collect_references``, ``print`` or ``_repr_html_``, which are of the plans and the Columns of
+# PySpark Connect's DataFrame, which the core builds. ``_DataFramePlan`` is the plan of a
+# DataFrame of the core, its ``DataFrame._plan``. ``Read``, ``Range``, ``SQL``, ``SubqueryAlias``,
+# ``CachedRemoteRelation`` and ``RemoveRemoteCachedRelation`` are PySpark Connect's, which
+# ``pyspark.testing.connectutils`` and ``pyspark.sql.connect.conversion`` build DataFrames of. The
+# messages are those of ``pyspark.sql.connect.proto``.
 
 from collections.abc import Sequence
 from threading import Lock
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 import pyspark.sql.connect.proto as proto
+from pyspark._pyspark import _NativePlan
+from pyspark.errors import PySparkValueError
 from pyspark.sql.column import Column
 from pyspark.sql.connect.logging import logger
 
 
 class LogicalPlan:
     _lock: Lock = Lock()
-    # The plan IDs of these plans start past those that the Rust core gives the relations of a
-    # session (from 1), so that the two never number a relation the same.
-    _nextPlanId: int = 1 << 48
+    # The next plan ID, as PySpark's, of the plans of the module where it runs without the Rust
+    # core, as the tests run it on a Python worker of the server; the core numbers the others.
+    _nextPlanId: int = 0
 
     def __init__(
         self, child: Optional["LogicalPlan"], references: Optional[Sequence["LogicalPlan"]] = None
@@ -71,13 +72,17 @@ class LogicalPlan:
 
     @staticmethod
     def _fresh_plan_id() -> int:
-        plan_id: Optional[int] = None
-        with LogicalPlan._lock:
-            plan_id = LogicalPlan._nextPlanId
-            LogicalPlan._nextPlanId += 1
-
-        assert plan_id is not None
-        return plan_id
+        # Of the one counter of the process from which the Rust core numbers the relations of its
+        # plans too, as PySpark's numbers all of its plans: so the ID of a plan, which a
+        # DataFrame(plan, session) keeps, is of no other relation.
+        try:
+            from pyspark import _pyspark
+        except ImportError:
+            with LogicalPlan._lock:
+                plan_id = LogicalPlan._nextPlanId
+                LogicalPlan._nextPlanId += 1
+            return plan_id
+        return _pyspark._fresh_plan_id()
 
     def _create_proto_relation(self) -> "proto.Relation":
         plan = proto.Relation()
@@ -101,10 +106,11 @@ class LogicalPlan:
         debug: bool
             if enabled, the proto plan will be printed.
         """
-        # As PySpark's, of its relation as the root of the plan. The transport compresses the
-        # plans that it sends itself, so the plan is the relation as it is.
+        # As PySpark's, of its relation set in the plan by the client, which compresses it as its
+        # plan compression asks, with what it logs of it, of the relations of its placeholders.
         plan = proto.Plan()
-        plan.root.CopyFrom(self.plan(session))
+        relation = self.plan(session)
+        session._set_relation_in_plan(plan, relation)
 
         if debug:
             print(plan)
@@ -148,30 +154,54 @@ class LogicalPlan:
             return plan
 
 
-class _DataFramePlan(LogicalPlan):
+class _DataFramePlan(_NativePlan, LogicalPlan):
     """The plan of a DataFrame of the Rust core, as its ``DataFrame._plan``: its relation, as the
-    core sends it, of the plan IDs of its session.
+    core sends it, of the plan IDs of its session, which are its ``_plan_id`` and
+    ``_root_plan_id``, as PySpark's plan of a DataFrame is the plan whose IDs the columns of the
+    DataFrame refer to.
 
-    Its ``plan`` is a placeholder that holds that relation, which the core builds at the call, as
-    PySpark's ``plan`` builds the relation, and replaces the placeholder with when the plan built
-    over it reaches the core, as ``DataFrame(plan, session)`` or a command does, also after the
-    DataFrame is gone. It is one message, an extension whose value holds the relation encoded, so
-    a plan of ``pyspark.ml`` over a deep DataFrame is never decoded in Python, as protobuf decoders
-    limit the depth of what they decode."""
+    The plan of the core is of its native base, ``_NativePlan``, which holds it and the parts of it
+    that the garbage collector sees, and no DataFrame, as PySpark's plan object holds none; its
+    ``__dict__`` holds the fields of PySpark's ``LogicalPlan``. Its ``plan`` is a placeholder that
+    holds that relation, which the core builds at the call, as PySpark's ``plan`` builds the
+    relation, and replaces the placeholder with when the plan built over it reaches the core, as
+    ``DataFrame(plan, session)`` or a command does, also after the DataFrame is gone. It is one
+    message, an extension whose value holds the relation encoded, so a plan of ``pyspark.ml`` over a
+    deep DataFrame is never decoded in Python, as protobuf decoders limit the depth of what they
+    decode. ``DataFrame(df._plan, session)`` is a DataFrame of the plan of ``df`` itself, as
+    PySpark's is of the plan object of ``df``. Its copies are of its class and its fields, of the
+    same plan for ``copy.copy`` and of a deep copy of it for ``copy.deepcopy``, as PySpark's."""
 
     def __init__(self, df: Any) -> None:
-        super().__init__(None)
-        self._df = df
+        # LogicalPlan's fields, in the order of its __init__, of the plan IDs of the DataFrame
+        # rather than of new ones.
+        plan_id, root_plan_id = self._plan_ids()
+        self._child = None
+        self._root_plan_id = plan_id if root_plan_id is None else root_plan_id
+        self._references: Sequence[LogicalPlan] = []
+        self._plan_id_with_rel: Optional[int] = None if root_plan_id is None else plan_id
 
     def plan(self, session: Any) -> "proto.Relation":
-        return proto.Relation.FromString(self._df._relation_placeholder())
+        # Built of the session of the client ``session``, as PySpark's plan builds the plan objects
+        # that it holds of the client that it is given.
+        return proto.Relation.FromString(self._relation_placeholder(session))
 
     @property
     def observations(self) -> dict[str, Any]:
         # As PySpark's plan of a DataFrame, whose ``observations`` are the Observations of its
         # plan by their names, which the DataFrame gives the executions of the client, and so do
         # the plans over it, such as a ``SubqueryAlias``: those of the core's plan.
-        return self._df._observations()
+        return self._observations()
+
+    def __reduce__(self) -> tuple[Any, tuple[Any, ...]]:
+        # As PySpark's plan object of a DataFrame, which pickles its fields and no session: the
+        # plan of the relation of the DataFrame as it was sent (``_column_reduce.sent_plan``), of
+        # the functions of its UDFs, of the error of a plan that does not build and of the
+        # Observations of the plan, a LogicalPlan on the client and on a Python worker of the
+        # server, which has no class of the drop-in. So a plan of the Python client over this
+        # one, such as a ``SubqueryAlias``, pickles plainly and unpickles on the worker, as
+        # PySpark's does. One of the plan of a model fails as PySpark's, as the DataFrame's.
+        return self._plan_reduce(self.observations)
 
 
 class Read(LogicalPlan):
@@ -195,7 +225,22 @@ class Read(LogicalPlan):
             plan.read.named_table.options[k] = v
         return plan
 
+    # The docstring of PySpark Connect's `LogicalPlan.print`, which `inspect.getdoc` and `help()`
+    # find of its `Read.print`, of none of its own: the `LogicalPlan` here has no `print`.
     def print(self, indent: int = 0) -> str:
+        """
+        Print the simple string representation of the current :class:`LogicalPlan`.
+
+        Parameters
+        ----------
+        indent : int
+            The number of leading spaces for the output string.
+
+        Returns
+        -------
+        str
+            Simple string representation of this :class:`LogicalPlan`.
+        """
         return f"{' ' * indent}<Read table_name={self.table_name}>\n"
 
 
@@ -326,3 +371,212 @@ class RemoveRemoteCachedRelation(LogicalPlan):
 
 
 __all__ = ["LogicalPlan", "Read", "Range", "SQL", "SubqueryAlias", "CachedRemoteRelation"]
+
+
+# The write operations of PySpark Connect's writers and stream writer, of Apache Spark v4.3.0
+# (python/pyspark/sql/connect/plan.py), which the drop-in's writers, PySpark's classes, keep as their
+# `_write` (and `_write_stream`) and send the command of, as PySpark's: a command over the relation
+# of the plan of the DataFrame, the core's placeholder (see `_DataFramePlan`), which the client
+# executes.
+
+
+class WriteOperation(LogicalPlan):
+    def __init__(self, child: "LogicalPlan") -> None:
+        super().__init__(child)
+        self.source: Optional[str] = None
+        self.path: Optional[str] = None
+        self.table_name: Optional[str] = None
+        self.table_save_method: Optional[str] = None
+        self.mode: Optional[str] = None
+        self.sort_cols: list[str] = []
+        self.partitioning_cols: list[str] = []
+        self.clustering_cols: list[str] = []
+        self.options: dict[str, Optional[str]] = {}
+        self.num_buckets: int = -1
+        self.bucket_cols: list[str] = []
+        self.with_schema_evolution: bool = False
+
+    def command(self, session: Any) -> proto.Command:
+        assert self._child is not None
+        plan = proto.Command()
+
+        plan.write_operation.input.CopyFrom(self._child.plan(session))
+        if self.source is not None:
+            plan.write_operation.source = self.source
+        plan.write_operation.sort_column_names.extend(self.sort_cols)
+        plan.write_operation.partitioning_columns.extend(self.partitioning_cols)
+        plan.write_operation.clustering_columns.extend(self.clustering_cols)
+        plan.write_operation.with_schema_evolution = self.with_schema_evolution
+
+        if self.num_buckets > 0:
+            plan.write_operation.bucket_by.bucket_column_names.extend(self.bucket_cols)
+            plan.write_operation.bucket_by.num_buckets = self.num_buckets
+
+        for k in self.options:
+            if self.options[k] is None:
+                plan.write_operation.options.pop(k, None)
+            else:
+                plan.write_operation.options[k] = cast(str, self.options[k])
+
+        if self.table_name is not None:
+            plan.write_operation.table.table_name = self.table_name
+            if self.table_save_method is not None:
+                tsm = self.table_save_method.lower()
+                if tsm == "save_as_table":
+                    plan.write_operation.table.save_method = proto.WriteOperation.SaveTable.TableSaveMethod.TABLE_SAVE_METHOD_SAVE_AS_TABLE
+                elif tsm == "insert_into":
+                    plan.write_operation.table.save_method = (
+                        proto.WriteOperation.SaveTable.TableSaveMethod.TABLE_SAVE_METHOD_INSERT_INTO
+                    )
+                else:
+                    raise PySparkValueError(
+                        errorClass="UNSUPPORTED_OPERATION",
+                        messageParameters={"operation": tsm},
+                    )
+        elif self.path is not None:
+            plan.write_operation.path = self.path
+
+        if self.mode is not None:
+            wm = self.mode.lower()
+            if wm == "append":
+                plan.write_operation.mode = proto.WriteOperation.SaveMode.SAVE_MODE_APPEND
+            elif wm == "overwrite":
+                plan.write_operation.mode = proto.WriteOperation.SaveMode.SAVE_MODE_OVERWRITE
+            elif wm == "error":
+                plan.write_operation.mode = proto.WriteOperation.SaveMode.SAVE_MODE_ERROR_IF_EXISTS
+            elif wm == "ignore":
+                plan.write_operation.mode = proto.WriteOperation.SaveMode.SAVE_MODE_IGNORE
+            else:
+                raise PySparkValueError(
+                    errorClass="UNSUPPORTED_OPERATION",
+                    messageParameters={"operation": self.mode},
+                )
+        return plan
+
+    def print(self, indent: int = 0) -> str:
+        # The docstring of PySpark Connect's `LogicalPlan.print`, which `inspect.getdoc` and `help()`
+        # find of its `WriteOperation.print`, of none of its own: the `LogicalPlan` here has no
+        # `print`.
+        """
+        Print the simple string representation of the current :class:`LogicalPlan`.
+
+        Parameters
+        ----------
+        indent : int
+            The number of leading spaces for the output string.
+
+        Returns
+        -------
+        str
+            Simple string representation of this :class:`LogicalPlan`.
+        """
+        i = " " * indent
+        return (
+            f"{i}"
+            f"<WriteOperation source='{self.source}' "
+            f"path='{self.path} "
+            f"table_name='{self.table_name}' "
+            f"table_save_method='{self.table_save_method}' "
+            f"mode='{self.mode}' "
+            f"sort_cols='{self.sort_cols}' "
+            f"partitioning_cols='{self.partitioning_cols}' "
+            f"clustering_cols='{self.clustering_cols}' "
+            f"num_buckets='{self.num_buckets}' "
+            f"bucket_cols='{self.bucket_cols}' "
+            f"options='{self.options}'>"
+        )
+
+    def _repr_html_(self) -> str:
+        return (
+            f"<uL><li>WriteOperation <br />source='{self.source}'<br />"
+            f"path: '{self.path}<br />"
+            f"table_name: '{self.table_name}' <br />"
+            f"table_save_method: '{self.table_save_method}' <br />"
+            f"mode: '{self.mode}' <br />"
+            f"sort_cols: '{self.sort_cols}' <br />"
+            f"partitioning_cols: '{self.partitioning_cols}' <br />"
+            f"clustering_cols: '{self.clustering_cols}' <br />"
+            f"num_buckets: '{self.num_buckets}' <br />"
+            f"bucket_cols: '{self.bucket_cols}' <br />"
+            f"options: '{self.options}'<br />"
+            f"</li></ul>"
+        )
+
+
+class WriteOperationV2(LogicalPlan):
+    def __init__(self, child: "LogicalPlan", table_name: str) -> None:
+        super().__init__(child)
+        self.table_name: Optional[str] = table_name
+        self.provider: Optional[str] = None
+        self.partitioning_columns: list[Column] = []
+        self.clustering_columns: list[str] = []
+        self.options: dict[str, Optional[str]] = {}
+        self.table_properties: dict[str, Optional[str]] = {}
+        self.mode: Optional[str] = None
+        self.overwrite_condition: Optional[Column] = None
+        self.with_schema_evolution: bool = False
+
+    def command(self, session: Any) -> proto.Command:
+        assert self._child is not None
+        plan = proto.Command()
+        plan.write_operation_v2.input.CopyFrom(self._child.plan(session))
+        if self.table_name is not None:
+            plan.write_operation_v2.table_name = self.table_name
+        if self.provider is not None:
+            plan.write_operation_v2.provider = self.provider
+
+        plan.write_operation_v2.partitioning_columns.extend(
+            [c.to_plan(session) for c in self.partitioning_columns]
+        )
+        plan.write_operation_v2.clustering_columns.extend(self.clustering_columns)
+        plan.write_operation_v2.with_schema_evolution = self.with_schema_evolution
+
+        for k in self.options:
+            if self.options[k] is None:
+                plan.write_operation_v2.options.pop(k, None)
+            else:
+                plan.write_operation_v2.options[k] = cast(str, self.options[k])
+
+        for k in self.table_properties:
+            if self.table_properties[k] is None:
+                plan.write_operation_v2.table_properties.pop(k, None)
+            else:
+                plan.write_operation_v2.table_properties[k] = cast(str, self.table_properties[k])
+
+        if self.mode is not None:
+            wm = self.mode.lower()
+            if wm == "create":
+                plan.write_operation_v2.mode = proto.WriteOperationV2.Mode.MODE_CREATE
+            elif wm == "overwrite":
+                plan.write_operation_v2.mode = proto.WriteOperationV2.Mode.MODE_OVERWRITE
+                if self.overwrite_condition is not None:
+                    plan.write_operation_v2.overwrite_condition.CopyFrom(
+                        self.overwrite_condition.to_plan(session)
+                    )
+            elif wm == "overwrite_partitions":
+                plan.write_operation_v2.mode = proto.WriteOperationV2.Mode.MODE_OVERWRITE_PARTITIONS
+            elif wm == "append":
+                plan.write_operation_v2.mode = proto.WriteOperationV2.Mode.MODE_APPEND
+            elif wm == "replace":
+                plan.write_operation_v2.mode = proto.WriteOperationV2.Mode.MODE_REPLACE
+            elif wm == "create_or_replace":
+                plan.write_operation_v2.mode = proto.WriteOperationV2.Mode.MODE_CREATE_OR_REPLACE
+            else:
+                raise PySparkValueError(
+                    errorClass="UNSUPPORTED_OPERATION",
+                    messageParameters={"operation": self.mode},
+                )
+        return plan
+
+
+class WriteStreamOperation(LogicalPlan):
+    def __init__(self, child: "LogicalPlan") -> None:
+        super().__init__(child)
+        self.write_op = proto.WriteStreamOperationStart()
+
+    def command(self, session: Any) -> proto.Command:
+        assert self._child is not None
+        self.write_op.input.CopyFrom(self._child.plan(session))
+        cmd = proto.Command()
+        cmd.write_stream_operation_start.CopyFrom(self.write_op)
+        return cmd

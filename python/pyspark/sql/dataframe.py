@@ -14,17 +14,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""The public DataFrame base and its concrete Rust-backed implementation.
-
-As in PySpark, ``pyspark.sql.DataFrame`` is a Python base/factory, whereas
-``pyspark.sql.connect.dataframe.DataFrame`` is the concrete remote DataFrame.  Keeping
-the public base in Python lets user-defined subclasses allocate their own Python state
-with ``object.__new__``.  A concrete frame must still be allocated by the native class:
-its Rust payload cannot be initialized by Python's object allocator.
-"""
+# The public DataFrame base and its concrete Rust-backed implementation.
+#
+# As in PySpark, ``pyspark.sql.DataFrame`` is a Python base/factory, whereas
+# ``pyspark.sql.connect.dataframe.DataFrame`` is the concrete remote DataFrame.  Keeping
+# the public base in Python lets user-defined subclasses allocate their own Python state
+# with ``object.__new__``.  A concrete frame must still be allocated by the native class:
+# its Rust payload cannot be initialized by Python's object allocator.
 
 from abc import ABCMeta
-from functools import wraps
+from functools import cached_property, wraps
 from inspect import signature
 from types import (
     ClassMethodDescriptorType,
@@ -33,17 +32,23 @@ from types import (
     MethodDescriptorType,
     WrapperDescriptorType,
 )
-from typing import TYPE_CHECKING, NamedTuple, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, NamedTuple, Optional, Tuple, Union, overload
 
-from pyspark._pyspark import (
-    Column,
-    DataFrameNaFunctions,
-    DataFrameStatFunctions,
-    TableArg,
-)
+from pyspark import _NoValue
+from pyspark._globals import _NoValueType
 from pyspark._pyspark import (
     DataFrame as _NativeDataFrame,
 )
+from pyspark.sql._classic_bases import _ClassicMeta
+
+# PySpark's docstrings of the members of its classic DataFrame that differ from those of the native
+# class, which are those that `inspect.getdoc` and `help()` find of PySpark's Connect DataFrame
+# (scripts/gen_connect_docstrings.py): the public base takes them in their place.
+from pyspark.sql._classic_docs_generated import DATAFRAME as _classic_docstrings
+
+# PySpark's, of the annotations of the classes of this module, as its module imports them.
+from pyspark.sql.column import Column
+from pyspark.sql.table_arg import TableArg
 
 # Of PySpark's pyspark.sql.dataframe, whose namespace the official doctests of the DataFrame take
 # as their globals (pyspark.sql.connect.dataframe._test), and whose examples use these names.
@@ -56,6 +61,7 @@ if TYPE_CHECKING:
 
     from pyspark.core.context import SparkContext
     from pyspark.core.rdd import RDD
+    from pyspark.sql._typing import LiteralType, OptionalPrimitiveType
     from pyspark.sql.context import SQLContext
     from pyspark.sql.pandas._typing import DataFrameLike as PandasDataFrameLike
     from pyspark.sql.session import SparkSession
@@ -66,6 +72,25 @@ _public_dataframe = None
 _initial_public_attributes = {}
 _native_overrides = {}
 _missing = object()
+
+
+# As PySpark Connect's `DataFrame.isStreaming`, a `functools.cached_property` of the class body of
+# its pyspark.sql.connect.dataframe: the first access keeps the answer in the `__dict__` of the
+# DataFrame, which the next ones read, of the request of the native class. It is installed on
+# the native class here, before the public base reads the attributes of that class.
+def isStreaming(self: Any) -> bool:
+    return self._is_streaming()
+
+
+isStreaming.__qualname__ = "DataFrame.isStreaming"
+isStreaming.__module__ = "pyspark.sql.connect.dataframe"
+if not isinstance(vars(_NativeDataFrame).get("isStreaming"), cached_property):
+    _cached_is_streaming = cached_property(isStreaming)
+    _cached_is_streaming.__set_name__(_NativeDataFrame, "isStreaming")
+    _NativeDataFrame.isStreaming = _cached_is_streaming
+    del _cached_is_streaming
+del isStreaming
+
 # The native class's own attributes, which a patch of the public base may replace.
 _native_originals = dict(vars(_NativeDataFrame))
 
@@ -262,6 +287,12 @@ def _not_implemented(name):
     )
 
 
+def _docstring(name, attribute):
+    """The docstring of the member `name` of the public base, PySpark's of its classic DataFrame:
+    that of the native class's `attribute`, or of `_classic_docstrings` where they differ."""
+    return _classic_docstrings.get(name, attribute.__doc__)
+
+
 def _dispatch_method(name, method):
     @wraps(method)
     def dispatched(self, *args, **kwargs):
@@ -281,6 +312,7 @@ def _dispatch_method(name, method):
 
     dispatched.__module__ = __name__
     dispatched.__qualname__ = f"DataFrame.{name}"
+    dispatched.__doc__ = _docstring(name, method)
     return dispatched
 
 
@@ -294,11 +326,11 @@ def _empty_property(name, descriptor):
     get.__name__ = name
     get.__module__ = __name__
     get.__qualname__ = f"DataFrame.{name}"
-    return property(get, doc=descriptor.__doc__)
+    return property(get, doc=_docstring(name, descriptor))
 
 
 class DataFrame(metaclass=_DataFrameMeta):
-    __doc__ = _NativeDataFrame.__doc__
+    __doc__ = _classic_docstrings.get("", _NativeDataFrame.__doc__)
     # PySpark's annotations of the attributes of its frames, which make no attribute.
     _sql_ctx: Optional["SQLContext"]
     _session: "SparkSession"
@@ -380,9 +412,9 @@ for _name, _attribute in vars(_NativeDataFrame).items():
         "__reduce__", "__reduce_ex__", "__getstate__", "__hash__", "__sizeof__",
     }:
         continue
-    if _name in {"_session", "_plan", "is_cached"}:
-        # These getters access native storage. Independent Python subclasses can
-        # assign ordinary instance attributes instead of inheriting those descriptors.
+    if _name in {"is_cached", "_schema", "_is_streaming"}:
+        # These access native storage, of no member of PySpark's public base. Independent Python
+        # subclasses can assign ordinary instance attributes instead of inheriting them.
         continue
     if _name in {"__getattr__", "_get_column_by_attribute"}:
         # The explicit public hook above owns the special-method dispatch. Its
@@ -390,7 +422,7 @@ for _name, _attribute in vars(_NativeDataFrame).items():
         continue
     if _name in _empty_public_methods:
         _public_attribute = vars(DataFrame)[_name]
-        _public_attribute.__doc__ = _attribute.__doc__
+        _public_attribute.__doc__ = _docstring(_name, _attribute)
     elif isinstance(_attribute, staticmethod):
         _public_attribute = _attribute
     elif isinstance(_attribute, (classmethod, ClassMethodDescriptorType)):
@@ -399,7 +431,7 @@ for _name, _attribute in vars(_NativeDataFrame).items():
         raise TypeError(
             f"Native DataFrame classmethod requires an explicit public binding: {_name}"
         )
-    elif isinstance(_attribute, GetSetDescriptorType):
+    elif isinstance(_attribute, (GetSetDescriptorType, cached_property)):
         _public_attribute = _empty_property(_name, _attribute)
     elif isinstance(_attribute, (FunctionType, MethodDescriptorType, WrapperDescriptorType)):
         _public_attribute = _dispatch_method(_name, _attribute)
@@ -418,3 +450,149 @@ DataFrame.register(_NativeDataFrame)
 _public_dataframe = DataFrame
 
 del _name, _attribute, _public_attribute
+
+
+# PySpark's classic classes of `df.na` and `df.stat`, of its module: the native Connect classes of
+# pyspark.sql.connect.dataframe are their virtual subclasses, as PySpark Connect's are their
+# subclasses (pyspark.sql._classic_bases), and their explicit calls dispatch as PySpark's
+# dispatch_df_method does. PySpark's classes are of `type`.
+from pyspark.sql.utils import dispatch_df_method  # noqa: E402
+
+
+class DataFrameNaFunctions(metaclass=_ClassicMeta):
+    """Functionality for working with missing data in :class:`DataFrame`.
+
+    .. versionadded:: 1.4.0
+
+    .. versionchanged:: 3.4.0
+        Supports Spark Connect.
+    """
+
+    def __init__(self, df: DataFrame):
+        self.df = df
+
+    @dispatch_df_method
+    def drop(
+        self,
+        how: str = "any",
+        thresh: Optional[int] = None,
+        subset: Optional[Union[str, Tuple[str, ...], List[str]]] = None,
+    ) -> DataFrame: ...
+
+    drop.__doc__ = DataFrame.dropna.__doc__
+
+    @overload
+    def fill(self, value: "LiteralType", subset: Optional[List[str]] = ...) -> DataFrame: ...
+
+    @overload
+    def fill(self, value: Dict[str, "LiteralType"]) -> DataFrame: ...
+
+    @dispatch_df_method
+    def fill(
+        self,
+        value: Union["LiteralType", Dict[str, "LiteralType"]],
+        subset: Optional[List[str]] = None,
+    ) -> DataFrame: ...
+
+    fill.__doc__ = DataFrame.fillna.__doc__
+
+    @overload
+    def replace(
+        self,
+        to_replace: List["LiteralType"],
+        value: List["OptionalPrimitiveType"],
+        subset: Optional[List[str]] = ...,
+    ) -> DataFrame: ...
+
+    @overload
+    def replace(
+        self,
+        to_replace: Dict["LiteralType", "OptionalPrimitiveType"],
+        subset: Optional[List[str]] = ...,
+    ) -> DataFrame: ...
+
+    @overload
+    def replace(
+        self,
+        to_replace: List["LiteralType"],
+        value: "OptionalPrimitiveType",
+        subset: Optional[List[str]] = ...,
+    ) -> DataFrame: ...
+
+    @dispatch_df_method  # type: ignore[misc]
+    def replace(
+        self,
+        to_replace: Union[List["LiteralType"], Dict["LiteralType", "OptionalPrimitiveType"]],
+        value: Optional[
+            Union["OptionalPrimitiveType", List["OptionalPrimitiveType"], _NoValueType]
+        ] = _NoValue,
+        subset: Optional[List[str]] = None,
+    ) -> DataFrame: ...
+
+    replace.__doc__ = DataFrame.replace.__doc__
+
+
+class DataFrameStatFunctions(metaclass=_ClassicMeta):
+    """Functionality for statistic functions with :class:`DataFrame`.
+
+    .. versionadded:: 1.4.0
+
+    .. versionchanged:: 3.4.0
+        Supports Spark Connect.
+    """
+
+    def __init__(self, df: DataFrame):
+        self.df = df
+
+    @overload
+    def approxQuantile(
+        self,
+        col: str,
+        probabilities: Union[List[float], Tuple[float]],
+        relativeError: float,
+    ) -> List[float]: ...
+
+    @overload
+    def approxQuantile(
+        self,
+        col: Union[List[str], Tuple[str]],
+        probabilities: Union[List[float], Tuple[float]],
+        relativeError: float,
+    ) -> List[List[float]]: ...
+
+    @dispatch_df_method
+    def approxQuantile(
+        self,
+        col: Union[str, List[str], Tuple[str]],
+        probabilities: Union[List[float], Tuple[float]],
+        relativeError: float,
+    ) -> Union[List[float], List[List[float]]]: ...
+
+    approxQuantile.__doc__ = DataFrame.approxQuantile.__doc__
+
+    @dispatch_df_method
+    def corr(self, col1: str, col2: str, method: Optional[str] = None) -> float: ...
+
+    corr.__doc__ = DataFrame.corr.__doc__
+
+    @dispatch_df_method
+    def cov(self, col1: str, col2: str) -> float: ...
+
+    cov.__doc__ = DataFrame.cov.__doc__
+
+    @dispatch_df_method
+    def crosstab(self, col1: str, col2: str) -> DataFrame: ...
+
+    crosstab.__doc__ = DataFrame.crosstab.__doc__
+
+    @dispatch_df_method
+    def freqItems(self, cols: List[str], support: Optional[float] = None) -> DataFrame: ...
+
+    freqItems.__doc__ = DataFrame.freqItems.__doc__
+
+    @dispatch_df_method
+    def sampleBy(
+        self, col: str, fractions: Dict[Any, float], seed: Optional[int] = None
+    ) -> DataFrame: ...
+
+    sampleBy.__doc__ = DataFrame.sampleBy.__doc__

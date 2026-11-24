@@ -1130,17 +1130,81 @@ pub trait Transformer: Send + Sync {
         &self,
         input: &DataFrame,
     ) -> spark_connect_core::error::Result<proto::MlRelation> {
-        let mut transform = proto::ml_relation::Transform::default();
-        transform.operator = Some(proto::ml_relation::transform::Operator::Transformer(
-            self.operator().to_proto(),
-        ));
-        transform.input = Some(Box::new(input.relation()?));
-        transform.params = Some(self.params().sendable()?);
-
-        let mut ml_relation = proto::MlRelation::default();
-        ml_relation.ml_type = Some(proto::ml_relation::MlType::Transform(Box::new(transform)));
-        Ok(ml_relation)
+        with_transform_input(
+            operator_transform(
+                proto::ml_relation::transform::Operator::Transformer(self.operator().to_proto()),
+                self.params(),
+            )?,
+            input,
+        )
     }
+}
+
+/// The MlRelation of the transform of `operator` of the params `params`, of no input, which the
+/// DataFrame of the transform builds at each request ([`transform_of`]): the params are sent as
+/// they are now, as PySpark's `try_remote_transform_relation` serializes them at the transform.
+pub(crate) fn operator_transform(
+    operator: proto::ml_relation::transform::Operator,
+    params: &Params,
+) -> spark_connect_core::error::Result<proto::MlRelation> {
+    Ok(proto::MlRelation {
+        ml_type: Some(proto::ml_relation::MlType::Transform(Box::new(
+            proto::ml_relation::Transform {
+                operator: Some(operator),
+                input: None,
+                params: Some(params.sendable()?),
+            },
+        ))),
+        ..Default::default()
+    })
+}
+
+/// The transform `ml_relation` (of [`operator_transform`]) of the relation of `input`, as it is
+/// built now.
+fn with_transform_input(
+    mut ml_relation: proto::MlRelation,
+    input: &DataFrame,
+) -> spark_connect_core::error::Result<proto::MlRelation> {
+    if let Some(proto::ml_relation::MlType::Transform(transform)) = &mut ml_relation.ml_type {
+        transform.input = Some(Box::new(input.relation()?));
+    }
+    Ok(ml_relation)
+}
+
+/// The DataFrame of the transform of `df` of the relation `relation` (an `MlRelation` of
+/// [`operator_transform`]), of `owner`, as PySpark's `TransformerRelation`: a request builds the
+/// relation of `df` then, as the input of the transform, with the pickles of the functions of its
+/// UDFs and its errors (see [`crate::plan::MlInputAt`]).
+pub(crate) fn transform_of(
+    df: &DataFrame,
+    relation: proto::Relation,
+    owner: Option<RelationOwner>,
+) -> DataFrame {
+    DataFrame::new(
+        df.session.clone(),
+        LogicalPlan::MlTransform {
+            ml_relation: Box::new(relation),
+            input: df.plan.clone(),
+            owner,
+            input_at: crate::plan::MlInputAt::TransformInput,
+        },
+    )
+}
+
+/// The DataFrame of the transform `ml_relation` (of [`Transformer::build_ml_relation`], whose input
+/// it drops) of `df`, of no owner, whose requests build the relation of `df` as its input, as
+/// PySpark's `TransformerRelation`: the binding's transform of a DataFrame of another session than
+/// its model's, which refers to the model of that session. Not a stable API.
+#[doc(hidden)]
+pub fn transform_without_owner(df: &DataFrame, mut ml_relation: proto::MlRelation) -> DataFrame {
+    if let Some(proto::ml_relation::MlType::Transform(transform)) = &mut ml_relation.ml_type {
+        transform.input = None;
+    }
+    let relation = proto::Relation {
+        rel_type: Some(proto::relation::RelType::MlRelation(Box::new(ml_relation))),
+        ..Default::default()
+    };
+    transform_of(df, relation, None)
 }
 
 /// Base trait for ML Models (result of fitting an Estimator).
@@ -1149,6 +1213,31 @@ pub trait Transformer: Send + Sync {
 pub trait Model: Transformer + AsAny {
     /// Clone this model into a boxed trait object.
     fn clone_box(&self) -> Box<dyn Model>;
+
+    /// The references of the model to the parts of plans (see [`crate::gc`]), each field once: of
+    /// the summary dataset of its training summary, and of those of the models that it holds, such
+    /// as the models of the classes of a OneVsRestModel, of their binary training sets. None of a
+    /// model of no summary dataset. Not a stable API.
+    #[doc(hidden)]
+    fn held_parts(&self) -> Vec<crate::gc::PartRef<'_>> {
+        Vec::new()
+    }
+
+    /// Drop the references that [`Model::held_parts`] gives, the training summaries of the model
+    /// and of the models that it holds, which it then has not: the garbage collector of a binding
+    /// breaks a reference cycle through its wrapper this way (see
+    /// [`DataFrame::clear_plan`](crate::DataFrame::clear_plan)). Not a stable API.
+    #[doc(hidden)]
+    fn clear_held_parts(&mut self) {}
+
+    /// The target of the training summary that the model holds, of the object of the model (see
+    /// [`training_summary`]), if it holds one: the field of the model of the
+    /// [`Model::held_parts`] of its training summary. None of a model of none, such as a loaded
+    /// one. Not a stable API.
+    #[doc(hidden)]
+    fn training_summary(&self) -> Option<&MlTarget> {
+        None
+    }
 
     /// The server-side object of the model, whose methods [`fetch`] reads (see
     /// [`MlTarget::object`]), of a model that the server holds. None of a model that holds no
@@ -1200,6 +1289,24 @@ pub trait Model: Transformer + AsAny {
         })?;
         Ok(MlWriter::object(object, self.params()))
     }
+}
+
+/// The [`Model::held_parts`] and [`Model::clear_held_parts`] of a model whose training summary,
+/// the target of a summary dataset, is the field `$field` (an `Option<MlTarget>`).
+macro_rules! training_summary_parts {
+    ($field:ident) => {
+        fn held_parts(&self) -> Vec<crate::gc::PartRef<'_>> {
+            self.$field.iter().flat_map(MlTarget::held_parts).collect()
+        }
+
+        fn clear_held_parts(&mut self) {
+            self.$field = None;
+        }
+
+        fn training_summary(&self) -> Option<&MlTarget> {
+            self.$field.as_ref()
+        }
+    };
 }
 
 /// The concrete type of a boxed model, as `Model` is a supertrait of it: `model.downcast_ref`
@@ -1594,16 +1701,14 @@ impl Transformer for VectorAssembler {
     }
 
     fn transform_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<DataFrame> {
-        let ml_relation = self.build_ml_relation(df)?;
+        let ml_relation = operator_transform(
+            proto::ml_relation::transform::Operator::Transformer(self.operator.to_proto()),
+            &self.params,
+        )?;
         let mut relation = proto::Relation::default();
         relation.common = Some(proto::RelationCommon::default());
         relation.rel_type = Some(proto::relation::RelType::MlRelation(Box::new(ml_relation)));
-        let plan = LogicalPlan::MlTransform {
-            ml_relation: relation,
-            input: df.plan.clone(),
-            owner: None,
-        };
-        Ok(DataFrame::new(df.session.clone(), plan))
+        Ok(transform_of(df, relation, None))
     }
 }
 
@@ -1944,7 +2049,8 @@ fn fit_warning_of(info: &proto::ml_command_result::MlOperatorInfo) -> Option<&st
 /// A server-side ML object: a fitted model, or another object that a fetch returns (a submodel, a
 /// tree of an ensemble), shared by its clones and by every DataFrame whose plan reads it (through
 /// the [`RelationOwner`] of their plans). The last owner to drop deletes the cached object on the
-/// server, as PySpark's `RemoteModelRef` does.
+/// server, as PySpark's `RemoteModelRef` does; of an object that this client does not own
+/// ([`MlRef::of_reference`]), it runs the release of the object's owner instead.
 #[derive(Debug, Clone)]
 pub struct MlRef(Arc<CachedModelRef>);
 
@@ -1956,6 +2062,14 @@ struct CachedModelRef {
     session: SparkSession,
     /// The warning that the server sent with the model of a fit (see [`MlRef::fit_warning`]).
     fit_warning: Option<String>,
+    /// The release of an object that this client does not own, which the drop runs in place of
+    /// the deletion of the object (see [`MlRef::of_reference`]).
+    release: Option<Box<dyn FnOnce() + Send + Sync>>,
+    /// Whether the drop keeps the object on the server (see [`MlRef::keep`]).
+    kept: std::sync::atomic::AtomicBool,
+    /// Whether the object was deleted before the drop, which then deletes nothing (see
+    /// [`MlRef::release`]).
+    released: std::sync::atomic::AtomicBool,
 }
 
 impl std::fmt::Debug for CachedModelRef {
@@ -1968,6 +2082,13 @@ impl std::fmt::Debug for CachedModelRef {
 
 impl Drop for CachedModelRef {
     fn drop(&mut self) {
+        if *self.kept.get_mut() || *self.released.get_mut() {
+            return;
+        }
+        if let Some(release) = self.release.take() {
+            release();
+            return;
+        }
         // Sent without waiting, and its errors (a stopped session, a closed channel) are
         // ignored, as PySpark ignores them when it releases a model.
         self.session
@@ -1989,6 +2110,9 @@ impl CachedModel {
                     model_ref: reference.clone(),
                     session: session.clone(),
                     fit_warning: fit_warning_of(info).map(str::to_string),
+                    release: None,
+                    kept: Default::default(),
+                    released: Default::default(),
                 })))
             }
             _ => Err(spark_connect_core::error::SparkError::connect_msg(format!(
@@ -2002,18 +2126,19 @@ impl CachedModel {
         df: &DataFrame,
         params: &Params,
     ) -> spark_connect_core::error::Result<proto::MlRelation> {
-        Ok(proto::MlRelation {
-            ml_type: Some(proto::ml_relation::MlType::Transform(Box::new(
-                proto::ml_relation::Transform {
-                    operator: Some(proto::ml_relation::transform::Operator::ObjRef(
-                        self.0.model_ref.clone(),
-                    )),
-                    input: Some(Box::new(df.relation()?)),
-                    params: Some(params.sendable()?),
-                },
-            ))),
-            ..Default::default()
-        })
+        with_transform_input(self.transform_relation(params)?, df)
+    }
+
+    /// The MlRelation of the transform by this model of `params`, of no input (see
+    /// [`operator_transform`]).
+    fn transform_relation(
+        &self,
+        params: &Params,
+    ) -> spark_connect_core::error::Result<proto::MlRelation> {
+        operator_transform(
+            proto::ml_relation::transform::Operator::ObjRef(self.0.model_ref.clone()),
+            params,
+        )
     }
 
     fn transform(
@@ -2028,18 +2153,15 @@ impl CachedModel {
         }
         let relation = proto::Relation {
             rel_type: Some(proto::relation::RelType::MlRelation(Box::new(
-                self.build_ml_relation(df, params)?,
+                self.transform_relation(params)?,
             ))),
             ..Default::default()
         };
         // The DataFrame keeps this model, and the plan of its input, alive.
-        Ok(DataFrame::new(
-            df.session.clone(),
-            LogicalPlan::MlTransform {
-                ml_relation: relation,
-                input: df.plan.clone(),
-                owner: Some(RelationOwner(self.0.clone())),
-            },
+        Ok(transform_of(
+            df,
+            relation,
+            Some(RelationOwner(self.0.clone())),
         ))
     }
 }
@@ -2164,6 +2286,7 @@ impl Model for LogisticRegressionModel {
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }
+    training_summary_parts!(summary);
 }
 
 /// Linear support vector classifier using Spark's JVM implementation.
@@ -2279,6 +2402,7 @@ impl Model for LinearSVCModel {
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }
+    training_summary_parts!(summary);
 }
 
 /// FMClassifier using Spark's JVM implementation and ML vectors.
@@ -2407,6 +2531,7 @@ impl Model for FMClassificationModel {
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }
+    training_summary_parts!(summary_target);
 }
 
 /// MultilayerPerceptronClassifier using Spark's JVM implementation and ML vectors.
@@ -2535,6 +2660,7 @@ impl Model for MultilayerPerceptronClassificationModel {
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }
+    training_summary_parts!(summary_target);
 }
 
 /// A native binary classifier that can be fitted independently for each OneVsRest class.
@@ -3170,6 +3296,20 @@ impl Model for OneVsRestModel {
         Box::new(self.clone())
     }
 
+    /// Of the models of the classes, whose training summaries are of their binary training sets.
+    fn held_parts(&self) -> Vec<crate::gc::PartRef<'_>> {
+        self.models
+            .iter()
+            .flat_map(|model| model.held_parts())
+            .collect()
+    }
+
+    fn clear_held_parts(&mut self) {
+        for model in &mut self.models {
+            model.clear_held_parts();
+        }
+    }
+
     /// The writer of PySpark's Python format, as `OneVsRestModelWriter` (see
     /// `OneVsRestModel::writer`).
     fn write(&self) -> spark_connect_core::error::Result<MlWriter> {
@@ -3349,6 +3489,7 @@ impl Model for LinearRegressionModel {
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }
+    training_summary_parts!(training_summary);
 }
 
 /// Generalized linear regression using Spark's JVM implementation and ML vector features.
@@ -3526,6 +3667,7 @@ impl Model for GeneralizedLinearRegressionModel {
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }
+    training_summary_parts!(training_summary);
 }
 
 /// Weibull accelerated failure time regression using Spark's JVM implementation.
@@ -4468,6 +4610,7 @@ impl Model for RandomForestClassificationModel {
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }
+    training_summary_parts!(training_summary);
 }
 
 /// Gradient-boosted regression using Spark's JVM implementation and ML vectors.
@@ -5226,6 +5369,7 @@ impl Model for KMeansModel {
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }
+    training_summary_parts!(training_summary);
 }
 
 /// Hierarchical bisecting K-means using Spark's JVM implementation and ML vectors.
@@ -5382,6 +5526,7 @@ impl Model for BisectingKMeansModel {
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }
+    training_summary_parts!(training_summary);
 }
 
 /// Gaussian mixture clustering fitted by Spark's JVM implementation using ML vectors.
@@ -5539,6 +5684,7 @@ impl Model for GaussianMixtureModel {
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }
+    training_summary_parts!(training_summary);
 }
 
 /// Latent Dirichlet Allocation, fitted by Spark Connect using the online or EM optimizer.
@@ -5831,9 +5977,10 @@ impl PowerIterationClustering {
         Ok(DataFrame::new(
             dataset.session.clone(),
             LogicalPlan::MlTransform {
-                ml_relation: relation,
+                ml_relation: Box::new(relation),
                 input: dataset.plan.clone(),
                 owner: None,
+                input_at: crate::plan::MlInputAt::Nowhere,
             },
         ))
     }
@@ -9332,5 +9479,117 @@ mod tests {
             ..Default::default()
         };
         assert!(ml_string_array(array(vec![long])).is_err());
+    }
+
+    /// The references that a model gives to the parts of the plans of the summary dataset of its
+    /// training summary, those of a OneVsRestModel, a PipelineModel and the validator models of
+    /// such models, and those that the owner of the DataFrame of a method of a summary gives, of
+    /// the summary dataset and of its arguments, are every reference to those parts, as a Python
+    /// wrapper counts them for the garbage collector (see `crate::gc`); a model cleared of them
+    /// gives none, and the others stay exact.
+    #[test]
+    fn held_parts_of_models_are_every_reference_to_the_parts_of_their_summary_datasets() {
+        use crate::gc::tests::assert_exact;
+        use crate::ml::object::{attribute_relation, FetchArg};
+        let session = SparkSession::builder()
+            .remote("sc://localhost:15002")
+            .get_or_create()
+            .expect("session");
+        let relation = proto::Relation {
+            common: None,
+            rel_type: Some(proto::relation::RelType::Sql(proto::Sql {
+                query: "SELECT 1 AS id".to_string(),
+                ..Default::default()
+            })),
+        };
+        let train = DataFrame::from_relation(session.clone(), relation, Some(Arc::new(7u8)))
+            .expect("relation")
+            .filter(crate::functions::col("id").gt(crate::column::lit(0)));
+        let other = session.range(2).expect("range");
+        let regression_object = MlRef::from_id(&session, "regression");
+        let regression = LinearRegressionModel {
+            operator: MlOperator::new(
+                "org.apache.spark.ml.regression.LinearRegressionModel",
+                OperatorType::Model,
+            ),
+            params: Params::new(),
+            training_summary: Some(training_summary(&regression_object, &train)),
+            cached: regression_object,
+        };
+        let kmeans_object = MlRef::from_id(&session, "kmeans");
+        let kmeans = KMeansModel {
+            operator: MlOperator::new(
+                "org.apache.spark.ml.clustering.KMeansModel",
+                OperatorType::Model,
+            ),
+            params: Params::new(),
+            training_summary: Some(training_summary(&kmeans_object, &train)),
+            cached: kmeans_object,
+        };
+        assert_eq!(regression.held_parts().len(), 1);
+        let one_vs_rest =
+            OneVsRestModel::new(&session, vec![regression.clone_box(), kmeans.clone_box()]);
+        let pipeline = PipelineModel::of_stages(vec![PipelineStage::Model(kmeans.clone_box())]);
+        let cross_validator = CrossValidatorModel::of_models(
+            regression.clone_box(),
+            Some(vec![vec![kmeans.clone_box(), regression.clone_box()]]),
+        );
+        let split = TrainValidationSplitModel::of_models(
+            kmeans.clone_box(),
+            Some(vec![regression.clone_box()]),
+        );
+        let summary = regression.training_summary.clone().expect("a summary");
+        let predictions =
+            attribute_relation(&summary, "predictions", Vec::new()).expect("relation");
+        let of_argument = attribute_relation(&summary, "roc", vec![FetchArg::Input(other.clone())])
+            .expect("relation");
+        let mut regression = regression;
+        assert_exact(
+            &[
+                train.held_parts(),
+                other.held_parts(),
+                regression.held_parts(),
+                kmeans.held_parts(),
+                one_vs_rest.held_parts(),
+                pipeline.held_parts(),
+                cross_validator.held_parts(),
+                split.held_parts(),
+                summary.held_parts(),
+                predictions.held_parts(),
+                of_argument.held_parts(),
+            ]
+            .concat(),
+        );
+        regression.clear_held_parts();
+        assert!(regression.held_parts().is_empty());
+        assert!(!regression.has_summary());
+        assert_exact(
+            &[
+                train.held_parts(),
+                other.held_parts(),
+                kmeans.held_parts(),
+                one_vs_rest.held_parts(),
+                pipeline.held_parts(),
+                cross_validator.held_parts(),
+                split.held_parts(),
+                summary.held_parts(),
+                predictions.held_parts(),
+                of_argument.held_parts(),
+            ]
+            .concat(),
+        );
+        let mut one_vs_rest = one_vs_rest;
+        one_vs_rest.clear_held_parts();
+        assert!(one_vs_rest.held_parts().is_empty());
+        let mut cross_validator = cross_validator;
+        cross_validator.clear_held_parts();
+        assert!(cross_validator.held_parts().is_empty());
+        let mut split = split;
+        split.clear_held_parts();
+        assert!(split.held_parts().is_empty());
+        // The objects of the models, which this test does not delete.
+        std::mem::forget((regression, kmeans, one_vs_rest, pipeline, summary));
+        std::mem::forget((cross_validator, split));
+        std::mem::forget((predictions, of_argument));
     }
 }

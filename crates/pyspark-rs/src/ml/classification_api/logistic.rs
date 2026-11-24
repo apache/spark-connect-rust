@@ -107,13 +107,14 @@ fn logistic_training_summary(
     target: spark_connect::ml::MlTarget,
 ) -> PyResult<Py<PyAny>> {
     if fetch_num_classes(py, &model.target()?)? <= 2 {
-        Ok(
-            crate::ml::object::new_py(py, PyBinaryLogisticRegressionTrainingSummary::from(target))?
-                .into_any(),
-        )
+        Ok(crate::ml::object::new_py(
+            py,
+            PyBinaryLogisticRegressionTrainingSummary::from(py, target),
+        )?
+        .into_any())
     } else {
         Ok(
-            crate::ml::object::new_py(py, PyLogisticRegressionTrainingSummary::from(target))?
+            crate::ml::object::new_py(py, PyLogisticRegressionTrainingSummary::from(py, target))?
                 .into_any(),
         )
     }
@@ -129,11 +130,14 @@ fn evaluated_summary_of(
 ) -> PyResult<Py<PyAny>> {
     if fetch_num_classes(py, model)? <= 2 {
         Ok(
-            crate::ml::object::new_py(py, PyBinaryLogisticRegressionSummary::from(summary))?
+            crate::ml::object::new_py(py, PyBinaryLogisticRegressionSummary::from(py, summary))?
                 .into_any(),
         )
     } else {
-        Ok(crate::ml::object::new_py(py, PyLogisticRegressionSummary::from(summary))?.into_any())
+        Ok(
+            crate::ml::object::new_py(py, PyLogisticRegressionSummary::from(py, summary))?
+                .into_any(),
+        )
     }
 }
 
@@ -348,10 +352,10 @@ native_summary! {
 
 /// Register the typed LogisticRegression models and summaries.
 pub(super) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<PyLogisticRegressionModel>()?;
-    m.add_class::<PyLogisticRegressionSummary>()?;
-    m.add_class::<PyLogisticRegressionTrainingSummary>()?;
-    m.add_class::<PyBinaryLogisticRegressionSummary>()?;
-    m.add_class::<PyBinaryLogisticRegressionTrainingSummary>()?;
+    crate::ml::object::register_class::<PyLogisticRegressionModel>(m)?;
+    crate::ml::object::register_class::<PyLogisticRegressionSummary>(m)?;
+    crate::ml::object::register_class::<PyLogisticRegressionTrainingSummary>(m)?;
+    crate::ml::object::register_class::<PyBinaryLogisticRegressionSummary>(m)?;
+    crate::ml::object::register_class::<PyBinaryLogisticRegressionTrainingSummary>(m)?;
     Ok(())
 }

@@ -39,7 +39,8 @@ _VARIABLE = "SPARK_CONNECT_RELEASE_SESSION_ON_EXIT"
 # modes "stop_wait" and "new_session_dropped_wait" stop the session, then print "ready" and hold
 # the child until a line on its stdin, for a test that stops the server before the child exits.
 # The mode "live_wait" does so with its session live, and prints "exiting" when it exits, just
-# before the exit hook of its session runs.
+# before the exit hook of its session runs. The modes "client_*" print the ID of the session of
+# the client that they drop.
 _CHILD = textwrap.dedent("""
     import os
     import sys
@@ -57,6 +58,23 @@ _CHILD = textwrap.dedent("""
     if mode == "new_session_dataframe":
         # Only a DataFrame of the new session is left, which holds the session.
         dataframe = sessions.pop().range(3)
+    if mode in (
+        "new_session_catalog_dropped",
+        "new_session_catalog_collected",
+        "new_session_streams_dropped",
+        "new_session_streams_collected",
+    ):
+        # The catalog, or the StreamingQueryManager, of the new session holds the session, which
+        # keeps it: a reference cycle, which its drop does not free, and which a collection frees.
+        if "_catalog_" in mode:
+            sessions[1].catalog
+        else:
+            sessions[1].streams
+        del sessions[1]
+        if mode.endswith("_collected"):
+            import gc
+
+            gc.collect()
     if mode == "new_session_dropped_wait":
         spark.stop()
         print("ready", flush=True)
@@ -65,17 +83,37 @@ _CHILD = textwrap.dedent("""
         from pyspark.sql.connect.client import SparkConnectClient
 
         # A client of a session of its own, which the child drops at once.
-        SparkConnectClient(remote)
+        print(SparkConnectClient(remote)._session_id, flush=True)
     if mode == "client_new_session_dropped":
-        spark.client.newSession()
+        print(spark.client.newSession()._session_id, flush=True)
     if mode == "client_clone_dropped":
-        spark.client.clone()
+        print(spark.client.clone()._session_id, flush=True)
     if mode == "stop":
         spark.stop()
+    if mode == "bad_global_extension":
+        # An extension that is not an Any, which fails the clean_cache of the exit, whose request
+        # carries the extensions, and not the release, whose request carries none.
+        spark.client.global_user_context_extensions.append(("bad", 5))
     if mode == "set_after_creation":
         os.environ["SPARK_CONNECT_RELEASE_SESSION_ON_EXIT"] = "true"
     if mode == "unset_after_creation":
         del os.environ["SPARK_CONNECT_RELEASE_SESSION_ON_EXIT"]
+    if mode == "release_attribute_set":
+        spark.client._release_session_on_exit = True
+    if mode == "release_attribute_unset":
+        spark.client._release_session_on_exit = False
+    if mode == "closed_attribute":
+        spark.client._closed = True
+    if mode == "closed_copy":
+        import copy
+
+        # A copy of the client, closed, whose request raises NO_ACTIVE_SESSION.
+        copied = copy.copy(spark.client)
+        copied._closed = True
+        try:
+            copied.get_configs("spark.a")
+        except Exception as error:
+            assert error.getCondition() == "NO_ACTIVE_SESSION", error
     if mode == "stop_wait":
         spark.stop()
         print("ready", flush=True)
@@ -180,17 +218,6 @@ def _exit_requests(service, session_id):
     return requests
 
 
-def _session_ids_of_requests(service):
-    # The IDs of the sessions of the requests that the server received, in the order of their
-    # first request.
-    session_ids = []
-    for _, data in service.recorded_order:
-        session_id = parse_message(data).get(1, [b""])[0].decode()
-        if session_id not in session_ids:
-            session_ids.append(session_id)
-    return session_ids
-
-
 def test_a_live_session_cleans_its_ml_cache_at_exit(exit_service):
     # (a) A session that is not stopped sends one clean_cache at exit, and nothing else.
     _, (session_id,) = _run_child(exit_service.remote, "plain")
@@ -220,6 +247,14 @@ def test_c_release_variable_values_as_pyspark(exit_service, value, released):
     assert _exit_requests(exit_service, session_id) == expected
 
 
+def test_c_release_at_exit_carries_no_user_context_extensions(exit_service):
+    # As PySpark's `_on_exit`, whose `_cleanup_ml_cache` fails to build its request of an extension
+    # that is not an Any, and whose `release_session` builds one of no extensions: the release is
+    # sent all the same.
+    _, (session_id,) = _run_child(exit_service.remote, "bad_global_extension", variable="true")
+    assert _exit_requests(exit_service, session_id) == ["release_session"]
+
+
 def test_d_variable_is_read_when_the_session_is_made(exit_service):
     # (d) The variable is read at the creation of the session, not at exit: one set after the
     # creation does not release the session, and one that is unset after it does.
@@ -228,6 +263,28 @@ def test_d_variable_is_read_when_the_session_is_made(exit_service):
 
     _, (session_id,) = _run_child(exit_service.remote, "unset_after_creation", variable="true")
     assert _exit_requests(exit_service, session_id) == ["clean_cache", "release_session"]
+
+
+def test_d_the_attribute_of_the_client_is_read_at_exit_as_pyspark(exit_service):
+    # (d) As PySpark's `_on_exit`, which reads the `_release_session_on_exit` of the client, which
+    # the variable sets when the client is made: set True, the exit releases the session, and set
+    # False, it does not.
+    _, (session_id,) = _run_child(exit_service.remote, "release_attribute_set")
+    assert _exit_requests(exit_service, session_id) == ["clean_cache", "release_session"]
+
+    _, (session_id,) = _run_child(exit_service.remote, "release_attribute_unset", variable="true")
+    assert _exit_requests(exit_service, session_id) == ["clean_cache"]
+
+
+def test_b_a_client_set_closed_sends_nothing_at_exit_as_pyspark(exit_service):
+    # (b) As PySpark's `_on_exit`, of the `_closed` of the client of the session: set True, the
+    # exit sends nothing, and a copy of the client that is closed, whose request raised, leaves
+    # the client open, which cleans its ML cache at exit.
+    _, (session_id,) = _run_child(exit_service.remote, "closed_attribute", variable="true")
+    assert _exit_requests(exit_service, session_id) == []
+
+    _, (session_id,) = _run_child(exit_service.remote, "closed_copy")
+    assert _exit_requests(exit_service, session_id) == ["clean_cache"]
 
 
 def test_g_closing_the_registered_sessions_makes_their_exit_send_nothing(exit_service):
@@ -269,6 +326,43 @@ def test_i_a_new_session_that_a_dataframe_holds_cleans_its_ml_cache_at_exit(
     assert _exit_requests(exit_service, session_id) == expected
 
 
+@pytest.mark.parametrize("variable", [None, "true"])
+def test_i_a_dropped_new_session_whose_catalog_was_read_is_open_until_a_collection(
+    exit_service, variable
+):
+    # (i) As PySpark's: once its catalog is read, a session and its Catalog, which holds the
+    # session as its `_sparkSession`, are a reference cycle, which the drop of the session does not
+    # free. So a newSession() that the child dropped after it read its catalog is open until a
+    # collection frees it: an exit before that sends its clean_cache (and its release, with the
+    # release variable), as PySpark's exit does, and after a collection, which closes it, nothing.
+    _, (_, dropped_id) = _run_child(exit_service.remote, "new_session_catalog_dropped", variable)
+    expected = ["clean_cache", "release_session"] if variable else ["clean_cache"]
+    assert _exit_requests(exit_service, dropped_id) == expected
+    _, (_, collected_id) = _run_child(
+        exit_service.remote, "new_session_catalog_collected", variable
+    )
+    assert _exit_requests(exit_service, collected_id) == []
+
+
+@pytest.mark.parametrize("variable", [None, "true"])
+def test_i_a_dropped_new_session_whose_streams_were_read_is_open_until_a_collection(
+    exit_service, variable
+):
+    # (i) As PySpark's: once its streams are read, a session and its StreamingQueryManager, which
+    # holds the session as its `_session`, are a reference cycle, which the drop of the session
+    # does not free. So a newSession() that the child dropped after it read its streams is open
+    # until a collection frees it: an exit before that sends its clean_cache (and its release, with
+    # the release variable), as PySpark's exit does, and after a collection, which closes it,
+    # nothing.
+    _, (_, dropped_id) = _run_child(exit_service.remote, "new_session_streams_dropped", variable)
+    expected = ["clean_cache", "release_session"] if variable else ["clean_cache"]
+    assert _exit_requests(exit_service, dropped_id) == expected
+    _, (_, collected_id) = _run_child(
+        exit_service.remote, "new_session_streams_collected", variable
+    )
+    assert _exit_requests(exit_service, collected_id) == []
+
+
 @pytest.mark.parametrize(
     "mode", ["client_dropped", "client_new_session_dropped", "client_clone_dropped"]
 )
@@ -278,12 +372,15 @@ def test_i_a_dropped_client_of_a_session_of_its_own_cleans_its_ml_cache_at_exit(
     # (i) The atexit registration of PySpark's SparkConnectClient keeps the client until the exit,
     # and no session object owns a client of SparkConnectClient(connection), or of the newSession
     # or the clone of a client, which none closes: its exit hook sends its clean_cache, even
-    # though the child dropped the client.
-    _, (session_id,) = _run_child(exit_service.remote, mode)
-    session_ids = _session_ids_of_requests(exit_service)
-    assert len(session_ids) == 2 and session_id in session_ids
-    (client_session_id,) = [other for other in session_ids if other != session_id]
+    # though the child dropped the client, as the session that the child keeps does. The requests
+    # are told apart by the sessions that the child printed, as each other test's are: a request
+    # of another session can reach the server too, such as a request of another process that is
+    # retried after its server stopped (the release of an execution, or the execution), once this
+    # server has the port of that one.
+    (session_id,), (client_session_id,) = _run_child_lines(exit_service.remote, mode)
+    assert client_session_id != session_id
     assert _exit_requests(exit_service, client_session_id) == ["clean_cache"]
+    assert _exit_requests(exit_service, session_id) == ["clean_cache"]
 
 
 def test_h_an_execution_once_the_interpreter_shuts_down_raises_pysparks_runtime_error(

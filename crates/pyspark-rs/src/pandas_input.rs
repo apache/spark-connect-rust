@@ -40,9 +40,10 @@ use crate::types::PyStructType;
 pub(crate) fn _pandas_string_ipc<'py>(
     py: Python<'py>,
     columns: Vec<Bound<'py, PyAny>>,
-    schema: PyRef<'py, PyStructType>,
+    schema: Bound<'py, PyStructType>,
 ) -> PyResult<Option<Bound<'py, PyBytes>>> {
-    let schema_fields = schema.current_fields(py)?;
+    let schema_fields =
+        crate::types::struct_core_fields(schema.as_any(), crate::types::MetadataOf::Strict)?;
     if columns.len() != schema_fields.len() {
         return Ok(None);
     }
@@ -96,13 +97,15 @@ pub(crate) fn _pandas_string_ipc<'py>(
         // Arrow fields carry the name, standard string type and nullability.
         fields.push(Field::new(&field.name, ArrowType::Utf8, field.nullable));
     }
-    let bytes = py
-        .detach(move || -> Result<Vec<u8>, arrow::error::ArrowError> {
+    let bytes = crate::gc::detach_without_parts(
+        py,
+        move || -> Result<Vec<u8>, arrow::error::ArrowError> {
             let batch = RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays)?;
             let mut writer = StreamWriter::try_new(Vec::new(), &batch.schema())?;
             writer.write(&batch)?;
             writer.into_inner()
-        })
-        .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
+        },
+    )
+    .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
     Ok(Some(PyBytes::new(py, &bytes)))
 }

@@ -1,7 +1,5 @@
-"""
-Minimal pyspark.sql.types module for the Spark Connect client.
-Provides DataType classes and conversion functions.
-"""
+# The pyspark.sql.types module of the Spark Connect client: the DataType classes of the Rust
+# extension, and the conversion functions. As PySpark's module, it has no docstring.
 import re
 from typing import cast  # noqa: F401  (upstream leaks typing.cast from this module)
 
@@ -103,17 +101,14 @@ except ImportError:  # pragma: no cover - defensive fallback when the extension 
         pass
 
 
+# A UDT is inherently a Python-level construct: ``jsonValue`` serializes the concrete Python class
+# with cloudpickle and ``fromJson`` re-imports it by module path, so (like the pickling
+# serializers) it cannot be lowered into Rust. It subclasses the Rust-backed :class:`DataType` so
+# ``isinstance`` and schema conversion treat it like any other type. Its docstrings are PySpark's.
 class UserDefinedType(DataType):
     """User-defined type (UDT).
 
     .. note:: WARN: Spark Internal Use Only
-
-    A UDT is inherently a Python-level construct: ``jsonValue`` serializes the
-    concrete Python class with cloudpickle and ``fromJson`` re-imports it by
-    module path, so (like the pickling serializers) it cannot be lowered into
-    Rust. It subclasses the Rust-backed :class:`DataType` so ``isinstance`` and
-    schema conversion treat it like any other type. Mirrors
-    ``pyspark.sql.types.UserDefinedType``.
     """
 
     @classmethod
@@ -131,7 +126,9 @@ class UserDefinedType(DataType):
 
     @classmethod
     def sqlType(cls) -> "DataType":
-        """Underlying SQL storage type for this UDT."""
+        """
+        Underlying SQL storage type for this UDT.
+        """
         from pyspark.errors import PySparkNotImplementedError
 
         raise PySparkNotImplementedError(
@@ -141,7 +138,9 @@ class UserDefinedType(DataType):
 
     @classmethod
     def module(cls) -> str:
-        """The Python module of the UDT."""
+        """
+        The Python module of the UDT.
+        """
         from pyspark.errors import PySparkNotImplementedError
 
         raise PySparkNotImplementedError(
@@ -151,8 +150,10 @@ class UserDefinedType(DataType):
 
     @classmethod
     def scalaUDT(cls) -> str:
-        """The class name of the paired Scala UDT (could be '', if there
-        is no corresponding one)."""
+        """
+        The class name of the paired Scala UDT (could be '', if there
+        is no corresponding one).
+        """
         return ""
 
     def needConversion(self) -> bool:
@@ -175,7 +176,9 @@ class UserDefinedType(DataType):
             return self.deserialize(v)
 
     def serialize(self, obj):
-        """Converts a user-type object into a SQL datum."""
+        """
+        Converts a user-type object into a SQL datum.
+        """
         from pyspark.errors import PySparkNotImplementedError
 
         raise PySparkNotImplementedError(
@@ -184,7 +187,9 @@ class UserDefinedType(DataType):
         )
 
     def deserialize(self, datum):
-        """Converts a SQL datum into a user-type object."""
+        """
+        Converts a SQL datum into a user-type object.
+        """
         from pyspark.errors import PySparkNotImplementedError
 
         raise PySparkNotImplementedError(
@@ -512,6 +517,85 @@ def _struct_field_from_json(json_value):
 def _struct_type_from_json(json_value):
     """``StructType.fromJson``, as PySpark's."""
     return StructType([_struct_field_from_json(f) for f in json_value["fields"]])
+
+
+def _foreign_tree_string(struct, max_depth):
+    """``StructType.treeString(maxDepth)`` of ``struct``, whose fields hold an element that is not
+    a ``StructField`` at some level, as PySpark's: of the ``_build_formatted_string`` of each
+    element, in turn, so of the ``AttributeError`` of an element of none, of ``max_depth`` as the
+    native method takes it."""
+    from pyspark.sql.utils import StringConcat
+
+    string_concat = StringConcat()
+    string_concat.append("root\n")
+    for field in struct.fields:
+        _build_formatted_string(field, " |", string_concat, max_depth)
+    return string_concat.toString()
+
+
+def _build_formatted_string(obj, prefix, string_concat, max_depth):
+    """PySpark's ``_build_formatted_string`` of ``obj``: of the native field, struct, array and
+    map as PySpark's are, of a Python subclass of its own method, and of another object, as
+    PySpark calls it, of its own method or of its ``AttributeError``."""
+    from pyspark.sql.utils import escape_meta_characters
+
+    if getattr(type(obj), "_build_formatted_string", None) is not None:
+        obj._build_formatted_string(prefix, string_concat, max_depth)
+    elif isinstance(obj, StructField):
+        if max_depth > 0:
+            string_concat.append(
+                f"{prefix}-- {escape_meta_characters(obj.name)}: "
+                + f"{_jvm_type_name(obj.dataType)} "
+                + f"(nullable = {str(obj.nullable).lower()})\n"
+            )
+            _data_type_build_formatted_string(
+                obj.dataType, f"{prefix}    |", string_concat, max_depth
+            )
+    elif isinstance(obj, StructType):
+        for field in obj.fields:
+            _build_formatted_string(field, prefix, string_concat, max_depth)
+    elif isinstance(obj, ArrayType):
+        if max_depth > 0:
+            string_concat.append(
+                f"{prefix}-- element: {_jvm_type_name(obj.elementType)} "
+                + f"(containsNull = {str(obj.containsNull).lower()})\n"
+            )
+            _data_type_build_formatted_string(
+                obj.elementType, f"{prefix}    |", string_concat, max_depth
+            )
+    elif isinstance(obj, MapType):
+        if max_depth > 0:
+            string_concat.append(f"{prefix}-- key: {_jvm_type_name(obj.keyType)}\n")
+            _data_type_build_formatted_string(
+                obj.keyType, f"{prefix}    |", string_concat, max_depth
+            )
+            string_concat.append(
+                f"{prefix}-- value: {_jvm_type_name(obj.valueType)} "
+                + f"(valueContainsNull = {str(obj.valueContainsNull).lower()})\n"
+            )
+            _data_type_build_formatted_string(
+                obj.valueType, f"{prefix}    |", string_concat, max_depth
+            )
+    else:
+        obj._build_formatted_string(prefix, string_concat, max_depth)
+
+
+def _data_type_build_formatted_string(data_type, prefix, string_concat, max_depth):
+    """PySpark's ``DataType._data_type_build_formatted_string``: of the levels of an array, a
+    struct and a map, one level deeper."""
+    if isinstance(data_type, (ArrayType, StructType, MapType)):
+        _build_formatted_string(data_type, prefix, string_concat, max_depth - 1)
+
+
+def _jvm_type_name(data_type):
+    """PySpark's ``DataType._get_jvm_type_name``: the simple string of a type of parameters, and
+    else the type name."""
+    if isinstance(
+        data_type,
+        (DecimalType, CharType, VarcharType, DayTimeIntervalType, YearMonthIntervalType, TimeType),
+    ):
+        return data_type.simpleString()
+    return data_type.typeName()
 
 
 def _assert_valid_type_for_collation(fieldPath, fieldType, collationMap):
@@ -1884,3 +1968,19 @@ def _create_row_inbound_converter(dataType: DataType) -> Callable:
     return lambda *a: dataType.fromInternal(a)
 
 
+
+
+def _register_type_deepcopy():
+    # `copy.deepcopy` of an object of a native class of the types, of the copier of the extension,
+    # which `copy`'s dispatch of exact classes calls: it makes what `copy.deepcopy` makes of
+    # PySpark's plain classes, of the reduce and `_reconstruct`, of no Python code of each object,
+    # and a subclass or a class of a hook of the protocol keeps Python's (see `type_copy`).
+    try:
+        from pyspark._pyspark import _register_type_deepcopy as register, _type_deepcopy
+    except ImportError:  # pragma: no cover - defensive fallback when the extension is absent
+        return
+    register(_type_deepcopy, _parse_datatype_json_string)
+
+
+_register_type_deepcopy()
+del _register_type_deepcopy

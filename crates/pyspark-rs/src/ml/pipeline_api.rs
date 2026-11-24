@@ -126,6 +126,21 @@ native_pymethods! {
         Ok(this)
     }
 
+    /// Visit the stages, of Python's garbage collector, as PySpark's param map holds them. Of an
+    /// `Option<Py<_>>` alone, whose zeroed memory is None: no `crate::gc::GcReady`.
+    fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
+        if let Some(stages) = &self.stages {
+            visit.call(stages)?;
+        }
+        Ok(())
+    }
+
+    /// Break a reference cycle that the garbage collector found unreachable: the Pipeline drops
+    /// its stages.
+    fn __clear__(&mut self) {
+        self.stages = None;
+    }
+
     #[pyo3(
         name = "setParams",
         signature = (*args, **kwargs),
@@ -225,6 +240,8 @@ pub struct PyPipelineModel {
     uid: String,
     #[pyo3(get, set)]
     stages: Py<PyAny>,
+    /// Whether the value is written, which `__traverse__` checks first (see `crate::gc::GcReady`).
+    gc_ready: crate::gc::GcReady,
 }
 
 impl PyPipelineModel {
@@ -239,6 +256,7 @@ impl PyPipelineModel {
         Ok(Self {
             uid: params_api::random_uid(py, class)?,
             stages,
+            gc_ready: crate::gc::GcReady::new(),
         })
     }
 }
@@ -256,12 +274,17 @@ impl params_api::ParamsHolder for PyPipelineModel {
 }
 
 impl params_api::NativeInstance for PyPipelineModel {
+    fn state_attributes(&self) -> &'static [&'static str] {
+        &["stages"]
+    }
+
     fn duplicate(&self, py: Python<'_>) -> PyResult<Py<Self>> {
         crate::ml::object::new_py(
             py,
             Self {
                 uid: self.uid.clone(),
                 stages: self.stages.clone_ref(py),
+                gc_ready: crate::gc::GcReady::new(),
             },
         )
     }
@@ -280,12 +303,33 @@ native_pymethods! {
     persistence: python;
     params: [];
 
-    /// `PipelineModel(stages)`, of a uid of the class of the object, as `Identifiable._randomUID`
-    /// names it (`MyPipelineModel_...` of a Python subclass).
+    /// A model of `stages`, as `PipelineModel(stages)`, of a uid of the class of the object, as
+    /// `Identifiable._randomUID` names it (`MyPipelineModel_...` of a Python subclass); of none,
+    /// of None, as `copyreg.__newobj__` makes PySpark's object of no `__init__`, whose state gives
+    /// its stages (see `params_api::set_state`).
     #[new]
     #[classmethod]
-    fn new(cls: &Bound<'_, pyo3::types::PyType>, stages: Py<PyAny>) -> PyResult<Self> {
-        Self::of_class(cls.py(), &cls.name()?.to_string(), stages)
+    #[pyo3(signature = (stages=None))]
+    fn new(cls: &Bound<'_, pyo3::types::PyType>, stages: Option<Py<PyAny>>) -> PyResult<Self> {
+        let py = cls.py();
+        Self::of_class(py, &cls.name()?.to_string(), stages.unwrap_or_else(|| py.None()))
+    }
+
+    /// Visit the stages, of Python's garbage collector, as PySpark's model holds them as its
+    /// attribute.
+    fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
+        if !self.gc_ready.get() {
+            return Ok(());
+        }
+        visit.call(&self.stages)
+    }
+
+    /// Break a reference cycle that the garbage collector found unreachable: the model drops its
+    /// stages, for None.
+    fn __clear__(&mut self) {
+        if self.gc_ready.get() {
+            self.stages = Python::attach(|py| py.None());
+        }
     }
 
     /// The transform of `dataset` by each stage in order, as `Transformer.transform` (a param map
@@ -488,7 +532,8 @@ pub(super) fn save_with_stages(
         ("language", serde_json::json!("Python").to_string()),
     ]);
     let default_map = default_params_json(instance)?;
-    interruptible(py, session, || {
+    // Of strings.
+    crate::interrupt::interruptible_without_parts(py, session, || {
         let version = session.version()?;
         let metadata = Metadata::new(class, &uid, &version, param_map, default_map);
         save_metadata(session, path, &metadata.to_json()).map_err(Box::new)
@@ -581,6 +626,7 @@ fn load_pipeline_model(
     let model = PyPipelineModel {
         uid,
         stages: stages.into_any().unbind(),
+        gc_ready: crate::gc::GcReady::new(),
     };
     Ok(crate::ml::object::new_py(py, model)?.into_any())
 }
@@ -615,7 +661,7 @@ pub(super) fn load_metadata_dict<'py>(
     session: &SparkSession,
     path: &str,
 ) -> PyResult<Bound<'py, PyAny>> {
-    let text = interruptible(py, session, || {
+    let text = crate::interrupt::interruptible_without_parts(py, session, || {
         load_metadata_text(session, path).map_err(Box::new)
     })?;
     let metadata = py.import("json")?.call_method1("loads", (text,))?;
@@ -686,7 +732,7 @@ fn class_of<'py>(py: Python<'py>, name: &str) -> PyResult<Bound<'py, PyAny>> {
 
 /// Register the Pipeline and the PipelineModel.
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<PyPipeline>()?;
-    m.add_class::<PyPipelineModel>()?;
+    super::object::register_class::<PyPipeline>(m)?;
+    super::object::register_class::<PyPipelineModel>(m)?;
     Ok(())
 }

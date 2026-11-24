@@ -6,11 +6,13 @@
 use pyo3::prelude::*;
 use pyo3::types::PyFloat;
 
-use super::containers::{MapContainer, MapValue};
-use super::message::{new_instance, PyMessage, Slot};
-use super::pool::{pool, Kind};
+use super::containers::Entries;
+use super::message::{generation, new_instance, EntryRef, Fields, PyMessage, Slot};
+use super::native::{self, CopyError, Value};
+use super::pool::{pool, FieldDesc, Kind, MapDesc};
 use super::scalar::{key_order, Scalar};
 use super::{codec, grow};
+use crate::interrupt::ConversionBudget;
 
 /// Which of protobuf's writers of the text format to follow.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -38,7 +40,27 @@ pub(crate) fn to_text(
         style,
         one_line,
     };
-    w.message(&message.borrow(), 0, &mut out)?;
+    match style {
+        // protobuf's writer expands an `Any` of a known type to a message that it parses of its
+        // bytes, of objects, whose allocation may start a collection of the garbage collector, of
+        // the Python code of its callbacks, which may read the message or give the GIL to a thread
+        // that does: so it writes a native copy of the message, of which it holds no borrow, taken
+        // with no checkpoint, as the writer held the GIL. upb's writes the message as it is,
+        // which runs no Python code.
+        Style::TextFormat => {
+            let at = native::At::top(None);
+            let budget = ConversionBudget::never();
+            let copy = match native::copy_message(py, message, at, generation(), &budget) {
+                Ok(copy) => copy,
+                Err(CopyError::Python(err)) => return Err(err),
+                Err(CopyError::TooDeep | CopyError::Holds) => {
+                    unreachable!("a copy of any depth, watching no message, stops for neither")
+                }
+            };
+            w.message(&copy.fields, 0, &mut out)?;
+        }
+        Style::Upb => w.message(&message.borrow(), 0, &mut out)?,
+    }
     if one_line {
         while out.ends_with(' ') {
             out.pop();
@@ -66,7 +88,7 @@ struct Writer<'py> {
 impl Writer<'_> {
     /// Write a `google.protobuf.Any` that holds a message of a known type as `text_format` does,
     /// as `[type_url] { ... }` of the message, and return whether it was one.
-    fn any(&self, message: &PyMessage, indent: usize, out: &mut String) -> PyResult<bool> {
+    fn any(&self, message: &Fields, indent: usize, out: &mut String) -> PyResult<bool> {
         if self.style != Style::TextFormat || message.desc.full_name != "google.protobuf.Any" {
             return Ok(false);
         }
@@ -109,7 +131,7 @@ impl Writer<'_> {
         Ok(true)
     }
 
-    fn message(&self, message: &PyMessage, indent: usize, out: &mut String) -> PyResult<()> {
+    fn message(&self, message: &Fields, indent: usize, out: &mut String) -> PyResult<()> {
         let py = self.py;
         grow(|| {
             if self.any(message, indent, out)? {
@@ -133,35 +155,74 @@ impl Writer<'_> {
                     Slot::Message(child) => {
                         self.message_field(&field.name, &child.bind(py).borrow(), indent, out)?
                     }
+                    Slot::Native(Value::Message(child)) => {
+                        self.message_field(&field.name, &child.fields, indent, out)?
+                    }
                     Slot::Repeated(container) => {
-                        for value in &container.bind(py).borrow().items {
-                            self.scalar(
-                                &field.name,
-                                field.kind,
-                                &field.type_name,
-                                value,
-                                indent,
-                                out,
-                            )?;
-                        }
+                        self.scalars(field, &container.bind(py).borrow().items, indent, out)?
+                    }
+                    Slot::Native(Value::Scalars(items)) => {
+                        self.scalars(field, items, indent, out)?
                     }
                     Slot::Composite(container) => {
                         for child in &container.bind(py).borrow().items {
                             self.message_field(&field.name, &child.bind(py).borrow(), indent, out)?;
                         }
                     }
-                    Slot::Map(map) => self.map(&field.name, &map.bind(py).borrow(), indent, out)?,
+                    Slot::Native(Value::Messages(items)) => {
+                        for child in &items.items {
+                            self.message_field(&field.name, &child.fields, indent, out)?;
+                        }
+                    }
+                    Slot::Map(map) => {
+                        let map = map.bind(py).borrow();
+                        self.map(&field.name, &map.map, &map.entries, indent, out)?
+                    }
+                    Slot::Native(Value::Map(map)) => {
+                        self.map(&field.name, &map.map, &map.entries, indent, out)?
+                    }
                 }
             }
             Ok(())
         })
     }
 
+    /// The values `items` of the repeated scalar field `field`, a line each.
+    fn scalars(
+        &self,
+        field: &FieldDesc,
+        items: &[Scalar],
+        indent: usize,
+        out: &mut String,
+    ) -> PyResult<()> {
+        for value in items {
+            self.scalar(
+                &field.name,
+                field.kind,
+                &field.type_name,
+                value,
+                indent,
+                out,
+            )?;
+        }
+        Ok(())
+    }
+
     /// The entries of a map, as entry messages: upb's writes the key and the value of each, in
     /// upb's order of the keys; `text_format` skips a key or a value of the default, in Python's
     /// order of the keys.
-    fn map(&self, name: &str, map: &MapContainer, indent: usize, out: &mut String) -> PyResult<()> {
-        let mut entries: Vec<&(Scalar, MapValue)> = map.entries.iter().collect();
+    fn map<V>(
+        &self,
+        name: &str,
+        map: &MapDesc,
+        entries: &Entries<V>,
+        indent: usize,
+        out: &mut String,
+    ) -> PyResult<()>
+    where
+        for<'a> EntryRef<'a>: From<&'a V>,
+    {
+        let mut entries: Vec<&(Scalar, V)> = entries.iter().collect();
         match self.style {
             Style::Upb => entries.sort_by(|a, b| upb_text_key_order(&a.0, &b.0)),
             Style::TextFormat => entries.sort_by(|a, b| key_order(&a.0, &b.0)),
@@ -173,24 +234,17 @@ impl Writer<'_> {
             out.push_str(" {");
             end_line(out, self.one_line);
             if all || !key.is_default() {
-                self.scalar("key", map.map.key, "", key, indent + 1, out)?;
+                self.scalar("key", map.key, "", key, indent + 1, out)?;
             }
-            match value {
-                MapValue::Scalar(value) => {
+            match EntryRef::from(value) {
+                EntryRef::Scalar(value) => {
                     if all || !value.is_default() {
-                        self.scalar(
-                            "value",
-                            map.map.value,
-                            &map.map.value_type,
-                            value,
-                            indent + 1,
-                            out,
-                        )?;
+                        self.scalar("value", map.value, &map.value_type, value, indent + 1, out)?;
                     }
                 }
-                MapValue::Message(child) => {
-                    self.message_field("value", &child.bind(self.py).borrow(), indent + 1, out)?;
-                }
+                EntryRef::Message(child) => child.read(self.py, |child| {
+                    self.message_field("value", child, indent + 1, out)
+                })?,
             }
             start_line(out, self.one_line, indent);
             out.push('}');
@@ -202,7 +256,7 @@ impl Writer<'_> {
     fn message_field(
         &self,
         name: &str,
-        message: &PyMessage,
+        message: &Fields,
         indent: usize,
         out: &mut String,
     ) -> PyResult<()> {
@@ -244,6 +298,10 @@ fn upb_text_key_order(a: &Scalar, b: &Scalar) -> std::cmp::Ordering {
     match (a, b) {
         (Scalar::Str(x), Scalar::Str(y)) => upb_bytes_order(x.as_bytes(), y.as_bytes()),
         (Scalar::Bytes(x), Scalar::Bytes(y)) => upb_bytes_order(x, y),
+        // A string key that is not UTF-8 (of proto2, or of the `NONE` validation of editions) is
+        // held as bytes, and sorts among the others of its bytes, as upb sorts them.
+        (Scalar::Str(x), Scalar::Bytes(y)) => upb_bytes_order(x.as_bytes(), y),
+        (Scalar::Bytes(x), Scalar::Str(y)) => upb_bytes_order(x, y.as_bytes()),
         (Scalar::I32(x), Scalar::I32(y)) => (*x as u32).cmp(&(*y as u32)),
         (Scalar::I64(x), Scalar::I64(y)) => (*x as u64).cmp(&(*y as u64)),
         _ => key_order(a, b),
@@ -290,6 +348,16 @@ fn format_scalar(
         Scalar::U32(v) => v.to_string(),
         Scalar::Bool(v) => if *v { "true" } else { "false" }.to_string(),
         Scalar::Str(v) => format!("\"{}\"", c_escape_str(v)),
+        // As upb's text of a string field that is not UTF-8 (of proto2): its UTF-8 characters as
+        // they are, and an octal escape of each byte that is not of one.
+        Scalar::Bytes(v) if style == Style::Upb && kind == Kind::String => {
+            let mut escaped = String::with_capacity(v.len());
+            for chunk in v.utf8_chunks() {
+                escaped.push_str(&c_escape_str(chunk.valid()));
+                escaped.push_str(&c_escape(chunk.invalid()));
+            }
+            format!("\"{escaped}\"")
+        }
         Scalar::Bytes(v) => format!("\"{}\"", c_escape(v)),
         Scalar::Enum(v) => {
             let name = (kind == Kind::Enum)
@@ -380,4 +448,21 @@ fn c_escape(bytes: &[u8]) -> String {
         }
     }
     escaped
+}
+
+/// The key of a map entry as a path of `FindInitializationErrors` writes it, as upb's
+/// (`upb_FieldPath_ToText`): a string quoted and escaped, a number or a bool as it is.
+pub(crate) fn map_key_text(key: &Scalar) -> String {
+    match key {
+        Scalar::Str(text) => format!("\"{}\"", c_escape_str(text)),
+        Scalar::Bytes(bytes) => format!("\"{}\"", c_escape(bytes)),
+        Scalar::Bool(b) => b.to_string(),
+        Scalar::I64(v) => v.to_string(),
+        Scalar::I32(v) => v.to_string(),
+        Scalar::U64(v) => v.to_string(),
+        Scalar::U32(v) => v.to_string(),
+        Scalar::Enum(v) => v.to_string(),
+        Scalar::F64(v) => v.to_string(),
+        Scalar::F32(v) => v.to_string(),
+    }
 }

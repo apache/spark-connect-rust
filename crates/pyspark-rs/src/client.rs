@@ -15,24 +15,33 @@
 // specific language governing permissions and limitations
 // under the License.
 
-//! The requests of PySpark Connect's `SparkConnectClient` (`pyspark.sql.connect.client`) that it
-//! sends of the messages it is given, such as the plans of `to_table` and `schema`, over the Rust
-//! transport of its session: the analyses, the configuration requests and the executions, of the
-//! bytes of the messages of `pyspark.sql.connect.proto` that the client builds as PySpark's does,
-//! and the settings of the client that the transport honors, such as its retry policy.
+//! The requests of PySpark Connect's `SparkConnectClient` (`pyspark.sql.connect.client.core`)
+//! that it sends of the messages it is given, such as the plans of `to_table` and `schema`, over
+//! the Rust transport of its session: the analyses, the configuration requests and the
+//! executions, of the bytes of the messages of `pyspark.sql.connect.proto` that the client builds
+//! as PySpark's does, and the settings of the client that the transport honors, such as its retry
+//! policy.
 
 use prost::Message;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
 use spark_connect::dataframe::PlanExecution;
+// The messages of the client, with the type URLs of placeholders of their encodings, of which the
+// core finds those of their relations as it walks them.
+use spark_connect::plan::BuiltOutside;
 use spark_connect::session::{ExecutionInfo, SparkSession};
 use spark_connect_core::client::{ResultChunking, RpcDeadlines};
+use spark_connect_core::client_log::ExecutionLog;
+use spark_connect_core::error::GrpcCall;
 use spark_connect_core::error::SparkError;
-use spark_connect_core::retries::{RetriesExceeded, RetriesListener, RetryPolicy};
+use spark_connect_core::retries::{
+    BackgroundFailure, BackgroundRequest, CallRetries, Decision, Delivery, Handled, LongSleep,
+    RetriesExceeded, RetriesListener, RetryDecider, RetryPolicy,
+};
 use spark_connect_proto as proto;
 
-use crate::interrupt::interruptible;
+use crate::errors::ResultExt;
 
 /// The message of `bytes`, decoded on a stack that holds its levels, as a plan of any depth may be.
 fn decode<M: Message + Default + Send>(bytes: &[u8]) -> PyResult<M> {
@@ -40,19 +49,92 @@ fn decode<M: Message + Default + Send>(bytes: &[u8]) -> PyResult<M> {
         .map_err(|error| PyValueError::new_err(error.to_string()))
 }
 
+/// `message` with the placeholders of its relations replaced by the relations of their DataFrames,
+/// with the GIL held, as PySpark builds the relations of its plans before its request: so the
+/// request reads no DataFrame, and does not keep the garbage collector from seeing the parts of
+/// plans while it runs (see [`crate::gc`]). Its error is of the request of `session`.
+pub(crate) fn resolved<M: spark_connect::plan::Resolvable + Send>(
+    session: &SparkSession,
+    message: BuiltOutside<M>,
+) -> PyResult<BuiltOutside<M>> {
+    crate::errors::of_request_session(session, || {
+        crate::on_grown_stack(|| message.resolved()).to_pyerr()
+    })
+}
+
 /// The bytes of the `AnalyzePlanResponse` of the server to `request`, the bytes of an
 /// `AnalyzePlanRequest` that the client built, as PySpark's `SparkConnectClient._analyze` sends
-/// it, of the session `session`.
+/// it, of the session `session`: of its plans as they are, as PySpark's `_analyze` sends the plans
+/// that it is given.
 pub(crate) fn analyze_plan<'py>(
     py: Python<'py>,
     session: &SparkSession,
     request: &[u8],
 ) -> PyResult<Bound<'py, PyBytes>> {
-    let request: proto::AnalyzePlanRequest = decode(request)?;
-    let response = interruptible(py, session, || {
+    let request = resolved(
+        session,
+        BuiltOutside::decoded(request, decode::<proto::AnalyzePlanRequest>)?,
+    )?;
+    let response = crate::interrupt::interruptible_without_parts(py, session, || {
         crate::on_grown_stack(|| session.analyze_plan_proto(request)).map_err(Box::new)
     })?;
     Ok(PyBytes::new(py, &crate::encode_on_grown_stack(response)))
+}
+
+/// Log `prefix` and the plan `plan`, the bytes of a `Plan` that the client was given, of its
+/// placeholders replaced as `session` sends it, truncated, at the debug level, as PySpark's
+/// `to_pandas`, `schema` and `explain_string` log the plan that they are given as they start
+/// (`Executing plan ...`, `Schema for plan: ...` and `Explain (mode=...) for plan ...`): of a
+/// caller that checked that the logger writes it. The error is the exception of the record, as it
+/// goes out of PySpark's log.
+pub(crate) fn log_plan(
+    py: Python<'_>,
+    session: &SparkSession,
+    prefix: String,
+    plan: &[u8],
+) -> PyResult<()> {
+    use spark_connect_core::client_log::{types, Encoded, Level, Message};
+    let plan = BuiltOutside::decoded(plan, decode::<proto::Plan>)?;
+    let encoded = crate::on_grown_stack(|| {
+        session
+            .resolved_plan_proto(plan)
+            .map(|plan| Encoded::of(types::PLAN, &plan))
+    })
+    .map_err(crate::errors::spark_error_to_py_exception)?;
+    crate::client_log::write(
+        py,
+        Level::Debug,
+        Message::Proto {
+            prefix: prefix.into(),
+            message: encoded,
+            truncated: true,
+        },
+    )
+}
+
+/// The bytes of `plan`, the bytes of a `Plan` of a relation or a command that the client sets in
+/// a plan, compressed as `session` compresses its plans, after the lookup of the plan compression
+/// of its first plan, as PySpark's `_try_compress_and_set_plan` compresses the plan of `to_proto`,
+/// with what it logs then; None when it is not compressed, which the client sets as it is (see
+/// `SparkSession::compressed_plan_proto`).
+pub(crate) fn compressed_plan<'py>(
+    py: Python<'py>,
+    session: &SparkSession,
+    plan: &[u8],
+) -> PyResult<Option<Bound<'py, PyBytes>>> {
+    let plan = resolved(session, BuiltOutside::decoded(plan, decode::<proto::Plan>)?)?;
+    // Of the protobufs of the plan, of no placeholder.
+    let compress =
+        || crate::on_grown_stack(|| session.compressed_plan_proto(plan)).map_err(Box::new);
+    // As PySpark's `_try_compress_and_set_plan`, which reads nothing of its client once the
+    // settings are looked up, as it sends nothing: the user, the session ID and the extensions of
+    // the client are read only for the request of the lookup.
+    let compressed = if session.known_plan_compression().is_some() {
+        crate::interrupt::interruptible_continuation_without_parts(py, session, compress)?
+    } else {
+        crate::interrupt::interruptible_without_parts(py, session, compress)?
+    };
+    Ok(compressed.map(|plan| PyBytes::new(py, &plan.encode_to_vec())))
 }
 
 /// The bytes of the `ConfigResponse` of the server to `request`, the bytes of a `ConfigRequest`
@@ -63,7 +145,7 @@ pub(crate) fn config<'py>(
     request: &[u8],
 ) -> PyResult<Bound<'py, PyBytes>> {
     let request: proto::ConfigRequest = decode(request)?;
-    let response = interruptible(py, session, || {
+    let response = crate::interrupt::interruptible_without_parts(py, session, || {
         session.config_proto(request).map_err(Box::new)
     })?;
     Ok(PyBytes::new(py, &response.encode_to_vec()))
@@ -72,14 +154,32 @@ pub(crate) fn config<'py>(
 /// Start the execution of `plan`, the bytes of a `Plan` that the client was given, of `session`,
 /// whose observed metrics set the Observations of `observations` by their names, and whose
 /// progress reaches the progress handlers when `reported`.
+///
+/// It logs what the method of PySpark's client of the name `log` logs of the execution: `to_table`,
+/// `to_table_as_iterator`, `execute_command` and `execute_command_as_iterator`, and `fetch` for the
+/// execution of `to_pandas`, which logged its plan as it started (see [`log_plan`]). Of none, a
+/// plan of a relation logs as `to_table`, and one of a command as `execute_command`. The plan of
+/// `to_table`, `to_table_as_iterator` and `fetch` is sent as it is, as PySpark's client sends the
+/// plan that it is given, and the command of `execute_command` and `execute_command_as_iterator`
+/// compressed, as it sets the command that it is given in its plan.
 pub(crate) fn execute_plan(
     py: Python<'_>,
     session: &SparkSession,
     plan: &[u8],
     observations: Vec<(String, Bound<'_, PyAny>)>,
     reported: bool,
+    log: Option<&str>,
 ) -> PyResult<PyExecutePlanResponses> {
-    let plan: proto::Plan = decode(plan)?;
+    let log = match log {
+        None => None,
+        Some("to_table") => Some(ExecutionLog::ToTable),
+        Some("to_table_as_iterator") => Some(ExecutionLog::ToTableAsIterator),
+        Some("fetch") => Some(ExecutionLog::Fetch),
+        Some("execute_command") => Some(ExecutionLog::ExecuteCommand),
+        Some("execute_command_as_iterator") => Some(ExecutionLog::ExecuteCommandAsIterator),
+        Some(other) => return Err(PyValueError::new_err(format!("unknown log: {other}"))),
+    };
+    let plan = BuiltOutside::decoded(plan, decode::<proto::Plan>)?;
     let observations = observations
         .into_iter()
         .map(|(name, observation)| {
@@ -87,9 +187,14 @@ pub(crate) fn execute_plan(
             Ok((name, crate::observation::state_of_execution(observation)?))
         })
         .collect::<PyResult<Vec<_>>>()?;
-    let execution = interruptible(py, session, || {
-        crate::on_grown_stack(|| session.execute_plan_proto(plan, observations, reported))
-            .map_err(Box::new)
+    let plan = resolved(session, plan)?;
+    // Of the protobufs of the plan, of no placeholder, and of the Observations, which it moves.
+    let execution = crate::interrupt::interruptible_without_parts(py, session, || {
+        crate::on_grown_stack(|| match log {
+            Some(log) => session.execute_plan_proto_logged(plan, observations, reported, log),
+            None => session.execute_plan_proto(plan, observations, reported),
+        })
+        .map_err(Box::new)
     })?;
     Ok(PyExecutePlanResponses {
         session: session.clone(),
@@ -103,7 +208,9 @@ pub(crate) fn execute_plan(
 /// the bytes of a response, with the `PlanMetrics` of its metrics and the `PlanObservedMetrics` of
 /// its observed metrics, as `DataFrame.executionInfo` has them, which the client builds the
 /// `ExecutionInfo` of the execution of. Closing it, or reading it to its end, ends the execution.
-#[pyclass(name = "ExecutePlanResponses", module = "pyspark.sql.connect.client")]
+// PySpark has no such class: it is of the extension, which has it, and not of PySpark's modules of
+// the client, whose names are PySpark's.
+#[pyclass(name = "ExecutePlanResponses", module = "pyspark._pyspark")]
 pub struct PyExecutePlanResponses {
     session: SparkSession,
     /// The execution, until it ends or is closed.
@@ -128,7 +235,11 @@ impl PyExecutePlanResponses {
             return Ok(None);
         };
         let session = self.session.clone();
-        let next = interruptible(py, &session, || execution.next_response().map_err(Box::new));
+        // As PySpark's iterator of the responses, whose reattaches and releases copy the request
+        // of the execution: nothing of the client is read again.
+        let next = crate::interrupt::interruptible_continuation_without_parts(py, &session, || {
+            execution.next_response().map_err(Box::new)
+        });
         let response = match next {
             Ok(Some(response)) => response,
             Ok(None) => {
@@ -142,7 +253,12 @@ impl PyExecutePlanResponses {
         };
         let of_response = ExecutionInfo {
             metrics: response.metrics.clone(),
-            observed_metrics: response.observed_metrics.clone(),
+            // Of literals of up to `spark_connect_proto::MAX_KEPT_DEPTH` levels.
+            observed_metrics: if response.observed_metrics.is_empty() {
+                Vec::new()
+            } else {
+                crate::on_grown_stack(|| response.observed_metrics.clone())
+            },
             operation_id: None,
         };
         let (metrics, observed) = crate::dataframe::execution_metrics(py, &of_response)?;
@@ -167,7 +283,7 @@ impl PyExecutePlanResponses {
     /// progress handlers, which take the GIL themselves.
     fn finish(&mut self, py: Python<'_>) {
         if let Some(execution) = self.execution.take() {
-            py.detach(move || drop(execution));
+            crate::gc::detach_without_parts(py, move || drop(execution));
         }
     }
 }
@@ -224,35 +340,623 @@ pub(crate) struct RetryParameters {
 
 /// What the client does when the retries of a call of the transport are spent, where PySpark's
 /// `Retrying._wait` warns `[RETRIES_EXCEEDED]`: it warns as PySpark does, with
-/// `_warn_retries_exceeded` of `pyspark.sql.connect.client`, on the thread of the call, and the
-/// exception of the warning, of a filter of `"error"`, is the error of the call in place of its
-/// failure, as PySpark raises it out of `_wait`.
+/// `_warn_retries_exceeded` of `pyspark.sql.connect.client.core`, on the thread of the call, and
+/// the exception of the warning, of a filter of `"error"`, is the error of the call in place of
+/// its failure, as PySpark raises it out of `_wait`. A call of a thread of the runtime, which no
+/// caller waits for, warns on the delivery thread, as PySpark's warns from the thread that sends
+/// it, and its failure stays its error. It logs to the logger of Spark Connect what PySpark's
+/// `Retrying` logs of the retries of the calls, and the failure of a request that the transport
+/// sent in the background as PySpark's sender logs it.
 struct RetriesWarning;
+
+/// Warn as PySpark's `Retrying._wait` warns once retries are spent, with `_warn_retries_exceeded`
+/// of `pyspark.sql.connect.client.core`: the exception of the warning, of a filter of `"error"`.
+fn warn_retries_exceeded(py: Python<'_>, exceeded: RetriesExceeded) -> PyResult<()> {
+    py.import("pyspark.sql.connect.client.core")?.call_method1(
+        "_warn_retries_exceeded",
+        (exceeded == RetriesExceeded::RetryException,),
+    )?;
+    Ok(())
+}
+
+/// The levels of `logging` of the logs of the client.
+pub(crate) const LOG_INFO: i32 = 20;
+const LOG_ERROR: i32 = 40;
+
+/// Whether the logger of Spark Connect (`pyspark.sql.connect.logging`), which is disabled unless
+/// `SPARK_CONNECT_LOG_LEVEL` is set, writes a log of `level`.
+pub(crate) fn connect_logger_enabled_for(py: Python<'_>, level: i32) -> PyResult<bool> {
+    py.import("pyspark.sql.connect.logging")?
+        .getattr("logger")?
+        .call_method1("isEnabledFor", (level,))?
+        .extract()
+}
+
+/// Log `message` at the level `level` to the logger of Spark Connect
+/// (`pyspark.sql.connect.logging`), as PySpark's client logs it, on the thread of the caller when
+/// it is a thread of Python, else on the delivery thread. The exception of the log, of a handler
+/// or a filter of the logger, is the error of the call, as it goes out of PySpark's log; of a
+/// request that the transport sends in the background, which no caller waits for, it is dropped,
+/// but for the KeyboardInterrupt of a signal (see [`crate::deliver::keep_interrupt`]).
+fn log_to_connect_logger(level: &'static str, message: String) -> Result<(), SparkError> {
+    let log = move |py: Python<'_>| -> PyResult<()> {
+        py.import("pyspark.sql.connect.logging")?
+            .getattr("logger")?
+            .call_method1(level, (message,))?;
+        Ok(())
+    };
+    if crate::deliver::on_python_thread() || spark_connect_core::client_log::records_written_here()
+    {
+        return match Python::try_attach(log) {
+            Some(Err(error)) => Err(crate::errors::callback_error(error)),
+            _ => Ok(()),
+        };
+    }
+    crate::deliver::run_dropping_errors(log);
+    Ok(())
+}
 
 impl RetriesListener for RetriesWarning {
     fn retries_exceeded(&self, exceeded: RetriesExceeded) -> spark_connect_core::error::Result<()> {
-        // Only on a thread of Python, as that of a call of the client is: a thread of the runtime,
-        // which runs what no caller waits for, has no thread state of Python, and does not wait
-        // for the GIL.
-        // SAFETY: reads the thread state that the interpreter keeps for this thread, without the
-        // GIL, which it does not need.
-        if unsafe { pyo3::ffi::PyGILState_GetThisThreadState() }.is_null() {
+        // On a thread of the runtime, of a request that no caller waits for, the warning is the
+        // delivery thread's, and the failure stays the error of the request.
+        if !crate::deliver::on_python_thread() {
+            // The exception of the warning, of a filter of "error", is dropped, as PySpark's
+            // senders in the background catch it (`except Exception`).
+            crate::deliver::run(move |py| drop(warn_retries_exceeded(py, exceeded)));
             return Ok(());
         }
-        Python::attach(|py| {
-            py.import("pyspark.sql.connect.client")?.call_method1(
-                "_warn_retries_exceeded",
-                (exceeded == RetriesExceeded::RetryException,),
-            )?;
-            Ok(())
-        })
-        .map_err(crate::errors::callback_error)
+        Python::attach(|py| warn_retries_exceeded(py, exceeded))
+            .map_err(crate::errors::callback_error)
     }
 
-    fn caught(&self, error: SparkError) {
-        // As PySpark's `except Exception`, which drops the exception of the warning.
+    fn caught(&self, error: SparkError) -> Option<SparkError> {
+        // As PySpark's `except Exception`, which drops the exception of the warning, or of a
+        // policy, but lets a `BaseException` only out, as a KeyboardInterrupt.
+        if crate::errors::is_base_exception_only(&error) {
+            return Some(error);
+        }
         drop(crate::errors::callback_exception(&error));
+        None
     }
+
+    fn background_failure(
+        &self,
+        request: BackgroundRequest,
+        exceeded: Option<RetriesExceeded>,
+        failure: BackgroundFailure<'_>,
+    ) {
+        let failure = match failure {
+            BackgroundFailure::Rpc(text) => Ok(text.to_string()),
+            BackgroundFailure::Error(error) => Err(error),
+        };
+        crate::deliver::run(move |py| {
+            // As PySpark's sender, which warns from its thread once the retries are spent, and
+            // catches the failure, or the exception of the warning of a filter of "error", or of
+            // a policy, which it logs as `{e}`.
+            let error = match exceeded.map(|exceeded| warn_retries_exceeded(py, exceeded)) {
+                Some(Err(raised)) => raised.value(py).to_string(),
+                _ => match failure {
+                    Ok(text) => text,
+                    Err(error) => match crate::errors::callback_exception(&error) {
+                        Some(raised) => raised.value(py).to_string(),
+                        None => error.message(),
+                    },
+                },
+            };
+            let logged = match request {
+                // `ReleaseExecute failed with exception: ...` of PySpark's iterator, and
+                // `RemoveRemoteCachedRelation failed with exception: ...` of its finalizer.
+                BackgroundRequest::ReleaseExecute => {
+                    format!("ReleaseExecute failed with exception: {error}.")
+                }
+                BackgroundRequest::RemoveCachedRemoteRelation => {
+                    format!("RemoveRemoteCachedRelation failed with exception: {error}.")
+                }
+            };
+            if let Err(error) = py
+                .import("pyspark.sql.connect.logging")
+                .and_then(|logging| logging.getattr("logger"))
+                .and_then(|logger| logger.call_method1("warning", (logged,)))
+            {
+                crate::deliver::keep_interrupt(py, &error);
+            }
+        });
+    }
+
+    fn retrying(&self, error: &str, wait_ms: i128, policy: &str) -> Result<(), SparkError> {
+        if crate::client_log::silenced() {
+            return Ok(());
+        }
+        log_to_connect_logger(
+            "debug",
+            format!("Got error: {error}. Will retry after {wait_ms} ms (policy: {policy})"),
+        )
+    }
+
+    fn retrying_at_once(&self, error: &str) -> Result<(), SparkError> {
+        if crate::client_log::silenced() {
+            return Ok(());
+        }
+        log_to_connect_logger("debug", format!("Got error: {error}. Retrying."))
+    }
+
+    fn given_up(&self, error: &str) -> Result<(), SparkError> {
+        if crate::client_log::silenced() {
+            return Ok(());
+        }
+        log_to_connect_logger("debug", format!("Given up on retrying. error: {error}"))
+    }
+
+    fn server_retry_delay(&self, delay_ms: i128) -> Result<(), SparkError> {
+        if crate::client_log::silenced() {
+            return Ok(());
+        }
+        log_to_connect_logger(
+            "debug",
+            format!("The server has sent a retry delay of {delay_ms} ms."),
+        )
+    }
+
+    fn sleep_long(&self, wait_ms: i128, watched: bool) -> LongSleep {
+        // As PySpark's `Retrying`, which sleeps `wait_time / 1000`: the true division of the int of
+        // the wait, which the f64 gives exactly up to 2^53 ms, and past it of the same error.
+        sleep_of_python(wait_ms as f64 / 1000.0, watched)
+    }
+
+    fn rpc_error(&self, error: &spark_connect_core::error::GrpcioError) -> Delivery {
+        // Of the execution that a KeyboardInterrupt interrupted, whose failure PySpark's client
+        // does not read.
+        if crate::client_log::silenced() {
+            return None;
+        }
+        let error = error.clone();
+        // A handler of the log may wait forever on the error (see `may_wait_forever`).
+        let apart = may_wait_forever(&error);
+        delivered(apart, move |py| {
+            // The error of grpcio, of `pyspark.sql.connect.client.core`, which imports grpc, is
+            // made only for a log that is written.
+            if !connect_logger_enabled_for(py, LOG_ERROR)? {
+                return Ok(());
+            }
+            py.import("pyspark.sql.connect.client.core")?
+                .call_method1("_log_rpc_error", grpc_error_args(py, &error))?;
+            Ok(())
+        })
+    }
+
+    fn error_info(&self, text: &str) -> Delivery {
+        if crate::client_log::silenced() {
+            return None;
+        }
+        let message = format!("Received ErrorInfo: {text}");
+        delivered(false, move |py| {
+            py.import("pyspark.sql.connect.logging")?
+                .getattr("logger")?
+                .call_method1("debug", (message,))?;
+            Ok(())
+        })
+    }
+
+    fn raised_in_handling(&self, error: SparkError, handled: Handled<'_>) -> SparkError {
+        // As the log is in an `except` clause that the `except KeyboardInterrupt` of PySpark's
+        // execution does not catch, as its `except Exception` that converts a failure: a
+        // KeyboardInterrupt of it interrupts nothing (see `crate::interrupt::interruptible`).
+        let error = crate::errors::raised_in_handling(error);
+        // Of an interpreter that the GIL cannot be taken of any more, as of a daemon thread at the
+        // exit, the error has no context.
+        let _ = Python::try_attach(|py| match handled {
+            // As PySpark's `_handle_rpc_error`, which logs while the `except` of the call handles
+            // grpcio's `RpcError`: the exception of a log has it as its context.
+            Handled::Rpc(failure) => {
+                if let Some(context) = rpc_error_of(py, failure) {
+                    crate::errors::set_callback_context(py, &error, context);
+                }
+            }
+            // As the `except Exception as e` of PySpark's lookup of the plan compression, whose
+            // log of the exception that it caught is in it: the exception of the log has that
+            // exception, the argument of the log, as its context.
+            Handled::Error(caught) => {
+                let context = crate::errors::exception_of(py, caught);
+                crate::errors::set_callback_context(py, &error, context);
+            }
+        });
+        error
+    }
+}
+
+/// The sleep of `seconds` before a retry of Python's `time.sleep`, as PySpark's `Retrying` sleeps
+/// it, which raises its error at once of a wait that it cannot hold (see
+/// [`RetriesListener::sleep_long`]): on the thread of the call, a thread of Python, whose wait is
+/// `watched` when a signal ends it; of a request that no caller waits for, on a thread of the
+/// runtime, as PySpark's sender sleeps it on a thread of Python, on a thread of its own, as the
+/// sleep may last decades, which would hold the delivery thread meanwhile.
+fn sleep_of_python(seconds: f64, watched: bool) -> LongSleep {
+    let sleep = move |py: Python<'_>| -> PyResult<()> {
+        py.import("time")?.call_method1("sleep", (seconds,))?;
+        Ok(())
+    };
+    if !crate::deliver::on_python_thread() {
+        return Box::pin(crate::deliver::call_apart(move |py| {
+            sleep(py).map_err(crate::errors::callback_error)
+        }));
+    }
+    // From the wait of the call, without the GIL: of an interpreter that the GIL cannot be taken of
+    // any more, as of a daemon thread at the exit, the core waits it, as a wait that the listener
+    // does not sleep, which the next poll of its watch ends, as that cannot take the GIL either
+    // (see `interrupt::SignalWatch::poll`).
+    let slept = Python::try_attach(|py| match sleep(py) {
+        Ok(()) => Some(Ok(())),
+        // The KeyboardInterrupt of a signal that came while it slept is the watch's, which ends the
+        // wait of the core as of a signal that came while it waited: the execution in flight is
+        // interrupted, as PySpark's `except KeyboardInterrupt` interrupts it.
+        Err(error) if watched && crate::deliver::keep_interrupt(py, &error) => None,
+        Err(error) => Some(Err(crate::errors::callback_error(error))),
+    })
+    .flatten();
+    Box::pin(std::future::ready(slept))
+}
+
+/// Run `log`, a log of a call, as PySpark's client logs it on the thread of the call: at once on a
+/// thread of Python, or on a thread whose records are written on it (see
+/// `spark_connect_core::client_log::records_written_here`), and else on the delivery thread, or on
+/// a thread of its own (`apart`, see [`crate::deliver::call_apart`]), of the delivery that the call
+/// awaits, so that the log precedes what the call does next, as PySpark's client logs on the
+/// thread of the call before it goes on. The exception of the log, of a handler or a filter of the
+/// logger, is the error of the delivery, which fails the call at the log, as the exception of
+/// PySpark's log goes out of its call (see [`crate::errors::callback_error`]).
+pub(crate) fn delivered(
+    apart: bool,
+    log: impl FnOnce(Python<'_>) -> PyResult<()> + Send + 'static,
+) -> Delivery {
+    let log = move |py: Python<'_>| log(py).map_err(crate::errors::callback_error);
+    if crate::deliver::on_python_thread() || spark_connect_core::client_log::records_written_here()
+    {
+        // An interpreter that exits writes nothing more.
+        return match Python::try_attach(log) {
+            Some(Err(error)) => Some(Box::pin(std::future::ready(Err(error)))),
+            _ => None,
+        };
+    }
+    Some(if apart {
+        Box::pin(async move { crate::deliver::call_apart(log).await.unwrap_or(Ok(())) })
+    } else {
+        Box::pin(async move { crate::deliver::call(log).await.unwrap_or(Ok(())) })
+    })
+}
+
+/// grpcio's error of the failed RPC `failure`, as the call of PySpark's client raises it
+/// (`_rpc_error` of `pyspark.sql.connect.client.core`): the context of an exception raised while
+/// PySpark's client handles it. None of one that Python code may wait forever on (see
+/// [`may_wait_forever`]), which nothing would read then.
+pub(crate) fn rpc_error_of(
+    py: Python<'_>,
+    failure: &spark_connect_core::error::GrpcioError,
+) -> Option<PyErr> {
+    if may_wait_forever(failure) {
+        return None;
+    }
+    py.import("pyspark.sql.connect.client.core")
+        .and_then(|core| core.call_method1("_rpc_error", grpc_error_args(py, failure)))
+        .ok()
+        .map(PyErr::from_value)
+}
+
+/// Whether Python code that is given grpcio's `error` may wait forever on it: grpcio's error of a
+/// stream of responses, `_MultiThreadedRendezvous`, of no `debug_error_string`, as of a response
+/// that the client failed to decode, whose `debug_error_string()` waits for one, which nothing
+/// sets, as grpcio's does. Such code runs apart from the delivery thread, where it would hold
+/// every later delivery of the process, as it holds only its own call in grpcio (see
+/// [`crate::deliver::call_apart`]).
+fn may_wait_forever(error: &spark_connect_core::error::GrpcioError) -> bool {
+    error.call == GrpcCall::ServerStreaming && error.debug_error_string.is_none()
+}
+
+/// The arguments of `_grpc_error` of `pyspark.sql.connect.client.core` of grpcio's `error`:
+/// whether its call is of a stream of responses, its code, its details, its `debug_error_string`,
+/// None when it has none, its trailing metadata, and its text, of which an error of no grpcio is
+/// made.
+#[allow(clippy::type_complexity)]
+pub(crate) fn grpc_error_args<'py>(
+    py: Python<'py>,
+    error: &spark_connect_core::error::GrpcioError,
+) -> (
+    bool,
+    i32,
+    String,
+    Option<String>,
+    Vec<(String, Bound<'py, PyBytes>)>,
+    String,
+) {
+    (
+        error.call == GrpcCall::ServerStreaming,
+        error.code as i32,
+        error.details.clone(),
+        error.debug_error_string.clone(),
+        error
+            .trailing_metadata
+            .iter()
+            .map(|(key, value)| (key.clone(), PyBytes::new(py, value)))
+            .collect(),
+        error.text.clone(),
+    )
+}
+
+/// The retries of the calls of a session whose retry policies the transport does not retry with
+/// itself, of their own methods, which PySpark's `Retrying` decides, as PySpark's client asks it:
+/// `_CallRetries` of `pyspark.sql.connect.client.core`, a `Retrying` of the policies of each call,
+/// of grpcio's `RpcError` of each failed attempt. The Python of a call of a thread of Python runs
+/// on that thread, the `to_state` of the policies as the call starts; that of a request that the
+/// transport sends in the background runs on the delivery thread, from its first failure on.
+pub(crate) struct PolicyRetries {
+    /// The list of the policies, which a thread of the runtime clones without the GIL.
+    policies: std::sync::Arc<Py<PyAny>>,
+}
+
+/// The retries of one call of [`PolicyRetries`]: its `_CallRetries`, once it is made, or the error
+/// of its making, which fails the call at its first failure.
+struct PolicyCallRetries {
+    policies: std::sync::Arc<Py<PyAny>>,
+    streaming: bool,
+    retries: Option<PyResult<Py<PyAny>>>,
+}
+
+/// The least wait before a retry of decades, in seconds, of 2^30 s (34 years), which is slept of
+/// Python's `time.sleep` (see [`sleep_of_python`]).
+const LONG_WAIT_SECONDS: f64 = (1u64 << 30) as f64;
+
+/// The `_CallRetries` of `policies`, a `Retrying` of their states.
+fn call_retries(py: Python<'_>, policies: &Py<PyAny>) -> PyResult<Py<PyAny>> {
+    Ok(py
+        .import("pyspark.sql.connect.client.core")?
+        .getattr("_CallRetries")?
+        .call1((policies.clone_ref(py),))?
+        .unbind())
+}
+
+impl RetryDecider for PolicyRetries {
+    fn start(&self, call: GrpcCall) -> Box<dyn CallRetries> {
+        // The `to_state` of the policies, on the thread of the call, as it starts; a thread of
+        // the runtime does not wait for the GIL, and makes them at its first failure. Of a request
+        // that a drop sends, as the release of a stream that a frame that CPython unwinds drops,
+        // of the exception that propagates kept (see `crate::deliver::preserving_pending_exception`).
+        let retries = if crate::deliver::on_python_thread() {
+            Python::try_attach(|py| {
+                crate::deliver::preserving_pending_exception(py, |py| {
+                    call_retries(py, &self.policies)
+                })
+            })
+        } else {
+            None
+        };
+        Box::new(PolicyCallRetries {
+            policies: std::sync::Arc::clone(&self.policies),
+            streaming: call == GrpcCall::ServerStreaming,
+            retries,
+        })
+    }
+}
+
+impl CallRetries for PolicyCallRetries {
+    fn decide<'a>(
+        &'a mut self,
+        status: &'a tonic::Status,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Decision> + Send + 'a>> {
+        let streaming = self.streaming;
+        let call = if streaming {
+            GrpcCall::ServerStreaming
+        } else {
+            GrpcCall::Unary
+        };
+        let error = spark_connect_core::error::grpcio_error(status, call);
+        let apart = may_wait_forever(&error);
+        let policies = std::sync::Arc::clone(&self.policies);
+        let retries = self.retries.take();
+        Box::pin(async move {
+            let decide_of = move |py: Python<'_>| {
+                let retries = match retries {
+                    Some(retries) => retries,
+                    None => call_retries(py, &policies),
+                };
+                let decided = match &retries {
+                    Ok(retries) => decide(py, retries, streaming, &error),
+                    Err(failed) => Err(failed.clone_ref(py)),
+                };
+                let decision = match decided {
+                    // A wait that `time.sleep` refuses, negative or NaN, or one of decades, which
+                    // is slept of it, as PySpark's `Retrying` sleeps it.
+                    Ok(Some(seconds)) if !(0.0..LONG_WAIT_SECONDS).contains(&seconds) => {
+                        Err(seconds)
+                    }
+                    Ok(Some(seconds)) => Ok(Decision::Retry(
+                        std::time::Duration::try_from_secs_f64(seconds)
+                            .unwrap_or(std::time::Duration::MAX),
+                    )),
+                    Ok(None) => Ok(Decision::GiveUp),
+                    Err(raised) => Ok(Decision::Failed(Box::new(crate::errors::callback_error(
+                        raised,
+                    )))),
+                };
+                (decision, retries)
+            };
+            // A policy may wait forever on the error (see `may_wait_forever`).
+            let decided = if apart {
+                crate::deliver::call_apart(decide_of).await
+            } else {
+                crate::deliver::call(decide_of).await
+            };
+            match decided {
+                Some((decision, retries)) => {
+                    self.retries = Some(retries);
+                    match decision {
+                        Ok(decision) => decision,
+                        Err(seconds) => {
+                            let watched = spark_connect_core::runtime::in_watched_wait();
+                            match sleep_of_python(seconds, watched).await {
+                                Some(Ok(())) => Decision::Retry(std::time::Duration::ZERO),
+                                Some(Err(error)) => Decision::Failed(Box::new(error)),
+                                // The watch ends the wait, of the signal that ended the sleep.
+                                None => Decision::Retry(std::time::Duration::MAX),
+                            }
+                        }
+                    }
+                }
+                // The interpreter exits: the failure is the error of the call.
+                None => Decision::GiveUp,
+            }
+        })
+    }
+}
+
+/// What the `_CallRetries` `retries` decides of the attempt that failed of grpcio's `error`: the
+/// wait in seconds before the retry, or None when the failure is the error of the call.
+fn decide(
+    py: Python<'_>,
+    retries: &Py<PyAny>,
+    streaming: bool,
+    error: &spark_connect_core::error::GrpcioError,
+) -> PyResult<Option<f64>> {
+    let metadata: Vec<(&str, Bound<'_, PyBytes>)> = error
+        .trailing_metadata
+        .iter()
+        .map(|(key, value)| (key.as_str(), PyBytes::new(py, value)))
+        .collect();
+    retries
+        .bind(py)
+        .call_method1(
+            "decide",
+            (
+                streaming,
+                error.code as i32,
+                error.details.as_str(),
+                error.debug_error_string.as_deref(),
+                metadata,
+                error.text.as_str(),
+            ),
+        )?
+        .extract()
+}
+
+/// Make PySpark's `Retrying` of `policies` decide the retries of the calls of `session` from now
+/// on, or the policy of the transport with None (see [`PolicyRetries`]).
+pub(crate) fn set_retry_decider(session: &SparkSession, policies: Option<Bound<'_, PyList>>) {
+    let decider = policies.map(|policies| {
+        std::sync::Arc::new(PolicyRetries {
+            policies: std::sync::Arc::new(policies.into_any().unbind()),
+        }) as std::sync::Arc<dyn RetryDecider>
+    });
+    session.set_retry_decider(decider);
+}
+
+/// The metadata of the calls of a channel builder of a `metadata()` of its own, which PySpark's
+/// client calls for each attempt of a call (see `spark_connect_core::channel::MetadataSource`), or
+/// of its requests of the artifacts, of the `metadata()` that the client read when it was made:
+/// encoded as grpcio encodes the metadata of a call (`_metadata_of_call` of
+/// `pyspark.sql.connect.client.core`), of its errors, which fail the call as they are. Read on the
+/// thread of the call, with the GIL, as the retry policies are decided, of the exception that the
+/// thread was raising kept as it was.
+pub(crate) enum BuilderMetadata {
+    /// Of the `metadata()` of the builder, at each call.
+    Calls(std::sync::Arc<Py<PyAny>>),
+    /// Of the `metadata()` that the client read when it was made.
+    Read(std::sync::Arc<Py<PyAny>>),
+}
+
+impl BuilderMetadata {
+    /// The pairs of the metadata of this source, read now with the GIL (see
+    /// `pyspark.sql.connect.client.core._metadata_of_call`).
+    fn read(&self, py: Python<'_>) -> PyResult<Vec<(Vec<u8>, Vec<u8>)>> {
+        let metadata = match self {
+            BuilderMetadata::Calls(builder) => builder
+                .bind(py)
+                .call_method0(pyo3::intern!(py, "metadata"))?,
+            BuilderMetadata::Read(metadata) => metadata.bind(py).clone(),
+        };
+        py.import("pyspark.sql.connect.client.core")?
+            .getattr("_metadata_of_call")?
+            .call1((metadata,))?
+            .extract::<Vec<(Vec<u8>, Vec<u8>)>>()
+    }
+}
+
+impl spark_connect_core::channel::MetadataSource for BuilderMetadata {
+    /// Of a thread of the interpreter, as a finalizer's, read on it, with the GIL, of the exception
+    /// that propagates there kept (see `crate::deliver::preserving_pending_exception`).
+    fn metadata_now(&self) -> Option<spark_connect_core::error::Result<Vec<(Vec<u8>, Vec<u8>)>>> {
+        if !crate::deliver::on_python_thread() {
+            return None;
+        }
+        Python::try_attach(|py| {
+            crate::deliver::preserving_pending_exception(py, |py| {
+                self.read(py).map_err(crate::errors::callback_error)
+            })
+        })
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn metadata(
+        &self,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = spark_connect_core::error::Result<Vec<(Vec<u8>, Vec<u8>)>>,
+                > + Send
+                + 'static,
+        >,
+    > {
+        let (object, of_builder) = match self {
+            BuilderMetadata::Calls(builder) => (std::sync::Arc::clone(builder), true),
+            BuilderMetadata::Read(metadata) => (std::sync::Arc::clone(metadata), false),
+        };
+        Box::pin(async move {
+            // Of the exception that propagates on the thread kept, of a request that a native drop
+            // or finalizer sends (see `crate::deliver::preserving_pending_exception`).
+            let read = crate::deliver::call(move |py| {
+                let object = object.bind(py);
+                let metadata = if of_builder {
+                    object.call_method0(pyo3::intern!(py, "metadata"))?
+                } else {
+                    object.clone()
+                };
+                py.import("pyspark.sql.connect.client.core")?
+                    .getattr("_metadata_of_call")?
+                    .call1((metadata,))?
+                    .extract::<Vec<(Vec<u8>, Vec<u8>)>>()
+            })
+            .await;
+            match read {
+                Some(Ok(pairs)) => Ok(pairs),
+                Some(Err(raised)) => Err(crate::errors::callback_error(raised)),
+                // The interpreter exits: the request is not sent, as one without the metadata of
+                // the builder, such as its `authorization`, would be of no credentials.
+                None => Err(spark_connect_core::error::SparkError::builtin_runtime_msg(
+                    "the metadata() of the channel builder cannot be read: the interpreter exits",
+                )),
+            }
+        })
+    }
+}
+
+/// Read the metadata of the calls of `session` of the `metadata()` of `builder`, a channel
+/// builder of a method of its own, from now on, and that of its requests of the artifacts of
+/// `read`, the `metadata()` that its client read when it was made (see [`BuilderMetadata`]).
+pub(crate) fn set_metadata_source(
+    session: &SparkSession,
+    builder: Bound<'_, PyAny>,
+    read: Bound<'_, PyAny>,
+) {
+    let source = |metadata: BuilderMetadata| {
+        Some(std::sync::Arc::new(metadata)
+            as std::sync::Arc<
+                dyn spark_connect_core::channel::MetadataSource,
+            >)
+    };
+    session.set_metadata_source(
+        source(BuilderMetadata::Calls(std::sync::Arc::new(
+            builder.unbind(),
+        ))),
+        source(BuilderMetadata::Read(std::sync::Arc::new(read.unbind()))),
+    );
 }
 
 /// Make the client warn as PySpark's when the retries of a call are spent (see
@@ -261,23 +965,22 @@ pub(crate) fn warn_of_spent_retries() {
     spark_connect_core::retries::set_listener(Some(std::sync::Arc::new(RetriesWarning)));
 }
 
-/// Make the client log the errors of its channels that grpcio logs, as PySpark's client shows
-/// them: the line of gRPC's C core on stderr, which `_log_grpc_error` of
-/// `pyspark.sql.connect.client` writes, on the thread of the channel. Unless `GRPC_VERBOSITY` is
-/// `NONE` when the extension loads, as grpcio reads it when it initializes and then logs no error.
+/// Make the client log what its channels log as grpcio does, as PySpark's client shows it: the
+/// line of gRPC's C core on stderr, written at once by the thread that logs it, of the channel or
+/// of its connections, as gRPC's core writes it (see [`grpc_log_line`]). As grpcio reads
+/// `GRPC_VERBOSITY` when it initializes, the variable as the extension loads decides what is
+/// logged: nothing for `NONE`, the errors only for `ERROR`, and the information too otherwise,
+/// such as the failure of a TLS handshake, as grpcio does by default.
 pub(crate) fn log_grpc_errors() {
-    let silenced = std::env::var("GRPC_VERBOSITY")
-        .is_ok_and(|verbosity| verbosity.eq_ignore_ascii_case("NONE"));
-    if silenced {
+    use spark_connect_core::grpc_log::Severity;
+    let verbosity = std::env::var("GRPC_VERBOSITY").unwrap_or_default();
+    if verbosity.eq_ignore_ascii_case("NONE") {
         return;
     }
+    let errors_only = verbosity.eq_ignore_ascii_case("ERROR");
     spark_connect_core::grpc_log::set_listener(Some(std::sync::Arc::new(
-        |logged: &spark_connect_core::grpc_log::Logged| {
-            // Only on a thread of Python, as that of a channel of a session is: a thread of the
-            // runtime has no thread state of Python, and does not wait for the GIL.
-            // SAFETY: reads the thread state that the interpreter keeps for this thread, without
-            // the GIL, which it does not need.
-            if unsafe { pyo3::ffi::PyGILState_GetThisThreadState() }.is_null() {
+        move |logged: &spark_connect_core::grpc_log::Logged| {
+            if errors_only && logged.severity != Severity::Error {
                 return;
             }
             let location = logged.location;
@@ -285,18 +988,101 @@ pub(crate) fn log_grpc_errors() {
                 .file()
                 .rsplit(['/', '\\'])
                 .next()
-                .unwrap_or_default();
-            Python::attach(|py| {
-                // An error that cannot be logged is dropped, as gRPC's core goes on.
-                let _ = py.import("pyspark.sql.connect.client").and_then(|client| {
-                    client.call_method1(
-                        "_log_grpc_error",
-                        (file, location.line(), logged.message.as_str()),
-                    )
-                });
-            });
+                .unwrap_or_default()
+                .to_string();
+            write_grpc_log(
+                logged.severity.letter(),
+                file,
+                location.line(),
+                logged.message.clone(),
+            );
         },
     )));
+}
+
+/// Write the line of gRPC's core of `message`, of the severity `severity` and of the source
+/// `file` and `line`, to stderr, at once, as gRPC's core writes its log, whatever the thread: to
+/// the descriptor itself, without the lock of Rust's stderr, which a thread of the runtime that
+/// logs while another thread forks would hold forever in the child of the fork.
+#[cfg(unix)]
+fn write_grpc_log(severity: char, file: String, line: u32, message: String) {
+    let entry = grpc_log_line(severity, &file, line, &message);
+    let mut unwritten = entry.as_bytes();
+    while !unwritten.is_empty() {
+        // SAFETY: writes the bytes of `unwritten`, which it is given the length of, to stderr.
+        let written = unsafe { libc::write(2, unwritten.as_ptr().cast(), unwritten.len()) };
+        match usize::try_from(written) {
+            Ok(written) if written > 0 => unwritten = &unwritten[written..],
+            _ if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted => {}
+            // As gRPC's core, which goes on when stderr is closed.
+            _ => break,
+        }
+    }
+}
+
+/// As on Unix, by the Python of the client, which has the local time.
+#[cfg(not(unix))]
+fn write_grpc_log(severity: char, file: String, line: u32, message: String) {
+    // An error that cannot be logged is dropped, as gRPC's core goes on.
+    crate::deliver::run_dropping_errors(move |py| {
+        py.import("pyspark.sql.connect.client.core")?.call_method1(
+            "_log_grpc_error",
+            (file, line, message, severity.to_string()),
+        )?;
+        Ok(())
+    });
+}
+
+/// The line of gRPC's core of `message`: `E<month><day> <time> <thread> <file>:<line>]
+/// <message>`, of the local time to the microsecond and the native ID of the calling thread, as
+/// `threading.get_native_id()` gives it, where gRPC's names the source of its own call.
+#[cfg(unix)]
+fn grpc_log_line(severity: char, file: &str, line: u32, message: &str) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let seconds = now.as_secs() as libc::time_t;
+    // SAFETY: `localtime_r` writes the local time of `seconds` to the `tm` it is given, which is
+    // read only once it returned it.
+    let tm = unsafe {
+        let mut tm = std::mem::MaybeUninit::<libc::tm>::zeroed();
+        libc::localtime_r(&seconds, tm.as_mut_ptr());
+        tm.assume_init()
+    };
+    format!(
+        "{severity}{:02}{:02} {:02}:{:02}:{:02}.{:06} {:7} {file}:{line}] {message}\n",
+        tm.tm_mon + 1,
+        tm.tm_mday,
+        tm.tm_hour,
+        tm.tm_min,
+        tm.tm_sec,
+        now.subsec_micros(),
+        native_thread_id(),
+    )
+}
+
+/// The native ID of the calling thread, as `threading.get_native_id()` gives it: of the system
+/// call, as the wheels link a glibc older than its `gettid` wrapper (2.30).
+#[cfg(target_os = "linux")]
+fn native_thread_id() -> u64 {
+    // SAFETY: the `gettid` system call takes no argument and cannot fail.
+    unsafe { libc::syscall(libc::SYS_gettid) as u64 }
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn native_thread_id() -> u64 {
+    let mut id = 0u64;
+    // SAFETY: writes the ID of the calling thread to `id`.
+    #[cfg(target_os = "macos")]
+    unsafe {
+        libc::pthread_threadid_np(0, &mut id);
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        // SAFETY: always safe to call.
+        id = unsafe { libc::pthread_self() } as u64;
+    }
+    id
 }
 
 /// Set the retry policy of `session` to `parameters`, from the calls that start from now on.
@@ -347,6 +1133,126 @@ pub(crate) fn rpc_deadlines(deadlines: &Bound<'_, PyDict>) -> PyResult<RpcDeadli
     })
 }
 
+/// The bool of `value` that a bool field of protobuf's default backend (upb) takes, as PySpark's
+/// request of an execution sets its `allow_arrow_batch_chunking`: a bool or an int as it is, and
+/// upb's `TypeError` of any other object.
+pub(crate) fn proto_bool(value: &Bound<'_, PyAny>) -> PyResult<bool> {
+    if let Ok(value) = value.extract::<bool>() {
+        return Ok(value);
+    }
+    if value.is_instance_of::<pyo3::types::PyInt>() {
+        return value.is_truthy();
+    }
+    Err(pyo3::exceptions::PyTypeError::new_err(format!(
+        "bad argument type for built-in operation: {}",
+        value.get_type().name()?
+    )))
+}
+
+/// Retry the RPCs of `session` that start from now on as PySpark's client of the retry policies
+/// of its `_retry_policies` and the `_max_retry_exception_elapsed_time` of its call settings
+/// (`_call_settings` of `pyspark.sql.connect.client.core`): of the parameters `native` that the
+/// transport retries with, of the policies of PySpark's own classes as they are now, else of
+/// PySpark's `Retrying` of `decider`, the policies of the client, which it asks of each failed
+/// RPC, as PySpark's `_retrying()` is of them, and of the bound `elapsed` of the retries of a
+/// `RetryException`, in seconds, or None without one.
+pub(crate) fn apply_retries(
+    py: Python<'_>,
+    session: &SparkSession,
+    native: Option<&Bound<'_, PyDict>>,
+    decider: Option<Bound<'_, PyAny>>,
+    elapsed: Option<f64>,
+) -> PyResult<()> {
+    let parameters = retry_policy(py, session)?;
+    parameters.set_item("max_retry_exception_elapsed_time", elapsed)?;
+    if let Some(native) = native {
+        parameters.update(native.as_mapping())?;
+    }
+    let of = |name: &str| -> PyResult<Bound<'_, PyAny>> {
+        parameters
+            .get_item(name)?
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(name.to_string()))
+    };
+    set_retry_policy(
+        session,
+        RetryParameters {
+            max_retries: of("max_retries")?.extract()?,
+            initial_backoff: of("initial_backoff")?.extract()?,
+            max_backoff: of("max_backoff")?.extract()?,
+            backoff_multiplier: of("backoff_multiplier")?.extract()?,
+            jitter: of("jitter")?.extract()?,
+            min_jitter_threshold: of("min_jitter_threshold")?.extract()?,
+            recognize_server_retry_delay: of("recognize_server_retry_delay")?.extract()?,
+            max_server_retry_delay: of("max_server_retry_delay")?.extract()?,
+            max_retry_exception_elapsed_time: of("max_retry_exception_elapsed_time")?.extract()?,
+            retries_failures: of("retries_failures")?.extract()?,
+        },
+    );
+    let decider = match decider {
+        Some(policies) => Some(match policies.cast_into::<PyList>() {
+            Ok(list) => list,
+            // As PySpark's `Retrying`, which iterates any iterable of policies.
+            Err(other) => PyList::new(
+                py,
+                other
+                    .into_inner()
+                    .try_iter()?
+                    .collect::<PyResult<Vec<_>>>()?,
+            )?,
+        }),
+        None => None,
+    };
+    set_retry_decider(session, decider);
+    Ok(())
+}
+
+/// The plan compression of the `_plan_compression_threshold` `threshold` and the
+/// `_plan_compression_algorithm` `algorithm` of a client, as PySpark's client compresses its plans
+/// of them: None while either is None, which the next plan looks up, as PySpark's does; else of
+/// the threshold, an int or a float, as PySpark compares it with the size of a plan, and the
+/// algorithm, of a str, which compresses of `ZSTD`, and of another object, which compresses of
+/// none, as PySpark compares it with "ZSTD". A threshold of another object compresses no plan.
+pub(crate) fn plan_compression_settings(
+    threshold: &Bound<'_, PyAny>,
+    algorithm: &Bound<'_, PyAny>,
+) -> PyResult<Option<spark_connect_core::client::PlanCompressionSettings>> {
+    if threshold.is_none() || algorithm.is_none() {
+        return Ok(None);
+    }
+    let threshold = match threshold.extract::<i64>() {
+        Ok(threshold) => i128::from(threshold),
+        // Of an int past 64 bits, as PySpark compares it with the size of the plan.
+        Err(_) if threshold.is_instance_of::<pyo3::types::PyInt>() => {
+            if threshold.lt(0)? {
+                i128::MIN
+            } else {
+                i128::MAX
+            }
+        }
+        // Of a float, the int of the same comparisons with the size of a plan, an int, of
+        // PySpark's `threshold >= 0` and `original_size > threshold`: none of a NaN or a
+        // negative one, and every size under an infinite one (`as` saturates).
+        Err(_) if threshold.is_instance_of::<pyo3::types::PyFloat>() => {
+            let threshold: f64 = threshold.extract()?;
+            if threshold >= 0.0 {
+                threshold.floor() as i128
+            } else {
+                -1
+            }
+        }
+        // Of another object, no compression (see "The attributes of `SparkConnectClient`" of
+        // dev/parity/known-differences.md).
+        Err(_) => -1,
+    };
+    // Of a value that is not a str, whose plans are sent as they are, as of one that is not
+    // "ZSTD".
+    let algorithm: String = algorithm.extract().unwrap_or_default();
+    Ok(Some(spark_connect_core::client::PlanCompressionSettings {
+        threshold,
+        algorithm: Some(algorithm),
+    }))
+}
+
 /// The result chunking of the executions of a client of `allow_arrow_batch_chunking` and
 /// `preferred_arrow_chunk_size`, as PySpark's `SparkConnectClient` takes them.
 pub(crate) fn result_chunking(
@@ -356,5 +1262,31 @@ pub(crate) fn result_chunking(
     ResultChunking {
         allow_arrow_batch_chunking,
         preferred_arrow_chunk_size,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_the_error_of_a_stream_of_no_debug_string_may_wait_forever() {
+        // grpcio's `debug_error_string()` of a stream waits for a debug string that a response
+        // that does not decode never gets; a unary error, or one of a debug string, does not.
+        let error =
+            |call, debug_error_string: Option<&str>| spark_connect_core::error::GrpcioError {
+                call,
+                code: tonic::Code::Internal,
+                details: "Exception deserializing response!".to_string(),
+                debug_error_string: debug_error_string.map(str::to_string),
+                trailing_metadata: Vec::new(),
+                text: String::new(),
+            };
+        assert!(may_wait_forever(&error(GrpcCall::ServerStreaming, None)));
+        assert!(!may_wait_forever(&error(GrpcCall::Unary, None)));
+        assert!(!may_wait_forever(&error(
+            GrpcCall::ServerStreaming,
+            Some("INTERNAL:boom")
+        )));
     }
 }

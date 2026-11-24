@@ -393,6 +393,54 @@ def test_the_plans_of_dataframes_give_the_client_their_observations_as_pyspark(s
     assert len(frame) == 5 and aliased.get == {"n": 5}
 
 
+def test_observed_metrics_within_upbs_limit_are_read_by_every_action(session):
+    # The observed metrics of a struct nested 31 levels, whose responses nest within upb's limit of
+    # 100 levels of messages, are read by collect(), toPandas(), its executionInfo and the client's
+    # to_table, and those of 32 raise PySpark's error of a response that gRPC's deserializer
+    # refuses, of each, as PySpark's client of the same server does (see docs/compatibility.md).
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.errors.exceptions.connect import SparkConnectGrpcException
+    from pyspark.sql import Observation
+
+    def depth(value):
+        levels = 0
+        while hasattr(value, "asDict"):
+            value, levels = value["a"], levels + 1
+        return levels
+
+    for levels in (31, 32):
+        nested = "count(1)"
+        for _ in range(levels):
+            nested = f"named_struct('a', {nested})"
+        for action in ("collect", "toPandas", "to_table"):
+            observation = Observation(f"deep_{action}_{levels}")
+            df = session.range(3).observe(observation, F.expr(nested).alias("s"))
+
+            def run():
+                if action == "to_table":
+                    plan = pb2.Plan()
+                    plan.root.CopyFrom(df._plan.plan(session.client))
+                    return session.client.to_table(plan, df._plan.observations)[0].num_rows
+                return len(getattr(df, action)())
+
+            if levels == 32:
+                with pytest.raises(SparkConnectGrpcException) as error:
+                    run()
+                assert error.value.getMessage() == (
+                    "<_MultiThreadedRendezvous of RPC that terminated with:\n"
+                    "\tstatus = StatusCode.INTERNAL\n"
+                    '\tdetails = "Exception deserializing response!"\n'
+                    '\tdebug_error_string = "None"\n>'
+                ), action
+                continue
+            assert run() == 3
+            if action != "to_table":
+                flows = dict(df.executionInfo.flows)
+                name = f"deep_{action}_{levels}"
+                assert list(flows) == [name] and depth(flows[name]["s"]) == levels
+            assert depth(observation.get["s"]) == levels, action
+
+
 def test_observations_are_pysparks_objects_of_a_live_result(session):
     # As PySpark Connect's Observation: `get` is its `_result`, one dict, which the executions
     # update in place, also through a shallow copy; the plan of observe holds the Observation
@@ -598,6 +646,76 @@ def test_client_members_that_pysparks_tests_read_as_pyspark(session):
     assert other.is_stopped
 
 
+def test_client_attributes_its_requests_read_and_its_closed_channel_as_pyspark(session):
+    # As PySpark Connect's client: the tags of its thread_local, its `_session_id` and its
+    # `_user_id` are what its requests read when they are built, of the errors of protobuf for a
+    # value that a field does not take (the tags only of the executions); a conf that is kept of a
+    # session that the program dropped raises NO_ACTIVE_SESSION; and once `close()` closed its
+    # channel, its requests raise grpc's ValueError of a closed channel when `_closed` is False.
+    import gc
+
+    from pyspark.errors.exceptions.connect import SparkConnectException
+
+    bad = "^bad argument type for built-in operation$"
+    other = session.newSession()
+    client = other.client
+    user = client._user_id
+    client.thread_local.tags = {"good", 5}
+    with pytest.raises(TypeError, match=bad):
+        other.range(1).collect()
+    assert other.range(2).schema is not None
+    client.thread_local.tags = {"good"}
+    assert other.range(1).collect() == [Row(id=0)]
+    for name in ("_session_id", "_user_id"):
+        value = getattr(client, name)
+        setattr(client, name, 5)
+        with pytest.raises(TypeError, match=bad):
+            other.range(3).filter("id > 1").schema
+        setattr(client, name, value)
+    assert client._user_id == user and other.range(1).count() == 1
+    client.close()
+    client._closed = False
+    with pytest.raises(ValueError, match="^Cannot invoke RPC: Channel closed!$"):
+        other.range(1).collect()
+    with pytest.raises(ValueError, match="^Cannot invoke RPC on closed channel!$"):
+        other.range(4).filter("id > 2").schema
+    other.stop()
+
+    other = session.newSession()
+    conf = other.conf
+    other.range(1).collect()
+    del other
+    gc.collect()
+    with pytest.raises(SparkConnectException) as error:
+        conf.get("spark.sql.shuffle.partitions")
+    assert error.value.getCondition() == "NO_ACTIVE_SESSION"
+
+
+def test_a_server_side_session_change_leaves_the_channel_open_as_pyspark(session, tmp_path):
+    # As PySpark's `_verify_response_integrity` of a response of another server-side session,
+    # which sets `_closed = True` of an open channel: the requests raise NO_ACTIVE_SESSION but
+    # those of the artifacts, which are sent, and once `_closed` is False, they are sent again.
+    import uuid
+
+    from pyspark.errors.exceptions.connect import SparkConnectException
+
+    other = session.newSession()
+    other.range(1).collect()
+    client = other.client
+    observed = client._server_session_id
+    client._server_session_id = str(uuid.uuid4())
+    with pytest.raises(SparkConnectException):
+        other.range(1).collect()
+    assert client.is_closed and other.is_stopped
+    module = tmp_path / "session_change_module.py"
+    module.write_text("value = 1\n")
+    other.addArtifacts(str(module), pyfile=True)
+    client._server_session_id = observed
+    client._closed = False
+    assert other.range(2).count() == 2
+    other.stop()
+
+
 def test_client_of_a_connection_string_as_pyspark(session):
     # As PySpark Connect's SparkConnectClient(connection, ...): a client of a session of its own,
     # of the plans that it is given, built without a DataFrame, whose executions may be not
@@ -738,6 +856,68 @@ def test_server_session_id_is_observed_and_a_changed_one_closes_the_session_as_p
     finally:
         session.release_session_on_close = False
         session.stop()
+
+
+def test_the_attributes_of_a_client_are_its_dict_read_at_each_request_as_pyspark():
+    # As PySpark's SparkConnectClient, a plain object: its state is the dict of its attributes, of
+    # PySpark's names and order, but for the objects of grpcio and of its Python plan compression,
+    # which the native transport replaces; its requests read them when they are built, so a change
+    # of its session hooks, of whether its executions are reattachable, of its plan compression
+    # and of its progress handlers applies to the next request; and a copy of it has its own
+    # `_closed`, which its `close()` sets, of the channel that it shares with its client, which
+    # stays open, of the ValueError of a closed channel.
+    import copy
+
+    from pyspark.errors.exceptions.connect import SparkConnectException
+
+    remote = os.environ.get("SPARK_REMOTE")
+    if not remote:
+        pytest.skip("SPARK_REMOTE is required for live-server tests")
+    spark = SparkSession.builder.remote(remote).create()
+    try:
+        client = spark.client
+        assert spark.range(3).count() == 3
+        inherent = {"_channel", "_internal_stub", "_artifact_manager", "_release_futures",
+                    "_zstd_module"}
+        assert [name for name in vars(client) if name not in inherent] == [
+            "thread_local", "_builder", "_user_id", "_retry_policies",
+            "_max_retry_exception_elapsed_time", "_session_id", "_closed", "_rpc_deadlines",
+            "_use_reattachable_execute", "_allow_arrow_batch_chunking",
+            "_preferred_arrow_chunk_size", "_session_hooks", "_server_session_id",
+            "_profiler_collector", "_progress_handlers", "_plan_compression_threshold",
+            "_plan_compression_algorithm", "_release_session_on_exit",
+            "global_user_context_extensions", "global_user_context_extensions_lock",
+        ]
+        seen = []
+
+        class Hook:
+            def on_execute_plan(self, request):
+                seen.append(request.operation_id)
+                return request
+
+        client._session_hooks.append(Hook())
+        client._use_reattachable_execute = False
+        client._plan_compression_threshold, client._plan_compression_algorithm = 0, "ZSTD"
+        assert spark.range(3).collect() == [Row(id=0), Row(id=1), Row(id=2)]
+        assert len(seen) == 1
+        client._session_hooks = []
+        client._use_reattachable_execute = True
+        calls = []
+        client._progress_handlers.append(lambda **kwargs: calls.append(kwargs["done"]))
+        assert spark.range(0, 8, 1, 4).selectExpr("sum(id) AS s").collect() == [Row(s=28)]
+        assert calls and calls[-1] is True and len(seen) == 1
+
+        copied = copy.copy(client)
+        copied.close()
+        assert copied.is_closed and not client.is_closed and not spark.is_stopped
+        with pytest.raises(ValueError, match="^Cannot invoke RPC on closed channel!$"):
+            client.get_configs("spark.sql.shuffle.partitions")
+        with pytest.raises(SparkConnectException) as error:
+            copied.get_configs("spark.sql.shuffle.partitions")
+        assert error.value.getCondition() == "NO_ACTIVE_SESSION"
+    finally:
+        spark.release_session_on_close = False
+        spark.stop()
 
 
 def test_udtfs_and_udfs_of_a_dataframe_or_the_session_raise_no_active_session_as_pyspark(session):
@@ -2458,6 +2638,280 @@ def test_deep_copies_copy_the_functions_of_udfs_as_pyspark(session):
     assert values(base.select(column)) == [7] and values(frame) == [7]
 
 
+def test_dataframes_of_the_plans_of_dataframes_build_them_at_each_request_as_pyspark(session):
+    # As PySpark's DataFrame(df._plan, session), which keeps the plan of df, of its plan ID, and
+    # builds it at each request: a plan whose UDF does not pickle makes a DataFrame whose requests
+    # raise the PicklingError, until the function pickles; its columns and those of df refer to
+    # one plan, so each resolves against the other, and a join of the two is a self-join, whose
+    # condition of their columns the server finds ambiguous, as in PySpark. In another session
+    # too, as a deep copy into another session, which runs the functions as they are then.
+    import copy
+    import pickle
+    import threading
+
+    from pyspark.sql.connect.dataframe import DataFrame
+    from pyspark.sql.functions import udf
+
+    state = {"lock": threading.Lock(), "value": "old"}
+    df = session.range(2).select(
+        "id", udf(lambda x: str(state["lock"] is None) + state["value"], "string")("id").alias("v"))
+    of = DataFrame(df._plan, session)
+    with pytest.raises(pickle.PicklingError, match="cannot pickle '_thread.lock' object"):
+        of.collect()
+    state["lock"] = None
+    assert sorted(of.select(df["v"]).collect()) == [Row(v="Trueold")] * 2
+    assert sorted(df.select(of["id"]).collect()) == [Row(id=0), Row(id=1)]
+    with pytest.raises(AnalysisException) as error:
+        df.join(of, df["id"] == of["id"]).collect()
+    assert error.value.getCondition() == "AMBIGUOUS_COLUMN_REFERENCE"
+    other = SparkSession.builder.remote(os.environ["SPARK_REMOTE"]).create()
+    try:
+        copied = copy.deepcopy(df, {id(session): other})
+        in_other = DataFrame(df._plan, other)
+        state["value"] = "new"
+        for frame in (copied, in_other):
+            assert frame.sparkSession is other
+            assert sorted(frame.select(df["v"]).collect()) == [Row(v="Truenew")] * 2
+    finally:
+        other.stop()
+
+
+def test_pickled_columns_and_dataframes_pickle_their_functions_at_each_request_as_pyspark(
+    session, tmp_path
+):
+    # As PySpark's pickles of a Column, a DataFrame and a table argument, which carry the
+    # functions of their UDFs, which the requests of the unpickled objects pickle: a plain pickle
+    # pickles a function of a script (of __main__) by reference, and the unpickled object runs it
+    # with the value that it reads at each request, as cloudpickle pickles it by value then; a
+    # cloudpickle pickles it by value, of the value then. A foreachBatch function that captures
+    # them runs them on the Python worker of the server, where they are PySpark's, which pickles
+    # the functions there.
+    import pickle
+    import sys
+
+    from pyspark import cloudpickle
+    from pyspark.sql.functions import udf, udtf
+
+    main = sys.modules["__main__"]
+    main._dropin_e2e_state = {"value": "old"}
+    exec("def _dropin_e2e_reads(x):\n    return _dropin_e2e_state['value']\n", main.__dict__)
+    try:
+        base = session.range(1)
+        column = udf(main._dropin_e2e_reads, "string")("id").alias("v")
+        frame = base.select(column)
+        table = frame.asTable()
+
+        @udtf(returnType="v string")
+        class Echo:
+            def eval(self, row):
+                yield (row["v"],)
+
+        loaded_column, loaded_table = (pickle.loads(pickle.dumps(held)) for held in (column, table))
+        loaded_frame = cloudpickle.loads(cloudpickle.dumps(frame))
+        for value in ("old", "new"):
+            main._dropin_e2e_state["value"] = value
+            assert base.select(loaded_column).collect() == [Row(v=value)]
+            assert Echo(loaded_table).collect() == [Row(v=value)]
+            # Of the value of its pickle, by value.
+            assert loaded_frame.collect() == [Row(v="old")]
+
+        (tmp_path / "input.txt").write_text("a\n")
+        name = "foreach_batch_captured_udfs_of_pickles"
+
+        def func(batch, batch_id):
+            # Each of its own write, as the DataFrame unpickles of a session of its own there.
+            for result in (batch.selectExpr("0 AS id").select(column), frame, Echo(table)):
+                result.write.mode("append").saveAsTable(name)
+
+        try:
+            query = (
+                session.readStream.format("text").load(str(tmp_path))
+                .writeStream.foreachBatch(func).trigger(availableNow=True).start()
+            )
+            query.awaitTermination()
+            assert session.table(name).collect() == [Row(v="new")] * 3
+        finally:
+            session.sql(f"DROP TABLE IF EXISTS {name}").collect()
+    finally:
+        del main._dropin_e2e_state, main._dropin_e2e_reads
+
+
+def test_pickles_of_many_udfs_pickle_each_function_in_its_place_as_pyspark(session, tmp_path):
+    # As PySpark's pickles of a Column or a DataFrame of many UDFs, also of subqueries, and of
+    # nested UDFs: the requests of the unpickled object pickle each function in its place, as
+    # does the Python worker of the server of a foreachBatch function that captures them, of the
+    # results of the objects that were pickled.
+    import functools
+    import json
+    import operator
+
+    from pyspark import cloudpickle
+    from pyspark.sql.functions import udf
+
+    udfs = [udf(lambda x, n=n: x + n, "long") for n in range(13)]
+
+    def total(columns):
+        return functools.reduce(operator.add, columns)
+
+    one = session.range(1).select(udfs[12]("id").alias("v"))
+    two = session.range(1).select((udfs[0]("id") + udfs[1]("id")).alias("v"))
+    nine = session.range(1).select(total([u("id") for u in udfs[2:11]]).alias("v"))
+    columns = {
+        "11 UDFs and a subquery of one": total([u("id") for u in udfs[:11]]) + one.scalar(),
+        "two subqueries of 2 and 9 UDFs": two.scalar() + nine.scalar(),
+        "nested UDFs": functools.reduce(lambda column, u: u(column), udfs[:12], F.col("id")),
+        "an IN subquery": F.when(udfs[0]("id").isin(nine.select("v")), 1).otherwise(udfs[1]("id")),
+    }
+    tens = session.range(1).select(total([u("id") for u in udfs[2:12]]).alias("v"))
+    frames = {
+        "12 UDFs": session.range(2).select(
+            *[u("id").alias(f"c{n}") for n, u in enumerate(udfs[:12])]),
+        "a subquery of 10 UDFs": session.range(2).select(
+            udfs[0]("id").alias("a"), tens.scalar().alias("s")),
+    }
+
+    def results(base, columns, frames):
+        found = {name: sorted(list(row) for row in base.select(column.alias("c")).collect())
+                 for name, column in columns.items()}
+        found.update({name: sorted(list(row) for row in frame.collect())
+                      for name, frame in frames.items()})
+        return found
+
+    expected = results(session.range(2), columns, frames)
+    loaded_columns = {name: cloudpickle.loads(cloudpickle.dumps(c)) for name, c in columns.items()}
+    loaded_frames = {name: cloudpickle.loads(cloudpickle.dumps(f)) for name, f in frames.items()}
+    assert results(session.range(2), loaded_columns, loaded_frames) == expected
+
+    source, out = tmp_path / "input", tmp_path / "out"
+    source.mkdir()
+    out.mkdir()
+    (source / "input.txt").write_text("a\n")
+
+    def func(batch, batch_id):
+        found = results(batch.sparkSession.range(2), columns, frames)
+        (out / f"{batch_id}.json").write_text(json.dumps(found))
+
+    query = (
+        session.readStream.format("text").load(str(source))
+        .writeStream.foreachBatch(func).trigger(availableNow=True).start()
+    )
+    query.awaitTermination()
+    assert query.exception() is None
+    (written,) = list(out.iterdir())
+    assert json.loads(written.read_text()) == expected
+
+
+def test_plans_over_the_plans_of_dataframes_unpickle_on_the_python_worker_as_pyspark(
+        session, tmp_path):
+    # As PySpark's plan object of a DataFrame, which pickles its fields and no session: a Column of
+    # the subquery of a DataFrame of a plan over `df._plan`, as `SubqueryAlias(df._plan, "s")`,
+    # whose build fails, pickles plainly, and a UDF and a foreachBatch function that capture it
+    # unpickle on the Python worker of the server, which has no class of the drop-in, where the
+    # requests of the Column raise the error of the plan, as PySpark's do: of a plan over the plan
+    # of a DataFrame that raises, and of a DataFrame whose option UTF-8 cannot encode, of the
+    # error of the protobuf of the worker.
+    import json
+    import pickle
+
+    from pyspark.sql.connect.dataframe import DataFrame
+    from pyspark.sql.connect.plan import SubqueryAlias
+    from pyspark.sql.functions import udf
+
+    class FailingOver(SubqueryAlias):
+        def plan(self, session):
+            self._child.plan(session)
+            raise ValueError("fails over the plan")
+
+    unencodable = session.read.format("json").option("k", "\ud800").load(str(tmp_path / "none"))
+    columns = {
+        "failing": DataFrame(FailingOver(session.range(3)._plan, "s"), session),
+        "unencodable": DataFrame(SubqueryAlias(unencodable._plan, "s"), session),
+    }
+    columns = {name: frame.select(F.lit(1)).scalar() for name, frame in columns.items()}
+    pickle.loads(pickle.dumps(columns["unencodable"]))
+
+    @udf("string")
+    def kinds(v):
+        return ",".join(type(columns[name]).__name__ for name in sorted(columns))
+
+    assert session.range(1).select(kinds("id").alias("k")).collect() == [Row(k="Column,Column")]
+
+    source, out = tmp_path / "input", tmp_path / "out"
+    source.mkdir()
+    out.mkdir()
+    (source / "input.txt").write_text("a\n")
+
+    def func(batch, batch_id):
+        found = {}
+        for name, column in columns.items():
+            try:
+                batch.select(column).collect()
+                found[name] = "collected"
+            except Exception as error:
+                found[name] = [isinstance(error, ValueError), str(error).splitlines()[0]]
+        (out / f"{batch_id}.json").write_text(json.dumps(found))
+
+    query = (
+        session.readStream.format("text").load(str(source))
+        .writeStream.foreachBatch(func).trigger(availableNow=True).start()
+    )
+    query.awaitTermination()
+    assert query.exception() is None
+    (written,) = list(out.iterdir())
+    found = json.loads(written.read_text())
+    assert found["failing"] == [True, "fails over the plan"]
+    assert found["unencodable"][0] is True
+    assert "_DataFramePlan" not in found["unencodable"][1]
+
+
+def test_deep_copies_of_observed_dataframes_set_their_own_observations_in_any_session_as_pyspark(
+        session):
+    # As PySpark's deep copy of a DataFrame of observe(observation, ...), which copies the plan,
+    # and so the Observation, in the session of the DataFrame or in another one of the memo: the
+    # copy's Observation is of the name of the Observation, its own name or the one that observe
+    # gave it, and of its metrics, none yet; the actions of the copy set the copy, and that of a
+    # deep copy of a tuple of the DataFrame and the Observation; those of the DataFrame set the
+    # Observation. Of a plan of a UDF too, whose function the copy copies.
+    import copy
+
+    from pyspark.sql import Observation
+    from pyspark.sql.functions import udf
+
+    other = SparkSession.builder.remote(os.environ["SPARK_REMOTE"]).create()
+    try:
+        for name in ("deep_copy_named", None):
+            for of_udf in (False, True):
+                for into_other in (False, True):
+                    for of_tuple in (False, True):
+                        memo = {id(session): other} if into_other else {}
+                        observation = Observation(name)
+                        df = session.range(3)
+                        if of_udf:
+                            df = df.select(udf(lambda x: x + 1, "long")("id").alias("id"))
+                        df = df.observe(observation, F.count("id").alias("c"),
+                                        F.sum("id").alias("s"))
+                        if of_tuple:
+                            copied, copied_observation = copy.deepcopy((df, observation), memo)
+                        else:
+                            copied, copied_observation = copy.deepcopy(df, memo), None
+                        assert copied.sparkSession is (other if into_other else session)
+                        ((held_name, held),) = copied._plan.observations.items()
+                        assert held is not observation and held_name == observation._name
+                        assert held._name == observation._name
+                        if name is not None:
+                            assert held._name == name
+                        if of_tuple:
+                            assert held is copied_observation
+                        assert held.get == {} and observation.get == {}
+                        total = 6 if of_udf else 3
+                        assert len(copied.collect()) == 3
+                        assert held.get == {"c": 3, "s": total} and observation.get == {}
+                        assert len(df.collect()) == 3
+                        assert observation.get == {"c": 3, "s": total}
+    finally:
+        other.stop()
+
+
 def test_udfs_that_capture_functions_pickle_them_by_name_as_pyspark(session):
     # As PySpark's, the functions are of pyspark.sql.functions.builtin: a UDF that captures one
     # pickles it by its name, of which the Python worker of the server imports PySpark's.
@@ -2628,28 +3082,28 @@ def test_create_dataframe_rows_column_names(session, data, schema, columns, rows
 
 
 def test_create_dataframe_of_a_struct_of_another_width(session):
-    # A pandas DataFrame of another width than a struct schema raises AXIS_LENGTH_MISMATCH,
-    # where PySpark's conversion drops the columns past the fields, fails the rename of fewer and
-    # takes the index of a frame of no columns as its columns (dev/parity/known-differences.md).
-    # As official PySpark 4.3.0's, a frame of no columns under a struct of no fields is the table
-    # of its index, which the struct then checks, and a pyarrow Table is cast to the struct,
-    # which checks its names.
+    # As official PySpark 4.3.0's conversion of a pandas DataFrame of rows under a struct, which
+    # zips its columns with the fields: the columns past the fields are dropped, of no fields the
+    # rows too, and of fewer columns the rename of its table raises PyArrow's ArrowInvalid. A
+    # frame of no columns is the table of its index, which the rename takes, and which a struct of
+    # no fields then checks; a pyarrow Table is cast to the struct, which checks its names.
     pd = pytest.importorskip("pandas")
     long_a = StructType([StructField("a", LongType())])
-    for frame, schema, expected, actual in [
-        (pd.DataFrame({"a": [1], "b": [2]}), long_a, "1", "2"),
-        (pd.DataFrame({"a": [1]}), "x long, y long", "2", "1"),
-        (pd.DataFrame({"a": [1, 2]}), StructType([]), "0", "1"),
-        (pd.DataFrame(index=[5, 6]), long_a, "1", "0"),
-        (pd.DataFrame(index=[0, 1]), StructType([]), "0", "1"),
+    for frame, schema, rows in [
+        (pd.DataFrame({"a": [1], "b": [2]}), long_a, [Row(a=1)]),
+        (pd.DataFrame({"a": [1, 2]}), StructType([]), []),
+        (pd.DataFrame(index=[5, 6]), long_a, [Row(a=5), Row(a=6)]),
+        (pd.DataFrame(index=range(2)), StructType([]), [Row(), Row()]),
     ]:
-        with pytest.raises(PySparkValueError) as error:
-            session.createDataFrame(frame, schema)
-        assert error.value.getCondition() == "AXIS_LENGTH_MISMATCH"
-        assert error.value.getMessageParameters() == {
-            "expected_length": expected, "actual_length": actual}
-    assert session.createDataFrame(
-        pd.DataFrame(index=range(2)), StructType([])).collect() == [Row(), Row()]
+        assert session.createDataFrame(frame, schema).collect() == rows
+    with pytest.raises(pa.ArrowInvalid) as arrow_error:
+        session.createDataFrame(pd.DataFrame({"a": [1]}), "x long, y long")
+    assert str(arrow_error.value) == (
+        "tried to rename a table of 1 columns but only 2 names were provided")
+    with pytest.raises(PySparkValueError) as error:
+        session.createDataFrame(pd.DataFrame(index=[0, 1]), StructType([]))
+    assert error.value.getCondition() == "AXIS_LENGTH_MISMATCH"
+    assert error.value.getMessageParameters() == {"expected_length": "0", "actual_length": "1"}
     for schema, names in ((long_a, "['a']"), ("x long, y long, z long", "['x', 'y', 'z']")):
         with pytest.raises(ValueError) as error:
             session.createDataFrame(pa.table({"a": [1], "b": [2]}), schema)
@@ -2657,6 +3111,212 @@ def test_create_dataframe_of_a_struct_of_another_width(session):
         assert str(error.value) == (
             f"Target schema's field names are not matching the table's field names: ['a', 'b'], "
             f"{names}")
+
+    # As PySpark's conversion of a struct whose `fields` or `names` list was changed in place, also
+    # of a class of an iteration of its own: of a field removed or a name appended, the names of
+    # `toDF` are not as many as the columns, which the server raises ASSIGNMENT_ARITY_MISMATCH of;
+    # of a field appended or a name removed, `_deduplicate_field_names` raises IndexError. The
+    # relation of a class of an iteration of its own is of its `json()`, as PySpark's, whose type
+    # is its `typeName()` (`iter`), which the server fails to parse first (PARSE_SYNTAX_ERROR).
+    class Iterated(StructType):
+        def __iter__(self):
+            return iter(self.fields)
+
+    for cls in (StructType, Iterated):
+        for change, error in (("fields.pop", AnalysisException), ("names.append", AnalysisException),
+                              ("fields.append", IndexError), ("names.pop", IndexError)):
+            schema = cls([StructField("a", LongType()), StructField("b", LongType())])
+            if change == "fields.pop":
+                schema.fields.pop()
+            elif change == "names.append":
+                schema.names.append("x")
+            elif change == "fields.append":
+                schema.fields.append(StructField("c", LongType()))
+            else:
+                schema.names.pop()
+            for frame in (pd.DataFrame({"a": [1], "b": [2]}),
+                          pd.DataFrame({"a": [1], "b": [2], "c": [3]})):
+                with pytest.raises(error) as raised:
+                    session.createDataFrame(frame, schema).schema
+                if error is AnalysisException:
+                    condition = ("PARSE_SYNTAX_ERROR" if cls is Iterated
+                                 else "ASSIGNMENT_ARITY_MISMATCH")
+                    assert raised.value.getCondition() == condition, change
+                else:
+                    assert str(raised.value) == "list index out of range", change
+
+
+def test_create_dataframe_of_a_pandas_frame_under_a_rebound_type_name():
+    # As PySpark's createDataFrame, whose module of the session binds the converters of its
+    # conversion when it is imported, with the session, while its conversion of a column imports
+    # `to_arrow_type` of the converter module when it is called: of a public `BooleanType` rebound
+    # to `LongType` after the session, with the converter module removed, the conversion of the
+    # column is imported anew and takes the ints as bools, which the cast to the schema of the
+    # session's module takes back to longs. In a process of its own, as it rebinds the name.
+    import subprocess
+    import sys
+
+    remote = os.environ.get("SPARK_REMOTE")
+    if not remote:
+        pytest.skip("SPARK_REMOTE is required for live-server tests")
+
+    script = r'''
+import os
+import sys
+import numpy as np
+import pandas as pd
+from pyspark.sql import SparkSession
+from pyspark.sql import types as T
+
+spark = SparkSession.builder.remote(os.environ["SPARK_REMOTE"]).getOrCreate()
+sys.modules.pop("pyspark.sql.pandas.types", None)
+T.BooleanType = T.LongType
+schema = T.StructType([T.StructField("renamed", T.LongType())])
+df = spark.createDataFrame(pd.DataFrame({"renamed": np.asarray([1, 0, 2], dtype="int64")}), schema)
+print(df.schema.simpleString(), [row.renamed for row in df.collect()])
+'''
+    result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True,
+                            timeout=120)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.strip().splitlines()[-1] == "struct<renamed:bigint> [1, 0, 1]"
+
+
+def test_create_dataframe_of_a_pandas_frame_under_a_subclass_that_overrides_its_reads(session):
+    # As official PySpark 4.3.0's createDataFrame of a pandas DataFrame, whose conversion and the
+    # `json()` of the struct that the relation sends read the attributes of a Python subclass that
+    # overrides them, as Python reads them: of a field whose `dataType` reads `StringType()` or
+    # `IntegerType()`, the DataFrame is of that type, also of no rows; of a struct that iterates
+    # its fields in reverse, the schema is of the fields in reverse, which the table zipped with
+    # the fields is not of, and which the server raises INVALID_COLUMN_OR_FIELD_DATA_TYPE of. A
+    # struct whose `fields` property reads the fields that its setter kept, which `__init__`
+    # assigns through (SPARK-62231), is of them, as PySpark's.
+    import json
+
+    pd = pytest.importorskip("pandas")
+
+    class FieldStr(StructField):
+        @property
+        def dataType(self):
+            return StringType()
+
+        @dataType.setter
+        def dataType(self, value):
+            self.__dict__["given"] = value
+
+    class FieldInt(StructField):
+        @property
+        def dataType(self):
+            return IntegerType()
+
+        @dataType.setter
+        def dataType(self, value):
+            self.__dict__["given"] = value
+
+    class StructRevr(StructType):
+        def __iter__(self):
+            return iter(list(self.fields)[::-1])
+
+    class StructFlds(StructType):
+        @property
+        def fields(self):
+            return list(self.__dict__.get("_f", []))
+
+        @fields.setter
+        def fields(self, value):
+            self.__dict__["_f"] = value
+
+    def field(name, type_name, metadata=None):
+        return {"metadata": metadata or {}, "name": name, "nullable": True, "type": type_name}
+
+    for frame, schema, fields, rows in [
+        (pd.DataFrame({"a": ["x", None]}), StructType([FieldStr("a", LongType())]),
+         [field("a", "string")], [Row(a="x"), Row(a=None)]),
+        (pd.DataFrame({"a": pd.Series([], dtype=object)}), StructType([FieldStr("a", LongType())]),
+         [field("a", "string")], []),
+        (pd.DataFrame({"a": [1, 2]}), StructType([FieldInt("a", LongType(), True, {"k": 1})]),
+         [field("a", "integer", {"k": 1})], [Row(a=1), Row(a=2)]),
+        (pd.DataFrame({"a": [1]}), StructFlds([StructField("a", LongType())]),
+         [field("a", "long")], [Row(a=1)]),
+        (pd.DataFrame({"a": pd.Series([], dtype="int64")}), StructFlds([StructField("a", LongType())]),
+         [field("a", "long")], []),
+    ]:
+        df = session.createDataFrame(frame, schema)
+        assert json.loads(df.schema.json()) == {"fields": fields, "type": "struct"}
+        assert df.collect() == rows
+    reversed_struct = StructRevr([StructField("a", LongType()), StructField("b", StringType())])
+    with pytest.raises(AnalysisException) as error:
+        session.createDataFrame(pd.DataFrame({"a": [1], "b": ["x"]}), reversed_struct).schema
+    assert error.value.getCondition() == "INVALID_COLUMN_OR_FIELD_DATA_TYPE"
+
+
+def test_create_dataframe_of_local_data_under_a_subclass_that_overrides_its_reads(session):
+    # As official PySpark 4.3.0's createDataFrame of local data, whose conversion
+    # (`LocalDataToArrowConversion`) and the `json()` of the struct that the relation sends read
+    # the attributes of a Python subclass that overrides them, as Python reads them: of a field
+    # whose `dataType` reads `StringType()`, an int is its str and a bool its lower-cased str, of
+    # tuples, dicts, Rows and NumPy arrays, also in a struct in an array; of one that reads
+    # `IntegerType()`, the column is of ints; of one that reads a name of its own, the column is
+    # of that name; and of a struct that iterates its fields in reverse, the schema is of the
+    # fields in reverse, which the table is not of, and which the server raises
+    # INVALID_COLUMN_OR_FIELD_DATA_TYPE of.
+    np = pytest.importorskip("numpy")
+
+    class FieldStr(StructField):
+        @property
+        def dataType(self):
+            return StringType()
+
+        @dataType.setter
+        def dataType(self, value):
+            self.__dict__["given"] = value
+
+    class FieldInt(StructField):
+        @property
+        def dataType(self):
+            return IntegerType()
+
+        @dataType.setter
+        def dataType(self, value):
+            self.__dict__["given"] = value
+
+    class FieldName(StructField):
+        @property
+        def name(self):
+            return "renamed"
+
+        @name.setter
+        def name(self, value):
+            self.__dict__["given"] = value
+
+    class StructRevr(StructType):
+        def __iter__(self):
+            return iter(list(self.fields)[::-1])
+
+    strs = StructType([FieldStr("a", LongType())])
+    for data, rows in [
+        ([(1,), (True,)], [Row(a="1"), Row(a="true")]),
+        ([{"a": 1}], [Row(a="1")]),
+        ([Row(a=2)], [Row(a="2")]),
+        (np.array([[1], [2]]), [Row(a="1"), Row(a="2")]),
+    ]:
+        df = session.createDataFrame(data, strs)
+        assert df.schema.simpleString() == "struct<a:string>"
+        assert df.collect() == rows
+    nested = StructType([StructField("l", ArrayType(strs))])
+    df = session.createDataFrame([([(1,)],)], nested)
+    assert df.schema.simpleString() == "struct<l:array<struct<a:string>>>"
+    assert df.collect() == [Row(l=[Row(a="1")])]
+    df = session.createDataFrame([(1, 2)], StructType([FieldInt("a", LongType()),
+                                                       StructField("b", LongType())]))
+    assert df.schema.simpleString() == "struct<a:int,b:bigint>"
+    assert df.collect() == [Row(a=1, b=2)]
+    df = session.createDataFrame([(1,)], StructType([FieldName("a", LongType())]))
+    assert df.schema.simpleString() == "struct<renamed:bigint>"
+    assert df.collect() == [Row(renamed=1)]
+    reversed_struct = StructRevr([StructField("a", LongType()), StructField("b", StringType())])
+    with pytest.raises(AnalysisException) as error:
+        session.createDataFrame([(1, "x")], reversed_struct).schema
+    assert error.value.getCondition() == "INVALID_COLUMN_OR_FIELD_DATA_TYPE"
 
 
 @pytest.mark.parametrize(
@@ -4996,6 +5656,70 @@ def test_reads_of_a_schema_of_a_user_defined_type_of_arguments_raise_as_pyspark(
     assert df.groupBy("i").count().collect() == [Row(i=1, count=1)]
 
 
+def test_a_deep_copy_converts_the_schema_before_it_copies_the_plan_as_pyspark(session):
+    # As official PySpark 4.3.0, whose copy.deepcopy looks `__deepcopy__` up through `__getattr__`,
+    # which reads the columns of a name of two underscores, and so converts the schema, before it
+    # copies the plan and then the session: of a schema that it does not convert, of a UDT whose
+    # __init__ takes arguments or of a nanosecond timestamp, the deep copy raises the error of the
+    # conversion before it copies the functions of the UDFs, also on a thread of no active
+    # session, where the copy of the session raises NO_ACTIVE_SESSION.
+    import copy
+    import threading
+
+    from pyspark.errors import PySparkRuntimeError
+
+    class Recorded:
+        copies = []
+
+        def __call__(self, x):
+            return x
+
+        def __deepcopy__(self, memo):
+            Recorded.copies.append(self)
+            return Recorded()
+
+    def on_a_thread(call):
+        raised = []
+
+        def run():
+            try:
+                call()
+            except BaseException as error:
+                raised.append(error)
+
+        thread = threading.Thread(target=run)
+        thread.start()
+        thread.join()
+        return raised[0]
+
+    of_udt = session.createDataFrame(
+        [((1.0, 2.0), 1)],
+        StructType([StructField("p", _ArgPointUDT(2)), StructField("i", LongType())]),
+    ).select("p", F.udf(Recorded(), "long")("i").alias("u"))
+    with pytest.raises(TypeError, match="missing 1 required positional argument"):
+        copy.deepcopy(of_udt)
+    error = on_a_thread(lambda: copy.deepcopy(of_udt))
+    assert isinstance(error, TypeError) and "missing 1 required positional argument" in str(error)
+    session.conf.set("spark.sql.timestampNanosTypes.enabled", "true")
+    try:
+        of_nanos = session.sql(
+            "SELECT CAST('2020-01-01 00:00:00.123456789' AS TIMESTAMP_NTZ(9)) c, 1 i"
+        ).select("c", F.udf(Recorded(), "long")("i").alias("u"))
+        with pytest.raises(PySparkValueError) as raised:
+            copy.deepcopy(of_nanos)
+        assert raised.value.getCondition() == "UNSUPPORTED_OPERATION"
+        error = on_a_thread(lambda: copy.deepcopy(of_nanos))
+        assert isinstance(error, PySparkValueError)
+        assert error.getCondition() == "UNSUPPORTED_OPERATION"
+    finally:
+        session.conf.unset("spark.sql.timestampNanosTypes.enabled")
+    assert Recorded.copies == []
+    # Of a schema that converts, the copy of the session raises there.
+    plain = session.range(1).select(F.udf(Recorded(), "long")("id").alias("u"))
+    error = on_a_thread(lambda: copy.deepcopy(plain))
+    assert isinstance(error, PySparkRuntimeError) and error.getCondition() == "NO_ACTIVE_SESSION"
+
+
 def test_uses_of_the_json_of_a_type_of_a_user_defined_type_of_no_json_raise_its_error(session):
     # As official PySpark 4.3.0, whose struct, array and map of a UserDefinedType whose module()
     # is not implemented are made (see test_dropin_types_columns_offline.py): the uses that read
@@ -5607,6 +6331,31 @@ def test_create_dataframe_schema_keeps_metadata_edited_in_place(session):
     assert df.schema["a"].metadata == {"comment": "the a"}
     assert df.schema.jsonValue()["fields"][0]["metadata"] == {"comment": "the a"}
     assert df.collect() == [Row(a=1, b="x")]
+
+
+def test_field_metadata_is_sent_as_pyspark_sends_it(session):
+    # As PySpark, which sends `json.dumps` of the metadata dict in a plan and the `json()` of the
+    # schema of createDataFrame: the server keeps the low 64 bits of an int beyond a long, also in
+    # an array, where the drop-in sent the float of the core's JSON values, which the server took
+    # as a double, refused in an array (a ClassCastException) and failed an Arrow-optimized UDF of
+    # it with ARROW_TYPE_MISMATCH. A float that is not finite is made, and the server refuses it.
+    # The values are those of official PySpark 4.3.0.
+    from pyspark.errors.exceptions.connect import SparkConnectGrpcException
+    from pyspark.sql import types as T
+
+    metadata = {"x": 10**30, "f": 1e-07, "b": [1, 2**70]}
+    struct = T.StructType([T.StructField("a", T.IntegerType(), True, metadata)])
+    kept = {"b": [1, 0], "f": 1e-07, "x": 5076944270305263616}
+    assert session.createDataFrame([(1,)], struct).schema.fields[0].metadata == kept
+    base = session.range(1).select(F.struct(F.lit(1).alias("a")).alias("v"))
+    cast = base.select(F.col("v").cast(struct)).schema.fields[0].dataType
+    assert cast.fields[0].metadata == kept
+    for use_arrow in (True, False):
+        udf = F.udf(lambda v: (v,), returnType=struct, useArrow=use_arrow)
+        assert session.range(1).select(udf(F.lit(1)).alias("r")).collect() == [Row(r=Row(a=1))]
+    infinite = T.StructType([T.StructField("a", T.IntegerType(), True, {"x": float("inf")})])
+    with pytest.raises(SparkConnectGrpcException, match="Non-standard token 'Infinity'"):
+        base.select(F.col("v").cast(infinite)).schema
 
 
 def test_collected_values_of_user_defined_types_are_deserialized_as_pyspark(session):
@@ -6222,6 +6971,116 @@ def test_create_dataframe_converts_numpy_scalars_as_pyspark(session):
         [(np.int64(1), np.float32(0.5), np.bool_(True), np.float32(1.5))],
         "a bigint, b double, c boolean, d bigint")
     assert [tuple(r) for r in df.collect()] == [(1, 0.5, True, 1)]
+
+
+def test_the_classic_column_window_and_table_arg_classes_are_pysparks(session):
+    # As official PySpark 4.3.0: pyspark.sql.Column, DataFrameNaFunctions,
+    # DataFrameStatFunctions, Window, WindowSpec and TableArg are PySpark's classic classes, of
+    # its modules and MROs, of which the Connect objects of a session are instances, of other
+    # classes; the explicit calls of their methods dispatch to the Connect class's, a patch of
+    # them reaches the objects, and the classic Column builds no object on Spark Connect.
+    import pyspark.sql.column
+    import pyspark.sql.connect.column
+    import pyspark.sql.connect.window
+    import pyspark.sql.dataframe
+    import pyspark.sql.table_arg
+    import pyspark.sql.window
+    from pyspark.errors import PySparkNotImplementedError
+    from pyspark.sql import Window
+
+    df = session.range(3)
+    window = Window.partitionBy("id").orderBy("id")
+    for obj, classic, mro in [
+        (F.col("id"), pyspark.sql.column.Column, 3),
+        (df.na, pyspark.sql.dataframe.DataFrameNaFunctions, 2),
+        (df.stat, pyspark.sql.dataframe.DataFrameStatFunctions, 2),
+        (window, pyspark.sql.window.WindowSpec, 2),
+        (df.asTable(), pyspark.sql.table_arg.TableArg, 3),
+    ]:
+        assert isinstance(obj, classic) and type(obj) is not classic, classic
+        assert issubclass(type(obj), classic) and len(classic.__mro__) == mro
+        assert type(obj).__module__.startswith("pyspark.sql.connect.")
+    assert pyspark.sql.Column is pyspark.sql.column.Column
+    assert pyspark.sql.connect.column.Column is not pyspark.sql.Column
+    assert pyspark.sql.connect.window.Window.__bases__ == (pyspark.sql.window.Window,)
+    assert repr(pyspark.sql.Column.alias(F.col("id"), "x")) == "Column<'id AS x'>"
+    with pytest.raises(PySparkNotImplementedError):
+        pyspark.sql.Column.alias(object(), "x")
+    with pytest.raises(ModuleNotFoundError):
+        pyspark.sql.Column("id")
+    pyspark.sql.Column.c14_twice = lambda self: self * 2
+    try:
+        assert [r[0] for r in df.select(F.col("id").c14_twice()).collect()] == [0, 2, 4]
+    finally:
+        del pyspark.sql.Column.c14_twice
+    rows = df.select("id", F.row_number().over(window).alias("n")).orderBy("id").collect()
+    assert [(r.id, r.n) for r in rows] == [(0, 1), (1, 1), (2, 1)]
+    na = pyspark.sql.dataframe.DataFrameNaFunctions(df)
+    assert na.df is df and vars(na) == {"df": df}
+    assert pyspark.sql.dataframe.DataFrameNaFunctions.drop(df).count() == 3
+
+
+def test_subclasses_of_the_classic_classes_run_in_the_python_workers_as_pysparks(session):
+    # As official PySpark 4.3.0: a subclass of a classic class that a UDF uses is pickled by value,
+    # of its metaclass and its bases, which the server's Python worker, of PySpark, imports to make
+    # the class again.
+    from pyspark.sql import Column
+    from pyspark.sql.table_arg import TableArg
+    from pyspark.sql.window import WindowSpec
+
+    class MyColumn(Column):
+        pass
+
+    class MySpec(WindowSpec):
+        pass
+
+    class MyTableArg(TableArg):
+        pass
+
+    @F.udf("string")
+    def bases(x):
+        return " ".join(
+            f"{c.__name__}:{c.__bases__[0].__module__}.{c.__bases__[0].__qualname__}"
+            for c in (MyColumn, MySpec, MyTableArg)
+        )
+
+    assert session.range(1).select(bases("id")).first()[0] == (
+        "MyColumn:pyspark.sql.column.Column MySpec:pyspark.sql.window.WindowSpec "
+        "MyTableArg:pyspark.sql.table_arg.TableArg"
+    )
+
+
+def test_columns_and_table_args_that_udfs_use_load_in_the_python_workers_as_pysparks(session):
+    # As official PySpark 4.3.0: a Column and a table argument that a UDF uses unpickle in the
+    # server's Python worker as PySpark Connect's, instances of the classic classes there. PySpark
+    # 4.3.0's pyspark.sql.connect.table_arg imports itself through pyspark.sql.connect.functions,
+    # so a worker that loads it first fails, as with pyspark-client: the function's tuple loads
+    # the functions first, as the items of a tuple unpickle in order.
+    import pyspark.sql.connect.functions as connect_functions
+    from pyspark.sql import Column
+    from pyspark.sql.table_arg import TableArg
+
+    column = (F.col("id") + 1).alias("x")
+    captured = (connect_functions, session.range(3).asTable().partitionBy("id"))
+
+    @F.udf("string")
+    def of_column(x):
+        return f"{type(column).__module__}.{type(column).__qualname__} " + (
+            f"{isinstance(column, Column)} {column!r}"
+        )
+
+    @F.udf("string")
+    def of_table(x):
+        table = captured[1]
+        return f"{type(table).__module__}.{type(table).__qualname__} " + (
+            f"{isinstance(table, TableArg)} {table._is_partitioned()}"
+        )
+
+    row = session.range(1).select(of_column("id"), of_table("id")).first()
+    assert tuple(row) == (
+        "pyspark.sql.connect.column.Column True Column<'+(id, 1) AS x'>",
+        "pyspark.sql.connect.table_arg.TableArg True True",
+    )
 
 
 def test_the_objects_of_a_session_are_not_of_the_classic_classes_as_pysparks(session):
@@ -7294,6 +8153,101 @@ def test_foreach_batch_captures_the_readers_writers_and_groups_as_pyspark(
         session.sql(f"DROP TABLE IF EXISTS {table}").collect()
 
 
+# The program of test_foreach_batch_captures_groups_and_queries_in_a_new_interpreter_as_pyspark,
+# which makes a session and the object that its foreachBatch function captures, and nothing else,
+# and prints what the function wrote on the Python worker of the server.
+FOREACH_BATCH_OF_A_NEW_INTERPRETER = """
+import sys
+
+from pyspark.sql import SparkSession
+
+remote, directory, name = sys.argv[1:]
+spark = SparkSession.builder.remote(remote).getOrCreate()
+df = spark.createDataFrame([(1, "a"), (2, "b"), (1, "c")], "k int, v string")
+running = None
+if name == "streamingQuery":
+    running = spark.readStream.format("rate").option("rowsPerSecond", 1).load()
+    running = running.writeStream.format("memory").queryName("fresh_running").start()
+captured = {
+    "groupBy": lambda: df.groupBy("k"),
+    "cogroup": lambda: df.groupBy("k").cogroup(df.groupBy("k")),
+    "streamingQuery": lambda: running,
+    "namespaces": lambda: (df.na, df.stat, spark.catalog, spark.tvf, spark.dataSource),
+}[name]()
+out = directory + "/out.txt"
+
+
+def func(batch, batch_id):
+    if name == "groupBy":
+        value = captured.agg({"v": "max"}).count()
+    elif name == "cogroup":
+        value = captured.applyInArrow(lambda left, right: left, "k int, v string").count()
+    elif name == "streamingQuery":
+        value = (captured.id == running.id, captured.isActive, captured.awaitTermination(0.1))
+    else:
+        na, stat, catalog, tvf, sources = captured
+        value = (
+            na.drop().count(),
+            stat.crosstab("k", "v").count(),
+            catalog.currentDatabase(),
+            tvf.range(2).count(),
+            type(sources).__name__,
+        )
+    with open(out, "w") as file:
+        file.write(str(value))
+
+
+query = spark.readStream.format("text").load(directory + "/in").writeStream.foreachBatch(func)
+query = query.trigger(once=True).start()
+try:
+    query.awaitTermination()
+finally:
+    if running is not None:
+        running.stop()
+print(open(out).read())
+"""
+
+
+@pytest.mark.parametrize("name", ["groupBy", "cogroup", "streamingQuery", "namespaces"])
+def test_foreach_batch_captures_groups_and_queries_in_a_new_interpreter_as_pyspark(
+        tmp_path, name):
+    # As PySpark's, in an interpreter that made only the session and the object, as a program of
+    # its own process does: a foreachBatch function that captures grouped data, cogrouped ops, a
+    # streaming query, or the na and stat functions of a DataFrame and the catalog, table-valued
+    # functions and data sources of a session uses them on the Python worker of the server.
+    # cloudpickle pickles a class by reference only when its module is in `sys.modules`, and else
+    # by value, which the worker unpickles as a class of none of the native class's members
+    # (`AttributeError: type object 'GroupedData' has no attribute 'agg'`): the modules that the
+    # native classes name are imported as PySpark imports them, with the session, its DataFrames
+    # and its properties. (test_foreach_batch_captures_the_readers_writers_and_groups_as_pyspark
+    # runs in the process of the other tests, which import them too.)
+    import subprocess
+    import sys
+
+    remote = os.environ.get("SPARK_REMOTE")
+    if not remote:
+        pytest.skip("SPARK_REMOTE is required for live-server tests")
+    (tmp_path / "in").mkdir()
+    (tmp_path / "in" / "input.txt").write_text("a\nc\nb\n")
+    script = tmp_path / "foreach_batch.py"
+    script.write_text(FOREACH_BATCH_OF_A_NEW_INTERPRETER)
+    result = subprocess.run(
+        [sys.executable, str(script), remote, str(tmp_path), name],
+        env=dict(os.environ, TZ="UTC"),
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+    assert result.returncode == 0, result.stderr
+    expected = {
+        "groupBy": "2",
+        "cogroup": "3",
+        "streamingQuery": "(True, True, False)",
+        "namespaces": "(3, 2, 'default', 2, 'DataSourceRegistration')",
+    }[name]
+    assert result.stdout.strip().splitlines()[-1] == expected, result.stderr
+
+
 def test_empty_data_with_a_struct_field_as_a_type_is_rejected_by_the_server(session):
     # As PySpark, which sends the schema of empty data as its JSON string, so that the server
     # parses it when the DataFrame is evaluated: the client has no error of its own for it.
@@ -7403,3 +8357,285 @@ def test_a_table_of_a_nested_abstract_type_is_not_created_as_pyspark(session):
     assert e.value.getCondition() == "UNSUPPORTED_OPERATION"
     assert e.value.getMessageParameters() == {"operation": "data type DataType()"}
     assert not session.catalog.tableExists(table)
+
+
+def test_the_functions_run_those_of_spark_connect_of_their_names_as_pysparks(
+    session, monkeypatch
+):
+    # As official PySpark 4.3.0, whose pyspark.sql.functions runs the functions of
+    # pyspark.sql.connect.functions of their names at each call (try_remote_functions): a patch
+    # of one is what a query of the functions of pyspark.sql.functions selects, also of a
+    # partition transform, which a function of the session gets too. The drop-in's
+    # pyspark.sql.functions were its own functions, which the patch did not change.
+    import pyspark.sql.connect.functions as CF
+    from pyspark.sql import functions as F
+
+    monkeypatch.setattr(CF, "upper", CF.lower)
+    df = session.createDataFrame([("aB",)], ["s"])
+    assert df.select(F.upper("s"), F.builtin.upper(df.s)).first() == ("ab", "ab")
+    assert df.select(F.expr("upper(s)").alias("u")).first().u == "AB"
+    monkeypatch.undo()
+    assert df.select(F.upper("s")).first()[0] == "AB"
+    # PYSPARK_NO_NAMESPACE_SHARE makes them run their own bodies, of Spark Classic, which a
+    # client of Spark Connect cannot.
+    monkeypatch.setenv("PYSPARK_NO_NAMESPACE_SHARE", "1")
+    with pytest.raises(ImportError, match="cannot import name 'SparkContext' from 'pyspark'"):
+        F.col("s")
+    monkeypatch.delenv("PYSPARK_NO_NAMESPACE_SHARE")
+    assert df.select(F.col("s")).first().s == "aB"
+
+
+def test_the_catalog_tvf_registration_and_conf_make_the_requests_of_their_dict_as_pysparks(
+    session,
+):
+    # As official PySpark 4.3.0, whose Catalog, TableValuedFunction, DataSourceRegistration and
+    # RuntimeConf keep the session or the client of their __init__ in their __dict__, which their
+    # methods read at each request: of a proxy of the session, a catalog and the table-valued
+    # functions make the requests of the session of its client, and a RuntimeConf of a client of
+    # another class calls its config, of the ConfigRequest.Operation of each request.
+    from pyspark.sql.connect.catalog import Catalog
+    from pyspark.sql.connect.conf import RuntimeConf
+    from pyspark.sql.connect.tvf import TableValuedFunction
+
+    class Proxy:
+        def __init__(self, spark):
+            self.spark = spark
+
+        def __getattr__(self, name):
+            return getattr(self.spark, name)
+
+    class Recording:
+        def __init__(self, client):
+            self.client, self.operations = client, []
+
+        def config(self, operation):
+            self.operations.append(operation)
+            return self.client.config(operation)
+
+    assert vars(session.catalog) == {"_sparkSession": session}
+    assert vars(session.tvf) == {"_sparkSession": session}
+    assert vars(session.dataSource) == {"sparkSession": session}
+    assert vars(session.conf) == {"_client": session.client}
+    proxy = Proxy(session)
+    catalog = Catalog(proxy)
+    assert catalog.currentDatabase() == session.catalog.currentDatabase()
+    assert catalog.databaseExists("default")
+    session.catalog._sparkSession = proxy
+    try:
+        assert session.catalog.currentDatabase() == "default"
+    finally:
+        session.catalog._sparkSession = session
+    tvf = TableValuedFunction(proxy)
+    assert tvf.range(3).count() == 3
+    assert tvf.explode(F.array(F.lit(1), F.lit(2))).collect() == [Row(col=1), Row(col=2)]
+    key = "spark.sql.shuffle.partitions"
+    client = Recording(session.client)
+    conf = RuntimeConf(client)
+    previous = conf.get(key)
+    try:
+        conf.set(key, 7)
+        assert session.conf.get(key) == "7" and conf.get(key) == "7"
+        assert conf.isModifiable(key) is True
+    finally:
+        conf.set(key, previous)
+    get, set_, *_ = client.operations
+    assert list(get.get.keys) == [key]
+    assert [(p.key, p.value) for p in set_.set.pairs] == [(key, "7")]
+    assert len(client.operations) == 5
+
+
+def test_the_streaming_queries_and_their_manager_make_the_requests_of_their_dict_as_pysparks(
+    session,
+):
+    # As official PySpark 4.3.0, whose StreamingQuery, StreamingQueryManager and
+    # StreamingQueryListenerBus keep their state in their __dict__, which their methods read at
+    # each request: a query or a manager of a proxy of the session makes the requests of the
+    # session of its client, and the queries that a manager gives are of its `_session`.
+    from pyspark.sql.connect.streaming.query import StreamingQuery, StreamingQueryManager
+
+    class Proxy:
+        def __init__(self, spark):
+            self.spark = spark
+
+        def __getattr__(self, name):
+            return getattr(self.spark, name)
+
+    manager = session.streams
+    assert list(vars(manager)) == ["_session", "_sqlb"] and manager._session is session
+    bus = manager._sqlb
+    assert list(vars(bus)) == ["_sqm", "_listener_bus", "_execution_thread", "_lock"]
+    assert bus._sqm is manager and bus._listener_bus == []
+    query = (
+        session.readStream.format("rate").load()
+        .writeStream.format("memory").queryName("dictsub_streams").start()
+    )
+    try:
+        assert list(vars(query)) == ["_session", "_query_id", "_run_id", "_name"]
+        assert query._session is session and query.name == "dictsub_streams"
+        proxy = Proxy(session)
+        of_proxy = StreamingQuery(proxy, query.id, query.runId)
+        assert of_proxy.isActive and of_proxy._session is proxy and of_proxy.name is None
+        [active] = StreamingQueryManager(proxy).active
+        assert active.id == query.id and active._session is proxy
+        assert manager.get(query.id)._session is session
+    finally:
+        query.stop()
+    assert not StreamingQuery(Proxy(session), query.id, query.runId).isActive
+
+
+def test_grouped_data_na_and_stat_make_their_dataframes_of_their_dict_as_pysparks(session):
+    # As official PySpark 4.3.0, whose GroupedData, PandasCogroupedOps, DataFrameNaFunctions and
+    # DataFrameStatFunctions keep their state in their __dict__, which their methods read when they
+    # make their DataFrames: an assigned grouping is that of the aggregation, grouped data of
+    # PySpark's constructor and of a pivot aggregate, cogrouped data of grouped data of any class
+    # map their cogroups, and the null and statistics functions of a proxy of a DataFrame call its
+    # methods.
+    from pyspark.sql.connect.dataframe import DataFrameNaFunctions, DataFrameStatFunctions
+    from pyspark.sql.connect.group import GroupedData
+
+    class Proxy:
+        def __init__(self, df):
+            self.df = df
+
+        def __getattr__(self, name):
+            return getattr(self.df, name)
+
+    class Grouped:
+        pass
+
+    df = session.createDataFrame(
+        [(1, "a", 1.0), (1, "b", None), (2, "a", 3.0)], "k int, s string, v double"
+    )
+    grouped = df.groupBy("k")
+    assert vars(grouped)["_df"] is df and vars(df.na) == {"df": df}
+    grouped._grouping_cols = [F.col("s")]
+    assert sorted(grouped.count().collect()) == [Row(s="a", count=2), Row(s="b", count=1)]
+    rolled = GroupedData(df, "rollup", [F.col("k")]).count().collect()
+    assert sorted(rolled, key=lambda row: (row.k is None, row.k)) == [
+        Row(k=1, count=2),
+        Row(k=2, count=1),
+        Row(k=None, count=3),
+    ]
+    pivoted = GroupedData(df, "groupby", [df.k]).pivot("s", ["a"]).sum("v")
+    assert sorted(pivoted.collect()) == [Row(k=1, a=1.0), Row(k=2, a=3.0)]
+    duck = Grouped()
+    duck._df, duck._grouping_cols = df, [F.col("k")]
+    mapped = df.groupBy("k").cogroup(duck).applyInPandas(lambda left, right: left, df.schema)
+    assert mapped.count() == 3
+    assert DataFrameNaFunctions(Proxy(df)).drop().count() == 2
+    assert DataFrameNaFunctions(Proxy(df)).fill(0.0).where("v = 0.0").count() == 1
+    assert DataFrameStatFunctions(Proxy(df)).crosstab("k", "s").count() == 2
+
+
+def test_a_builder_creates_its_session_of_its_dict_as_pysparks(session):
+    # As official PySpark 4.3.0, whose SparkSession.Builder keeps its options, its channel builder
+    # and its hook factories in its __dict__, which its create reads: the builder of a subclass
+    # makes a session of the options that are assigned to it, which its _apply_options sets on that
+    # session, and of the hooks of its factories.
+    from pyspark.sql.connect.session import SparkSession as ConnectSession
+
+    remote, applied, hooked = os.environ["SPARK_REMOTE"], [], []
+
+    class Builder(ConnectSession.Builder):
+        def _apply_options(self, session):
+            applied.append(session)
+            return super()._apply_options(session)
+
+    def factory(created):
+        hooked.append(created)
+        return ConnectSession.Hook()
+
+    builder = Builder().remote(remote)._registerHook(factory)
+    assert vars(builder) == {
+        "_options": {"spark.remote": remote},
+        "_channel_builder": None,
+        "_hook_factories": [factory],
+    }
+    builder._options["spark.sql.shuffle.partitions"] = 7
+    created = builder.create()
+    try:
+        assert applied == [created] and hooked == [created] and created is not session
+        assert created.conf.get("spark.sql.shuffle.partitions") == "7"
+        assert created.range(3).count() == 3
+    finally:
+        created.stop()
+
+
+def test_a_session_keeps_its_state_in_its_dict_and_requests_of_its_client_as_pysparks(session):
+    # As official PySpark 4.3.0, whose SparkSession keeps its `_client`, its `_session_id` and its
+    # `release_session_on_close` in its __dict__, and then its catalog and its version, cached
+    # properties, and the `_sqm` of its streams, and makes its requests of its client at the call:
+    # of the client of another session that is assigned, its SQL, its catalog and its conf are of
+    # that session, and of its own client given back, of its own again.
+    other = session.newSession()
+    try:
+        assert list(vars(session))[:3] == ["_client", "_session_id", "release_session_on_close"]
+        assert session.client is session._client and session.session_id == session._session_id
+        assert session.version == vars(session)["version"]
+        catalog, streams = session.catalog, session.streams
+        assert vars(session)["catalog"] is catalog and vars(session)["_sqm"] is streams
+        other.range(3).createOrReplaceTempView("dictsub_session_view")
+        other.conf.set("spark.sql.shuffle.partitions", "7")
+        own = session._client
+        session._client = other.client
+        try:
+            assert session.sql("select count(*) from dictsub_session_view").collect()[0][0] == 3
+            assert session.catalog.tableExists("dictsub_session_view")
+            assert session.conf.get("spark.sql.shuffle.partitions") == "7"
+        finally:
+            session._client = own
+        assert not session.catalog.tableExists("dictsub_session_view")
+        assert session.conf.get("spark.sql.shuffle.partitions") != "7"
+    finally:
+        other.stop()
+
+
+def test_columns_windows_and_table_arguments_keep_their_state_in_their_dict_as_pysparks(session):
+    # As official PySpark 4.3.0, whose Column keeps its `_expr`, whose WindowSpec keeps its
+    # `_partitionSpec`, `_orderSpec` and `_frame`, and whose TableArg keeps its `_subquery_expr`
+    # in their __dict__, which their methods read at the call: a Column of a LiteralExpression,
+    # a Column whose `_expr` is assigned, a window of PySpark's arguments and a table argument of
+    # the subquery of another give the rows of their state, and a frame of a row bound beyond an
+    # int is PySpark's error of the request.
+    from pyspark.errors import PySparkValueError
+    from pyspark.sql import functions as F
+    from pyspark.sql.connect.column import Column
+    from pyspark.sql.connect.expressions import LiteralExpression
+    from pyspark.sql.connect.table_arg import TableArg
+    from pyspark.sql.connect.window import Window, WindowFrame, WindowSpec
+    from pyspark.sql.types import LongType
+
+    df = session.range(4).select(F.col("id"), (F.col("id") % 2).alias("g"))
+    five = Column(LiteralExpression(5, LongType()))
+    assert vars(five) == {"_expr": five._expr}
+    assert df.select((five + F.col("id")).alias("v")).collect()[0].v == 5
+    col = F.col("id")
+    col._expr = (F.col("id") * 10)._expr
+    assert [row[0] for row in df.select(col).orderBy("id").collect()] == [0, 10, 20, 30]
+    ordered = Window.partitionBy("g").orderBy("id")
+    window = WindowSpec(
+        ordered._partitionSpec, ordered._orderSpec, WindowFrame(True, Window.unboundedPreceding, 0)
+    )
+    assert vars(window)["_partitionSpec"] is ordered._partitionSpec
+    rows = df.select("id", F.sum("id").over(window).alias("s")).orderBy("id").collect()
+    assert [row.s for row in rows] == [0, 1, 2, 4]
+    beyond = F.sum("id").over(ordered.rowsBetween(-(2**40), 0))
+    with pytest.raises(PySparkValueError) as raised:
+        df.select(beyond).collect()
+    assert raised.value.getCondition() == "VALUE_NOT_BETWEEN"
+    table = df.asTable().withSinglePartition()
+    same = TableArg(table._subquery_expr)
+    assert vars(same) == {"_subquery_expr": table._subquery_expr} and same._is_partitioned()
+
+    @F.udtf(returnType="n: long")
+    class Count:
+        def __init__(self):
+            self.n = 0
+
+        def eval(self, row):
+            self.n += 1
+
+        def terminate(self):
+            yield (self.n,)
+
+    assert [row.n for row in Count(same).collect()] == [4]

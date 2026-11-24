@@ -20,11 +20,15 @@
 //! - a proxy without a port is on port 443;
 //! - `no_grpc_proxy`, or else `no_proxy`, lists the hosts that are not proxied: a host matches
 //!   an entry that is the host itself or a parent domain of it (a leading `.` is optional), or
-//!   an IP host is in an entry's CIDR range.
+//!   an IP host, as gRPC reads an address (an IPv6 one of its zone too), is in an entry's CIDR
+//!   range; an entry of a port matches no host;
+//! - a loopback host is proxied as any other, as gRPC proxies it, of the local address of the
+//!   connection to the proxy, which gRPC's local credentials check.
 //!
-//! One difference is deliberate: a loopback host is never proxied. Its traffic need not leave
-//! the machine, and a token is sent in plaintext to `localhost` (see
-//! [`crate::channel::ChannelBuilder::secure`]), which a proxy must not see.
+//! One difference is deliberate, of a channel of no credentials of the Python binding only: a
+//! loopback host of a channel that sends its token in plaintext, of the rule of
+//! [`crate::channel::ChannelBuilder::secure`] (a token to `localhost`), is never proxied, as no
+//! local credentials keep the token from a proxy that is not on the machine.
 //!
 //! The tunnel only carries bytes: TLS is negotiated through it with the Spark server, against
 //! the server's own name, so the proxy sees neither the token nor the data of a TLS channel.
@@ -78,10 +82,15 @@ impl ProxyEnv {
     }
 
     /// The proxy to reach `host` (as the connection string has it, an IPv6 address in
-    /// brackets) through, or `None` to connect directly. The error is a proxy address that
-    /// cannot be connected to, of a host that the proxy applies to; it names the variable but
-    /// not its value, which can hold a password.
-    pub(crate) fn proxy_for(&self, host: &str) -> Result<Option<HttpProxy>, String> {
+    /// brackets) through, or `None` to connect directly, of a loopback host directly too if
+    /// `direct_loopback` (see the module). The error is a proxy address that cannot be connected
+    /// to, of a host that the proxy applies to; it names the variable but not its value, which can
+    /// hold a password.
+    pub(crate) fn proxy_for(
+        &self,
+        host: &str,
+        direct_loopback: bool,
+    ) -> Result<Option<HttpProxy>, String> {
         let Some((name, value)) = self.proxy.as_ref() else {
             return Ok(None);
         };
@@ -104,7 +113,7 @@ impl ProxyEnv {
             Err(ProxyUriError::Invalid(reason)) => Err(reason),
         };
         let host = host.trim_start_matches('[').trim_end_matches(']');
-        let excluded = is_loopback(host)
+        let excluded = (direct_loopback && is_loopback(host))
             || self
                 .no_proxy
                 .as_ref()
@@ -127,9 +136,12 @@ enum ProxyUriError {
     Invalid(String),
 }
 
-/// An HTTP proxy: its `host:port`, and the `Proxy-Authorization` value of its credentials.
+/// An HTTP proxy: its `host:port`, its host (an IPv6 address without brackets) and its port, and
+/// the `Proxy-Authorization` value of its credentials.
 pub(crate) struct HttpProxy {
     pub(crate) authority: String,
+    pub(crate) host: String,
+    pub(crate) port: u16,
     pub(crate) authorization: Option<String>,
 }
 
@@ -204,14 +216,17 @@ impl HttpProxy {
             (!userinfo.is_empty()).then(|| format!("Basic {}", STANDARD.encode(userinfo)));
         Ok(Self {
             authority,
+            host: host.to_string(),
+            port,
             authorization,
         })
     }
 }
 
-/// Whether `host` (an IPv6 address without brackets) is a loopback host, which is never
-/// proxied. Wider than [`crate::channel::ChannelBuilder::is_loopback`], which names only the
-/// hosts that a token is sent to in plaintext or not.
+/// Whether `host` (an IPv6 address without brackets) is a loopback host, which a channel that sends
+/// its token in plaintext never proxies (see the module). Wider than
+/// [`crate::channel::ChannelBuilder::is_loopback`], which names only the hosts that a token is
+/// sent to in plaintext or not.
 fn is_loopback(host: &str) -> bool {
     // A trailing dot names the same host, and every name under `.localhost` is loopback
     // (RFC 6761). An IPv4-mapped IPv6 address is the IPv4 address it maps.
@@ -241,9 +256,15 @@ fn split_host_port(host_port: &str) -> (&str, Option<&str>) {
     }
 }
 
-/// Whether the no-proxy list `list` excludes `host`, as gRPC's `AddressIncluded`.
+/// Whether the no-proxy list `list` excludes `host`, as gRPC's `AddressIncluded`, of the address
+/// of the host as gRPC's `StringToSockaddr` reads it, of an IPv6 address of a zone too.
 fn no_proxy_matches(list: &str, host: &str) -> bool {
-    let ip = host.parse::<IpAddr>().ok();
+    let joined = if host.contains(':') {
+        format!("[{host}]:0")
+    } else {
+        format!("{host}:0")
+    };
+    let ip = crate::grpc_target::parse_host_port(&joined, None).map(|address| address.ip());
     list.split(',')
         .map(str::trim_ascii)
         .filter(|entry| !entry.is_empty())
@@ -311,7 +332,7 @@ mod tests {
 
     fn authority(vars: &[(&str, &str)], host: &str) -> Option<String> {
         env(vars)
-            .proxy_for(host)
+            .proxy_for(host, false)
             .unwrap()
             .map(|proxy| proxy.authority)
     }
@@ -358,7 +379,22 @@ mod tests {
     }
 
     #[test]
-    fn loopback_hosts_are_never_proxied() {
+    fn loopback_hosts_are_proxied_but_of_a_token_in_plaintext() {
+        // As gRPC, which proxies a loopback host as any other (of the local credentials of the
+        // connection to the proxy), but of a channel that sends its token in plaintext.
+        for host in ["localhost", "127.0.0.1", "[::1]", "spark.localhost"] {
+            assert_eq!(
+                authority(&[PROXY], host),
+                Some("proxy.corp:3128".into()),
+                "{host}"
+            );
+        }
+        let direct = |host: &str| {
+            env(&[PROXY])
+                .proxy_for(host, true)
+                .unwrap()
+                .map(|proxy| proxy.authority)
+        };
         for host in [
             "localhost",
             "LOCALHOST",
@@ -372,7 +408,7 @@ mod tests {
             "::ffff:127.0.0.1",
             "[::ffff:127.0.0.1]",
         ] {
-            assert_eq!(authority(&[PROXY], host), None, "{host}");
+            assert_eq!(direct(host), None, "{host}");
         }
         for host in [
             "[2001:db8::1]",
@@ -382,11 +418,7 @@ mod tests {
             ".localhost",
             "[::ffff:10.0.0.1]",
         ] {
-            assert_eq!(
-                authority(&[PROXY], host),
-                Some("proxy.corp:3128".into()),
-                "{host}"
-            );
+            assert_eq!(direct(host), Some("proxy.corp:3128".into()), "{host}");
         }
     }
 
@@ -430,7 +462,7 @@ mod tests {
         ];
         let (direct, logged) = crate::grpc_log::logged_by(|| {
             ["spark.example", "other.example", "localhost"]
-                .map(|host| env(&vars).proxy_for(host).unwrap().is_none())
+                .map(|host| env(&vars).proxy_for(host, false).unwrap().is_none())
         });
         assert_eq!(direct, [true; 3]);
         let messages: Vec<_> = logged.iter().map(|entry| entry.message.as_str()).collect();
@@ -454,7 +486,7 @@ mod tests {
             "http://[::1",
         ] {
             let error = env(&[("https_proxy", uri)])
-                .proxy_for("spark.example")
+                .proxy_for("spark.example", false)
                 .unwrap_err();
             assert!(
                 error.starts_with("Invalid HTTP proxy address in https_proxy"),
@@ -477,13 +509,13 @@ mod tests {
             "http://[::1",
         ] {
             for no_proxy in [("no_proxy", "spark.example"), ("no_grpc_proxy", ".example")] {
-                let proxy = env(&[("grpc_proxy", uri), no_proxy]).proxy_for("spark.example");
+                let proxy = env(&[("grpc_proxy", uri), no_proxy]).proxy_for("spark.example", false);
                 assert!(proxy.unwrap().is_none(), "{uri} {no_proxy:?}");
             }
-            let proxy = env(&[("grpc_proxy", uri)]).proxy_for("localhost");
+            let proxy = env(&[("grpc_proxy", uri)]).proxy_for("localhost", true);
             assert!(proxy.unwrap().is_none(), "{uri}");
             let error = env(&[("grpc_proxy", uri), ("no_proxy", "other.example")])
-                .proxy_for("spark.example")
+                .proxy_for("spark.example", false)
                 .unwrap_err();
             assert!(error.starts_with("Invalid HTTP proxy address in grpc_proxy"));
         }
@@ -494,7 +526,7 @@ mod tests {
         // As gRPC: the userinfo after decoding, split at the last '@' of the authority.
         let auth = |uri: &str| {
             env(&[("https_proxy", uri)])
-                .proxy_for("spark.example")
+                .proxy_for("spark.example", false)
                 .unwrap()
                 .unwrap()
                 .authorization
@@ -519,7 +551,7 @@ mod tests {
     fn no_proxy_lists() {
         let proxied = |no_proxy: &str, host: &str| {
             env(&[PROXY, ("no_proxy", no_proxy)])
-                .proxy_for(host)
+                .proxy_for(host, false)
                 .unwrap()
                 .is_some()
         };
@@ -546,6 +578,13 @@ mod tests {
         assert!(proxied("10.0.0.0/x", "10.1.2.3"));
         // A CIDR range is not a domain.
         assert!(proxied("10.0.0.0/8", "spark.example"));
+        // As gRPC's `StringToSockaddr`, an IPv6 address of a zone is in a range, and an entry of a
+        // port matches no host, a loopback one either.
+        assert!(!proxied("::1/128", "[::1%1]"));
+        assert!(!proxied("::/0", "fe80::1%1"));
+        assert!(proxied("::1/128", "[::1%nosuchinterface0]"));
+        assert!(proxied("127.0.0.1:17843", "127.0.0.1"));
+        assert!(!proxied("127.0.0.0/8", "127.0.0.1"));
     }
 
     #[test]
@@ -564,7 +603,7 @@ mod tests {
     #[test]
     fn debug_never_shows_credentials() {
         let env = env(&[("https_proxy", "http://alice:hunter2@p:1")]);
-        let proxy = env.proxy_for("spark.example").unwrap().unwrap();
+        let proxy = env.proxy_for("spark.example", false).unwrap().unwrap();
         for shown in [format!("{env:?}"), format!("{proxy:?}")] {
             assert!(
                 !shown.contains("hunter2") && !shown.contains("YWxp"),

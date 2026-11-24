@@ -6,8 +6,8 @@ It parses crates/spark-connect/src/functions.rs and generates
 
   * crates/pyspark-rs/src/dispatch_generated.rs  (``call_builtin``: function name ->
     call into the Rust core), and
-  * python/pyspark/sql/functions_generated.py    (the ``pyspark.sql.functions`` wrappers;
-    needs ``--pyspark-src``).
+  * python/pyspark/sql/connect/functions/_generated.py  (the functions of
+    ``pyspark.sql.connect.functions``; needs ``--pyspark-src``).
 
 Both files are fully generated: every arm or wrapper that does not follow from a
 function's Rust signature is declared in one of the tables below, so regenerating
@@ -45,7 +45,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 FUNCTIONS_RS = Path("crates/spark-connect/src/functions.rs")
 DISPATCH_FILE = Path("crates/pyspark-rs/src/dispatch_generated.rs")
-WRAPPERS_FILE = Path("python/pyspark/sql/functions_generated.py")
+WRAPPERS_FILE = Path("python/pyspark/sql/connect/functions/_generated.py")
 # The type stub of pyspark.sql.connect.functions.builtin, which scripts/gen_type_stubs.py
 # generates from the reference PySpark: the signatures of its functions.
 CONNECT_FUNCTIONS_STUB = Path("python/pyspark/sql/connect/functions/builtin.pyi")
@@ -154,9 +154,10 @@ def _is_variadic(fn: dict, ptype: str) -> bool:
 # Tables
 # ---------------------------------------------------------------------------------------
 
-# Functions without a generated Python wrapper: functions.py writes them by hand or binds
-# them to a dedicated pyfunc_*. Unless DISPATCH_ONLY lists them, they have no dispatch arm
-# either, their Rust signature not being a list of columns.
+# Functions without a generated Python wrapper: pyspark/sql/connect/functions/builtin.py
+# (``builtin.py`` below) writes them by hand or binds them to a dedicated pyfunc_*. Unless
+# DISPATCH_ONLY lists them, they have no dispatch arm either, their Rust signature not being a
+# list of columns.
 SKIP_FUNCTIONS = {
     "col",
     "lit",
@@ -189,7 +190,7 @@ SKIP_FUNCTIONS = {
     "sha2",
     "window",
     # window(Column, windowDuration, slideDuration, startTime): string args, so it is
-    # hand-wired via pyfunc_window_with_slide_and_start (functions.py), not the generic
+    # hand-wired via pyfunc_window_with_slide_and_start (builtin.py), not the generic
     # Vec<Column> dispatch.
     "window_with_slide_and_start",
     "from_avro",
@@ -204,14 +205,14 @@ SKIP_FUNCTIONS = {
     "to_protobuf_with_descriptor_and_options",
     "to_protobuf_with_options",
     # listagg_distinct(col, delimiter) and string_agg_distinct: a distinct function call,
-    # which the Python wrappers of functions.py dispatch with or without the delimiter.
+    # which the Python wrappers of builtin.py dispatch with or without the delimiter.
     "listagg_distinct",
     "string_agg_distinct",
     # count_distinct(col, *cols) and countDistinct: a distinct count of all the columns.
     "count_distinct",
     "countDistinct",
     # when (a CASE WHEN), and the deprecated partition transforms, which call those of
-    # pyspark.sql.functions.partitioning: written in functions.py as PySpark Connect's.
+    # pyspark.sql.connect.functions.partitioning: PySpark Connect's, vendored.
     "when",
     "years",
     "months",
@@ -221,7 +222,7 @@ SKIP_FUNCTIONS = {
 }
 
 # The SKIP_FUNCTIONS that still have a dispatch arm: their Python wrapper is written by
-# hand in functions.py (which dispatches count_distinct, listagg_distinct and
+# hand in builtin.py (which dispatches count_distinct, listagg_distinct and
 # string_agg_distinct by name), but call_builtin resolves them.
 DISPATCH_ONLY = {
     "bucket",
@@ -451,7 +452,7 @@ NOT_DISPATCHED = {
     "to_json_with_options": "takes the options as pairs of names and values",
     "to_xml_with_options": "takes the options as pairs of names and values",
     "window_with_slide": "takes the durations as strings",
-    # Higher-order functions: they take Rust closures. functions.py builds their lambdas
+    # Higher-order functions: they take Rust closures. builtin.py builds their lambdas
     # with _invoke_higher_order_function.
     "aggregate": "takes a Rust closure",
     "aggregate_with_finish": "takes a Rust closure",
@@ -678,7 +679,7 @@ def plan_dispatch(
             signature = ", ".join(f"{p['name']}: {p['type']}" for p in fn["params"])
             raise GeneratorError(
                 f"{name}({signature}) is not a function of columns: add it to "
-                "SKIP_FUNCTIONS (hand-written in functions.py), OPTIONAL_ARG_VARIANTS, "
+                "SKIP_FUNCTIONS (hand-written in builtin.py), OPTIONAL_ARG_VARIANTS, "
                 "HEAD_REST_ARMS or NOT_DISPATCHED in scripts/gen_fn_dispatch.py"
             )
         if name in section_overrides:
@@ -836,7 +837,7 @@ def optional_argument_gaps(
 # reference's real parameter names/order, so keyword calls (``F.first(col,
 # ignorenulls=True)``) work. Optional params default to the ``_UNSET`` sentinel and are
 # forwarded only when supplied, reproducing the historical ``*args`` dispatch exactly
-# (same columns, same order) — see functions.py ``_dispatch`` / ``_UNSET``.
+# (same columns, same order) — see builtin.py ``_dispatch`` / ``_UNSET``.
 
 
 def _emit_def(name, sig):
@@ -912,7 +913,7 @@ UPSTREAM_GLOBALS = {
     "warnings",
 }
 # The helpers of pyspark.sql.connect.functions.builtin that the generated module defines
-# with their PySpark Connect bodies. functions.py injects lit, column, _invoke_function and
+# with their PySpark Connect bodies. builtin.py defines lit, column, _invoke_function and
 # _invoke_higher_order_function, which the Rust core implements.
 UPSTREAM_HELPERS = [
     "_to_col",
@@ -921,7 +922,7 @@ UPSTREAM_HELPERS = [
     "_ensure_column_or_name",
     "_options_to_col",
 ]
-# Functions that functions.py used to write by hand and that are now generated from their
+# Functions that builtin.py used to write by hand and that are now generated from their
 # PySpark Connect implementations, which they must have.
 UPSTREAM_EXTRA = {
     "array",
@@ -952,8 +953,8 @@ UPSTREAM_EXTRA = {
 
 
 def wrapper_names(arms: list[dict], *, skip=None, upstream_extra=None) -> list[str]:
-    """The functions of functions_generated.py: those with a dispatch arm, less the ones
-    functions.py writes by hand, and those generated from PySpark Connect."""
+    """The functions of _generated.py: those with a dispatch arm, less the ones builtin.py
+    writes by hand, and those generated from PySpark Connect."""
     skip = SKIP_FUNCTIONS if skip is None else skip
     upstream_extra = UPSTREAM_EXTRA if upstream_extra is None else upstream_extra
     return sorted({arm["name"] for arm in arms if arm["name"] not in skip} | upstream_extra)
@@ -1048,10 +1049,12 @@ function call has that implementation's signature and body, and the helpers belo
 PySpark Connect's, so it sends the arguments, the defaults and the errors that PySpark
 does. The other functions dispatch to the Rust core through _dispatch.
 
-Before loading this module, functions.py injects _create_wrapper, _dispatch, _UNSET,
-_wrap, _unwrap and _call_function, and lit, column and _invoke_function, which build a
-literal, a column reference and an UnresolvedFunction in the Rust core
-(_invoke_higher_order_function follows once defined). It copies the names of __all__.
+pyspark.sql.connect.functions.builtin runs this code in its own namespace, as PySpark
+Connect's functions are of its module: they call its _create_wrapper, _dispatch, _UNSET,
+_wrap, _unwrap and _call_function, and its lit, column, _invoke_function and
+_invoke_higher_order_function, which build a literal, a column reference, an
+UnresolvedFunction and a higher-order function in the Rust core. __all__ names the
+generated functions.
 """
 import decimal
 import random as py_random
@@ -1086,7 +1089,7 @@ def load_reference(pyspark_src: str):
 
 
 def render_wrappers(names: list[str], ref_builtin, ref_functions, *, upstream_extra=None):
-    """The text of functions_generated.py, and how many functions come from their PySpark
+    """The text of _generated.py, and how many functions come from their PySpark
     Connect implementation and how many dispatch with the reference's signature."""
     upstream_extra = UPSTREAM_EXTRA if upstream_extra is None else upstream_extra
     upstream = _upstream_eligible(ref_builtin, names)
@@ -1094,7 +1097,7 @@ def render_wrappers(names: list[str], ref_builtin, ref_functions, *, upstream_ex
     if missing:
         raise GeneratorError(
             f"{', '.join(missing)}: not generated from a PySpark Connect implementation, "
-            "which functions.py relies on"
+            "which builtin.py relies on"
         )
 
     # The aliases of PySpark Connect, as ``power = pow``, are bound to their functions after
@@ -1154,7 +1157,7 @@ def render_wrappers(names: list[str], ref_builtin, ref_functions, *, upstream_ex
 
 
 def generate(root: Path, pyspark_src: str | None = None, log=print) -> dict[Path, str]:
-    """The generated files, by path relative to `root`. functions_generated.py is among
+    """The generated files, by path relative to `root`. _generated.py is among
     them only with a reference PySpark."""
     functions = parse_rust_functions((root / FUNCTIONS_RS).read_text())
     arms = plan_dispatch(functions)
@@ -1207,7 +1210,7 @@ def main(argv=None) -> int:
         "PySpark Connect importable. A function whose PySpark Connect implementation only "
         "marshals its arguments into a function call is generated with that "
         "implementation's signature and body; the others carry the reference's parameter "
-        "names and dispatch to the Rust core. Without it, functions_generated.py is "
+        "names and dispatch to the Rust core. Without it, _generated.py is "
         "neither written nor checked.",
     )
     parser.add_argument(

@@ -183,9 +183,17 @@ impl Scalar {
                         });
                 }
                 let v = int_of(field, value)?;
-                i32::try_from(v)
-                    .map(Scalar::Enum)
-                    .map_err(|_| out_of_range(v))
+                let number = i32::try_from(v).map_err(|_| out_of_range(v))?;
+                // As upb's: a closed enum (of proto2, or of the `CLOSED` enum type of editions)
+                // takes only the values that it declares.
+                if let Some(e) = pool().enumeration(enum_type) {
+                    if e.closed && e.name_of(number).is_none() {
+                        return Err(PyValueError::new_err(format!(
+                            "invalid enumerator {number}"
+                        )));
+                    }
+                }
+                Ok(Scalar::Enum(number))
             }
             Kind::Message => unreachable!("a message field holds no scalar"),
         }
@@ -220,6 +228,20 @@ fn int_of(field: &str, value: &Bound<'_, PyAny>) -> PyResult<i128> {
         )));
     }
     let index = index_of(value)?;
+    // An int of 64 bits at once, as most are, else of PyO3's conversion of 128 bits, which the
+    // stable ABI makes of shifts of the int.
+    let mut overflow = 0;
+    // SAFETY: `index` is a live int (of `__index__`), whose conversion sets no error but of an
+    // int past 64 bits, which `overflow` tells.
+    let v = unsafe { ffi::PyLong_AsLongLongAndOverflow(index.as_ptr(), &mut overflow) };
+    if overflow == 0 {
+        if v == -1 {
+            if let Some(err) = PyErr::take(value.py()) {
+                return Err(err);
+            }
+        }
+        return Ok(i128::from(v));
+    }
     index.extract::<i128>().map_err(|_| out_of_range_of(&index))
 }
 

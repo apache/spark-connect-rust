@@ -325,6 +325,85 @@ def test_models_whose_summary_keeps_their_transform_are_released_as_pyspark(sess
     assert released(ref_id)
 
 
+def test_the_dataframes_of_members_and_transforms_build_their_datasets_at_requests_as_pyspark(
+    session,
+):
+    # As PySpark's AttributeRelation and TransformerRelation, which build the plan of their child
+    # each time that their own plan is built: the DataFrame of a member of a training summary (of
+    # the training dataset, or of its transform by a clustering model) and of a transform builds
+    # the relation of its dataset at each request, and pickles the functions of its UDFs then, so a
+    # function that does not pickle fails each request of the DataFrame, and not its making, also
+    # of the transform of a DataFrame of another session (whose model the server of that session
+    # does not cache). A helper's method builds its DataFrame arguments at the call, as PySpark's
+    # `serialize`.
+    import pickle
+
+    from pyspark.errors.exceptions.connect import SparkException
+    from pyspark.ml.linalg import Vectors
+    from pyspark.ml.stat import ChiSquareTest
+    from pyspark.sql import functions as F
+
+    def of(module, name):
+        return native_class("pyspark.ml.connect." + module, name, "pyspark.ml." + module)
+
+    class Pickled:
+        armed = False
+
+        def __reduce__(self):
+            if Pickled.armed:
+                raise TypeError("a function that does not pickle")
+            return (Pickled, ())
+
+    held = Pickled()
+
+    def f(x):
+        return held and x
+
+    rows = [(float(i % 2), Vectors.dense(float(i % 2), float(i % 3) + 0.5)) for i in range(20)]
+    frame = session.createDataFrame(rows, ["label", "features"])
+    frame = frame.withColumn("w", F.udf(f, "double")("label"))
+    regression = of("regression", "LinearRegression")(maxIter=1).fit(frame)
+    logistic = of("classification", "LogisticRegression")(maxIter=1).fit(frame)
+    kmeans = of("clustering", "KMeans")(k=2, maxIter=1, seed=1).fit(frame)
+    does_not_pickle = "a function that does not pickle"
+    other = session.newSession()
+    held_out = other.createDataFrame(rows, ["label", "features"])
+    held_out = held_out.withColumn("w", F.udf(f, "double")("label"))
+    Pickled.armed = True
+    try:
+        of_another_session = regression.transform(held_out)
+        with pytest.raises(pickle.PicklingError, match=does_not_pickle):
+            of_another_session.count()
+        members = [
+            regression.summary.predictions,
+            regression.summary.residuals,
+            logistic.summary.roc,
+            kmeans.summary.cluster,
+            regression.transform(frame),
+        ]
+        for df in members:
+            with pytest.raises(pickle.PicklingError, match=does_not_pickle):
+                df.columns
+            with pytest.raises(pickle.PicklingError, match=does_not_pickle):
+                df.count()
+        with pytest.raises(pickle.PicklingError, match=does_not_pickle):
+            ChiSquareTest.test(frame, "features", "label")
+        Pickled.armed = False
+        counts = [df.count() for df in members]
+        assert counts[:2] + counts[3:] == [20] * 4 and counts[2] > 0
+        with pytest.raises(SparkException) as error:
+            of_another_session.count()
+        assert error.value.getCondition() == "CONNECT_ML.CACHE_INVALID"
+        # Each request pickles the functions again.
+        Pickled.armed = True
+        for df in members:
+            with pytest.raises(pickle.PicklingError, match=does_not_pickle):
+                df.count()
+    finally:
+        Pickled.armed = False
+        other.stop()
+
+
 def test_ml_connect_fit_of_two_param_maps_returns_two_models_as_pyspark(session):
     # As pyspark.ml's Estimator.fit: a list of two param maps fits the estimator once per map, and
     # returns the two models in a list, each of which transforms the dataset.
@@ -780,6 +859,84 @@ def test_ml_connect_estimators_and_scalers_take_vectors_not_arrays_as_pyspark(se
     clustered = clusters.transform(max_abs_scaled)
     assert clustered.schema["scaled"].dataType.simpleString() == "vector"
     assert len({row.prediction for row in clustered.collect()}) == 2
+
+
+@pytest.mark.parametrize("reads", ["plain", "client", "call stack"])
+def test_ml_connect_models_deleted_while_an_exception_propagates_keep_it_as_pyspark(reads):
+    # As PySpark's `RemoteModelRef`, whose `__del__` CPython runs with the exception that
+    # propagates set aside: of `est.fit(vectors).transform(arrays).columns`, the DataFrame of the
+    # transform holds the last reference to the model, which the frame that the JVM's error
+    # unwinds drops with the error set, of a handler in that frame or in its caller. The model is
+    # deleted, and the error goes on, which the reads of the Delete took before, of the refresher
+    # of the client once it is used, or of the call stack of SPARK_CONNECT_DEBUG_CLIENT_CALL_STACK:
+    # CPython crashed of a handler in the frame, and the caller got a `SystemError` ("error return
+    # without exception set") of none. In a process of its own, whose crash fails this test only.
+    # The test passes with the reference client too.
+    import subprocess
+    import sys
+    import textwrap
+    from pathlib import Path
+
+    remote = os.environ.get("SPARK_REMOTE")
+    if not remote:
+        pytest.skip("SPARK_REMOTE is required for live-server tests")
+    code = textwrap.dedent("""
+        import sys
+        import time
+
+        sys.path.insert(0, sys.argv[3])
+        from _native_classes import native_class
+        from pyspark.errors import IllegalArgumentException
+        from pyspark.ml.functions import array_to_vector
+        from pyspark.sql import SparkSession
+
+        spark = SparkSession.builder.remote(sys.argv[1]).getOrCreate()
+        if sys.argv[2] == "client":
+            spark.client
+        LogisticRegression = native_class(
+            "pyspark.ml.connect.classification", "LogisticRegression", "pyspark.ml.classification"
+        )
+        MaxAbsScaler = native_class(
+            "pyspark.ml.connect.feature", "MaxAbsScaler", "pyspark.ml.feature"
+        )
+        features = [[1.0, 2.0], [2.0, -1.0], [-3.0, -2.0], [-1.0, -2.0]]
+        arrays = spark.createDataFrame(
+            [(f, label) for f, label in zip(features, [1, 1, 0, 0])], schema=["features", "label"]
+        )
+        vectors = arrays.withColumn("features", array_to_vector("features"))
+        for estimator in [
+            LogisticRegression(maxIter=5), MaxAbsScaler(inputCol="features", outputCol="scaled")
+        ]:
+            name = type(estimator).__name__
+            try:
+                estimator.fit(vectors).transform(arrays).columns
+            except IllegalArgumentException:
+                print(name, "in the frame: IllegalArgumentException")
+            try:
+                (lambda: estimator.fit(vectors).transform(arrays).columns)()
+            except IllegalArgumentException:
+                print(name, "in the caller: IllegalArgumentException")
+        # The models are deleted from the ML cache of the server, which this client does without
+        # waiting.
+        deadline = time.time() + 30
+        while spark.client._get_ml_cache_info() and time.time() < deadline:
+            time.sleep(0.2)
+        print("cached:", spark.client._get_ml_cache_info())
+        spark.stop()
+    """)
+    env = dict(os.environ)
+    if reads == "call stack":
+        env["SPARK_CONNECT_DEBUG_CLIENT_CALL_STACK"] = "1"
+    result = subprocess.run(
+        [sys.executable, "-c", code, remote, reads, str(Path(__file__).parent)],
+        capture_output=True, text=True, timeout=600, env=env,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr[-3000:]
+    assert result.stdout.splitlines() == [
+        f"{name} {where}: IllegalArgumentException"
+        for name in ["LogisticRegression", "MaxAbsScaler"]
+        for where in ["in the frame", "in the caller"]
+    ] + ["cached: []"]
 
 
 def test_ml_connect_logistic_regression_labels_are_checked_by_the_jvm_as_pyspark(session):

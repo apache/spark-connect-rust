@@ -13,12 +13,26 @@ use spark_connect_proto as proto;
 /// name of the observation. Each action that runs the DataFrame, or a DataFrame of it, sets
 /// them as the server observed them, which [`Observation::get`] returns. A clone shares the
 /// state of the observation.
-#[derive(Clone, Default)]
+#[derive(Default)]
 pub struct Observation {
     state: Arc<Mutex<ObservationState>>,
     /// What a binding of another language keeps alive with this clone of the observation (see
     /// [`Observation::with_owner`]), which the other clones of its state do not hold.
     owner: Option<Arc<dyn std::any::Any + Send + Sync>>,
+}
+
+/// A clone of the same state and owner, of which the check of the clones of a binding is told
+/// (see [`crate::gc::check_clones_with`]).
+impl Clone for Observation {
+    fn clone(&self) -> Self {
+        if let Some(owner) = &self.owner {
+            crate::gc::cloned(Arc::as_ptr(owner) as *const () as usize);
+        }
+        Observation {
+            state: Arc::clone(&self.state),
+            owner: self.owner.clone(),
+        }
+    }
 }
 
 /// The metrics of an observation, by their names, in order.
@@ -621,7 +635,7 @@ mod tests {
         };
         let obs = Observation::used("first");
         let plan = crate::plan::LogicalPlan::Observe {
-            input: Arc::new(crate::plan::range(0, 3, 1)),
+            input: Arc::new(crate::plan::range(0, 3, 1)).into(),
             name: "first".to_string(),
             exprs: vec![crate::expression::Expression::column("id")],
             observation: Some(obs.clone()),

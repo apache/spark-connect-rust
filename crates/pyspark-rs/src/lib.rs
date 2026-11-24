@@ -18,11 +18,13 @@ use pyo3::prelude::*;
 mod connect_docs_generated;
 mod catalog;
 mod client;
+mod client_log;
 mod column;
 mod conf;
 mod connect_bridge;
 mod dataframe;
 mod datasource;
+mod deliver;
 mod errors;
 mod functions;
 mod gc;
@@ -41,6 +43,7 @@ mod profiler;
 mod progress;
 mod pyarrow_export;
 mod pyarrow_import;
+mod reader_plans;
 mod readwriter;
 mod reduce;
 
@@ -48,11 +51,13 @@ mod row;
 mod session;
 mod stat;
 mod stat_arguments;
+mod state;
 mod storagelevel;
 mod streaming;
 mod tablearg;
 mod transport;
 mod tvf;
+mod type_copy;
 mod types;
 mod udf_command;
 mod values;
@@ -61,21 +66,13 @@ mod window;
 use catalog::PyCatalog;
 use column::PyColumn;
 use conf::PyRuntimeConf;
-use dataframe::{
-    PyDataFrame, PyDataFrameNaFunctions, PyDataFrameWriter, PyDataFrameWriterV2,
-    PyLocalRowIterator, PyMergeIntoWriter, PyWhenMatched, PyWhenNotMatched,
-    PyWhenNotMatchedBySource,
-};
+use dataframe::{PyDataFrame, PyDataFrameNaFunctions, PyLocalRowIterator};
 use datasource::PyDataSourceRegistration;
 use group::{PyCoGroupedData, PyGroupedData};
-pub(crate) use options::{coerce_option_value, str_argument, str_text};
-use readwriter::PyDataFrameReader;
+pub(crate) use options::str_argument;
 use session::{PyHook, PySparkSession, PySparkSessionBuilder};
 use stat::PyStatFunctions;
-use streaming::{
-    PyDataStreamReader, PyDataStreamWriter, PyListenerEventStream, PyStreamingQuery,
-    PyStreamingQueryManager, PyTrigger,
-};
+use streaming::{PyListenerEventStream, PyStreamingQuery, PyStreamingQueryManager, PyTrigger};
 use types::{
     PyAnsiIntervalType, PyAnyTimeType, PyArrayType, PyAtomicType, PyBinaryType, PyBooleanType,
     PyByteType, PyCalendarIntervalType, PyCharType, PyDataType, PyDateType, PyDatetimeType,
@@ -85,7 +82,7 @@ use types::{
     PyStructType, PyTimeType, PyTimestampLTZNanosType, PyTimestampNTZNanosType, PyTimestampNTZType,
     PyTimestampType, PyVarcharType, PyVariantType, PyYearMonthIntervalType,
 };
-use window::{PyFrameBound, PyWindow, PyWindowSpec};
+use window::{PyFrameBound, PyWindowSpec};
 
 /// The stack that the encode, the decode and the drop of a protobuf of a pickled Column,
 /// DataFrame or hook request take on the thread that unpickles or sends it. Prost recurses once
@@ -108,11 +105,70 @@ pub(crate) fn encode_on_grown_stack<M: prost::Message + Send>(message: M) -> Vec
     on_grown_stack(move || message.encode_to_vec())
 }
 
+/// The bundle of root certificates of grpcio, `roots.pem` of its package, which its channels
+/// trust by default, if grpcio is installed: found by `importlib.util.find_spec`, which does not
+/// import it.
+fn grpcio_roots_file(py: Python<'_>) -> Option<std::path::PathBuf> {
+    let spec = py
+        .import("importlib.util")
+        .ok()?
+        .call_method1("find_spec", ("grpc",))
+        .ok()?;
+    let origin: String = spec.getattr("origin").ok()?.extract().ok()?;
+    let roots = std::path::Path::new(&origin)
+        .parent()?
+        .join("_cython")
+        .join("_credentials")
+        .join("roots.pem");
+    roots.is_file().then_some(roots)
+}
+
 #[pymodule(gil_used = false)]
 fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    // How Python's garbage collector sees the parts of plans and expressions: not at all on a
+    // free-threaded build, and of the counts of the calls without the GIL of the forking thread
+    // alone in the child of a fork (see `gc`).
+    gc::init(_py)?;
+    // The check of the clones of the parts that the tests turn on (see `gc::check_clone`).
+    m.add_function(wrap_pyfunction!(gc::_check_part_clones, m)?)?;
+    m.add_function(wrap_pyfunction!(gc::_part_clones_checked, m)?)?;
+    m.add_function(wrap_pyfunction!(gc::_take_part_clone_violations, m)?)?;
+    // The watch of the parts that the collector sees, of a test of its own (see
+    // `gc::_watch_reported_parts`).
+    m.add_function(wrap_pyfunction!(gc::_watch_reported_parts, m)?)?;
     origin::listen_to_plan_builds();
+    // As grpcio's fork support, which registers its handlers as it loads: a child of a `fork()`
+    // is of a generation of its own, whatever thread used the client first.
+    spark_connect_core::fork::watch_forks();
+    // As grpcio, the gRPC library of PySpark's client: the texts of the failures of the
+    // connections, and the `User-Agent` of the CONNECT request of a proxy.
+    spark_connect_core::set_grpcio_dialect(true);
+    // As PySpark's `ChannelBuilder.userAgent`, which ends with the version of Python.
+    let python_version: String = _py
+        .import("platform")?
+        .call_method0("python_version")?
+        .extract()?;
+    spark_connect_core::channel::set_user_agent_language(&format!("python/{python_version}"));
+    // The bundle of roots of grpcio, which its channels trust by default, where it is installed,
+    // found without importing grpc: trusted besides the roots of the system's store, so that the
+    // drop-in trusts what PySpark trusts, and what the system trusts too.
+    spark_connect_core::client::set_bundled_ssl_roots_file(grpcio_roots_file(_py));
     client::warn_of_spent_retries();
     client::log_grpc_errors();
+    client_log::listen();
+    // The requests of the finalizers of a session read the state of its client when they are
+    // sent, as PySpark's finalizers build their requests when they run.
+    spark_connect::session::set_finalizer_request_hook(
+        spark_connect::session::FinalizerRequestHook {
+            before: interrupt::before_finalizer_request,
+            after: interrupt::after_finalizer_request,
+        },
+    );
+    // So do the requests of the failure of a call, of the details of its error and of the configs
+    // of its stack trace, as PySpark's `_handle_error` builds them.
+    spark_connect_core::client::set_failure_requests_hook(interrupt::before_failure_requests);
+    m.add_function(wrap_pyfunction!(deliver::_stop_deliveries, m)?)?;
+    deliver::stop_at_exit(m)?;
     m.add_class::<PySparkSession>()?;
     m.add_function(wrap_pyfunction!(session::_close_sessions_at_exit, m)?)?;
     m.add_function(wrap_pyfunction!(session::_refuse_releases, m)?)?;
@@ -127,20 +183,12 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
             .setattr("__qualname__", format!("SparkSession.{name}"))?;
     }
     m.add_class::<PyDataFrame>()?;
-    m.add_class::<PyDataFrameWriter>()?;
-    m.add_class::<PyDataFrameWriterV2>()?;
+    m.add_class::<dataframe::PyNativePlan>()?;
     m.add_class::<PyDataFrameNaFunctions>()?;
-    m.add_class::<PyMergeIntoWriter>()?;
-    m.add_class::<PyWhenMatched>()?;
-    m.add_class::<PyWhenNotMatched>()?;
-    m.add_class::<PyWhenNotMatchedBySource>()?;
-    // As PySpark Connect's classes nested in MergeIntoWriter, of which they are attributes.
-    for name in ["WhenMatched", "WhenNotMatched", "WhenNotMatchedBySource"] {
-        m.getattr(name)?
-            .setattr("__qualname__", format!("MergeIntoWriter.{name}"))?;
-    }
     m.add_class::<PyColumn>()?;
     column::install_getattr(m)?;
+    // Of the class as the module makes it, of its `__getattr__`, before user code could patch it.
+    column::remember_column_class(m.py())?;
     row::register(m)?;
     m.add_class::<PyGroupedData>()?;
     m.add_class::<PyCoGroupedData>()?;
@@ -151,7 +199,13 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("RustRpcError", m.py().get_type::<transport::RustRpcError>())?;
     m.add_class::<PyCatalog>()?;
     m.add_class::<PyRuntimeConf>()?;
-    m.add_class::<PyDataFrameReader>()?;
+    // The plans of the reads of PySpark's readers (see `reader_plans`).
+    m.add_class::<reader_plans::PyReadPlan>()?;
+    m.add_function(wrap_pyfunction!(reader_plans::data_source, m)?)?;
+    m.add_function(wrap_pyfunction!(reader_plans::read_table, m)?)?;
+    m.add_function(wrap_pyfunction!(reader_plans::relation_changes, m)?)?;
+    m.add_function(wrap_pyfunction!(reader_plans::parse, m)?)?;
+    m.add_function(wrap_pyfunction!(reader_plans::read_dataframe, m)?)?;
     m.add_class::<PyStatFunctions>()?;
     m.add_class::<storagelevel::PyStorageLevel>()?;
 
@@ -160,6 +214,7 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(types::parse_datatype_json, m)?)?;
     m.add_function(wrap_pyfunction!(connect_bridge::_data_type_proto, m)?)?;
     m.add_function(wrap_pyfunction!(connect_bridge::_data_type_of_proto, m)?)?;
+    m.add_function(wrap_pyfunction!(connect_bridge::_fresh_plan_id, m)?)?;
     m.add_function(wrap_pyfunction!(column::column_reference_name, m)?)?;
 
     m.add_function(wrap_pyfunction!(pandas_input::_pandas_string_ipc, m)?)?;
@@ -188,11 +243,12 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(pipelines::pipeline_start_run, m)?)?;
 
     // Streaming classes
-    m.add_class::<PyDataStreamReader>()?;
-    m.add_class::<PyDataStreamWriter>()?;
+    m.add_function(wrap_pyfunction!(streaming::post_query_started, m)?)?;
     m.add_class::<PyTrigger>()?;
     m.add_class::<PyStreamingQuery>()?;
     m.add_class::<PyStreamingQueryManager>()?;
+    m.add_class::<streaming::PyStreamingQueryListenerBus>()?;
+    streaming::keep_native_post_to_all(m.py())?;
     m.add_class::<PyListenerEventStream>()?;
 
     // Data source and profiler classes
@@ -238,10 +294,17 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyYearMonthIntervalType>()?;
     m.add_class::<PyDayTimeIntervalType>()?;
     m.add_class::<PyVariantType>()?;
+    // The attributes that PySpark's `jsonValue` reads of the native classes, as they are made,
+    // before any patch of them.
+    types::keep_native_json_reads(_py)?;
+    // The copier of `copy.deepcopy` of the objects of the native classes of the types, which
+    // `pyspark.sql.types` registers once it is made (see `type_copy`).
+    m.add_function(wrap_pyfunction!(type_copy::_type_deepcopy, m)?)?;
+    m.add_function(wrap_pyfunction!(type_copy::_register_type_deepcopy, m)?)?;
     values::register(m)?;
 
     // Register Window classes
-    m.add_class::<PyWindow>()?;
+    m.add_function(wrap_pyfunction!(window::empty_window_spec, m)?)?;
     m.add_class::<PyWindowSpec>()?;
     m.add_class::<PyFrameBound>()?;
 
@@ -253,50 +316,62 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // Register ML classes (pyspark.ml.connect)
     m.add_function(wrap_pyfunction!(ml::object::register_public_class, m)?)?;
-    m.add_class::<ml::PyMLModel>()?;
-    m.add_class::<ml::object::PyMLWriter>()?;
-    m.add_class::<ml::object::PyMLReader>()?;
+    m.add_function(wrap_pyfunction!(ml::object::ml_kind, m)?)?;
+    m.add_function(wrap_pyfunction!(ml::object::ml_params, m)?)?;
+    m.add_function(wrap_pyfunction!(ml::object::ml_sync, m)?)?;
+    m.add_function(wrap_pyfunction!(ml::object::ml_java_obj, m)?)?;
+    m.add_function(wrap_pyfunction!(ml::object::ml_uid, m)?)?;
+    m.add_function(wrap_pyfunction!(ml::object::ml_jvm_class, m)?)?;
+    m.add_function(wrap_pyfunction!(ml::object::ml_finalize, m)?)?;
+    m.add_function(wrap_pyfunction!(ml::object::ml_copy, m)?)?;
+    m.add_function(wrap_pyfunction!(ml::object::ml_make_java_obj, m)?)?;
+    // The watch of the traverses of the models, of a test of its own (see
+    // `ml::object::ml_watch_traverses`).
+    m.add_function(wrap_pyfunction!(ml::object::ml_watch_traverses, m)?)?;
+    ml::object::register_class::<ml::PyMLModel>(m)?;
+    ml::object::register_class::<ml::object::PyMLWriter>(m)?;
+    ml::object::register_class::<ml::object::PyMLReader>(m)?;
     m.add_function(wrap_pyfunction!(ml::object::new_remote_ml_writer, m)?)?;
     m.add_function(wrap_pyfunction!(ml::object::new_remote_ml_reader, m)?)?;
-    m.add_class::<ml::params_api::PyFitMultipleIterator>()?;
+    ml::object::register_class::<ml::params_api::PyFitMultipleIterator>(m)?;
     ml::classification_api::register(m)?;
     ml::clustering_api::register(m)?;
     ml::regression_api::register(m)?;
     ml::feature::register(m)?;
     ml::stat::register(m)?;
     ml::fpm::register(m)?;
-    m.add_class::<ml::PyLogisticRegression>()?;
-    m.add_class::<ml::PyLinearSVC>()?;
-    m.add_class::<ml::PyFMClassifier>()?;
-    m.add_class::<ml::PyMultilayerPerceptronClassifier>()?;
-    m.add_class::<ml::PyOneVsRest>()?;
+    ml::object::register_class::<ml::PyLogisticRegression>(m)?;
+    ml::object::register_class::<ml::PyLinearSVC>(m)?;
+    ml::object::register_class::<ml::PyFMClassifier>(m)?;
+    ml::object::register_class::<ml::PyMultilayerPerceptronClassifier>(m)?;
+    ml::object::register_class::<ml::PyOneVsRest>(m)?;
 
-    m.add_class::<ml::PyLinearRegression>()?;
-    m.add_class::<ml::PyAFTSurvivalRegression>()?;
-    m.add_class::<ml::PyIsotonicRegression>()?;
-    m.add_class::<ml::PyFMRegressor>()?;
-    m.add_class::<ml::PyGeneralizedLinearRegression>()?;
-    m.add_class::<ml::PyDecisionTreeClassifier>()?;
-    m.add_class::<ml::PyNaiveBayes>()?;
-    m.add_class::<ml::PyGBTClassifier>()?;
-    m.add_class::<ml::PyGBTRegressor>()?;
-    m.add_class::<ml::PyRandomForestClassifier>()?;
-    m.add_class::<ml::PyDecisionTreeRegressor>()?;
-    m.add_class::<ml::PyRandomForestRegressor>()?;
-    m.add_class::<ml::PyLDA>()?;
-    m.add_class::<ml::PyPowerIterationClustering>()?;
-    m.add_class::<ml::PyKMeans>()?;
-    m.add_class::<ml::PyGaussianMixture>()?;
-    m.add_class::<ml::PyBisectingKMeans>()?;
+    ml::object::register_class::<ml::PyLinearRegression>(m)?;
+    ml::object::register_class::<ml::PyAFTSurvivalRegression>(m)?;
+    ml::object::register_class::<ml::PyIsotonicRegression>(m)?;
+    ml::object::register_class::<ml::PyFMRegressor>(m)?;
+    ml::object::register_class::<ml::PyGeneralizedLinearRegression>(m)?;
+    ml::object::register_class::<ml::PyDecisionTreeClassifier>(m)?;
+    ml::object::register_class::<ml::PyNaiveBayes>(m)?;
+    ml::object::register_class::<ml::PyGBTClassifier>(m)?;
+    ml::object::register_class::<ml::PyGBTRegressor>(m)?;
+    ml::object::register_class::<ml::PyRandomForestClassifier>(m)?;
+    ml::object::register_class::<ml::PyDecisionTreeRegressor>(m)?;
+    ml::object::register_class::<ml::PyRandomForestRegressor>(m)?;
+    ml::object::register_class::<ml::PyLDA>(m)?;
+    ml::object::register_class::<ml::PyPowerIterationClustering>(m)?;
+    ml::object::register_class::<ml::PyKMeans>(m)?;
+    ml::object::register_class::<ml::PyGaussianMixture>(m)?;
+    ml::object::register_class::<ml::PyBisectingKMeans>(m)?;
     ml::recommendation::register(m)?;
-    m.add_class::<ml::PyRegressionEvaluator>()?;
-    m.add_class::<ml::PyBinaryClassificationEvaluator>()?;
+    ml::object::register_class::<ml::PyRegressionEvaluator>(m)?;
+    ml::object::register_class::<ml::PyBinaryClassificationEvaluator>(m)?;
     ml::pipeline_api::register(m)?;
     ml::tuning_api::register(m)?;
-    m.add_class::<ml::PyMulticlassClassificationEvaluator>()?;
-    m.add_class::<ml::PyClusteringEvaluator>()?;
-    m.add_class::<ml::PyMultilabelClassificationEvaluator>()?;
-    m.add_class::<ml::PyRankingEvaluator>()?;
+    ml::object::register_class::<ml::PyMulticlassClassificationEvaluator>(m)?;
+    ml::object::register_class::<ml::PyClusteringEvaluator>(m)?;
+    ml::object::register_class::<ml::PyMultilabelClassificationEvaluator>(m)?;
+    ml::object::register_class::<ml::PyRankingEvaluator>(m)?;
 
     // Register functions as a submodule
     let functions_module = PyModule::new(_py, "functions")?;
@@ -304,7 +379,21 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_submodule(&functions_module)?;
 
     bare_type_names(m)?;
+    for cls in classes_of_no_docstring(m.py()) {
+        cls.setattr(pyo3::intern!(m.py(), "__doc__"), m.py().None())?;
+    }
     Ok(())
+}
+
+/// The native classes of PySpark Connect's classes of no docstring that carry the text signature
+/// of PySpark's `__init__` (`text_signature` of their `#[new]`), whose `__doc__` CPython makes the
+/// empty str of the rest of that text: None, as PySpark's. Their `__text_signature__`, of the text,
+/// stays, which `inspect.signature` reads.
+fn classes_of_no_docstring(py: Python<'_>) -> [Bound<'_, pyo3::types::PyType>; 2] {
+    [
+        py.get_type::<PyStreamingQuery>(),
+        py.get_type::<PyStreamingQueryManager>(),
+    ]
 }
 
 /// Give each class of the module, and each native class outside it (`classes_outside_module`),
@@ -330,19 +419,16 @@ fn bare_type_names(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
 /// The native classes that are not attributes of the module, of objects that it makes: the
 /// expression of a Column (`Column._expr`), the attribute of a param of an ML class, the exit
-/// hook and the active session of the sessions (`SparkSession._active_session`), the tags and the
-/// user context extensions that threads share, the listener bus of a stream manager, and the
-/// objects of the options and the kept arguments that the copies of a reader, a writer or a
-/// builder share.
-fn classes_outside_module(py: Python<'_>) -> [Bound<'_, pyo3::types::PyType>; 8] {
+/// hook and the active session of the sessions (`SparkSession._active_session`), the handle of a
+/// session that a client holds, and the objects that the garbage collector sees of the parts of
+/// plans and expressions (see `gc`).
+fn classes_outside_module(py: Python<'_>) -> [Bound<'_, pyo3::types::PyType>; 6] {
     [
         py.get_type::<column::PyColumnExpression>(),
         py.get_type::<ml::params_api::PyParamAttribute>(),
         py.get_type::<session::PyExitHook>(),
         py.get_type::<session::PyActiveSession>(),
-        py.get_type::<session::PySharedTags>(),
-        py.get_type::<session::PySharedUserContextExtensions>(),
-        py.get_type::<streaming::PyStreamingQueryListenerBus>(),
-        py.get_type::<options::PySharedObjects>(),
+        py.get_type::<session::PyWeakSession>(),
+        py.get_type::<gc::SharedPart>(),
     ]
 }

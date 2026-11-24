@@ -18,13 +18,17 @@
 # do not edit. Type checkers read this stub instead of the module of the drop-in.
 
 from typing import Dict, Optional, Callable
-from pyspark.sql.connect import proto
-from pyspark.sql.connect.column import Column
+from pyspark.sql.connect import proto as proto
+from pyspark.sql.connect.column import Column as Column
+from pyspark.sql.connect.functions import expr as expr
+from pyspark.sql.connect.client import SparkConnectClient
 from pyspark.sql.connect.plan import LogicalPlan
 from pyspark.sql.connect.session import SparkSession
 from pyspark.sql.metrics import ExecutionInfo
 
 __all__ = ['MergeIntoWriter']
+
+def _build_merge_action(client: 'SparkConnectClient', action_type: proto.MergeAction.ActionType.ValueType, condition: Optional[Column]=None, assignments: Optional[Dict[str, Column]]=None) -> proto.MergeAction: ...
 
 class MergeIntoWriter:
     """`MergeIntoWriter` provides methods to define and execute merge actions based

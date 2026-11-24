@@ -26,6 +26,7 @@ from pyspark.sql.merge import MergeIntoWriter
 from pyspark.sql.streaming import DataStreamWriter
 from pyspark.sql.table_arg import TableArg as TableArg
 from pyspark.sql.types import StructType as StructType, Row as Row
+from pyspark.sql.utils import dispatch_df_method as dispatch_df_method
 from py4j.java_gateway import JavaObject
 import pyarrow as pa
 from pyspark.core.context import SparkContext

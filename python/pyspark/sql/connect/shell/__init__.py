@@ -15,7 +15,8 @@
 # limitations under the License.
 #
 
-"""Helpers for integration with the IPython Shell - compatibility shim."""
+# Helpers for integration with the IPython Shell - compatibility shim.
+"""Helpers for integration with the IPython Shell"""
 
 import os
 
@@ -23,7 +24,7 @@ PROGRESS_BAR_ENABLED = "SPARK_CONNECT_PROGRESS_BAR_ENABLED"
 
 
 def progress_bar_enabled() -> bool:
-    """Check if progress bar is enabled for Spark Connect."""
+    # Check if progress bar is enabled for Spark Connect.
     return os.getenv(PROGRESS_BAR_ENABLED, "0") == "1"
 
 

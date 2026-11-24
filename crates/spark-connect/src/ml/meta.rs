@@ -735,18 +735,14 @@ impl Transformer for OperatorTransformer {
     fn transform_impl(&mut self, df: &DataFrame) -> Result<DataFrame> {
         let ml_relation = proto::Relation {
             rel_type: Some(proto::relation::RelType::MlRelation(Box::new(
-                self.build_ml_relation(df)?,
+                operator_transform(
+                    proto::ml_relation::transform::Operator::Transformer(self.operator.to_proto()),
+                    &self.params,
+                )?,
             ))),
             ..Default::default()
         };
-        Ok(DataFrame::new(
-            df.session.clone(),
-            LogicalPlan::MlTransform {
-                ml_relation,
-                input: df.plan.clone(),
-                owner: None,
-            },
-        ))
+        Ok(transform_of(df, ml_relation, None))
     }
 }
 
@@ -847,28 +843,11 @@ pub(super) fn python_float_json(value: f64) -> String {
 }
 
 /// The text of the finite or non-finite float `value` as Python's `repr` (and `str`) writes it:
-/// the shortest digits that read back the same, in the decimal form for a decimal exponent from -4
-/// to 15, else in the exponent form with a sign and at least two digits (`1e-06`, `1e+16`).
+/// the shortest digits that read back the same, of an even last digit of a tie, in the decimal form
+/// for a decimal exponent from -4 to 15, else in the exponent form with a sign and at least two
+/// digits (`1e-06`, `1e+16`), as [`crate::expression::python_float_repr`] writes it.
 pub(super) fn python_float_repr(value: f64) -> String {
-    if value.is_nan() {
-        return "nan".to_string();
-    }
-    if value.is_infinite() {
-        return if value > 0.0 { "inf" } else { "-inf" }.to_string();
-    }
-    // Rust's `Debug` of a float has the same shortest digits and the same thresholds of the
-    // exponent form, but writes the exponent without its sign and its padding.
-    let text = format!("{value:?}");
-    match text.split_once('e') {
-        None => text,
-        Some((mantissa, exponent)) => {
-            let (sign, digits) = match exponent.strip_prefix('-') {
-                Some(digits) => ('-', digits),
-                None => ('+', exponent),
-            };
-            format!("{mantissa}e{sign}{digits:0>2}")
-        }
-    }
+    crate::expression::python_float_repr(value)
 }
 
 /// The metadata at `<path>/metadata`, of [`parse_python_json`].
@@ -1295,6 +1274,25 @@ impl Transformer for PipelineModel {
 impl Model for PipelineModel {
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
+    }
+
+    /// Of the models among the stages, of their training summaries.
+    fn held_parts(&self) -> Vec<crate::gc::PartRef<'_>> {
+        self.stages
+            .iter()
+            .flat_map(|stage| match stage {
+                PipelineStage::Model(model) => model.held_parts(),
+                PipelineStage::Estimator(_) | PipelineStage::Transformer(_) => Vec::new(),
+            })
+            .collect()
+    }
+
+    fn clear_held_parts(&mut self) {
+        for stage in &mut self.stages {
+            if let PipelineStage::Model(model) = stage {
+                model.clear_held_parts();
+            }
+        }
     }
 
     fn write(&self) -> Result<MlWriter> {

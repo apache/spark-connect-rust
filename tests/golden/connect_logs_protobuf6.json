@@ -1,0 +1,157 @@
+{
+ "cases": {
+  "call_stack": [],
+  "call_stack_of_calls": [],
+  "cannot_parse": [
+   "Executing plan root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } }"
+  ],
+  "client_api": [
+   "Executing plan root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } }",
+   "Executing plan root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } }",
+   "Executing plan root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } }",
+   "Schema for plan: root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } }",
+   "Explain (mode=simple) for plan root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } }",
+   "Execute command for command sql_command { input { sql { query: \"select 1 as a\" } } }",
+   "Execute command as iterator for command sql_command { input { sql { query: \"select 1 as a\" } } }"
+  ],
+  "close_after_releases_in_flight": [
+   "Executing plan root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } }"
+  ],
+  "close_by_another_thread_before_the_first_response": [
+   "Executing plan root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } }"
+  ],
+  "close_by_another_thread_during_a_config_read": [],
+  "close_by_another_thread_during_a_read": [
+   "Executing plan root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } }"
+  ],
+  "closed_client": [
+   "Executing plan root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } }",
+   "Executing plan root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } }",
+   "Schema for plan: root { common { plan_id: <id> } filter { input { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } } condition { expression_string { expression: \"id > 0\" } } } }",
+   "Execute command for command sql_command { input { common { plan_id: <id> } sql { query: \"select 1 as a\" } } }",
+   "Executing plan root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } }"
+  ],
+  "closed_client_before_its_first_plan": [
+   "Executing plan root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } }"
+  ],
+  "collect": [
+   "Executing plan root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } }"
+  ],
+  "collect_again": [
+   "Executing plan root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } }",
+   "Executing plan root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } }"
+  ],
+  "collect_of_a_failed_lookup": [
+   "Executing plan root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } }"
+  ],
+  "collect_of_a_lookup_that_a_policy_fails": [
+   "Executing plan root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } }"
+  ],
+  "collect_of_chunks": [
+   "Executing plan root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } }"
+  ],
+  "compressed": [
+   "Execute command for command sql_command { input { sql { query: \"select 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1\" } } }",
+   "Execute command for command sql_command { input { sql { query: \"select \\'abcdefghijklmnopqrstuvwxyz0123\\'\" } } }"
+  ],
+  "explain": [
+   "Explain (mode=formatted) for plan root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } }"
+  ],
+  "explain_not_allowed": [
+   "Explain (mode=FORMATTED) for plan root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } }",
+   "Explain (mode=bogus) for plan root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } }"
+  ],
+  "failure_of_a_call_of_a_handler_of_a_conversion": [
+   "Executing plan root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } }",
+   "Executing plan root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } }"
+  ],
+  "failure_of_a_config_read_of_a_handler_of_a_conversion": [
+   "Executing plan root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } }"
+  ],
+  "handler_interrupts": [
+   "Executing plan root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } }",
+   "Executing plan root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } }",
+   "Executing plan root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } }",
+   "Executing plan root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } }"
+  ],
+  "handler_raises": [
+   "Executing plan root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } }",
+   "Executing plan root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } }",
+   "Executing plan root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } }",
+   "Executing plan root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } }",
+   "Executing plan root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } }",
+   "Schema for plan: root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } }",
+   "Executing plan root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } }"
+  ],
+  "hook": [
+   "Executing plan root { common { plan_id: <id> } project { input { common { plan_id: <id> } range { start: 0 end: 1 step: 1 } } expressions { alias { expr { literal { binary: \"\\347\\356\\347a^\\363_0[truncated]\" } } name: \"b\" } common { origin { python_origin { fragment: \"alias\" call_site: \"_connect_log_cases.py:369\" } } } } } }"
+  ],
+  "incompressible": [
+   "Executing plan root { common { plan_id: <id> } project { input { common { plan_id: <id> } range { start: 0 end: 1 step: 1 } } expressions { alias { expr { literal { binary: \"\\347\\356\\347a^\\363_0[truncated]\" } } name: \"b\" } common { origin { python_origin { fragment: \"alias\" call_site: \"_connect_log_cases.py:369\" } } } } } }",
+   "Executing plan root { common { plan_id: <id> } project { input { common { plan_id: <id> } range { start: 0 end: 1 step: 1 } } expressions { alias { expr { literal { binary: \"\\347\\356\\347a^\\363_0[truncated]\" } } name: \"b\" } common { origin { python_origin { fragment: \"alias\" call_site: \"_connect_log_cases.py:369\" } } } } } }",
+   "Executing plan root { common { plan_id: <id> } project { input { common { plan_id: <id> } range { start: 0 end: 1 step: 1 } } expressions { alias { expr { literal { binary: \"\\347\\356\\347a^\\363_0[truncated]\" } } name: \"b\" } common { origin { python_origin { fragment: \"alias\" call_site: \"_connect_log_cases.py:369\" } } } } } }",
+   "Executing plan root { common { plan_id: <id> } project { input { common { plan_id: <id> } range { start: 0 end: 1 step: 1 } } expressions { alias { expr { literal { binary: \"\\347\\356\\347a^\\363_0[truncated]\" } } name: \"b\" } common { origin { python_origin { fragment: \"alias\" call_site: \"_connect_log_cases.py:369\" } } } } } }",
+   "Executing plan root { common { plan_id: <id> } project { input { common { plan_id: <id> } range { start: 0 end: 1 step: 1 } } expressions { alias { expr { literal { binary: \"\\347\\356\\347a^\\363_0[truncated]\" } } name: \"b\" } common { origin { python_origin { fragment: \"alias\" call_site: \"_connect_log_cases.py:369\" } } } } } }",
+   "Executing plan root { common { plan_id: <id> } project { input { common { plan_id: <id> } range { start: 0 end: 1 step: 1 } } expressions { alias { expr { literal { binary: \"\\347\\356\\347a^\\363_0[truncated]\" } } name: \"b\" } common { origin { python_origin { fragment: \"alias\" call_site: \"_connect_log_cases.py:369\" } } } } } }",
+   "Schema for plan: root { common { plan_id: <id> } project { input { common { plan_id: <id> } range { start: 0 end: 1 step: 1 } } expressions { alias { expr { literal { binary: \"\\347\\356\\347a^\\363_0[truncated]\" } } name: \"b\" } common { origin { python_origin { fragment: \"alias\" call_site: \"_connect_log_cases.py:369\" } } } } } }",
+   "Explain (mode=simple) for plan root { common { plan_id: <id> } project { input { common { plan_id: <id> } range { start: 0 end: 1 step: 1 } } expressions { alias { expr { literal { binary: \"\\347\\356\\347a^\\363_0[truncated]\" } } name: \"b\" } common { origin { python_origin { fragment: \"alias\" call_site: \"_connect_log_cases.py:369\" } } } } } }"
+  ],
+  "info_level": [],
+  "info_level_of_an_error": [],
+  "interrupted_at_a_failed_lookup": [
+   "Executing plan root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } }"
+  ],
+  "iterator_open_across_close": [
+   "Executing plan root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } }"
+  ],
+  "keyboard_interrupt": [
+   "Executing plan root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } }"
+  ],
+  "raised_at_a_failed_lookup": [
+   "Executing plan root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } }"
+  ],
+  "registration": [],
+  "resources": [
+   "Execute command for command get_resources_command { }",
+   "Execute command for command create_resource_profile_command { profile { } }"
+  ],
+  "schema": [
+   "Schema for plan: root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } }"
+  ],
+  "server_error": [
+   "Executing plan root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } }"
+  ],
+  "signal_in_a_call_of_a_handler_of_a_conversion": [
+   "Executing plan root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } }",
+   "Executing plan root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } }"
+  ],
+  "signal_in_a_config_read_of_a_handler_of_a_conversion": [
+   "Executing plan root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } }"
+  ],
+  "signal_while_a_failure_is_converted": [
+   "Executing plan root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } }"
+  ],
+  "sql": [
+   "Execute command for command sql_command { input { common { plan_id: <id> } sql { query: \"select 1 as a\" } } }"
+  ],
+  "stop_after_releases_in_flight": [],
+  "stopped_by_another_thread": [
+   "Executing plan root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } }"
+  ],
+  "to_arrow": [
+   "Schema for plan: root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } }",
+   "Executing plan root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } }"
+  ],
+  "to_local_iterator": [
+   "Executing plan root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } }"
+  ],
+  "to_pandas": [
+   "Executing plan root { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } }"
+  ],
+  "write": [
+   "Execute command for command write_operation { input { common { plan_id: <id> } range { start: 0 end: 3 step: 1 } } source: \"parquet\" path: \"/tmp/connect-logs-case\" mode: SAVE_MODE_OVERWRITE }"
+  ]
+ },
+ "protobuf": "6.33.5",
+ "pyspark": "4.3.0"
+}

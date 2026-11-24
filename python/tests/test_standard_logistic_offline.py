@@ -125,3 +125,21 @@ for payload in json.loads(sys.argv[1]):
         "KIND", repr(kind)
     )
     subprocess.run([sys.executable, "-c", code, json.dumps(payloads)], check=True)
+
+
+def test_standard_logistic_needs_no_optional_python_dependencies():
+    from _standard_logistic_cases import without_optional_dependencies
+
+    without_optional_dependencies("""
+import copy
+import pickle
+from pyspark import _pyspark
+from pyspark.ml.classification import LogisticRegression
+lr = LogisticRegression(maxIter=3)
+assert isinstance(lr, _pyspark.LogisticRegression)
+lr.setRegParam(0.1)
+assert copy.deepcopy(lr).getRegParam() == 0.1
+assert pickle.loads(pickle.dumps(lr)).getMaxIter() == 3
+assert lr.write().overwrite().shouldOverwrite
+assert LogisticRegression.read()._clazz is LogisticRegression
+""")

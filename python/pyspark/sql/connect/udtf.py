@@ -15,11 +15,12 @@
 # limitations under the License.
 #
 
+# User-defined table functions of Spark Connect, as PySpark Connect's ``pyspark.sql.connect.udtf``:
+# the UDTF objects of ``pyspark.sql.functions.udtf`` and ``arrow_udtf``, and the registration of
+# ``spark.udtf``. PySpark's classic ``pyspark.sql.udtf``, vendored as it is, holds the dataclasses of
+# ``analyze`` that this module takes.
 """
-User-defined table functions of Spark Connect, as PySpark Connect's ``pyspark.sql.connect.udtf``:
-the UDTF objects of ``pyspark.sql.functions.udtf`` and ``arrow_udtf``, and the registration of
-``spark.udtf``. PySpark's classic ``pyspark.sql.udtf``, vendored as it is, holds the dataclasses of
-``analyze`` that this module takes.
+User-defined table function related classes and functions
 """
 
 import functools
@@ -181,8 +182,8 @@ class UserDefinedTableFunction:
         )
 
     def asDeterministic(self) -> "UserDefinedTableFunction":
-        """Mark this UDTF as deterministic, and return it. Mirrors
-        ``UserDefinedTableFunction.asDeterministic``."""
+        # Mark this UDTF as deterministic, and return it. Mirrors
+        # ``UserDefinedTableFunction.asDeterministic``.
         self.deterministic = True
         return self
 

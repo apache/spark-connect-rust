@@ -51,6 +51,52 @@ def varint_field(field, value):
     return varint(field * 8) + varint(value & (2**64 - 1))
 
 
+def abort_with_error_info(context, error):
+    # Abort the call of `context` with the error `error`, (message, reason, metadata), as the
+    # server does, of an INTERNAL status whose details are the ErrorInfo of the reason and the
+    # metadata, such as an `errorId` of the details that FetchErrorDetails gives.
+    import grpc
+
+    message, reason, metadata = error
+    # google.rpc: Status.code=1, message=2, details=3; Any.type_url=1, value=2;
+    # ErrorInfo.reason=1, domain=2, metadata=3 (entries of key=1, value=2).
+    info = message_field(1, reason) + message_field(2, "org.apache.spark")
+    for key, value in metadata.items():
+        info += message_field(3, message_field(1, key) + message_field(2, value))
+    status = (
+        varint_field(1, grpc.StatusCode.INTERNAL.value[0])
+        + message_field(2, message)
+        + message_field(
+            3,
+            message_field(1, "type.googleapis.com/google.rpc.ErrorInfo") + message_field(2, info),
+        )
+    )
+    context.set_trailing_metadata((("grpc-status-details-bin", status),))
+    context.abort(grpc.StatusCode.INTERNAL, message)
+
+
+def abort_with_mismatched_status(context, mismatched):
+    # Abort the call of `context` with the status (code name, google.rpc.Status code, message,
+    # google.rpc.Status message) `mismatched`, whose grpc-status-details-bin is a status of its
+    # own code and message, as of metadata that gRPC's core refuses at its soft limit.
+    import grpc
+
+    code, proto_code, message, proto_message = mismatched
+    status = varint_field(1, proto_code) + message_field(2, proto_message)
+    context.set_trailing_metadata((("grpc-status-details-bin", status),))
+    context.abort(getattr(grpc.StatusCode, code), message)
+
+
+def abort_with_details(context, failed):
+    # Abort the call of `context` with the failure (code name, message, details) `failed`, whose
+    # grpc-status-details-bin is the bytes of `details`, as a server sends them.
+    import grpc
+
+    code, message, details = failed
+    context.set_trailing_metadata((("grpc-status-details-bin", details),))
+    context.abort(getattr(grpc.StatusCode, code), message)
+
+
 def parse_message(data):
     """Decode protobuf wire bytes into {field: [value, ...]}: varints as ints and
     length-delimited fields as bytes (decode nested messages with another call)."""
@@ -252,8 +298,9 @@ def struct_schema(name="id"):
     return message_field(21, message_field(1, field))
 
 
-def retry_info_status(code, delay_ms):
-    """The grpc-status-details-bin of a failure of `code` with a RetryInfo of `delay_ms`."""
+def retry_info_status(code, delay_ms, message="retry later"):
+    """The grpc-status-details-bin of a failure of `code` and `message` with a RetryInfo of
+    `delay_ms`, of the code and the message of the failure, as a server sends it."""
     import grpc
 
     # google.rpc: Status.code=1, message=2, details=3; Any.type_url=1, value=2;
@@ -261,7 +308,7 @@ def retry_info_status(code, delay_ms):
     delay = varint_field(1, delay_ms // 1000) + varint_field(2, (delay_ms % 1000) * 1_000_000)
     return (
         varint_field(1, getattr(grpc.StatusCode, code).value[0])
-        + message_field(2, "retry later")
+        + message_field(2, message)
         + message_field(
             3,
             message_field(1, "type.googleapis.com/google.rpc.RetryInfo")
@@ -332,6 +379,7 @@ def serve(connection):
             # Back to the state of a new server: the tests of a module share one.
             self.calls = 0
             self.execute_calls = 0
+            self.response_delay = 0
             self.data_type = struct_schema()
             self.failure = None
             self.block_response = False
@@ -345,6 +393,10 @@ def serve(connection):
             self.local = None
             self.local_failure = False
             self.execute_requests = []
+            self.execute_authorizations = []
+            # The metadata of each call of the server, by its kind, as `(kind, ((key, value), ...))`,
+            # but of the keys of gRPC and HTTP/2 of every call.
+            self.call_metadata = []
             # The requests of forgotten sessions that were answered, by kind: "execute", "analyze",
             # "config", "release_session", "release_execute", "reattach", "interrupt", "clone",
             # "fetch_error_details".
@@ -354,6 +406,7 @@ def serve(connection):
             # too (see RemoteService.forgotten_count).
             self.forgotten_requests_of_sessions = Counter()
             self.release_execute_requests = []
+            self.release_delay = 0
             self.execute_payload = b""
             self.execute_payloads = None
             self.execute_payload_queue = None
@@ -363,7 +416,15 @@ def serve(connection):
             self.query_payload = None
             self.execute_failure = None
             self.execute_error = None
+            self.mismatched_status = None
+            self.failed_details = None
+            self.get_status_error = None
+            self.fetch_error_details_requests = []
             self.stream_failure = None
+            self.stream_error = None
+            self.interrupted_error = None
+            self.clone_error = None
+            self.clone_response_fields = b""
             self.reattach_requests = []
             self.retry_info_failures = []
             # The InterruptRequests of each Interrupt, and the operations that they interrupt.
@@ -381,18 +442,31 @@ def serve(connection):
             self.plan_compression_lookups = 0
             self.plan_compression_lookup_positions = []
             self.config_failure = None
+            self.plan_compression_lookup_error = None
             self.block_config = False
             self.plan_compression_lookup_delay = 0
             self.interrupt_failure = None
             self.rpc_events = []
             self.set_confs = []
             self.clone_requests = []
+            # The (code, message) that CloneSession and ReleaseExecute abort with, if any; of
+            # ReleaseExecute, also (code, message, details), of the bytes of `details` in
+            # grpc-status-details-bin.
+            self.clone_failure = None
+            self.release_failure = None
             # The GetStatusRequests of each GetStatus.
             self.get_status_requests = []
             # The session and the first request of each AddArtifacts.
             self.add_artifacts_requests = []
             # The DDL of the JSON of each JsonToDDL.
             self.ddl_string = ""
+            # The raw fields that end each response of AnalyzePlan, of Config (but the plan
+            # compression lookup) and of GetStatus, such as unknown fields of many levels, and
+            # those of a response that ReattachExecute streams before ResultComplete, or None.
+            self.analyze_extra = b""
+            self.config_extra = b""
+            self.status_extra = b""
+            self.reattach_payload = None
             with self.listener_condition:
                 # Late completion of an old RPC must not count towards the next test.
                 self.listener_epoch += 1
@@ -434,11 +508,18 @@ def serve(connection):
             self.release_session_gate = Event()
             self.add_artifacts_gate = Event()
 
+        # With `response_delay` set, AnalyzePlan and ExecutePlan answer after that many seconds,
+        # as a server of a remote network does.
+        response_delay = 0
+
         def analyze(self, request, context):
             # AnalyzePlanRequest.session_id=1, echoed as AnalyzePlanResponse.session_id=1, as the
             # server does: the client checks it.
+            if self.response_delay:
+                time.sleep(self.response_delay)
             session_id = parse_message(request).get(1, [b""])[0]
-            return message_field(1, session_id) + self._analyze(request, context)
+            return message_field(1, session_id) + self._analyze(request, context) + (
+                self.analyze_extra)
 
         def _analyze(self, request, context):
             if self.is_recorded(request, "analyze"):
@@ -486,6 +567,10 @@ def serve(connection):
             # a test sets.
             if 18 in parse_message(request):
                 return message_field(16, message_field(1, self.ddl_string.encode()))
+            # base.proto: AnalyzePlanRequest.spark_version=10; AnalyzePlanResponse.spark_version=8,
+            # SparkVersion.version=1: `spark_version`, which a test may set.
+            if 10 in parse_message(request):
+                return message_field(8, message_field(1, getattr(self, "spark_version", "4.3.0")))
             # base.proto: AnalyzePlanRequest.same_semantics=12 (SameSemantics.target_plan=1,
             # other_plan=2) and semantic_hash=13; AnalyzePlanResponse.same_semantics=10 and
             # semantic_hash=11, of result=1: whether the two plans are the same bytes, and
@@ -516,6 +601,8 @@ def serve(connection):
         # operation id, as the server does.
         execute_requests = []
         release_execute_requests = []
+        # With `release_delay` set, each ReleaseExecute is answered after that many seconds.
+        release_delay = 0
         execute_payload = b""
         # With `execute_payloads` set (a list of raw ExecutePlanResponse fields), the execution
         # streams one response of each, r1, r2, ..., instead of `execute_payload`.
@@ -534,11 +621,34 @@ def serve(connection):
         # before ResultComplete, as a dropped stream does. Each ReattachExecute is recorded in
         # `reattach_requests`.
         stream_failure = None
+        # With `stream_error` set as `execute_error` is, ExecutePlan streams its responses and
+        # then fails with it, as a query that fails once it ran a while; with `interrupted_error`
+        # set so, an execution that an Interrupt ends fails with it rather than a plain
+        # CANCELLED, as the server's OPERATION_CANCELED of an error ID; with `clone_error` set so,
+        # each CloneSession fails with it.
+        stream_error = None
+        interrupted_error = None
+        clone_error = None
+        # Raw CloneSessionResponse fields that each CloneSession answers with after its own, as a
+        # session ID (1) or a server-side session ID (2) of the response that the test sets.
+        clone_response_fields = b""
         reattach_requests = []
+        # The FetchErrorDetails requests, as `fetched_error_ids` has their error IDs, and the
+        # failure of GetStatus, of the form of `execute_error`.
+        fetch_error_details_requests = []
+        get_status_error = None
         # With `execute_error` set to (message, reason, metadata), ExecutePlan fails as the
         # server does for an error that it raised: INTERNAL, with a google.rpc.Status of an
         # ErrorInfo of `reason` and `metadata` in grpc-status-details-bin.
         execute_error = None
+        # With `mismatched_status` set to (code name, google.rpc.Status code, message,
+        # google.rpc.Status message), Config, but the plan compression lookup, and ExecutePlan
+        # fail with that code and message, of the details of a google.rpc.Status of the others.
+        mismatched_status = None
+        # With `failed_details` set to (code name, message, details), Config, but the plan
+        # compression lookup, and ExecutePlan fail with that code and message, of the bytes of
+        # `details` in grpc-status-details-bin.
+        failed_details = None
         # Each (code name, delay in ms) of this list fails an ExecutePlan of a session that is not
         # forgotten, once, as the server does for a failure with a google.rpc.RetryInfo that asks
         # for the delay.
@@ -580,6 +690,9 @@ def serve(connection):
         # requests recorded before it, so that a test sees when it came.
         plan_compression_lookup_positions = []
         config_failure = None
+        # With `plan_compression_lookup_error` set as `execute_error` is, the next plan
+        # compression lookup fails with it, once.
+        plan_compression_lookup_error = None
         block_config = False
         # The seconds that the plan compression lookup of the first plan of a session takes.
         plan_compression_lookup_delay = 0
@@ -659,6 +772,8 @@ def serve(connection):
                 return reached and epoch == self.listener_epoch and self.execute_started >= count
 
         def execute(self, request, context):
+            if self.response_delay:
+                time.sleep(self.response_delay)
             fields = parse_message(request)
             with self.listener_condition:
                 # Capture these before yielding: an earlier call can resume after reset.
@@ -668,6 +783,11 @@ def serve(connection):
                 recorded = self.is_recorded(request, "execute")
                 if recorded:
                     self.execute_requests.append(request)
+                    # The `authorization` of the metadata of the call, if it has one.
+                    self.execute_authorizations.append(
+                        dict(context.invocation_metadata()).get("authorization")
+                    )
+                    self.record_metadata("execute", context)
                     self.rpc_events.append("execute")
                     self.execute_calls += 1
                 execute_epoch = self.listener_epoch
@@ -764,6 +884,8 @@ def serve(connection):
                 held_operation_id = parse_message(request).get(6, [b""])[0]
                 released = self.wait_for_response(response_gate, held_operation_id, 5)
                 if released == "interrupted":
+                    if self.interrupted_error:
+                        abort_with_error_info(context, self.interrupted_error)
                     context.abort(grpc.StatusCode.CANCELLED, "Operation has been canceled")
                 if not released:
                     with self.listener_condition:
@@ -789,23 +911,11 @@ def serve(connection):
                 )
                 context.abort(getattr(grpc.StatusCode, code), message)
             if self.execute_error:
-                message, reason, metadata = self.execute_error
-                # google.rpc: Status.code=1, message=2, details=3; Any.type_url=1, value=2;
-                # ErrorInfo.reason=1, domain=2, metadata=3 (entries of key=1, value=2).
-                info = message_field(1, reason) + message_field(2, "org.apache.spark")
-                for key, value in metadata.items():
-                    info += message_field(3, message_field(1, key) + message_field(2, value))
-                status = (
-                    varint_field(1, grpc.StatusCode.INTERNAL.value[0])
-                    + message_field(2, message)
-                    + message_field(
-                        3,
-                        message_field(1, "type.googleapis.com/google.rpc.ErrorInfo")
-                        + message_field(2, info),
-                    )
-                )
-                context.set_trailing_metadata((("grpc-status-details-bin", status),))
-                context.abort(grpc.StatusCode.INTERNAL, message)
+                abort_with_error_info(context, self.execute_error)
+            if self.mismatched_status:
+                abort_with_mismatched_status(context, self.mismatched_status)
+            if self.failed_details:
+                abort_with_details(context, self.failed_details)
             # ExecutePlanRequest.operation_id=6; ExecutePlanResponse.operation_id=12,
             # response_id=13, result_complete=14.
             operation_id = parse_message(request).get(6, [b""])[0]
@@ -841,12 +951,16 @@ def serve(connection):
                     else (self.stream_failure, None)
                 )
                 if delay_ms is not None:
-                    status = retry_info_status(code, delay_ms)
+                    status = retry_info_status(code, delay_ms, "stream dropped")
                     context.set_trailing_metadata((("grpc-status-details-bin", status),))
                 context.abort(getattr(grpc.StatusCode, code), "stream dropped")
+            if self.stream_error:
+                abort_with_error_info(context, self.stream_error)
             if block_result_complete:
                 released = self.wait_for_response(response_gate, operation_id, 30)
                 if released == "interrupted":
+                    if self.interrupted_error:
+                        abort_with_error_info(context, self.interrupted_error)
                     context.abort(grpc.StatusCode.CANCELLED, "Operation has been canceled")
                 if not released:
                     context.abort(
@@ -864,12 +978,21 @@ def serve(connection):
         def reattach_execute(self, request, context):
             if self.is_recorded(request, "reattach"):
                 self.reattach_requests.append(request)
+            if self.reattach_payload is not None:
+                yield self.reattach_payload
             # ExecutePlanResponse.result_complete=14.
             yield message_field(14, b"")
 
         def release_execute(self, request, context):
+            if self.release_delay:
+                time.sleep(self.release_delay)
             if self.is_recorded(request, "release_execute"):
                 self.release_execute_requests.append(request)
+                if self.release_failure:
+                    if len(self.release_failure) == 3:
+                        abort_with_details(context, self.release_failure)
+                    code, message = self.release_failure
+                    context.abort(getattr(grpc.StatusCode, code), message)
             return b""
 
         def wait_for_response(self, gate, operation_id, timeout):
@@ -902,6 +1025,7 @@ def serve(connection):
             # FetchErrorDetailsRequest.error_id=3.
             if self.is_recorded(request, "fetch_error_details"):
                 self.fetched_error_ids.append(parse_message(request)[3][0].decode())
+                self.fetch_error_details_requests.append(request)
             return self.error_details
 
         # CloneSession records the requests and answers with the new session id, the one
@@ -912,28 +1036,57 @@ def serve(connection):
         def clone_session(self, request, context):
             if self.is_recorded(request, "clone"):
                 self.clone_requests.append(request)
+                if self.clone_failure:
+                    code, message = self.clone_failure
+                    context.abort(getattr(grpc.StatusCode, code), message)
+            if self.clone_error:
+                abort_with_error_info(context, self.clone_error)
             # CloneSessionRequest.session_id=1, new_session_id=4; CloneSessionResponse
             # .session_id=1, new_session_id=3.
             fields = parse_message(request)
             new_id = fields.get(4, [self.cloned_session_id.encode()])[0]
-            return message_field(1, fields[1][0]) + message_field(3, new_id)
+            return (
+                message_field(1, fields[1][0])
+                + message_field(3, new_id)
+                + self.clone_response_fields
+            )
 
         def get_status(self, request, context):
             # GetStatusRequest.session_id=1, operation_status=5, OperationStatusRequest
             # .operation_ids=1; GetStatusResponse.session_id=1, operation_statuses=3,
             # OperationStatus.operation_id=1, state=2. Each operation that the request names is
             # OPERATION_STATE_UNKNOWN=1, as the server answers of an operation that it does not
-            # know.
+            # know. With `get_status_error` set as `execute_error` is, it fails as ExecutePlan
+            # does then.
             if self.is_recorded(request, "get_status"):
                 self.get_status_requests.append(request)
+            if self.get_status_error:
+                abort_with_error_info(context, self.get_status_error)
             fields = parse_message(request)
             operation_status = parse_message(fields.get(5, [b""])[0])
             return message_field(1, fields[1][0]) + b"".join(
                 message_field(3, message_field(1, operation_id) + varint_field(2, 1))
                 for operation_id in operation_status.get(1, [])
-            )
+            ) + self.status_extra
+
+        def record_metadata(self, kind, context):
+            # The metadata of a call of `kind` (see `call_metadata`).
+            common = {"user-agent", "content-type", "te", "grpc-accept-encoding", "accept-encoding",
+                      "grpc-timeout"}
+            self.call_metadata.append((kind, tuple(
+                (key, value) for key, value in context.invocation_metadata()
+                if key not in common)))
 
         def config(self, request, context):
+            if PLAN_COMPRESSION_LOOKUP not in request:
+                with self.listener_condition:
+                    self.record_metadata("config", context)
+            response = self._config(request, context)
+            if PLAN_COMPRESSION_LOOKUP in request:
+                return response
+            return response + self.config_extra
+
+        def _config(self, request, context):
             # ConfigRequest.session_id=1, operation=3, Operation.get=2, Get.keys=1;
             # ConfigResponse.session_id=1, pairs=2, KeyValue.key=1, value=2.
             # The plan compression lookup of a client, which PySpark makes on its first plan, is
@@ -950,6 +1103,9 @@ def serve(connection):
             if recorded:
                 self.config_requests.append(request)
                 self.rpc_events.append("config")
+            if lookup and self.plan_compression_lookup_error and not self.is_forgotten(request):
+                error, self.plan_compression_lookup_error = self.plan_compression_lookup_error, None
+                abort_with_error_info(context, error)
             if lookup and self.plan_compression_lookup_delay:
                 # The plan compression lookup that PySpark makes on the first plan, held for the
                 # seconds of the delay, as a slow server holds it.
@@ -961,6 +1117,10 @@ def serve(connection):
                 )
             if not lookup and self.config_failure:
                 context.abort(grpc.StatusCode.INVALID_ARGUMENT, self.config_failure)
+            if not lookup and self.mismatched_status:
+                abort_with_mismatched_status(context, self.mismatched_status)
+            if not lookup and self.failed_details:
+                abort_with_details(context, self.failed_details)
             request = parse_message(request)
             operation = parse_message(request[3][0])
             if 1 in operation:
@@ -1214,32 +1374,37 @@ class RemoteService:
 
 
 @contextmanager
-def mock_connect_session():
-    from pyspark.sql import SparkSession
-
+def mock_connect_server():
+    # The service of a mock server in a process of its own, without a session of this process:
+    # its `remote` is the URL of the server, for the sessions of this process or of others.
     context = multiprocessing.get_context("spawn")
     parent, child = context.Pipe()
     process = context.Process(target=serve, args=(child,))
     process.start()
-    spark = None
     try:
         assert parent.poll(20), "Mock server did not start"
         remote = f"sc://127.0.0.1:{parent.recv()}"
-        spark = SparkSession.builder.remote(remote).getOrCreate()
         service = RemoteService(parent)
-        # The URL of the server, for more sessions of it.
         object.__setattr__(service, "remote", remote)
-        yield spark, service
+        yield service
     finally:
-        try:
-            if spark is not None:
-                spark.stop()
-        finally:
-            if process.is_alive():
-                parent.send(("stop",))
+        if process.is_alive():
+            parent.send(("stop",))
+        process.join(10)
+        if process.is_alive():
+            process.terminate()
             process.join(10)
-            if process.is_alive():
-                process.terminate()
-                process.join(10)
-            parent.close()
-            child.close()
+        parent.close()
+        child.close()
+
+
+@contextmanager
+def mock_connect_session():
+    from pyspark.sql import SparkSession
+
+    with mock_connect_server() as service:
+        spark = SparkSession.builder.remote(service.remote).getOrCreate()
+        try:
+            yield spark, service
+        finally:
+            spark.stop()

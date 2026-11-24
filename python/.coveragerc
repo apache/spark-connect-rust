@@ -40,7 +40,7 @@ omit =
     */pyspark/sql/worker/*
     */pyspark/sql/plot/*
     */pyspark/sql/pandas/*
-    */pyspark/sql/functions_generated.py
+    */pyspark/sql/connect/functions/_generated.py
     */pyspark/sql/datasource.py
     */pyspark/sql/conversion.py
     */pyspark/sql/internal.py
@@ -63,6 +63,8 @@ omit =
     */pyspark/sql/pandas/group_ops.py
     */pyspark/sql/streaming/readwriter.py
     */pyspark/sql/streaming/query.py
+    */pyspark/sql/column.py
+    */pyspark/sql/table_arg.py
     */pyspark/sql/utils.py
     */pyspark/serializers.py
     */pyspark/loose_version.py
@@ -81,6 +83,7 @@ omit =
     */pyspark/sql/connect/logging.py
     */pyspark/sql/connect/_typing.py
     */pyspark/sql/connect/conversion.py
+    */pyspark/sql/connect/local_server.py
     # The other files that scripts/check_vendored_upstream.sh keeps byte-identical to the tag
     # (scripts/tests/test_coverage_scope.py checks that every vendored file is omitted here).
     */pyspark/conf.py
@@ -91,10 +94,13 @@ omit =
     */pyspark/sql/connect/profiler.py
     */pyspark/sql/connect/shell/progress.py
     */pyspark/sql/connect/resource/*
+    */pyspark/sql/functions/*
+    */pyspark/sql/connect/functions/partitioning.py
     */pyspark/sql/connect/avro/__init__.py
     */pyspark/sql/connect/protobuf/__init__.py
     */pyspark/sql/connect/streaming/__init__.py
     */pyspark/sql/connect/client/retries.py
+    */pyspark/sql/connect/client/__init__.py
     # The native extension and its embedded Row and value sources, which have synthetic
     # filenames.
     */pyspark/_pyspark*

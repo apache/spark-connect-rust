@@ -26,7 +26,7 @@ fn helper_relation(
     method: &str,
     args: &[&Bound<'_, PyAny>],
     typed: Option<proto::expression::Literal>,
-) -> PyResult<PyDataFrame> {
+) -> PyResult<crate::dataframe::NewDataFrame> {
     let py = args[0].py();
     let session = crate::session::active_session(py)
         .ok_or_else(|| PyAssertionError::new_err(()))?
@@ -45,14 +45,9 @@ fn helper_relation(
 
 // PySpark's `ChiSquareTest`, a plain class of a static `test`: its objects, and those of a
 // subclass, construct as `object.__new__` makes PySpark's (see `reduce::check_plain_new`), take
-// attributes and weak references, and pickle and copy as plain objects.
-#[pyclass(
-    subclass,
-    weakref,
-    dict,
-    name = "ChiSquareTest",
-    module = "pyspark.ml.stat"
-)]
+// attributes and weak references, and pickle and copy as plain objects. Of no `weakref` of its
+// own: so the public class, a Python subclass, has the `__weakref__` of PySpark's plain class.
+#[pyclass(subclass, dict, name = "ChiSquareTest", module = "pyspark.ml.stat")]
 pub struct PyChiSquareTest;
 #[pymethods]
 impl PyChiSquareTest {
@@ -86,7 +81,7 @@ impl PyChiSquareTest {
         featuresCol: &Bound<'_, PyAny>,
         labelCol: &Bound<'_, PyAny>,
         flatten: DefaultedOption,
-    ) -> PyResult<PyDataFrame> {
+    ) -> PyResult<crate::dataframe::NewDataFrame> {
         let flatten = flatten.or_bool(py, false);
         helper_relation(
             "chiSquareTest",
@@ -97,13 +92,7 @@ impl PyChiSquareTest {
 }
 
 // PySpark's `Correlation`, a plain class of a static `corr` (see `PyChiSquareTest`).
-#[pyclass(
-    subclass,
-    weakref,
-    dict,
-    name = "Correlation",
-    module = "pyspark.ml.stat"
-)]
+#[pyclass(subclass, dict, name = "Correlation", module = "pyspark.ml.stat")]
 pub struct PyCorrelation;
 #[pymethods]
 impl PyCorrelation {
@@ -135,7 +124,7 @@ impl PyCorrelation {
         dataset: &Bound<'_, PyAny>,
         column: &Bound<'_, PyAny>,
         method: DefaultedOption,
-    ) -> PyResult<PyDataFrame> {
+    ) -> PyResult<crate::dataframe::NewDataFrame> {
         let method = match method {
             DefaultedOption::Omitted => pyo3::types::PyString::new(py, "pearson").into_any(),
             DefaultedOption::Given(method) => method.into_bound(py),
@@ -147,7 +136,6 @@ impl PyCorrelation {
 // PySpark's `KolmogorovSmirnovTest`, a plain class of a static `test` (see `PyChiSquareTest`).
 #[pyclass(
     subclass,
-    weakref,
     dict,
     name = "KolmogorovSmirnovTest",
     module = "pyspark.ml.stat"
@@ -181,7 +169,7 @@ impl PyKolmogorovSmirnovTest {
         sampleCol: &Bound<'_, PyAny>,
         distName: &Bound<'_, PyAny>,
         params: &Bound<'_, PyTuple>,
-    ) -> PyResult<PyDataFrame> {
+    ) -> PyResult<crate::dataframe::NewDataFrame> {
         use proto::expression::literal::{Array, LiteralType};
         // PySpark deliberately uses float(), accepting numeric strings as well as numbers, and
         // converts the params first: its list of them is an argument of the helper call, whose
@@ -255,7 +243,7 @@ impl PySummaryBuilder {
         slf: &Bound<'_, Self>,
         featuresCol: &Bound<'_, PyAny>,
         weightCol: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<PyColumn> {
+    ) -> PyResult<crate::column::ColumnOut> {
         // As in the remote SummaryBuilder, the metrics are those of the `_metrics` of the builder
         // (the AttributeError of a builder of none, `SummaryBuilder(None)`), converted at
         // summary(), each with `lit` (`F.array([F.lit(m) for m in self._metrics])`), so that a list
@@ -266,49 +254,36 @@ impl PySummaryBuilder {
             .try_iter()?
             .map(|v| crate::functions::to_column(&v?))
             .collect::<PyResult<Vec<_>>>()?;
-        let features = featuresCol
-            .extract::<PyRef<'_, PyColumn>>()
-            .map_err(|_| PyAssertionError::new_err(()))?
-            .column
-            .clone();
+        let features = crate::column::column_of(
+            featuresCol
+                .cast::<PyColumn>()
+                .map_err(|_| PyAssertionError::new_err(()))?,
+        )?;
         let weight = weightCol
             .map(|v| {
-                v.extract::<PyRef<'_, PyColumn>>()
-                    .map(|c| c.column.clone())
-                    .map_err(|_| PyAssertionError::new_err(()))
+                let column = v
+                    .cast::<PyColumn>()
+                    .map_err(|_| PyAssertionError::new_err(()))?;
+                crate::column::column_of(column)
             })
             .transpose()?;
-        Ok(PyColumn::new(
+        Ok(crate::column::ColumnOut::new(
             SummaryBuilder::from_metric_columns(metrics).summary(features, weight),
         ))
     }
 }
 
 // PySpark's `Summarizer`, a plain class of static methods (see `PyChiSquareTest`).
-#[pyclass(
-    subclass,
-    weakref,
-    dict,
-    name = "Summarizer",
-    module = "pyspark.ml.stat"
-)]
+#[pyclass(subclass, dict, name = "Summarizer", module = "pyspark.ml.stat")]
 pub struct PySummarizer;
 fn columns(
     col: &Bound<'_, PyAny>,
     weight: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<(spark_connect::Column, Option<spark_connect::Column>)> {
     let error = || PyTypeError::new_err("featureCol and weightCol should be a Column");
-    let col = col
-        .extract::<PyRef<'_, PyColumn>>()
-        .map_err(|_| error())?
-        .column
-        .clone();
+    let col = crate::column::column_of(col.cast::<PyColumn>().map_err(|_| error())?)?;
     let weight = weight
-        .map(|v| {
-            v.extract::<PyRef<'_, PyColumn>>()
-                .map(|c| c.column.clone())
-                .map_err(|_| error())
-        })
+        .map(|v| crate::column::column_of(v.cast::<PyColumn>().map_err(|_| error())?))
         .transpose()?;
     Ok((col, weight))
 }
@@ -348,9 +323,12 @@ macro_rules! metrics {
         #[staticmethod]
         #[pyo3(name=$python, signature=(col, weightCol=None))]
         #[allow(non_snake_case)]
-        fn $name(col: &Bound<'_, PyAny>, weightCol: Option<&Bound<'_, PyAny>>) -> PyResult<PyColumn> {
+        fn $name(
+            col: &Bound<'_, PyAny>,
+            weightCol: Option<&Bound<'_, PyAny>>,
+        ) -> PyResult<crate::column::ColumnOut> {
             let (col, weight) = columns(col, weightCol)?;
-            Ok(PyColumn::new(Summarizer::$name(col, weight)))
+            Ok(crate::column::ColumnOut::new(Summarizer::$name(col, weight)))
         }
     )* } };
 }
@@ -367,12 +345,19 @@ metrics!(
     (norm_l2, "normL2")
 );
 
+// The plain classes of no helpers.
+impl super::object::NativeClass for PyChiSquareTest {}
+impl super::object::NativeClass for PyCorrelation {}
+impl super::object::NativeClass for PyKolmogorovSmirnovTest {}
+impl super::object::NativeClass for PySummarizer {}
+impl super::object::NativeClass for PySummaryBuilder {}
+
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<PyChiSquareTest>()?;
-    m.add_class::<PyCorrelation>()?;
-    m.add_class::<PyKolmogorovSmirnovTest>()?;
-    m.add_class::<PySummarizer>()?;
-    m.add_class::<PySummaryBuilder>()?;
+    super::object::register_class::<PyChiSquareTest>(m)?;
+    super::object::register_class::<PyCorrelation>(m)?;
+    super::object::register_class::<PyKolmogorovSmirnovTest>(m)?;
+    super::object::register_class::<PySummarizer>(m)?;
+    super::object::register_class::<PySummaryBuilder>(m)?;
     let py = m.py();
     for class in [
         py.get_type::<PyChiSquareTest>(),

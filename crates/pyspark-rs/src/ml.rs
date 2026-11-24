@@ -612,8 +612,8 @@ fn core_of<T: Native + PyClass>(slf: &Bound<'_, T>, subclass_params: bool) -> Py
 /// of its plan and session (`DataFrame(plan, session)`), as PySpark sends the relation of the plan
 /// (`dataset._plan.plan(client)`), of the error of a plan of none.
 fn dataset_of(dataset: &Bound<'_, PyAny>, method: &str) -> PyResult<DataFrame> {
-    if let Ok(df) = dataset.extract::<PyRef<'_, PyDataFrame>>() {
-        return Ok(df.dataframe.clone());
+    if let Ok(df) = dataset.cast::<PyDataFrame>() {
+        return Ok(crate::dataframe::Frame::of(df)?.dataframe.clone());
     }
     let py = dataset.py();
     let session = dataset.getattr(pyo3::intern!(py, "sparkSession"))?;
@@ -623,7 +623,9 @@ fn dataset_of(dataset: &Bound<'_, PyAny>, method: &str) -> PyResult<DataFrame> {
     session.getattr(pyo3::intern!(py, "client"))?;
     let plan = dataset.getattr(pyo3::intern!(py, "_plan"))?;
     let df = py.get_type::<PyDataFrame>().call1((plan, session))?;
-    let df = df.cast::<PyDataFrame>()?.borrow().dataframe.clone();
+    let df = crate::dataframe::Frame::of(df.cast::<PyDataFrame>()?)?
+        .dataframe
+        .clone();
     Ok(df)
 }
 
@@ -668,7 +670,10 @@ where
     // The defaults of the estimator, which `_copyValues` gives the model of the fit.
     let defaults = params_api::fit_defaults(slf)?;
     let session = df.spark_session();
-    let fitted = interruptible(py, &session, || estimator.fit(&df).map_err(Box::new))?;
+    // Of the plan of the dataset, which the fit is built over; the estimator holds params alone.
+    let fitted = crate::interrupt::interruptible_of_values(py, &session, df.held_parts(), || {
+        estimator.fit(&df).map_err(Box::new)
+    })?;
     let mut model = model(py, fitted, &df)?;
     params_api::copy_defaults(py, defaults, &mut model)?;
     // The object of the model's class, as `Fitted` returns it.
@@ -678,10 +683,30 @@ where
 /// A fitted ML model (result of `Estimator.fit`), wrapping a boxed core `Model`.
 #[pyclass(subclass, name = "MLModel", module = "pyspark.ml.connect")]
 pub struct PyMLModel {
+    /// The references of `model` to the parts of plans, of its training summary (see
+    /// `Model::held_parts`), which `__traverse__` reports.
+    parts: crate::gc::Parts,
     model: Box<dyn Model>,
     /// The session of the DataFrame that the model was fitted on.
     session_id: String,
+    /// Whether the value is written, which `__traverse__` checks first (see `crate::gc::GcReady`).
+    gc_ready: crate::gc::GcReady,
 }
+
+impl PyMLModel {
+    /// The model of the core model `model`, fitted on a DataFrame of the session `session_id`.
+    pub(crate) fn new(py: Python<'_>, model: Box<dyn Model>, session_id: String) -> Self {
+        Self {
+            parts: crate::gc::Parts::of(py, model.held_parts()),
+            model,
+            session_id,
+            gc_ready: crate::gc::GcReady::new(),
+        }
+    }
+}
+
+// Of no helpers, of no Python object.
+impl object::NativeClass for PyMLModel {}
 
 #[pymethods]
 impl PyMLModel {
@@ -695,10 +720,28 @@ impl PyMLModel {
         py: Python<'_>,
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<PyDataFrame> {
+    ) -> PyResult<crate::dataframe::NewDataFrame> {
         check_params(params)?;
         let input = dataset_of(dataset, "transform")?;
         Ok(PyDataFrame::new(self.transform_dataframe(py, &input)?))
+    }
+
+    /// Visit the parts of the plans of the training summary of the model, of Python's garbage
+    /// collector (see `crate::gc::Parts`).
+    fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
+        if !self.gc_ready.get() {
+            return Ok(());
+        }
+        self.parts.visit(&visit)
+    }
+
+    /// Break a reference cycle that the garbage collector found unreachable: the model drops its
+    /// training summary.
+    fn __clear__(&mut self) {
+        if self.gc_ready.get() {
+            self.parts.release();
+            self.model.clear_held_parts();
+        }
     }
 }
 
@@ -711,21 +754,23 @@ impl PyMLModel {
             // As PySpark, the transform of a DataFrame of another session refers to the model
             // on the server of that session, which raises CONNECT_ML.CACHE_INVALID when the
             // DataFrame is analyzed or run, as it caches no such model. (The Rust API rejects
-            // the transform itself.) Its input is the placeholder of the DataFrame, as in the
-            // plans of `pyspark.ml`: the core resolves it, counting its levels for the depth
-            // bound, where an input put in whole would count as one level.
-            let placeholder =
-                DataFrame::from_sent_relation(session.clone(), df.placeholder_relation());
-            let relation = spark_connect_proto::Relation {
-                rel_type: Some(spark_connect_proto::relation::RelType::MlRelation(
-                    Box::new(model.build_ml_relation(&placeholder).to_pyerr()?),
-                )),
-                ..Default::default()
-            };
-            DataFrame::from_relation(session, relation, None).to_pyerr()
+            // the transform itself.) Its requests build the relation of `df`, as its input, and
+            // count its levels for the depth bound, as PySpark's `TransformerRelation`; the
+            // transform is of the placeholder of `df`, which builds nothing of it.
+            let placeholder = DataFrame::from_sent_relation(session, df.placeholder_relation());
+            Ok(spark_connect::ml::transform_without_owner(
+                df,
+                model.build_ml_relation(&placeholder).to_pyerr()?,
+            ))
         } else {
-            py.detach(|| model.transform(df).map_err(Box::new))
-                .to_pyerr()
+            // Of the plan of `df`, which the transform is built over, and of the summary datasets
+            // that the copy of the model holds (see `ModelCore::transform_job`).
+            let parts = df.held_parts().into_iter().chain(model.held_parts());
+            let _in_use = crate::gc::in_use_of_values(py, parts);
+            crate::gc::run_detached(py, crate::gc::take_counting(), || {
+                model.transform(df).map_err(Box::new)
+            })
+            .to_pyerr()
         }
     }
 }
@@ -1875,6 +1920,8 @@ pub struct PyOneVsRest {
     /// then the params of the metadata in its order); the defaults of a load are of the names of
     /// the params, as its `_resetUid` makes them.
     set_order: params_api::SetOrder,
+    /// Whether the value is written, which `__traverse__` checks first (see `crate::gc::GcReady`).
+    gc_ready: crate::gc::GcReady,
 }
 
 const ONE_VS_REST_PARAMS: &[(&str, Kind)] = &[
@@ -1949,10 +1996,27 @@ native_pymethods! {
             inner: OneVsRest::new(),
             raw: Vec::new(),
             set_order: params_api::SetOrder::default(),
+            gc_ready: crate::gc::GcReady::new(),
         };
         check_classifier_kwarg(kwargs)?;
         set_ovr_params(&mut this, args.py(), "__init__", args, kwargs)?;
         Ok(this)
+    }
+
+    /// Visit the classifier, of Python's garbage collector, as PySpark's param map holds it.
+    fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
+        if !self.gc_ready.get() {
+            return Ok(());
+        }
+        params_api::visit_values(&self.raw, &visit)
+    }
+
+    /// Break a reference cycle that the garbage collector found unreachable: the estimator drops
+    /// its classifier.
+    fn __clear__(&mut self) {
+        if self.gc_ready.get() {
+            self.raw.clear();
+        }
     }
 
     #[pyo3(
@@ -2251,16 +2315,17 @@ fn fit_one_vs_rest(
         let mut core = slf.try_borrow()?.inner.clone();
         core = core.set_classifier(native_classifier(classifier, true)?);
         core.ensure_operator();
-        let training = cached
-            .extract::<PyRef<'_, PyDataFrame>>()?
+        let training = crate::dataframe::Frame::of(cached.cast::<PyDataFrame>()?)?
             .dataframe
             .clone();
         let weight = weight.map(|name| name.extract::<String>()).transpose()?;
         let session = training.spark_session();
-        let (model, datasets) = interruptible(py, &session, || {
-            core.fit_classes(&training, num_classes, threads, weight.as_deref())
-                .map_err(Box::new)
-        })?;
+        // Of the plan of the training dataset, of which the fits of the classes are built.
+        let (model, datasets) =
+            crate::interrupt::interruptible_of_values(py, &session, training.held_parts(), || {
+                core.fit_classes(&training, num_classes, threads, weight.as_deref())
+                    .map_err(Box::new)
+            })?;
         // The typed models of the classes, of their binary training sets, which the fits of
         // PySpark's classifier make in the pool, before the cache is released.
         let fit = classification_api::OneVsRestFit {
@@ -2333,6 +2398,7 @@ impl params_api::NativeInstance for PyOneVsRest {
                 inner: self.inner.clone(),
                 raw,
                 set_order: self.set_order.clone(),
+                gc_ready: crate::gc::GcReady::new(),
             },
         )
     }
@@ -6456,7 +6522,7 @@ native_pymethods! {
     /// another value as a literal, which the server rejects when the result is analyzed or
     /// collected (a value that cannot be one raises PySpark's error of its conversion).
     #[pyo3(name = "assignClusters")]
-    fn assign_clusters(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+    fn assign_clusters(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<crate::dataframe::NewDataFrame> {
         use spark_connect::ml::{attribute_relation, FetchArg, MlTarget};
         let py = slf.py();
         let algorithm = core_of(slf, false)?;

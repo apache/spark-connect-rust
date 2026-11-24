@@ -34,8 +34,35 @@ pub struct TransformWithStateInfo {
 /// DataFrame uses it: such as the Python plan of `pyspark.ml`, which keeps the models whose
 /// cached objects on the server the relation refers to, as PySpark Connect's DataFrame keeps its
 /// plan.
-#[derive(Clone)]
 pub struct RelationOwner(pub Arc<dyn std::any::Any + Send + Sync>);
+
+/// Where a request puts the relation of the input of a [`LogicalPlan::MlTransform`] in the
+/// relation of the node, which it builds then, with the plan IDs, pickles, warnings and errors of
+/// that request, as PySpark's ML plans build the plan of their child each time that their own is
+/// built (`TransformerRelation` and `AttributeRelation` of `pyspark.ml.connect.proto`). Not a
+/// stable API.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MlInputAt {
+    /// Nowhere: the relation holds what it reads of the input, as the arguments of a method,
+    /// which PySpark's `serialize` builds when the method is called.
+    #[default]
+    Nowhere,
+    /// The `input` of its `MlRelation`'s `Transform`, as a transform of a model or a transformer.
+    TransformInput,
+    /// The `model_summary_dataset` of its `MlRelation`, as the DataFrame of a method of a
+    /// training summary.
+    SummaryDataset,
+}
+
+/// A handle of the same owner, of which the check of the clones of a binding is told (see
+/// [`crate::gc::check_clones_with`]).
+impl Clone for RelationOwner {
+    fn clone(&self) -> Self {
+        crate::gc::cloned(Arc::as_ptr(&self.0) as *const () as usize);
+        RelationOwner(Arc::clone(&self.0))
+    }
+}
 
 impl std::fmt::Debug for RelationOwner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -43,10 +70,108 @@ impl std::fmt::Debug for RelationOwner {
     }
 }
 
+/// A plan node that a plan node holds as its input: a shared, immutable node, with whether an
+/// object of a binding is below it, which the binding needs not to look for below a node of none
+/// (see [`crate::gc`]). Made of the node, as a node is made of its inputs and expressions, each
+/// of which tells it, so it is told at once. Cloning it shares the node, of which the check of
+/// the clones of a binding is told (see [`crate::gc::check_clones_with`]).
+pub struct SharedPlan {
+    node: Arc<LogicalPlan>,
+    objects: bool,
+}
+
+impl SharedPlan {
+    /// The node `plan`, to share.
+    pub fn new(plan: LogicalPlan) -> Self {
+        SharedPlan::from(Arc::new(plan))
+    }
+
+    /// The node `node`, of whether an object of a binding is at or below it as its holder keeps
+    /// it, as the plan of a DataFrame does.
+    pub(crate) fn of_node(node: Arc<LogicalPlan>, objects: bool) -> Self {
+        SharedPlan { node, objects }
+    }
+
+    /// The node, as the plan of a DataFrame holds it.
+    pub fn arc(&self) -> &Arc<LogicalPlan> {
+        &self.node
+    }
+
+    /// The node, of this reference to it.
+    pub fn into_arc(self) -> Arc<LogicalPlan> {
+        self.node
+    }
+
+    /// Whether an object of a binding is below the node, or the node holds one: a pickler or an
+    /// owner, which may hold one (see [`crate::gc::PartRef::holds_objects`]).
+    pub fn holds_objects(&self) -> bool {
+        self.objects
+    }
+
+    /// The node of a dropped node in place of this one, as it drops its inputs in turn (see the
+    /// `Drop` of [`LogicalPlan`]).
+    fn take(&mut self) -> Arc<LogicalPlan> {
+        self.objects = false;
+        std::mem::replace(&mut self.node, Arc::clone(&DROPPED_INPUT))
+    }
+}
+
+/// A node shared: of whether an object of a binding is below it, of its fields.
+impl From<Arc<LogicalPlan>> for SharedPlan {
+    fn from(node: Arc<LogicalPlan>) -> Self {
+        let objects = crate::gc::PartRef::Plan(&node).holds_objects();
+        SharedPlan { node, objects }
+    }
+}
+
+impl From<LogicalPlan> for SharedPlan {
+    fn from(plan: LogicalPlan) -> Self {
+        SharedPlan::new(plan)
+    }
+}
+
+impl From<Box<LogicalPlan>> for SharedPlan {
+    fn from(plan: Box<LogicalPlan>) -> Self {
+        SharedPlan::from(Arc::<LogicalPlan>::from(plan))
+    }
+}
+
+impl Clone for SharedPlan {
+    fn clone(&self) -> Self {
+        crate::gc::cloned(Arc::as_ptr(&self.node) as usize);
+        SharedPlan {
+            node: Arc::clone(&self.node),
+            objects: self.objects,
+        }
+    }
+}
+
+impl std::ops::Deref for SharedPlan {
+    type Target = LogicalPlan;
+
+    fn deref(&self) -> &LogicalPlan {
+        &self.node
+    }
+}
+
+impl AsRef<LogicalPlan> for SharedPlan {
+    fn as_ref(&self) -> &LogicalPlan {
+        &self.node
+    }
+}
+
+impl std::fmt::Debug for SharedPlan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&*self.node, f)
+    }
+}
+
 #[derive(Debug, Clone)]
-// `GroupMap` is the largest variant; boxing its fields would change the public fields of the
-// variant, and each plan node is shared in an `Arc`, so its size is paid once per node.
-#[allow(clippy::large_enum_variant)]
+// Each node of every plan is the size of the largest variant, which every DataFrame derived of
+// another pays for its node: so the large fields of the variants that few plans have are boxed,
+// the UDF expressions of the maps, the state of `GroupMap`, the relation of `MlTransform`, the
+// error of `Unbuildable`, the catalog of `Catalog`, the read type of `Read` and the return type of
+// `CommonInlineUdtf`, which makes a node 184 bytes, from 648 (see `layout_tests`).
 pub enum LogicalPlan {
     /// A range of integers: `range(start, end, step)`.
     Range {
@@ -63,17 +188,17 @@ pub enum LogicalPlan {
     },
     /// A projection (select): `df.select(cols...)`.
     Project {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         columns: Vec<Column>,
     },
     /// A filter: `df.filter(condition)`.
     Filter {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         condition: Column,
     },
     /// An aggregation: `df.groupBy(...).agg(...)`.
     Aggregate {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         group_type: AggregateGroupType,
         grouping_expressions: Vec<Expression>,
         aggregate_expressions: Vec<Expression>,
@@ -85,42 +210,39 @@ pub enum LogicalPlan {
     },
     /// A join: `df.join(other, on)`.
     Join {
-        left: Arc<LogicalPlan>,
-        right: Arc<LogicalPlan>,
+        left: SharedPlan,
+        right: SharedPlan,
         join_type: JoinType,
         on: Option<Column>,
         using_columns: Vec<String>,
     },
     /// A lateral join (`LATERAL` correlated subquery join).
     LateralJoin {
-        left: Arc<LogicalPlan>,
-        right: Arc<LogicalPlan>,
+        left: SharedPlan,
+        right: SharedPlan,
         join_type: JoinType,
         on: Option<Column>,
     },
     /// A set operation (union, intersect, except).
     SetOperation {
-        left: Arc<LogicalPlan>,
-        right: Arc<LogicalPlan>,
+        left: SharedPlan,
+        right: SharedPlan,
         set_op_type: SetOpType,
         is_all: bool,
         by_name: bool,
         allow_missing_columns: bool,
     },
     /// Limit: `df.limit(n)`.
-    Limit { input: Arc<LogicalPlan>, limit: i32 },
+    Limit { input: SharedPlan, limit: i32 },
     /// Offset: `df.offset(n)`.
-    Offset {
-        input: Arc<LogicalPlan>,
-        offset: i32,
-    },
+    Offset { input: SharedPlan, offset: i32 },
     /// Tail: `df.tail(n)` - returns last n rows.
-    Tail { input: Arc<LogicalPlan>, limit: i32 },
+    Tail { input: SharedPlan, limit: i32 },
     /// ShowString: the table of `df.show(...)`, which the server formats as one string:
     /// `num_rows` rows, values truncated to `truncate` characters (0 for none), vertical
     /// with a line per value.
     ShowString {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         num_rows: i32,
         truncate: i32,
         vertical: bool,
@@ -128,7 +250,7 @@ pub enum LogicalPlan {
     /// HtmlString: the HTML table of `df._repr_html_()`, which the server formats as one
     /// string: `num_rows` rows, values truncated to `truncate` characters (0 for none).
     HtmlString {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         num_rows: i32,
         truncate: i32,
     },
@@ -144,23 +266,29 @@ pub enum LogicalPlan {
         owner: Option<RelationOwner>,
         depth: usize,
         observations: Vec<(String, crate::observation::Observation)>,
+        /// The holes of the relation, of a pickled DataFrame, whose picklers a request calls when
+        /// it builds the plan, and whose messages it fills in, as PySpark's unpickled plan
+        /// pickles the functions of its UDFs at each request (see [`crate::udf::SentHole`]).
+        /// Not a stable API.
+        #[doc(hidden)]
+        holes: crate::udf::SentHoles,
     },
     /// Deduplicate: `df.distinct()` or `df.dropDuplicates()`.
     Deduplicate {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         all_columns_as_keys: bool,
         column_names: Vec<String>,
         within_watermark: bool,
     },
     /// Sort: `df.sort(cols...)`.
     Sort {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         order: Vec<Expression>,
         is_global: bool,
     },
     /// Sample: `df.sample(fraction)` or `df.sample(num_rows)`.
     Sample {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         lower_bound: f64,
         upper_bound: f64,
         with_replacement: bool,
@@ -171,19 +299,19 @@ pub enum LogicalPlan {
     },
     /// Repartition: `df.repartition(num_partitions)`.
     Repartition {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         num_partitions: i32,
         shuffle: bool,
     },
     /// RepartitionByExpression: `df.repartitionByRange()` or similar.
     RepartitionByExpression {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         num_partitions: i32,
         expressions: Vec<Expression>,
     },
     /// WithColumns: `df.withColumn(name, col)` or `df.withColumns(...)`.
     WithColumns {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         column_names: Vec<String>,
         columns: Vec<Column>,
     },
@@ -191,7 +319,7 @@ pub enum LogicalPlan {
     /// Mirrors `DataFrame.withMetadata` - a `WithColumns` whose one alias re-aliases
     /// the column to itself, carrying the metadata JSON.
     WithColumnMetadata {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         column_name: String,
         /// The column as a reference to the input's plan ID, as PySpark's `self[columnName]`.
         column: Expression,
@@ -200,24 +328,24 @@ pub enum LogicalPlan {
     /// WithColumnsRenamed: `df.withColumnRenamed(old, new)` or `df.withColumnsRenamed(...)`,
     /// of the renames in their order, in which the server applies them, as PySpark sends them.
     WithColumnsRenamed {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         renames: Vec<(String, String)>,
     },
     /// Drop: `df.drop(column_names...)`.
     Drop {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         columns: Vec<String>,
         /// The columns to drop as expressions, as PySpark's `Drop` of Columns sends them.
         expressions: Vec<Expression>,
     },
     /// ToDF: `df.toDF(*column_names)`.
     ToDF {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         column_names: Vec<String>,
     },
     /// ToSchema: set schema to match the provided type.
     ToSchema {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         schema: DataType,
         /// The reader of the schema of a client, which a request calls when it builds the plan,
         /// in place of `schema`, as PySpark's `ToSchema` converts the type object of its schema
@@ -234,12 +362,12 @@ pub enum LogicalPlan {
     /// [`crate::expression::Expression::unbuildable`]): a request raises the first error of
     /// either kind, in the order in which PySpark builds the plan, its inputs before itself.
     Unbuildable {
-        input: Arc<LogicalPlan>,
-        error: SparkError,
+        input: SharedPlan,
+        error: Box<SparkError>,
     },
     /// Hint: `df.hint(name, parameters...)`.
     Hint {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         name: String,
         /// The parameters, literal expressions or columns, as PySpark's `lit` of them.
         parameters: Vec<Expression>,
@@ -247,14 +375,14 @@ pub enum LogicalPlan {
     /// Parse: a DataFrame of one string column parsed into a structured DataFrame, as
     /// PySpark's `Parse` of `spark.read.json`, `csv` and `xml` of a DataFrame.
     Parse {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         format: ParseFormat,
         schema: Option<DataType>,
         options: HashMap<String, String>,
     },
     /// Unpivot: `df.unpivot(...)`.
     Unpivot {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         ids: Vec<Column>,
         values: Option<Vec<Column>>,
         variable_column_name: String,
@@ -262,19 +390,19 @@ pub enum LogicalPlan {
     },
     /// NAFill: `df.fillna(value, subset)`.
     NAFill {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         fill_value: crate::row::Value,
         columns: Vec<String>,
     },
     /// NAFill with a per-column value: `df.fillna({col: value, ...})`.
     NAFillColumns {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         cols: Vec<String>,
         values: Vec<crate::row::Value>,
     },
     /// NADrop: `df.dropna(how, thresh, subset)`.
     NADrop {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         how: String,
         min_non_null: Option<i32>,
         columns: Vec<String>,
@@ -282,36 +410,30 @@ pub enum LogicalPlan {
     /// NAReplace: `df.replace(to_replace, value, subset)`, each replacement a literal and
     /// the literal that replaces it.
     NAReplace {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         replacements: Vec<(LiteralExpression, LiteralExpression)>,
         columns: Vec<String>,
     },
     /// Describe: `df.describe(cols...)`.
     Describe {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         columns: Vec<String>,
     },
     /// Summary: `df.summary(percentiles...)`.
     Summary {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         percentiles: Vec<String>,
     },
     /// ColRegex: column selection by regex.
-    ColRegex {
-        input: Arc<LogicalPlan>,
-        col_name: String,
-    },
+    ColRegex { input: SharedPlan, col_name: String },
     /// SubqueryAlias: `df.as(alias)`.
-    SubqueryAlias {
-        input: Arc<LogicalPlan>,
-        alias: String,
-    },
+    SubqueryAlias { input: SharedPlan, alias: String },
     /// WithRelations: a plan with the plans that it refers to, such as a SQL query with the
     /// DataFrames that `SparkSession.sql` takes as keyword arguments, each a `SubqueryAlias`
     /// whose alias the query names.
     WithRelations {
-        root: Arc<LogicalPlan>,
-        references: Vec<Arc<LogicalPlan>>,
+        root: SharedPlan,
+        references: Vec<SharedPlan>,
     },
     /// LocalRelation: data supplied locally.
     LocalRelation {
@@ -336,7 +458,7 @@ pub enum LogicalPlan {
     CachedRelation { relation: Box<proto::Relation> },
     /// Read: `spark.read.format(...).load(...)` or `spark.read.table(...)`.
     Read {
-        read_type: crate::readwriter::ReadType,
+        read_type: Box<crate::readwriter::ReadType>,
         is_streaming: bool,
     },
     /// RelationChanges: `spark.read.changes(table)` / `spark.readStream.changes(table)`
@@ -348,58 +470,58 @@ pub enum LogicalPlan {
     },
     /// WithWatermark: `df.withWatermark(timeColumn, delayThreshold)`.
     WithWatermark {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         time_column: String,
         delay_threshold: String,
     },
     /// RepartitionByRange: `df.repartitionByRange(numPartitions, *cols)`.
     RepartitionByRange {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         num_partitions: Option<i32>,
         partition_exprs: Vec<Expression>,
     },
     /// StatCrosstab: `df.stat.crosstab(col1, col2)`.
     StatCrosstab {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         col1: String,
         col2: String,
     },
     /// StatFreqItems: `df.stat.freqItems(columns, support)`.
     StatFreqItems {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         columns: Vec<String>,
         support: f64,
     },
     /// StatApproxQuantile: `df.stat.approxQuantile(columns, probabilities, relativeError)`.
     StatApproxQuantile {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         columns: Vec<String>,
         probabilities: Vec<f64>,
         relative_error: f64,
     },
     /// StatCorr: `df.stat.corr(col1, col2, method)`, of the method that PySpark sends, "pearson".
     StatCorr {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         col1: String,
         col2: String,
         method: String,
     },
     /// StatCov: `df.stat.cov(col1, col2)`.
     StatCov {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         col1: String,
         col2: String,
     },
     /// StatSampleBy: `df.stat.sampleBy(col, fractions, seed)`.
     StatSampleBy {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         col: Expression,
         fractions: Vec<(Expression, f64)>,
         seed: Option<i64>,
     },
     /// Observe: `df.observe(name, exprs)` - collect metrics.
     Observe {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         name: String,
         exprs: Vec<Expression>,
         /// The Observation that the metrics that the server observes for this relation set,
@@ -412,33 +534,34 @@ pub enum LogicalPlan {
         arguments: Vec<Expression>,
     },
     /// Zip: `df.zip(other)` - combine two DataFrames column-wise.
-    Zip {
-        left: Arc<LogicalPlan>,
-        right: Arc<LogicalPlan>,
-    },
-    /// ML Transformation: wraps an MlRelation proto directly. The proto carries the input
-    /// inline, so `input` keeps the input plan, and the owners in it, alive; `owner` keeps
-    /// the cached model that the relation refers to alive, if any.
+    Zip { left: SharedPlan, right: SharedPlan },
+    /// ML Transformation: wraps an MlRelation proto directly. `input` keeps the input plan, and
+    /// the owners in it, alive; `owner` keeps the cached model that the relation refers to alive,
+    /// if any. A request puts the relation of `input`, which it builds then, where `input_at`
+    /// says (see [`MlInputAt`]): the proto carries the input inline of [`MlInputAt::Nowhere`].
     MlTransform {
-        ml_relation: proto::Relation,
+        ml_relation: Box<proto::Relation>,
         input: Arc<LogicalPlan>,
         owner: Option<RelationOwner>,
+        /// Where a request puts the relation of `input` in `ml_relation`. Not a stable API.
+        #[doc(hidden)]
+        input_at: MlInputAt,
     },
     /// A catalog operation exposed as a relation (e.g. `listTables`, `listColumns`),
     /// evaluated lazily so `.collect()` returns the server's rows - including zero
     /// rows for an empty database, which must not be an error.
-    Catalog { catalog: proto::Catalog },
+    Catalog { catalog: Box<proto::Catalog> },
     /// Transpose: swap rows and columns. `index_columns` optionally names the
     /// column(s) used as the transposed header (empty = server default).
     Transpose {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         index_columns: Vec<Expression>,
     },
     /// MapPartitions: `DataFrame.mapInPandas` / `mapInArrow` (also backs foreach), of the id
     /// of the resource profile of its stage, if any.
     MapPartitions {
-        input: Arc<LogicalPlan>,
-        func: CommonInlineUserDefinedFunctionExpression,
+        input: SharedPlan,
+        func: Box<CommonInlineUserDefinedFunctionExpression>,
         is_barrier: bool,
         profile_id: Option<i32>,
         /// The id of the resource profile as a request reads it when it builds the plan, after
@@ -452,25 +575,25 @@ pub enum LogicalPlan {
     /// GroupMap: `GroupedData.applyInPandas` / `applyInArrow`, and the stateful
     /// `transformWithState[InPandas]`.
     GroupMap {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         grouping_expressions: Vec<Expression>,
-        func: CommonInlineUserDefinedFunctionExpression,
+        func: Box<CommonInlineUserDefinedFunctionExpression>,
         sorting_expressions: Vec<Expression>,
         // Stateful fields (all default to None/empty for plain applyInPandas/applyInArrow).
-        initial_input: Option<Arc<LogicalPlan>>,
+        initial_input: Option<SharedPlan>,
         initial_grouping_expressions: Vec<Expression>,
         is_map_groups_with_state: Option<bool>,
         output_mode: Option<String>,
         timeout_conf: Option<String>,
-        state_schema: Option<DataType>,
-        transform_with_state_info: Option<TransformWithStateInfo>,
+        state_schema: Option<Box<DataType>>,
+        transform_with_state_info: Option<Box<TransformWithStateInfo>>,
     },
     /// ApplyInPandasWithState: `GroupedData.applyInPandasWithState`. The schemas are the
     /// strings that it sends, a DDL string or the JSON of a type, which the server parses.
     ApplyInPandasWithState {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         grouping_expressions: Vec<Expression>,
-        func: CommonInlineUserDefinedFunctionExpression,
+        func: Box<CommonInlineUserDefinedFunctionExpression>,
         output_schema: String,
         state_schema: String,
         output_mode: String,
@@ -478,16 +601,16 @@ pub enum LogicalPlan {
     },
     /// CoGroupMap: `GroupedData.cogroup(...).applyInPandas` / `applyInArrow`.
     CoGroupMap {
-        input: Arc<LogicalPlan>,
+        input: SharedPlan,
         input_grouping_expressions: Vec<Expression>,
-        other: Arc<LogicalPlan>,
+        other: SharedPlan,
         other_grouping_expressions: Vec<Expression>,
-        func: CommonInlineUserDefinedFunctionExpression,
+        func: Box<CommonInlineUserDefinedFunctionExpression>,
     },
     /// AsOfJoin: `DataFrame._joinAsOf`, which pandas-on-Spark's `merge_asof` calls.
     AsOfJoin {
-        left: Arc<LogicalPlan>,
-        right: Arc<LogicalPlan>,
+        left: SharedPlan,
+        right: SharedPlan,
         left_as_of: Column,
         right_as_of: Column,
         on: Option<Column>,
@@ -499,8 +622,8 @@ pub enum LogicalPlan {
     },
     /// NearestByJoin: `DataFrame.nearestByJoin`.
     NearestByJoin {
-        left: Arc<LogicalPlan>,
-        right: Arc<LogicalPlan>,
+        left: SharedPlan,
+        right: SharedPlan,
         ranking_expression: Expression,
         num_results: i32,
         join_type: String,
@@ -512,7 +635,7 @@ pub enum LogicalPlan {
         function_name: String,
         deterministic: bool,
         arguments: Vec<Expression>,
-        return_type: Option<crate::types::DataType>,
+        return_type: Option<Box<crate::types::DataType>>,
         eval_type: i32,
         command: Vec<u8>,
         python_ver: String,
@@ -529,7 +652,9 @@ pub enum LogicalPlan {
 /// A part of a plan node, of [`LogicalPlan::parts_mut`]: an input, an expression, a UDF, the
 /// pickler of a UDTF, the Observation of an `Observe` of its name, or the Observations of a `Raw`.
 pub(crate) enum PlanPart<'a> {
-    Input(&'a mut Arc<LogicalPlan>),
+    Input(&'a mut SharedPlan),
+    /// The input of an `MlTransform`, which holds it as a DataFrame holds its plan.
+    ArcInput(&'a mut Arc<LogicalPlan>),
     Expression(&'a mut Expression),
     Udf(&'a mut CommonInlineUserDefinedFunctionExpression),
     Pickler(&'a mut Option<crate::udf::CommandPickler>),
@@ -662,8 +787,20 @@ pub enum SetOpType {
 
 /// The plan ID of the next new node, of all the sessions of the process: as PySpark's
 /// `LogicalPlan._nextPlanId`, one counter, so that a column of a DataFrame of another session
-/// names no node of this session's plan.
+/// names no node of this session's plan. The plans that a client builds outside the core take
+/// theirs from it too ([`fresh_plan_id`]).
 static NEXT_PLAN_ID: AtomicI64 = AtomicI64::new(1);
+
+/// A new plan ID of the counter of the process, from which the core numbers the nodes of its
+/// plans, for a plan that a client builds outside the core, as PySpark's
+/// `LogicalPlan._fresh_plan_id()` numbers each plan: the Python client's `LogicalPlan` takes its
+/// IDs here, so that the ID of such a plan, which a DataFrame of it keeps as its plan ID
+/// ([`crate::dataframe::DataFrame::assign_plan_id`]), is of no other node of any session. Not a
+/// stable API.
+#[doc(hidden)]
+pub fn fresh_plan_id() -> i64 {
+    NEXT_PLAN_ID.fetch_add(1, Ordering::Relaxed)
+}
 
 /// Plan IDs that stay the same each time a plan node is serialized, as PySpark assigns
 /// them once per plan. The server caches resolved plans keyed by the whole relation, so
@@ -688,7 +825,14 @@ struct PlanIdNodes {
 }
 
 impl PlanIdNodes {
+    /// Give the key of `node` the plan ID `id`, once the entries of the dropped nodes are pruned,
+    /// when the map has grown to twice the entries that it had at the last prune: so the map stays
+    /// of about the nodes that are alive, however the keys get their IDs, numbered or given.
     fn insert(&mut self, key: usize, node: &Arc<LogicalPlan>, id: i64) {
+        if self.ids.len() >= self.prune_at {
+            self.ids.retain(|_, (node, _, _)| node.strong_count() > 0);
+            self.prune_at = (self.ids.len() * 2).max(PlanIds::MIN_PRUNE_AT);
+        }
         let order = self.next_order;
         self.next_order += 1;
         self.ids.insert(key, (Arc::downgrade(node), id, order));
@@ -728,21 +872,53 @@ impl PlanIds {
         if let Some((_, id, _)) = nodes.ids.get(&key) {
             return *id;
         }
-        if nodes.ids.len() >= nodes.prune_at {
-            nodes.ids.retain(|_, (node, _, _)| node.strong_count() > 0);
-            nodes.prune_at = (nodes.ids.len() * 2).max(Self::MIN_PRUNE_AT);
-        }
         let id = NEXT_PLAN_ID.fetch_add(1, Ordering::Relaxed);
         nodes.insert(key, node, id);
         id
     }
 
     /// Give `node` the plan ID `id`, of a relation that this session sent: so a DataFrame of the
-    /// relation, such as one that was pickled, keeps the plan ID of the DataFrame it was of.
+    /// relation, such as one that was pickled, keeps the plan ID of the DataFrame it was of. The
+    /// counter of the process goes past `id`, so that no node is numbered `id` later: an ID of
+    /// the counter, such as that of a plan of the Python client ([`fresh_plan_id`]), is below it
+    /// already.
     pub(crate) fn assign(&self, node: &Arc<LogicalPlan>, id: i64) {
+        self.assign_key(node, Arc::as_ptr(node) as usize, id);
+    }
+
+    /// As [`PlanIds::assign`], the plan ID of the relation of `node` within the `WithRelations`
+    /// that sends it with the plans of its subqueries ([`PlanIds::root_id_of`]).
+    pub(crate) fn assign_root(&self, node: &Arc<LogicalPlan>, id: i64) {
+        self.assign_key(node, Arc::as_ptr(node) as usize | 1, id);
+    }
+
+    fn assign_key(&self, node: &Arc<LogicalPlan>, key: usize, id: i64) {
         NEXT_PLAN_ID.fetch_max(id.saturating_add(1), Ordering::Relaxed);
         let mut nodes = self.nodes.lock().unwrap_or_else(|e| e.into_inner());
-        nodes.insert(Arc::as_ptr(node) as usize, node, id);
+        nodes.insert(key, node, id);
+    }
+
+    /// Give each node of `plan` in these plan IDs the plan ID that it has in `from`, those of
+    /// another session, as PySpark's plan objects keep their plan IDs in any session that sends
+    /// them: so a DataFrame of `plan` in this session, such as a deep copy of a DataFrame into it
+    /// or a `DataFrame(df._plan, session)`, sends the plan IDs of the DataFrame, which the
+    /// columns of that DataFrame refer to, and a node with subqueries the root plan ID within its
+    /// `WithRelations` too. The plans of the subqueries keep the plan IDs of their own sessions,
+    /// which they are sent with. Computed without recursing, once for each node that several
+    /// nodes share.
+    pub(crate) fn assign_ids_of(&self, plan: &Arc<LogicalPlan>, from: &PlanIds) {
+        let mut seen = std::collections::HashSet::new();
+        let mut pending = vec![plan];
+        while let Some(node) = pending.pop() {
+            if !seen.insert(Arc::as_ptr(node) as usize) {
+                continue;
+            }
+            self.assign(node, from.id_of(node));
+            if has_subquery_references(node) {
+                self.assign_root(node, from.root_id_of(node));
+            }
+            pending.extend(node.inputs());
+        }
     }
 
     /// The live node of the plan ID `id` that was first given it, such as the DataFrame that a
@@ -770,7 +946,12 @@ impl PlanIds {
             .filter(|(_, node_id, _)| *node_id == id)
             .filter_map(|(node, _, order)| node.upgrade().map(|node| (*order, node)))
             .min_by_key(|(order, _)| *order)
-            .map(|(_, node)| node)
+            .map(|(_, node)| {
+                // A new reference to the node, which the check of the clones of a binding is
+                // told of (see `crate::gc::check_clones_with`).
+                crate::gc::cloned(Arc::as_ptr(&node) as usize);
+                node
+            })
     }
 
     #[cfg(test)]
@@ -850,6 +1031,7 @@ fn placeholder_target(marker: i64) -> Option<(Arc<LogicalPlan>, Arc<PlanIds>)> {
         .values()
         .find(|entry| entry.marker == marker)
         .and_then(|entry| Some((entry.node.upgrade()?, entry.ids.upgrade()?)))
+        .inspect(|(node, _)| crate::gc::cloned(Arc::as_ptr(node) as usize))
 }
 
 /// The placeholder of the relation of `node`, a DataFrame of the session of `ids`, of its marker
@@ -1078,31 +1260,215 @@ fn relation_inputs_mut(relation: &mut proto::Relation) -> Vec<&mut proto::Relati
     inputs.into_iter().flatten().collect()
 }
 
+/// A message that a client built outside the core, such as a relation, a plan, a command, an
+/// analysis or a request of the Python client, with the type URLs of placeholders in the encoding
+/// that it was decoded from, when the core is given that encoding ([`BuiltOutside::decoded`]). The
+/// core replaces the placeholders of such a message wherever PySpark's message would hold the
+/// relations of their DataFrames (see [`resolve_relation_levels`]). It meets those at the relations
+/// of the message as it walks them; it encodes the fields of its relations and its commands, and
+/// reads the messages of its extensions, for the others only when the encoding holds a type URL
+/// that is not of a placeholder at a relation, as a placeholder in the extension of an expression
+/// or in the message of a plugin's extension adds one. A message given as it is (`From`) is read
+/// everywhere. Not a stable API.
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct BuiltOutside<M> {
+    message: M,
+    urls: Option<usize>,
+}
+
+impl<M> From<M> for BuiltOutside<M> {
+    fn from(message: M) -> Self {
+        BuiltOutside {
+            message,
+            urls: None,
+        }
+    }
+}
+
+impl<M> BuiltOutside<M> {
+    /// The message that `decode` gives of `encoded`, the encoding of a message that a client built,
+    /// with the type URLs of placeholders that `encoded` holds. The encoding of a message that
+    /// holds a placeholder anywhere holds the type URL of the placeholder's `Any` as it is: in its
+    /// own bytes, which those of the message that holds it hold in turn, also when that message is
+    /// that of an extension, whose bytes are its encoding.
+    pub fn decoded<'a, E>(
+        encoded: &'a [u8],
+        decode: impl FnOnce(&'a [u8]) -> std::result::Result<M, E>,
+    ) -> std::result::Result<Self, E> {
+        let message = decode(encoded)?;
+        Ok(BuiltOutside {
+            message,
+            urls: Some(placeholder_urls(encoded)),
+        })
+    }
+
+    /// The message, and the type URLs of placeholders in its encoding, if the core was given it.
+    pub(crate) fn into_parts(self) -> (M, Option<usize>) {
+        (self.message, self.urls)
+    }
+
+    /// The message, as it was given.
+    pub(crate) fn message(&self) -> &M {
+        &self.message
+    }
+}
+
+/// A message built outside the core whose placeholders a request of it replaces (see
+/// [`BuiltOutside::resolved`]). Not a stable API.
+#[doc(hidden)]
+pub trait Resolvable {
+    /// Replace the placeholders of this message, whose encoding holds `urls` type URLs of
+    /// placeholders, or None when the core was not given its encoding.
+    fn resolve(&mut self, urls: Option<usize>) -> Result<()>;
+}
+
+impl Resolvable for proto::Plan {
+    fn resolve(&mut self, urls: Option<usize>) -> Result<()> {
+        resolve_plan(self, urls)
+    }
+}
+
+impl Resolvable for proto::Command {
+    fn resolve(&mut self, urls: Option<usize>) -> Result<()> {
+        resolve_command(self, urls)
+    }
+}
+
+impl Resolvable for proto::AnalyzePlanRequest {
+    fn resolve(&mut self, urls: Option<usize>) -> Result<()> {
+        match self.analyze.as_mut() {
+            Some(analyze) => resolve_analysis(analyze, urls),
+            None => Ok(()),
+        }
+    }
+}
+
+impl<M: Resolvable> BuiltOutside<M> {
+    /// The message with its placeholders replaced by the relations of their DataFrames, as a
+    /// request of it replaces them, which then holds none: so its request reads no DataFrame, as
+    /// a binding that sends it without its lock, which it replaced them with, needs. Not a stable
+    /// API.
+    pub fn resolved(self) -> Result<Self> {
+        let (mut message, urls) = self.into_parts();
+        message.resolve(urls)?;
+        Ok(BuiltOutside {
+            message,
+            urls: Some(0),
+        })
+    }
+}
+
+/// How far a resolution of a message built outside the core looks for its placeholders.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Search {
+    /// At the relations of the message, which the walk of them meets, counting them and replacing
+    /// none: of a message whose encoding holds type URLs of placeholders, to tell whether those
+    /// of its relations are all of them.
+    Count,
+    /// At the relations of the message, replacing them: of a message whose encoding holds no type
+    /// URL of a placeholder but those of the placeholders of its relations, so that no field and
+    /// no message of an extension of it holds one.
+    Relations,
+    /// Also in the fields of the relations and the commands built in Python (see
+    /// [`resolve_own_fields`]) and in the messages of extensions (see [`resolve_extension`]): of a
+    /// message given without its encoding, or whose encoding holds another type URL.
+    Everywhere,
+}
+
+/// The search of a resolution, and the placeholders that it met at the relations of the message.
+struct Resolver {
+    search: Search,
+    found: usize,
+}
+
+impl Resolver {
+    fn new(search: Search) -> Resolver {
+        Resolver { search, found: 0 }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The search of the last resolution of a message built outside the core of this thread.
+    static LAST_SEARCH: std::cell::Cell<Option<Search>> = const { std::cell::Cell::new(None) };
+}
+
+/// Run `resolve`, the resolution of a message built outside the core whose encoding holds `urls`
+/// type URLs of placeholders, or None when the core was not given the encoding, of the search that
+/// the encoding allows. A message whose encoding holds none, or only those of the placeholders at
+/// its relations, which a first walk of them counts, is resolved at its relations: its fields and
+/// the messages of its extensions hold no placeholder, so they are neither encoded nor read, as
+/// the URL of each placeholder is in the encoding once. Any other is resolved everywhere: its
+/// encoding holds a type URL elsewhere, such as in the extension of an expression, in the message
+/// of an extension or in a string, which the resolution then tells apart.
+fn resolve_with<T>(
+    urls: Option<usize>,
+    mut resolve: impl FnMut(&mut Resolver) -> Result<T>,
+) -> Result<T> {
+    let search = match urls {
+        None => Search::Everywhere,
+        Some(0) => Search::Relations,
+        Some(urls) => {
+            let mut count = Resolver::new(Search::Count);
+            resolve(&mut count)?;
+            if count.found == urls {
+                Search::Relations
+            } else {
+                Search::Everywhere
+            }
+        }
+    };
+    #[cfg(test)]
+    LAST_SEARCH.with(|last| last.set(Some(search)));
+    resolve(&mut Resolver::new(search))
+}
+
+/// The number of type URLs of placeholders that `encoded` holds. They do not overlap, as no start
+/// of the type URL is an end of it.
+fn placeholder_urls(encoded: &[u8]) -> usize {
+    memchr::memmem::find_iter(encoded, PLACEHOLDER_TYPE_URL.as_bytes()).count()
+}
+
 /// Replace the placeholders of `relation`, a relation built in Python, by the relations of their
 /// DataFrames, wherever PySpark's plan would hold the relation of such a DataFrame: `relation`
 /// itself, the inputs of every relation of Spark Connect under it (see [`relation_inputs_of`]),
 /// those of the relations of `pyspark.ml` (an `ml_relation`'s inputs and fetched arguments), and
 /// the messages of the extensions of a plugin there (see [`resolve_extension`]), and those of the
 /// extensions of the expressions of the relations built in Python, as a plugin's expression may
-/// hold the relation of a DataFrame in its message (see [`resolve_own_fields`]). Each replacement
-/// is the relation of a DataFrame of the core, which has no placeholder.
+/// hold the relation of a DataFrame in its message (see [`resolve_own_fields`]), of the search
+/// that its encoding, which holds `urls` type URLs of placeholders, allows (see
+/// [`resolve_with`]). Each replacement is the relation of a DataFrame of the core, which has no
+/// placeholder. The levels that it gives are those of the relation as a plan of them, as
+/// PySpark's serializer counts the levels of a plan of `pyspark.ml`, which serializes the plans of
+/// its inputs within its own: one for the relation, one more for each relation that holds an
+/// input, and those of the plan of the DataFrame of each placeholder under them.
+pub(crate) fn resolve_relation_levels(
+    relation: &mut proto::Relation,
+    urls: Option<usize>,
+) -> Result<usize> {
+    resolve_with(urls, |resolver| resolve_relation_at(relation, 1, resolver))
+}
+
+/// As [`resolve_relation_levels`], of a relation given without its encoding, without its levels.
+#[cfg(test)]
 pub(crate) fn resolve_relation(relation: &mut proto::Relation) -> Result<()> {
-    resolve_relation_at(relation, 1).map(|_| ())
+    resolve_relation_levels(relation, None).map(|_| ())
 }
 
-/// As [`resolve_relation`], and the levels of the relation as a plan of them, as PySpark's
-/// serializer counts the levels of a plan of `pyspark.ml`, which serializes the plans of its
-/// inputs within its own: one for the relation, one more for each relation that holds an input,
-/// and those of the plan of the DataFrame of each placeholder under them.
-pub(crate) fn resolve_relation_levels(relation: &mut proto::Relation) -> Result<usize> {
-    resolve_relation_at(relation, 1)
-}
-
-/// Resolve `relation`, which is at the level `level` of the relation being resolved, and the
-/// deepest level of its resolved relation.
-fn resolve_relation_at(relation: &mut proto::Relation, level: usize) -> Result<usize> {
+/// Resolve `relation`, which is at the level `level` of the relation being resolved, of the search
+/// of `resolver`, and the deepest level of its resolved relation.
+fn resolve_relation_at(
+    relation: &mut proto::Relation,
+    level: usize,
+    resolver: &mut Resolver,
+) -> Result<usize> {
     if let Some(proto::relation::RelType::Extension(any)) = &relation.rel_type {
         if any.type_url == PLACEHOLDER_TYPE_URL {
+            resolver.found += 1;
+            if resolver.search == Search::Count {
+                return Ok(level);
+            }
             let (mut resolved, levels) = placeholder_contents(&any.value)?;
             // A `common` that the plan set on the placeholder, as on PySpark's relation of
             // `plan(session)` (`relation.common.plan_id = ...`), merged into the relation's.
@@ -1115,47 +1481,60 @@ fn resolve_relation_at(relation: &mut proto::Relation, level: usize) -> Result<u
             return Ok(level - 1 + levels);
         }
     }
+    let everywhere = resolver.search == Search::Everywhere;
     let mut deepest = level;
-    let mut below = |relation: &mut proto::Relation| -> Result<()> {
-        // Relations over relations are as deep as the Python plan that builds them.
-        let levels =
-            crate::expression::with_stack_for_a_level(|| resolve_relation_at(relation, level + 1))?;
-        deepest = deepest.max(levels);
-        Ok(())
-    };
     match relation.rel_type.as_mut() {
         Some(proto::relation::RelType::MlRelation(ml)) => {
             if let Some(summary) = ml.model_summary_dataset.as_mut() {
-                below(summary)?;
+                resolve_input_at(summary, level + 1, &mut deepest, resolver)?;
             }
             match ml.ml_type.as_mut() {
                 Some(proto::ml_relation::MlType::Transform(transform)) => {
                     if let Some(input) = transform.input.as_mut() {
-                        below(input)?;
+                        resolve_input_at(input, level + 1, &mut deepest, resolver)?;
                     }
                 }
                 Some(proto::ml_relation::MlType::Fetch(fetch)) => {
-                    deepest = deepest.max(resolve_fetch_at(fetch, level + 1)?);
+                    deepest = deepest.max(resolve_fetch_at(fetch, level + 1, resolver)?);
                 }
                 None => {}
             }
         }
-        Some(proto::relation::RelType::Extension(extension)) => resolve_extension(extension)?,
+        Some(proto::relation::RelType::Extension(extension)) => {
+            if everywhere {
+                resolve_extension(extension)?;
+            }
+        }
         // Every input of a relation of Spark Connect, as PySpark's plans hold the relations of
         // their children's DataFrames: those of `pyspark.sql.connect.plan` (a `SubqueryAlias`
         // and the views of a `SQL`, references of a `WithRelations`), of a plugin (Delta Lake's
         // `DeltaTable.alias`) and of the messages that `SparkSession.client` is given; and the
         // extensions of the expressions of the relation (see [`resolve_own_fields`]).
         _ => {
-            if holds_expressions(relation) {
+            if everywhere && holds_expressions(relation) {
                 resolve_own_fields(relation, relation_inputs_mut)?;
             }
             for input in relation_inputs_mut(relation) {
-                below(input)?;
+                resolve_input_at(input, level + 1, &mut deepest, resolver)?;
             }
         }
     }
     Ok(deepest)
+}
+
+/// Resolve `input`, an input of a relation of the level `level - 1`, at the level `level`, of the
+/// search of `resolver`, keeping in `deepest` the deepest level that it reaches.
+fn resolve_input_at(
+    input: &mut proto::Relation,
+    level: usize,
+    deepest: &mut usize,
+    resolver: &mut Resolver,
+) -> Result<()> {
+    // Relations over relations are as deep as the Python plan that builds them.
+    let levels =
+        crate::expression::with_stack_for_a_level(|| resolve_relation_at(input, level, resolver))?;
+    *deepest = (*deepest).max(levels);
+    Ok(())
 }
 
 /// Whether `relation` holds expressions of its own (or a function, whose arguments are), whose
@@ -1268,9 +1647,9 @@ const OWN_FIELDS_STACK: usize = if cfg!(debug_assertions) {
 /// The core does not walk the expressions of the message: the fields are encoded with the inputs
 /// taken out, and only when that encoding holds the type URL of a placeholder, as an extension
 /// that holds one does, are they resolved as any message (see [`resolve_encoded`]) and decoded
-/// back. So a plan of no such extension costs an encoding of the fields of its relations built in
-/// Python, without their inputs: a relation that the core builds, such as that of a placeholder,
-/// is not encoded.
+/// back. A relation that the core builds, such as that of a placeholder, is not encoded, and nor
+/// is a message whose encoding the client gave, which holds no type URL of a placeholder but those
+/// of the placeholders at its relations (see [`resolve_with`]).
 fn resolve_own_fields<M: prost::Message + Default>(
     message: &mut M,
     inputs: impl Fn(&mut M) -> Vec<&mut proto::Relation>,
@@ -1348,15 +1727,10 @@ fn resolve_encoded(encoded: &[u8]) -> Result<Option<Vec<u8>>> {
     Ok(Some(resolved))
 }
 
-/// The offsets in `encoded` at which the type URL of a placeholder starts, in order.
+/// The offsets in `encoded` at which the type URL of a placeholder starts, in order (see
+/// [`placeholder_urls`]).
 fn url_offsets(encoded: &[u8]) -> Vec<usize> {
-    let url = PLACEHOLDER_TYPE_URL.as_bytes();
-    encoded
-        .windows(url.len())
-        .enumerate()
-        .filter(|(_, window)| *window == url)
-        .map(|(offset, _)| offset)
-        .collect()
+    memchr::memmem::find_iter(encoded, PLACEHOLDER_TYPE_URL.as_bytes()).collect()
 }
 
 /// Whether the bytes `start..end` of the encoding of `offsets` hold the type URL of a placeholder
@@ -1541,26 +1915,48 @@ fn top_level_fields(encoded: &[u8]) -> Option<Vec<(u64, &[u8])>> {
 }
 
 /// Replace the placeholders of the relations of `command`, a command built in Python, as
-/// `resolve_relation`: the relation of a command that holds one, as PySpark's commands hold the
-/// relations of their DataFrames (the input of a write, of a view, of a stream or of a SQL
+/// `resolve_relation_levels`: the relation of a command that holds one, as PySpark's commands hold
+/// the relations of their DataFrames (the input of a write, of a view, of a stream or of a SQL
 /// statement, the relation of a checkpoint, the source of a `MERGE INTO`, the relation of a
 /// pipeline's flow), the datasets and the fetched arguments of the ML commands, the message of the
 /// extension of a plugin's command, and the messages of the extensions of the expressions of the
-/// command (see [`resolve_own_fields`]).
-pub(crate) fn resolve_command(command: &mut proto::Command) -> Result<()> {
+/// command (see [`resolve_own_fields`]), of a command whose encoding holds `urls` type URLs of
+/// placeholders (see [`resolve_with`]).
+pub(crate) fn resolve_command(command: &mut proto::Command, urls: Option<usize>) -> Result<()> {
+    resolve_with(urls, |resolver| resolve_command_with(command, resolver))
+}
+
+/// Resolve `command` of the search of `resolver` (see [`resolve_command`]).
+fn resolve_command_with(command: &mut proto::Command, resolver: &mut Resolver) -> Result<()> {
     use proto::command::CommandType;
     use proto::pipeline_command::CommandType as PipelineCommandType;
+    let everywhere = resolver.search == Search::Everywhere;
     match command.command_type.as_mut() {
-        Some(CommandType::Extension(extension)) => return resolve_extension(extension),
+        Some(CommandType::Extension(extension)) => {
+            return if everywhere {
+                resolve_extension(extension)
+            } else {
+                Ok(())
+            };
+        }
         Some(CommandType::PipelineCommand(proto::PipelineCommand {
             command_type: Some(PipelineCommandType::Extension(extension)),
-        })) => return resolve_extension(extension),
-        Some(CommandType::MlCommand(ml)) => return resolve_ml_command(ml),
+        })) => {
+            return if everywhere {
+                resolve_extension(extension)
+            } else {
+                Ok(())
+            };
+        }
+        Some(CommandType::MlCommand(ml)) => return resolve_ml_command(ml, resolver),
         None => return Ok(()),
         Some(_) => {}
     }
     if let Some(relation) = command_relation_mut(command) {
-        resolve_relation(relation)?;
+        resolve_relation_at(relation, 1, resolver)?;
+    }
+    if !everywhere {
+        return Ok(());
     }
     // The extensions of the expressions of the command, such as of the conditions and the
     // assignments of a `MergeIntoTableCommand` and the partitioning of a `WriteOperationV2`.
@@ -1570,19 +1966,19 @@ pub(crate) fn resolve_command(command: &mut proto::Command) -> Result<()> {
 }
 
 /// Replace the placeholders of the datasets and of the fetched arguments of `ml`, an ML command
-/// built in Python.
-fn resolve_ml_command(ml: &mut proto::MlCommand) -> Result<()> {
+/// built in Python, of the search of `resolver`.
+fn resolve_ml_command(ml: &mut proto::MlCommand, resolver: &mut Resolver) -> Result<()> {
     let dataset = match ml.command.as_mut() {
         Some(proto::ml_command::Command::Fit(fit)) => fit.dataset.as_mut(),
         Some(proto::ml_command::Command::Evaluate(evaluate)) => evaluate.dataset.as_mut(),
         Some(proto::ml_command::Command::CreateSummary(summary)) => summary.dataset.as_mut(),
         Some(proto::ml_command::Command::Fetch(fetch)) => {
-            return resolve_fetch_at(fetch, 1).map(|_| ())
+            return resolve_fetch_at(fetch, 1, resolver).map(|_| ())
         }
         _ => None,
     };
     match dataset {
-        Some(dataset) => resolve_relation(dataset),
+        Some(dataset) => resolve_relation_at(dataset, 1, resolver).map(|_| ()),
         None => Ok(()),
     }
 }
@@ -1613,44 +2009,73 @@ fn command_relation_mut(command: &mut proto::Command) -> Option<&mut proto::Rela
 }
 
 /// Replace the placeholders of the relations that a fetch of `fetch` takes as arguments, each at
-/// the level `level`, and the deepest level of them.
-fn resolve_fetch_at(fetch: &mut proto::Fetch, level: usize) -> Result<usize> {
+/// the level `level`, of the search of `resolver`, and the deepest level of them.
+fn resolve_fetch_at(
+    fetch: &mut proto::Fetch,
+    level: usize,
+    resolver: &mut Resolver,
+) -> Result<usize> {
     let mut deepest = 0;
     for method in fetch.methods.iter_mut() {
         for args in method.args.iter_mut() {
             if let Some(proto::fetch::method::args::ArgsType::Input(input)) =
                 args.args_type.as_mut()
             {
-                deepest = deepest.max(resolve_relation_at(input, level)?);
+                deepest = deepest.max(resolve_relation_at(input, level, resolver)?);
             }
         }
     }
     Ok(deepest)
 }
 
-/// Replace the placeholders of the relation or of the command of `request`, a request that a
-/// session hook built in Python, as `DataFrame::from_relation` does. Not a stable API.
+/// `request`, a request that a session hook built in Python, with the placeholders of its relation
+/// or of its command replaced, as `DataFrame::from_relation` replaces them, of the search that
+/// the encoding of the request allows, if the core is given it (see [`BuiltOutside`]). Not a
+/// stable API.
 #[doc(hidden)]
-pub fn resolve_request(request: &mut proto::ExecutePlanRequest) -> Result<()> {
-    match request.plan.as_mut() {
-        Some(plan) => resolve_plan(plan),
-        None => Ok(()),
+pub fn resolve_request(
+    request: impl Into<BuiltOutside<proto::ExecutePlanRequest>>,
+) -> Result<proto::ExecutePlanRequest> {
+    let (mut request, urls) = request.into().into_parts();
+    if let Some(plan) = request.plan.as_mut() {
+        resolve_plan(plan, urls)?;
     }
+    Ok(request)
 }
 
-/// Replace the placeholders of `plan`, a plan built outside the core, of its relation or of its
-/// command, as [`resolve_request`] does for the plan of a request.
-pub(crate) fn resolve_plan(plan: &mut proto::Plan) -> Result<()> {
+/// Replace the placeholders of `plan`, a plan built outside the core whose encoding holds `urls`
+/// type URLs of placeholders (see [`resolve_with`]), of its relation or of its command, as
+/// [`resolve_request`] does for the plan of a request.
+pub(crate) fn resolve_plan(plan: &mut proto::Plan, urls: Option<usize>) -> Result<()> {
+    resolve_with(urls, |resolver| resolve_plan_with(plan, resolver))
+}
+
+/// Resolve `plan` of the search of `resolver` (see [`resolve_plan`]).
+fn resolve_plan_with(plan: &mut proto::Plan, resolver: &mut Resolver) -> Result<()> {
     match plan.op_type.as_mut() {
-        Some(proto::plan::OpType::Root(relation)) => resolve_relation(relation),
-        Some(proto::plan::OpType::Command(command)) => resolve_command(command),
+        Some(proto::plan::OpType::Root(relation)) => {
+            resolve_relation_at(relation, 1, resolver).map(|_| ())
+        }
+        Some(proto::plan::OpType::Command(command)) => resolve_command_with(command, resolver),
         _ => Ok(()),
     }
 }
 
 /// Replace the placeholders of the plans and the relations of `analyze`, an analysis built
-/// outside the core, as [`resolve_plan`] does for each.
-pub(crate) fn resolve_analysis(analyze: &mut proto::analyze_plan_request::Analyze) -> Result<()> {
+/// outside the core, as [`resolve_plan`] does for each, of an analysis whose request's encoding
+/// holds `urls` type URLs of placeholders (see [`resolve_with`]).
+pub(crate) fn resolve_analysis(
+    analyze: &mut proto::analyze_plan_request::Analyze,
+    urls: Option<usize>,
+) -> Result<()> {
+    resolve_with(urls, |resolver| resolve_analysis_with(analyze, resolver))
+}
+
+/// Resolve `analyze` of the search of `resolver` (see [`resolve_analysis`]).
+fn resolve_analysis_with(
+    analyze: &mut proto::analyze_plan_request::Analyze,
+    resolver: &mut Resolver,
+) -> Result<()> {
     use proto::analyze_plan_request::Analyze;
     let (plans, relation) = match analyze {
         Analyze::Schema(request) => (vec![&mut request.plan], None),
@@ -1672,10 +2097,10 @@ pub(crate) fn resolve_analysis(analyze: &mut proto::analyze_plan_request::Analyz
         }
     };
     for plan in plans.into_iter().flatten() {
-        resolve_plan(plan)?;
+        resolve_plan_with(plan, resolver)?;
     }
     match relation {
-        Some(relation) => resolve_relation(relation),
+        Some(relation) => resolve_relation_at(relation, 1, resolver).map(|_| ()),
         None => Ok(()),
     }
 }
@@ -1842,6 +2267,9 @@ thread_local! {
 pub(crate) fn refer_to(plan: &Arc<LogicalPlan>, ids: Option<&Arc<PlanIds>>) {
     SUBQUERY_REFERENCES.with(|frames| {
         if let Some(frame) = frames.borrow_mut().last_mut() {
+            // A new reference to the plan, which the check of the clones of a binding is told of
+            // (see `crate::gc::check_clones_with`).
+            crate::gc::cloned(Arc::as_ptr(plan) as usize);
             frame.push((Arc::clone(plan), ids.cloned()));
         }
     });
@@ -1880,11 +2308,54 @@ pub(crate) fn subquery_plans(node: &LogicalPlan) -> Vec<&Arc<LogicalPlan>> {
             PicklerHolder::Udf(udf) => {
                 below.extend(udf.arguments.iter().map(PicklerHolder::Expression));
             }
-            PicklerHolder::Plan(_) | PicklerHolder::Pickler(_) => {}
+            PicklerHolder::Plan(_) | PicklerHolder::Pickler(_) | PicklerHolder::SentPlans(_) => {}
         }
         pending.extend(below.into_iter().rev());
     }
     plans
+}
+
+/// Whether `plan` is the node of a relation built outside the core whose build failed with
+/// `error` (see [`crate::dataframe::DataFrame::from_unbuilt_relation`]), rather than a plan over
+/// one.
+pub(crate) fn is_unbuilt_with(plan: &LogicalPlan, error: &SparkError) -> bool {
+    match plan {
+        LogicalPlan::Unbuildable { input, error: own } => {
+            matches!(input.as_ref(), LogicalPlan::Raw { .. })
+                && own.error_class == error.error_class
+                && own.params == error.params
+        }
+        _ => false,
+    }
+}
+
+/// Whether `node` is sent in a `WithRelations` of the plans that the subqueries of its own
+/// expressions refer to: of a subquery ([`subquery_plans`]), or of an expression as it was sent,
+/// of a pickled Column of subqueries, which sends the plans of its subqueries too.
+pub(crate) fn has_subquery_references(node: &LogicalPlan) -> bool {
+    use crate::udf::PicklerHolder;
+    if !subquery_plans(node).is_empty() {
+        return true;
+    }
+    let mut pending = Vec::new();
+    node.push_own_pickler_holders(&mut pending);
+    while let Some(holder) = pending.pop() {
+        match holder {
+            PicklerHolder::Expression(expression) => {
+                expression.node().push_pickler_holders(&mut pending)
+            }
+            PicklerHolder::Udf(udf) => {
+                pending.extend(udf.arguments.iter().map(PicklerHolder::Expression));
+            }
+            PicklerHolder::SentPlans(plans) => {
+                if plans.plans().next().is_some() {
+                    return true;
+                }
+            }
+            PicklerHolder::Subquery(_) | PicklerHolder::Plan(_) | PicklerHolder::Pickler(_) => {}
+        }
+    }
+    false
 }
 
 /// The relation of `node`, and the plans that the subqueries of its own expressions refer
@@ -2028,7 +2499,6 @@ macro_rules! inputs_of {
             | LogicalPlan::StatCov { input, .. }
             | LogicalPlan::StatSampleBy { input, .. }
             | LogicalPlan::Observe { input, .. }
-            | LogicalPlan::MlTransform { input, .. }
             | LogicalPlan::Transpose { input, .. }
             | LogicalPlan::MapPartitions { input, .. }
             | LogicalPlan::ApplyInPandasWithState { input, .. } => inputs.push(input),
@@ -2068,7 +2538,9 @@ macro_rules! inputs_of {
             | LogicalPlan::RelationChanges { .. }
             | LogicalPlan::UnresolvedTableValuedFunction { .. }
             | LogicalPlan::Catalog { .. }
-            | LogicalPlan::CommonInlineUdtf { .. } => {}
+            | LogicalPlan::CommonInlineUdtf { .. }
+            // Of an input of its own type (see `LogicalPlan::inputs`).
+            | LogicalPlan::MlTransform { .. } => {}
         }
         inputs
     }};
@@ -2091,9 +2563,14 @@ impl Drop for LogicalPlan {
     fn drop(&mut self) {
         let mut pending: Vec<Arc<LogicalPlan>> = Vec::new();
         let take_inputs = |plan: &mut LogicalPlan, pending: &mut Vec<Arc<LogicalPlan>>| {
-            for input in inputs_of!(plan) {
+            if let LogicalPlan::MlTransform { input, .. } = plan {
                 if !Arc::ptr_eq(input, &DROPPED_INPUT) {
                     pending.push(std::mem::replace(input, Arc::clone(&DROPPED_INPUT)));
+                }
+            }
+            for input in inputs_of!(plan) {
+                if !Arc::ptr_eq(input.arc(), &DROPPED_INPUT) {
+                    pending.push(input.take());
                 }
             }
         };
@@ -2109,7 +2586,10 @@ impl Drop for LogicalPlan {
 impl LogicalPlan {
     /// The plans that this one reads directly.
     pub(crate) fn inputs(&self) -> Vec<&Arc<LogicalPlan>> {
-        inputs_of!(self)
+        match self {
+            LogicalPlan::MlTransform { input, .. } => vec![input],
+            _ => inputs_of!(self).into_iter().map(SharedPlan::arc).collect(),
+        }
     }
 
     /// The inputs of this node, then its expressions, UDFs, the pickler of its UDTF and its
@@ -2207,7 +2687,14 @@ impl LogicalPlan {
                 parts.extend(exprs.iter_mut().map(Of));
                 parts.push(Observation(name.as_str(), observation));
             }
-            LogicalPlan::Raw { observations, .. } => parts.push(Observations(observations)),
+            LogicalPlan::Raw {
+                observations,
+                holes,
+                ..
+            } => {
+                parts.push(Observations(observations));
+                parts.extend(holes.0.iter_mut().map(|hole| Pickler(&mut hole.pickler)));
+            }
             LogicalPlan::UnresolvedTableValuedFunction { arguments, .. } => {
                 parts.extend(arguments.iter_mut().map(Of));
             }
@@ -2336,8 +2823,8 @@ impl LogicalPlan {
             | LogicalPlan::StatFreqItems { input, .. }
             | LogicalPlan::StatApproxQuantile { input, .. }
             | LogicalPlan::StatCorr { input, .. }
-            | LogicalPlan::StatCov { input, .. }
-            | LogicalPlan::MlTransform { input, .. } => parts.push(Input(input)),
+            | LogicalPlan::StatCov { input, .. } => parts.push(Input(input)),
+            LogicalPlan::MlTransform { input, .. } => parts.push(PlanPart::ArcInput(input)),
             // A deep copy copies the schema object of the reader, as PySpark's copies the schema.
             LogicalPlan::ToSchema {
                 input,
@@ -2359,8 +2846,65 @@ impl LogicalPlan {
         parts
     }
 
+    /// The parts of this node that PySpark's pickle of its plan object takes after its child
+    /// (`_child`) and the plans of the subqueries of its expressions (`_references`), in the order
+    /// of the attributes of the plan object: its other inputs, as [`PicklerHolder::Plan`], and
+    /// its own pickler holders ([`Self::push_own_pickler_holders`]). Of most nodes the other
+    /// inputs first (the right side of a join, `right`, before its condition, `on`); of a
+    /// cogroup, its grouping columns, then its other side (`_other`), then its function; of a
+    /// `transformWithState`, its grouping columns, its function, then its initial state
+    /// (`_initial_state_plan`) and its grouping columns.
+    ///
+    /// [`PicklerHolder::Plan`]: crate::udf::PicklerHolder::Plan
+    pub(crate) fn push_pickled_fields<'a>(
+        &'a self,
+        pending: &mut Vec<crate::udf::PicklerHolder<'a>>,
+    ) {
+        use crate::udf::PicklerHolder::{Expression as Of, Plan, Udf};
+        match self {
+            LogicalPlan::CoGroupMap {
+                input_grouping_expressions,
+                other,
+                other_grouping_expressions,
+                func,
+                ..
+            } => {
+                pending.extend(
+                    input_grouping_expressions
+                        .iter()
+                        .chain(other_grouping_expressions)
+                        .map(Of),
+                );
+                pending.push(Plan(other));
+                pending.push(Udf(func));
+            }
+            LogicalPlan::GroupMap {
+                grouping_expressions,
+                func,
+                sorting_expressions,
+                initial_input,
+                initial_grouping_expressions,
+                ..
+            } => {
+                pending.extend(
+                    grouping_expressions
+                        .iter()
+                        .chain(sorting_expressions)
+                        .map(Of),
+                );
+                pending.push(Udf(func));
+                pending.extend(initial_input.iter().map(|input| Plan(input)));
+                pending.extend(initial_grouping_expressions.iter().map(Of));
+            }
+            _ => {
+                pending.extend(self.inputs().into_iter().skip(1).map(|input| Plan(input)));
+                self.push_own_pickler_holders(pending);
+            }
+        }
+    }
+
     /// The expressions, the UDFs and the pickler of the UDTF of this node, without those of its
-    /// inputs, whose picklers [`crate::udf::exclusive_pickler_objects`] visits.
+    /// inputs, whose picklers [`crate::udf::all_picklers`] visits.
     pub(crate) fn push_own_pickler_holders<'a>(
         &'a self,
         pending: &mut Vec<crate::udf::PicklerHolder<'a>>,
@@ -2437,6 +2981,8 @@ impl LogicalPlan {
                 pending.push(Udf(func));
                 pending.extend(profile_id_reader.iter().map(Pickler));
             }
+            // As PySpark's plans of these, and their requests, which take the grouping columns
+            // before the function, and the initial state of a `transformWithState` after it.
             LogicalPlan::GroupMap {
                 grouping_expressions,
                 func,
@@ -2444,22 +2990,22 @@ impl LogicalPlan {
                 initial_grouping_expressions,
                 ..
             } => {
-                pending.push(Udf(func));
                 pending.extend(
                     grouping_expressions
                         .iter()
                         .chain(sorting_expressions)
-                        .chain(initial_grouping_expressions)
                         .map(Of),
                 );
+                pending.push(Udf(func));
+                pending.extend(initial_grouping_expressions.iter().map(Of));
             }
             LogicalPlan::ApplyInPandasWithState {
                 grouping_expressions,
                 func,
                 ..
             } => {
-                pending.push(Udf(func));
                 pending.extend(grouping_expressions.iter().map(Of));
+                pending.push(Udf(func));
             }
             LogicalPlan::CoGroupMap {
                 input_grouping_expressions,
@@ -2467,13 +3013,13 @@ impl LogicalPlan {
                 func,
                 ..
             } => {
-                pending.push(Udf(func));
                 pending.extend(
                     input_grouping_expressions
                         .iter()
                         .chain(other_grouping_expressions)
                         .map(Of),
                 );
+                pending.push(Udf(func));
             }
             LogicalPlan::AsOfJoin {
                 left_as_of,
@@ -2497,6 +3043,16 @@ impl LogicalPlan {
             LogicalPlan::ToSchema { schema_reader, .. } => {
                 pending.extend(schema_reader.iter().map(Pickler));
             }
+            // The picklers of the holes of a relation that was sent, of a pickled DataFrame.
+            LogicalPlan::Raw { holes, .. } => {
+                pending.extend(
+                    holes
+                        .0
+                        .iter()
+                        .filter_map(|hole| hole.pickler.as_ref())
+                        .map(Pickler),
+                );
+            }
             LogicalPlan::Range { .. }
             | LogicalPlan::SetOperation { .. }
             | LogicalPlan::Limit { .. }
@@ -2504,7 +3060,6 @@ impl LogicalPlan {
             | LogicalPlan::Tail { .. }
             | LogicalPlan::ShowString { .. }
             | LogicalPlan::HtmlString { .. }
-            | LogicalPlan::Raw { .. }
             | LogicalPlan::Deduplicate { .. }
             | LogicalPlan::Sample { .. }
             | LogicalPlan::Repartition { .. }
@@ -2714,7 +3269,7 @@ impl LogicalPlan {
 
             LogicalPlan::Project { input, columns } => {
                 let mut project = proto::Project::default();
-                project.input = Some(Box::new(relation_of(input, plan_ids)));
+                project.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 for col in columns {
                     project.expressions.push(col.to_proto());
                 }
@@ -2723,7 +3278,7 @@ impl LogicalPlan {
 
             LogicalPlan::Filter { input, condition } => {
                 let mut filter = proto::Filter::default();
-                filter.input = Some(Box::new(relation_of(input, plan_ids)));
+                filter.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 filter.condition = Some(condition.to_proto());
                 relation.rel_type = Some(proto::relation::RelType::Filter(Box::new(filter)));
             }
@@ -2738,7 +3293,7 @@ impl LogicalPlan {
                 grouping_sets,
             } => {
                 let mut agg = proto::Aggregate::default();
-                agg.input = Some(Box::new(relation_of(input, plan_ids)));
+                agg.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 agg.group_type = match group_type {
                     AggregateGroupType::GroupBy => proto::aggregate::GroupType::Groupby as i32,
                     AggregateGroupType::Rollup => proto::aggregate::GroupType::Rollup as i32,
@@ -2789,8 +3344,8 @@ impl LogicalPlan {
                 using_columns,
             } => {
                 let mut join = proto::Join::default();
-                join.left = Some(Box::new(relation_of(left, plan_ids)));
-                join.right = Some(Box::new(relation_of(right, plan_ids)));
+                join.left = Some(Box::new(relation_of(left.arc(), plan_ids)));
+                join.right = Some(Box::new(relation_of(right.arc(), plan_ids)));
                 join.join_type = match join_type {
                     JoinType::Inner => proto::join::JoinType::Inner as i32,
                     JoinType::LeftOuter => proto::join::JoinType::LeftOuter as i32,
@@ -2820,8 +3375,8 @@ impl LogicalPlan {
                 direction,
             } => {
                 let aj = proto::AsOfJoin {
-                    left: Some(Box::new(relation_of(left, plan_ids))),
-                    right: Some(Box::new(relation_of(right, plan_ids))),
+                    left: Some(Box::new(relation_of(left.arc(), plan_ids))),
+                    right: Some(Box::new(relation_of(right.arc(), plan_ids))),
                     left_as_of: Some(left_as_of.to_proto()),
                     right_as_of: Some(right_as_of.to_proto()),
                     join_expr: on.as_ref().map(|condition| condition.to_proto()),
@@ -2841,8 +3396,8 @@ impl LogicalPlan {
                 on,
             } => {
                 let mut lj = proto::LateralJoin::default();
-                lj.left = Some(Box::new(relation_of(left, plan_ids)));
-                lj.right = Some(Box::new(relation_of(right, plan_ids)));
+                lj.left = Some(Box::new(relation_of(left.arc(), plan_ids)));
+                lj.right = Some(Box::new(relation_of(right.arc(), plan_ids)));
                 lj.join_type = match join_type {
                     JoinType::Inner => proto::join::JoinType::Inner as i32,
                     JoinType::LeftOuter => proto::join::JoinType::LeftOuter as i32,
@@ -2867,8 +3422,8 @@ impl LogicalPlan {
                 allow_missing_columns,
             } => {
                 let mut set_op = proto::SetOperation::default();
-                set_op.left_input = Some(Box::new(relation_of(left, plan_ids)));
-                set_op.right_input = Some(Box::new(relation_of(right, plan_ids)));
+                set_op.left_input = Some(Box::new(relation_of(left.arc(), plan_ids)));
+                set_op.right_input = Some(Box::new(relation_of(right.arc(), plan_ids)));
                 set_op.set_op_type = match set_op_type {
                     SetOpType::Union => proto::set_operation::SetOpType::Union as i32,
                     SetOpType::Intersect => proto::set_operation::SetOpType::Intersect as i32,
@@ -2882,21 +3437,21 @@ impl LogicalPlan {
 
             LogicalPlan::Limit { input, limit } => {
                 let mut lim = proto::Limit::default();
-                lim.input = Some(Box::new(relation_of(input, plan_ids)));
+                lim.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 lim.limit = *limit;
                 relation.rel_type = Some(proto::relation::RelType::Limit(Box::new(lim)));
             }
 
             LogicalPlan::Offset { input, offset } => {
                 let mut off = proto::Offset::default();
-                off.input = Some(Box::new(relation_of(input, plan_ids)));
+                off.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 off.offset = *offset;
                 relation.rel_type = Some(proto::relation::RelType::Offset(Box::new(off)));
             }
 
             LogicalPlan::Tail { input, limit } => {
                 let mut tail = proto::Tail::default();
-                tail.input = Some(Box::new(relation_of(input, plan_ids)));
+                tail.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 tail.limit = *limit;
                 relation.rel_type = Some(proto::relation::RelType::Tail(Box::new(tail)));
             }
@@ -2908,7 +3463,7 @@ impl LogicalPlan {
                 vertical,
             } => {
                 let show = proto::ShowString {
-                    input: Some(Box::new(relation_of(input, plan_ids))),
+                    input: Some(Box::new(relation_of(input.arc(), plan_ids))),
                     num_rows: *num_rows,
                     truncate: *truncate,
                     vertical: *vertical,
@@ -2922,7 +3477,7 @@ impl LogicalPlan {
                 truncate,
             } => {
                 let html = proto::HtmlString {
-                    input: Some(Box::new(relation_of(input, plan_ids))),
+                    input: Some(Box::new(relation_of(input.arc(), plan_ids))),
                     num_rows: *num_rows,
                     truncate: *truncate,
                 };
@@ -2932,11 +3487,35 @@ impl LogicalPlan {
             LogicalPlan::Raw {
                 relation: raw,
                 depth,
+                holes,
                 ..
             } => {
                 // The clone recurses for each level of the relation: grow the stack for them all.
                 let stack = raw_relation_stack(*depth);
-                relation = stacker::maybe_grow(stack, stack, || raw.as_ref().clone());
+                relation = if holes.is_empty() {
+                    stacker::maybe_grow(stack, stack, || raw.as_ref().clone())
+                } else {
+                    // Of the messages that the picklers of the holes give now, in the order of
+                    // their build, as PySpark's unpickled plan pickles the functions of its UDFs.
+                    let fill = crate::udf::SENT_FILL_STACK;
+                    match stacker::maybe_grow(fill, fill, || {
+                        use prost::Message;
+                        holes
+                            .fill(|| raw.encode_to_vec())
+                            .and_then(|filled| match filled {
+                                Some(filled) => proto::Relation::decode(filled.as_slice())
+                                    .map_err(|error| SparkError::connect_msg(error.to_string())),
+                                // The first build of a request, which meets the picklers.
+                                None => Ok(raw.as_ref().clone()),
+                            })
+                    }) {
+                        Ok(filled) => filled,
+                        Err(error) => {
+                            crate::expression::record_unbuildable(&error);
+                            stacker::maybe_grow(stack, stack, || raw.as_ref().clone())
+                        }
+                    }
+                };
                 relation.common.get_or_insert_with(Default::default);
             }
 
@@ -2947,7 +3526,7 @@ impl LogicalPlan {
                 within_watermark,
             } => {
                 let mut dedup = proto::Deduplicate::default();
-                dedup.input = Some(Box::new(relation_of(input, plan_ids)));
+                dedup.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 dedup.all_columns_as_keys = Some(*all_columns_as_keys);
                 dedup.column_names.extend(column_names.clone());
                 dedup.within_watermark = Some(*within_watermark);
@@ -2963,7 +3542,7 @@ impl LogicalPlan {
                 // numbers, so a future proto reorder can't silently change meaning.
                 use proto::expression::sort_order::{NullOrdering as PbNulls, SortDirection};
                 let mut sort = proto::Sort::default();
-                sort.input = Some(Box::new(relation_of(input, plan_ids)));
+                sort.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 for expr in order {
                     // Extract SortOrder from Expression if it's SortOrder type
                     if let ExpressionNode::SortOrder(so) = expr.node() {
@@ -3013,7 +3592,7 @@ impl LogicalPlan {
                 deterministic_order,
             } => {
                 let mut sample = proto::Sample::default();
-                sample.input = Some(Box::new(relation_of(input, plan_ids)));
+                sample.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 sample.lower_bound = *lower_bound;
                 sample.upper_bound = *upper_bound;
                 sample.with_replacement = Some(*with_replacement);
@@ -3030,7 +3609,7 @@ impl LogicalPlan {
                 shuffle,
             } => {
                 let mut repart = proto::Repartition::default();
-                repart.input = Some(Box::new(relation_of(input, plan_ids)));
+                repart.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 repart.num_partitions = *num_partitions;
                 repart.shuffle = Some(*shuffle);
                 relation.rel_type = Some(proto::relation::RelType::Repartition(Box::new(repart)));
@@ -3047,7 +3626,7 @@ impl LogicalPlan {
                 for expr in expressions {
                     repart.partition_exprs.push(expr.to_proto());
                 }
-                repart.input = Some(Box::new(relation_of(input, plan_ids)));
+                repart.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 // num_partitions is optional in the proto: <= 0 means "unset" so the
                 // server uses the default (the `df.repartition(*cols)` column-only form,
                 // where no partition count is given). A real count is always positive.
@@ -3067,7 +3646,7 @@ impl LogicalPlan {
                 columns,
             } => {
                 let mut wc = proto::WithColumns::default();
-                wc.input = Some(Box::new(relation_of(input, plan_ids)));
+                wc.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 for (name, col) in column_names.iter().zip(columns.iter()) {
                     // Create an Alias expression for each column
                     let mut alias = proto::expression::Alias::default();
@@ -3085,7 +3664,7 @@ impl LogicalPlan {
                 metadata_json,
             } => {
                 let mut wc = proto::WithColumns::default();
-                wc.input = Some(Box::new(relation_of(input, plan_ids)));
+                wc.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 wc.aliases.push(proto::expression::Alias {
                     expr: Some(Box::new(column.to_proto())),
                     name: vec![column_name.clone()],
@@ -3096,7 +3675,7 @@ impl LogicalPlan {
 
             LogicalPlan::WithColumnsRenamed { input, renames } => {
                 let mut wcr = proto::WithColumnsRenamed::default();
-                wcr.input = Some(Box::new(relation_of(input, plan_ids)));
+                wcr.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 for (old_name, new_name) in renames.iter() {
                     let mut rename = proto::with_columns_renamed::Rename::default();
                     rename.col_name = old_name.clone();
@@ -3113,7 +3692,7 @@ impl LogicalPlan {
                 expressions,
             } => {
                 let mut drop = proto::Drop::default();
-                drop.input = Some(Box::new(relation_of(input, plan_ids)));
+                drop.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 drop.columns
                     .extend(expressions.iter().map(|e| e.to_proto()));
                 drop.column_names.extend(columns.clone());
@@ -3125,7 +3704,7 @@ impl LogicalPlan {
                 column_names,
             } => {
                 let mut to_df = proto::ToDf::default();
-                to_df.input = Some(Box::new(relation_of(input, plan_ids)));
+                to_df.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 to_df.column_names.extend(column_names.clone());
                 relation.rel_type = Some(proto::relation::RelType::ToDf(Box::new(to_df)));
             }
@@ -3133,7 +3712,7 @@ impl LogicalPlan {
             LogicalPlan::Unbuildable { input, error } => {
                 // The input, as PySpark builds it first, and then the error, which the request
                 // raises; the relation is not sent.
-                relation.rel_type = relation_of(input, plan_ids).rel_type;
+                relation.rel_type = relation_of(input.arc(), plan_ids).rel_type;
                 crate::expression::record_unbuildable(error);
             }
 
@@ -3143,7 +3722,7 @@ impl LogicalPlan {
                 schema_reader,
             } => {
                 let mut to_schema = proto::ToSchema::default();
-                to_schema.input = Some(Box::new(relation_of(input, plan_ids)));
+                to_schema.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 // As PySpark's, which converts the schema once it built the input: of the reader,
                 // the schema that it gives, else `schema`, as before the reader gives one.
                 let read = schema_reader
@@ -3164,7 +3743,7 @@ impl LogicalPlan {
                 parameters,
             } => {
                 let mut hint = proto::Hint::default();
-                hint.input = Some(Box::new(relation_of(input, plan_ids)));
+                hint.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 hint.name = name.clone();
                 hint.parameters
                     .extend(parameters.iter().map(|p| p.to_proto()));
@@ -3178,7 +3757,7 @@ impl LogicalPlan {
                 options,
             } => {
                 relation.rel_type = Some(proto::relation::RelType::Parse(Box::new(proto::Parse {
-                    input: Some(Box::new(relation_of(input, plan_ids))),
+                    input: Some(Box::new(relation_of(input.arc(), plan_ids))),
                     format: format.to_proto() as i32,
                     schema: schema.as_ref().map(|s| s.to_proto()),
                     options: options.clone(),
@@ -3193,7 +3772,7 @@ impl LogicalPlan {
                 value_column_name,
             } => {
                 let mut unpivot = proto::Unpivot::default();
-                unpivot.input = Some(Box::new(relation_of(input, plan_ids)));
+                unpivot.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 for col in ids {
                     unpivot.ids.push(col.to_proto());
                 }
@@ -3215,7 +3794,7 @@ impl LogicalPlan {
                 columns,
             } => {
                 let mut na_fill = proto::NaFill::default();
-                na_fill.input = Some(Box::new(relation_of(input, plan_ids)));
+                na_fill.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 na_fill.cols.extend(columns.clone());
                 na_fill.values.push(value_to_proto_literal(fill_value));
                 relation.rel_type = Some(proto::relation::RelType::FillNa(Box::new(na_fill)));
@@ -3229,7 +3808,7 @@ impl LogicalPlan {
                 // Per-column fill: cols[i] is filled with values[i] (Spark aligns them
                 // positionally when both are non-empty).
                 let mut na_fill = proto::NaFill::default();
-                na_fill.input = Some(Box::new(relation_of(input, plan_ids)));
+                na_fill.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 na_fill.cols.extend(cols.clone());
                 na_fill
                     .values
@@ -3244,7 +3823,7 @@ impl LogicalPlan {
                 columns,
             } => {
                 let mut na_drop = proto::NaDrop::default();
-                na_drop.input = Some(Box::new(relation_of(input, plan_ids)));
+                na_drop.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 na_drop.cols.extend(columns.clone());
                 // Mirror pyspark: an explicit `thresh` (min_non_null) wins; otherwise
                 // `how="all"` -> min_non_nulls=1 and `how="any"` -> unset (server default).
@@ -3264,7 +3843,7 @@ impl LogicalPlan {
                 columns,
             } => {
                 let mut na_replace = proto::NaReplace::default();
-                na_replace.input = Some(Box::new(relation_of(input, plan_ids)));
+                na_replace.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 for (old_val, new_val) in replacements.iter() {
                     na_replace
                         .replacements
@@ -3279,14 +3858,14 @@ impl LogicalPlan {
 
             LogicalPlan::Describe { input, columns } => {
                 let mut describe = proto::StatDescribe::default();
-                describe.input = Some(Box::new(relation_of(input, plan_ids)));
+                describe.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 describe.cols.extend(columns.clone());
                 relation.rel_type = Some(proto::relation::RelType::Describe(Box::new(describe)));
             }
 
             LogicalPlan::Summary { input, percentiles } => {
                 let mut summary = proto::StatSummary::default();
-                summary.input = Some(Box::new(relation_of(input, plan_ids)));
+                summary.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 summary.statistics.extend(percentiles.clone());
                 relation.rel_type = Some(proto::relation::RelType::Summary(Box::new(summary)));
             }
@@ -3294,7 +3873,7 @@ impl LogicalPlan {
             LogicalPlan::ColRegex { input, col_name } => {
                 // ColRegex is implemented as a Project with UnresolvedRegex expressions
                 let mut project = proto::Project::default();
-                project.input = Some(Box::new(relation_of(input, plan_ids)));
+                project.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 let mut expr = proto::Expression::default();
                 expr.expr_type = Some(proto::expression::ExprType::UnresolvedRegex(
                     proto::expression::UnresolvedRegex {
@@ -3308,7 +3887,7 @@ impl LogicalPlan {
 
             LogicalPlan::SubqueryAlias { input, alias } => {
                 let mut sq_alias = proto::SubqueryAlias::default();
-                sq_alias.input = Some(Box::new(relation_of(input, plan_ids)));
+                sq_alias.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 sq_alias.alias = alias.clone();
                 relation.rel_type =
                     Some(proto::relation::RelType::SubqueryAlias(Box::new(sq_alias)));
@@ -3316,10 +3895,10 @@ impl LogicalPlan {
 
             LogicalPlan::WithRelations { root, references } => {
                 let with_relations = proto::WithRelations {
-                    root: Some(Box::new(relation_of(root, plan_ids))),
+                    root: Some(Box::new(relation_of(root.arc(), plan_ids))),
                     references: references
                         .iter()
-                        .map(|reference| relation_of(reference, plan_ids))
+                        .map(|reference| relation_of(reference.arc(), plan_ids))
                         .collect(),
                 };
                 relation.rel_type = Some(proto::relation::RelType::WithRelations(Box::new(
@@ -3370,7 +3949,7 @@ impl LogicalPlan {
                 let mut read = proto::Read::default();
                 read.is_streaming = *is_streaming;
 
-                match read_type {
+                match &**read_type {
                     crate::readwriter::ReadType::DataSource {
                         format,
                         schema,
@@ -3428,7 +4007,7 @@ impl LogicalPlan {
                 delay_threshold,
             } => {
                 let mut watermark = proto::WithWatermark::default();
-                watermark.input = Some(Box::new(relation_of(input, plan_ids)));
+                watermark.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 watermark.event_time = time_column.clone();
                 watermark.delay_threshold = delay_threshold.clone();
                 relation.rel_type =
@@ -3445,7 +4024,7 @@ impl LogicalPlan {
                 for expr in partition_exprs {
                     repart.partition_exprs.push(expr.to_proto());
                 }
-                repart.input = Some(Box::new(relation_of(input, plan_ids)));
+                repart.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 if let Some(n) = num_partitions {
                     repart.num_partitions = Some(*n);
                 }
@@ -3456,7 +4035,7 @@ impl LogicalPlan {
 
             LogicalPlan::StatCrosstab { input, col1, col2 } => {
                 let mut stat = proto::StatCrosstab::default();
-                stat.input = Some(Box::new(relation_of(input, plan_ids)));
+                stat.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 stat.col1 = col1.clone();
                 stat.col2 = col2.clone();
                 relation.rel_type = Some(proto::relation::RelType::Crosstab(Box::new(stat)));
@@ -3468,7 +4047,7 @@ impl LogicalPlan {
                 support,
             } => {
                 let mut stat = proto::StatFreqItems::default();
-                stat.input = Some(Box::new(relation_of(input, plan_ids)));
+                stat.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 stat.cols.extend(columns.clone());
                 stat.support = Some(*support);
                 relation.rel_type = Some(proto::relation::RelType::FreqItems(Box::new(stat)));
@@ -3481,7 +4060,7 @@ impl LogicalPlan {
                 relative_error,
             } => {
                 let mut stat = proto::StatApproxQuantile::default();
-                stat.input = Some(Box::new(relation_of(input, plan_ids)));
+                stat.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 stat.cols.extend(columns.clone());
                 stat.probabilities.extend(probabilities.clone());
                 stat.relative_error = *relative_error;
@@ -3495,7 +4074,7 @@ impl LogicalPlan {
                 method,
             } => {
                 let mut stat = proto::StatCorr::default();
-                stat.input = Some(Box::new(relation_of(input, plan_ids)));
+                stat.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 stat.col1 = col1.clone();
                 stat.col2 = col2.clone();
                 stat.method = Some(method.clone());
@@ -3504,7 +4083,7 @@ impl LogicalPlan {
 
             LogicalPlan::StatCov { input, col1, col2 } => {
                 let mut stat = proto::StatCov::default();
-                stat.input = Some(Box::new(relation_of(input, plan_ids)));
+                stat.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 stat.col1 = col1.clone();
                 stat.col2 = col2.clone();
                 relation.rel_type = Some(proto::relation::RelType::Cov(Box::new(stat)));
@@ -3517,7 +4096,7 @@ impl LogicalPlan {
                 seed,
             } => {
                 let mut stat = proto::StatSampleBy::default();
-                stat.input = Some(Box::new(relation_of(input, plan_ids)));
+                stat.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 stat.col = Some(col.to_proto());
                 // As PySpark's: each stratum, a literal, with its fraction.
                 for (expr, fraction) in fractions {
@@ -3543,7 +4122,7 @@ impl LogicalPlan {
                 observation,
             } => {
                 let mut collect_metrics = proto::CollectMetrics::default();
-                collect_metrics.input = Some(Box::new(relation_of(input, plan_ids)));
+                collect_metrics.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 // As PySpark's `CollectMetrics`, which sets the `str` of the `_name` of its
                 // Observation when it builds the plan, after its input: its error fails the
                 // request.
@@ -3574,16 +4153,35 @@ impl LogicalPlan {
 
             LogicalPlan::Zip { left, right } => {
                 let mut zip = proto::Zip::default();
-                zip.left = Some(Box::new(relation_of(left, plan_ids)));
-                zip.right = Some(Box::new(relation_of(right, plan_ids)));
+                zip.left = Some(Box::new(relation_of(left.arc(), plan_ids)));
+                zip.right = Some(Box::new(relation_of(right.arc(), plan_ids)));
                 relation.rel_type = Some(proto::relation::RelType::Zip(Box::new(zip)));
             }
 
-            LogicalPlan::MlTransform { ml_relation, .. } => {
-                return ml_relation.clone();
+            LogicalPlan::MlTransform {
+                ml_relation,
+                input,
+                input_at,
+                ..
+            } => {
+                // As PySpark's ML plans, which build the plan of their child now.
+                let mut built = (**ml_relation).clone();
+                if let Some(proto::relation::RelType::MlRelation(ml)) = &mut built.rel_type {
+                    match (input_at, &mut ml.ml_type) {
+                        (
+                            MlInputAt::TransformInput,
+                            Some(proto::ml_relation::MlType::Transform(transform)),
+                        ) => transform.input = Some(Box::new(relation_of(input, plan_ids))),
+                        (MlInputAt::SummaryDataset, _) => {
+                            ml.model_summary_dataset = Some(Box::new(relation_of(input, plan_ids)))
+                        }
+                        _ => {}
+                    }
+                }
+                return built;
             }
             LogicalPlan::Catalog { catalog } => {
-                relation.rel_type = Some(proto::relation::RelType::Catalog(catalog.clone()));
+                relation.rel_type = Some(proto::relation::RelType::Catalog((**catalog).clone()));
                 return relation;
             }
             LogicalPlan::Transpose {
@@ -3591,7 +4189,7 @@ impl LogicalPlan {
                 index_columns,
             } => {
                 let mut transpose = proto::Transpose::default();
-                transpose.input = Some(Box::new(relation_of(input, plan_ids)));
+                transpose.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 transpose.index_columns = index_columns.iter().map(|e| e.to_proto()).collect();
                 relation.rel_type = Some(proto::relation::RelType::Transpose(Box::new(transpose)));
                 return relation;
@@ -3604,7 +4202,7 @@ impl LogicalPlan {
                 profile_id_reader,
             } => {
                 let mut mp = proto::MapPartitions::default();
-                mp.input = Some(Box::new(relation_of(input, plan_ids)));
+                mp.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 mp.func = Some(func.to_proto());
                 mp.is_barrier = Some(*is_barrier);
                 // As PySpark's, which reads `profile.id` once it set the function and the flag.
@@ -3630,14 +4228,14 @@ impl LogicalPlan {
                 transform_with_state_info,
             } => {
                 let mut gm = proto::GroupMap::default();
-                gm.input = Some(Box::new(relation_of(input, plan_ids)));
+                gm.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 for e in grouping_expressions {
                     gm.grouping_expressions.push(e.to_proto());
                 }
                 // As PySpark's transformWithState plan, which builds the initial state before the
                 // function, whose command it pickles then.
                 if let Some(ii) = initial_input {
-                    gm.initial_input = Some(Box::new(relation_of(ii, plan_ids)));
+                    gm.initial_input = Some(Box::new(relation_of(ii.arc(), plan_ids)));
                 }
                 for e in initial_grouping_expressions {
                     gm.initial_grouping_expressions.push(e.to_proto());
@@ -3674,7 +4272,7 @@ impl LogicalPlan {
                 timeout_conf,
             } => {
                 let apply = proto::ApplyInPandasWithState {
-                    input: Some(Box::new(relation_of(input, plan_ids))),
+                    input: Some(Box::new(relation_of(input.arc(), plan_ids))),
                     grouping_expressions: grouping_expressions
                         .iter()
                         .map(|e| e.to_proto())
@@ -3697,11 +4295,11 @@ impl LogicalPlan {
                 func,
             } => {
                 let mut cg = proto::CoGroupMap::default();
-                cg.input = Some(Box::new(relation_of(input, plan_ids)));
+                cg.input = Some(Box::new(relation_of(input.arc(), plan_ids)));
                 for e in input_grouping_expressions {
                     cg.input_grouping_expressions.push(e.to_proto());
                 }
-                cg.other = Some(Box::new(relation_of(other, plan_ids)));
+                cg.other = Some(Box::new(relation_of(other.arc(), plan_ids)));
                 for e in other_grouping_expressions {
                     cg.other_grouping_expressions.push(e.to_proto());
                 }
@@ -3718,8 +4316,8 @@ impl LogicalPlan {
                 direction,
             } => {
                 let mut nbj = proto::NearestByJoin::default();
-                nbj.left = Some(Box::new(relation_of(left, plan_ids)));
-                nbj.right = Some(Box::new(relation_of(right, plan_ids)));
+                nbj.left = Some(Box::new(relation_of(left.arc(), plan_ids)));
+                nbj.right = Some(Box::new(relation_of(right.arc(), plan_ids)));
                 nbj.ranking_expression = Some(ranking_expression.to_proto());
                 nbj.num_results = *num_results;
                 nbj.join_type = join_type.clone();
@@ -3741,7 +4339,7 @@ impl LogicalPlan {
                     function_name,
                     *deterministic,
                     arguments,
-                    return_type.as_ref(),
+                    return_type.as_deref(),
                     *eval_type,
                     (command, pickler.as_ref()),
                     python_ver,
@@ -3846,7 +4444,7 @@ pub fn sql(query: impl Into<String>) -> LogicalPlan {
 
 /// Create a Project plan.
 pub fn project<C: Into<Column>>(
-    input: impl Into<Arc<LogicalPlan>>,
+    input: impl Into<SharedPlan>,
     columns: impl IntoIterator<Item = C>,
 ) -> LogicalPlan {
     LogicalPlan::Project {
@@ -3856,7 +4454,7 @@ pub fn project<C: Into<Column>>(
 }
 
 /// Create a Filter plan.
-pub fn filter(input: impl Into<Arc<LogicalPlan>>, condition: Column) -> LogicalPlan {
+pub fn filter(input: impl Into<SharedPlan>, condition: Column) -> LogicalPlan {
     LogicalPlan::Filter {
         input: input.into(),
         condition,
@@ -3865,7 +4463,7 @@ pub fn filter(input: impl Into<Arc<LogicalPlan>>, condition: Column) -> LogicalP
 
 /// Create an Aggregate plan.
 pub fn aggregate(
-    input: impl Into<Arc<LogicalPlan>>,
+    input: impl Into<SharedPlan>,
     group_type: AggregateGroupType,
     grouping_expressions: Vec<Expression>,
     aggregate_expressions: Vec<Expression>,
@@ -3883,7 +4481,7 @@ pub fn aggregate(
 
 /// Create an Aggregate plan with pivot.
 pub fn aggregate_with_pivot(
-    input: impl Into<Arc<LogicalPlan>>,
+    input: impl Into<SharedPlan>,
     group_type: AggregateGroupType,
     grouping_expressions: Vec<Expression>,
     aggregate_expressions: Vec<Expression>,
@@ -3903,7 +4501,7 @@ pub fn aggregate_with_pivot(
 
 /// Create an Aggregate plan with explicit grouping sets.
 pub fn aggregate_with_grouping_sets(
-    input: impl Into<Arc<LogicalPlan>>,
+    input: impl Into<SharedPlan>,
     grouping_expressions: Vec<Expression>,
     aggregate_expressions: Vec<Expression>,
     grouping_sets: Vec<Vec<Expression>>,
@@ -3921,8 +4519,8 @@ pub fn aggregate_with_grouping_sets(
 
 /// Create a Join plan.
 pub fn join(
-    left: impl Into<Arc<LogicalPlan>>,
-    right: impl Into<Arc<LogicalPlan>>,
+    left: impl Into<SharedPlan>,
+    right: impl Into<SharedPlan>,
     join_type: JoinType,
     on: Option<Column>,
     using_columns: Vec<String>,
@@ -3938,8 +4536,8 @@ pub fn join(
 
 /// Create a SetOperation plan.
 pub fn set_operation(
-    left: impl Into<Arc<LogicalPlan>>,
-    right: impl Into<Arc<LogicalPlan>>,
+    left: impl Into<SharedPlan>,
+    right: impl Into<SharedPlan>,
     set_op_type: SetOpType,
     is_all: bool,
     by_name: bool,
@@ -3956,7 +4554,7 @@ pub fn set_operation(
 }
 
 /// Create a Limit plan.
-pub fn limit(input: impl Into<Arc<LogicalPlan>>, limit: i32) -> LogicalPlan {
+pub fn limit(input: impl Into<SharedPlan>, limit: i32) -> LogicalPlan {
     LogicalPlan::Limit {
         input: input.into(),
         limit,
@@ -3964,7 +4562,7 @@ pub fn limit(input: impl Into<Arc<LogicalPlan>>, limit: i32) -> LogicalPlan {
 }
 
 /// Create an Offset plan.
-pub fn offset(input: impl Into<Arc<LogicalPlan>>, offset: i32) -> LogicalPlan {
+pub fn offset(input: impl Into<SharedPlan>, offset: i32) -> LogicalPlan {
     LogicalPlan::Offset {
         input: input.into(),
         offset,
@@ -3972,7 +4570,7 @@ pub fn offset(input: impl Into<Arc<LogicalPlan>>, offset: i32) -> LogicalPlan {
 }
 
 /// Create a Tail plan.
-pub fn tail(input: impl Into<Arc<LogicalPlan>>, limit: i32) -> LogicalPlan {
+pub fn tail(input: impl Into<SharedPlan>, limit: i32) -> LogicalPlan {
     LogicalPlan::Tail {
         input: input.into(),
         limit,
@@ -3981,7 +4579,7 @@ pub fn tail(input: impl Into<Arc<LogicalPlan>>, limit: i32) -> LogicalPlan {
 
 /// Create a Deduplicate plan.
 pub fn deduplicate(
-    input: impl Into<Arc<LogicalPlan>>,
+    input: impl Into<SharedPlan>,
     all_columns_as_keys: bool,
     column_names: Vec<String>,
     within_watermark: bool,
@@ -3995,11 +4593,7 @@ pub fn deduplicate(
 }
 
 /// Create a Sort plan.
-pub fn sort(
-    input: impl Into<Arc<LogicalPlan>>,
-    order: Vec<Expression>,
-    is_global: bool,
-) -> LogicalPlan {
+pub fn sort(input: impl Into<SharedPlan>, order: Vec<Expression>, is_global: bool) -> LogicalPlan {
     LogicalPlan::Sort {
         input: input.into(),
         order,
@@ -4009,7 +4603,7 @@ pub fn sort(
 
 /// Create a Sample plan.
 pub fn sample(
-    input: impl Into<Arc<LogicalPlan>>,
+    input: impl Into<SharedPlan>,
     lower_bound: f64,
     upper_bound: f64,
     with_replacement: bool,
@@ -4027,7 +4621,7 @@ pub fn sample(
 
 /// Create a Repartition plan.
 pub fn repartition(
-    input: impl Into<Arc<LogicalPlan>>,
+    input: impl Into<SharedPlan>,
     num_partitions: i32,
     shuffle: bool,
 ) -> LogicalPlan {
@@ -4040,7 +4634,7 @@ pub fn repartition(
 
 /// Create a RepartitionByExpression plan.
 pub fn repartition_by_expression(
-    input: impl Into<Arc<LogicalPlan>>,
+    input: impl Into<SharedPlan>,
     num_partitions: i32,
     expressions: Vec<Expression>,
 ) -> LogicalPlan {
@@ -4053,7 +4647,7 @@ pub fn repartition_by_expression(
 
 /// Create a WithColumns plan.
 pub fn with_columns(
-    input: impl Into<Arc<LogicalPlan>>,
+    input: impl Into<SharedPlan>,
     column_names: Vec<String>,
     columns: Vec<Column>,
 ) -> LogicalPlan {
@@ -4067,7 +4661,7 @@ pub fn with_columns(
 /// Create a WithColumnsRenamed plan of `renames`, of old and new names, in their order, in
 /// which the server applies them.
 pub fn with_columns_renamed(
-    input: impl Into<Arc<LogicalPlan>>,
+    input: impl Into<SharedPlan>,
     renames: impl IntoIterator<Item = (String, String)>,
 ) -> LogicalPlan {
     LogicalPlan::WithColumnsRenamed {
@@ -4077,7 +4671,7 @@ pub fn with_columns_renamed(
 }
 
 /// Create a Drop plan.
-pub fn drop(input: impl Into<Arc<LogicalPlan>>, columns: Vec<String>) -> LogicalPlan {
+pub fn drop(input: impl Into<SharedPlan>, columns: Vec<String>) -> LogicalPlan {
     LogicalPlan::Drop {
         input: input.into(),
         columns,
@@ -4086,7 +4680,7 @@ pub fn drop(input: impl Into<Arc<LogicalPlan>>, columns: Vec<String>) -> Logical
 }
 
 /// Create a ToDF plan.
-pub fn to_df(input: impl Into<Arc<LogicalPlan>>, column_names: Vec<String>) -> LogicalPlan {
+pub fn to_df(input: impl Into<SharedPlan>, column_names: Vec<String>) -> LogicalPlan {
     LogicalPlan::ToDF {
         input: input.into(),
         column_names,
@@ -4094,7 +4688,7 @@ pub fn to_df(input: impl Into<Arc<LogicalPlan>>, column_names: Vec<String>) -> L
 }
 
 /// Create a ToSchema plan.
-pub fn to_schema(input: impl Into<Arc<LogicalPlan>>, schema: DataType) -> LogicalPlan {
+pub fn to_schema(input: impl Into<SharedPlan>, schema: DataType) -> LogicalPlan {
     LogicalPlan::ToSchema {
         input: input.into(),
         schema,
@@ -4125,7 +4719,7 @@ impl ParseFormat {
 /// Long literal is rejected as a partitionNum by e.g. the REBALANCE hint, which expects an
 /// integral int.)
 pub fn hint(
-    input: impl Into<Arc<LogicalPlan>>,
+    input: impl Into<SharedPlan>,
     name: impl Into<String>,
     parameters: Vec<String>,
 ) -> LogicalPlan {
@@ -4147,7 +4741,7 @@ pub(crate) fn hint_parameter(parameter: &str) -> Expression {
 
 /// Create an Unpivot plan.
 pub fn unpivot(
-    input: impl Into<Arc<LogicalPlan>>,
+    input: impl Into<SharedPlan>,
     ids: Vec<Column>,
     values: Option<Vec<Column>>,
     variable_column_name: impl Into<String>,
@@ -4164,7 +4758,7 @@ pub fn unpivot(
 
 /// Create a NAFill plan.
 pub fn na_fill(
-    input: impl Into<Arc<LogicalPlan>>,
+    input: impl Into<SharedPlan>,
     fill_value: crate::row::Value,
     columns: Vec<String>,
 ) -> LogicalPlan {
@@ -4222,7 +4816,7 @@ fn value_to_proto_literal(v: &crate::row::Value) -> proto::expression::Literal {
 
 /// Create a NADrop plan.
 pub fn na_drop(
-    input: impl Into<Arc<LogicalPlan>>,
+    input: impl Into<SharedPlan>,
     how: impl Into<String>,
     min_non_null: Option<i32>,
     columns: Vec<String>,
@@ -4240,7 +4834,7 @@ pub fn na_drop(
 /// string that reads as a number too. A `LogicalPlan::NAReplace` of other literals replaces
 /// booleans, numbers or nulls.
 pub fn na_replace(
-    input: impl Into<Arc<LogicalPlan>>,
+    input: impl Into<SharedPlan>,
     replacements: Vec<(String, String)>,
     columns: Vec<String>,
 ) -> LogicalPlan {
@@ -4260,7 +4854,7 @@ pub fn na_replace(
 }
 
 /// Create a Describe plan.
-pub fn describe(input: impl Into<Arc<LogicalPlan>>, columns: Vec<String>) -> LogicalPlan {
+pub fn describe(input: impl Into<SharedPlan>, columns: Vec<String>) -> LogicalPlan {
     LogicalPlan::Describe {
         input: input.into(),
         columns,
@@ -4268,7 +4862,7 @@ pub fn describe(input: impl Into<Arc<LogicalPlan>>, columns: Vec<String>) -> Log
 }
 
 /// Create a Summary plan.
-pub fn summary(input: impl Into<Arc<LogicalPlan>>, percentiles: Vec<String>) -> LogicalPlan {
+pub fn summary(input: impl Into<SharedPlan>, percentiles: Vec<String>) -> LogicalPlan {
     LogicalPlan::Summary {
         input: input.into(),
         percentiles,
@@ -4276,7 +4870,7 @@ pub fn summary(input: impl Into<Arc<LogicalPlan>>, percentiles: Vec<String>) -> 
 }
 
 /// Create a ColRegex plan.
-pub fn col_regex(input: impl Into<Arc<LogicalPlan>>, col_name: impl Into<String>) -> LogicalPlan {
+pub fn col_regex(input: impl Into<SharedPlan>, col_name: impl Into<String>) -> LogicalPlan {
     LogicalPlan::ColRegex {
         input: input.into(),
         col_name: col_name.into(),
@@ -4284,7 +4878,7 @@ pub fn col_regex(input: impl Into<Arc<LogicalPlan>>, col_name: impl Into<String>
 }
 
 /// Create a SubqueryAlias plan.
-pub fn subquery_alias(input: impl Into<Arc<LogicalPlan>>, alias: impl Into<String>) -> LogicalPlan {
+pub fn subquery_alias(input: impl Into<SharedPlan>, alias: impl Into<String>) -> LogicalPlan {
     LogicalPlan::SubqueryAlias {
         input: input.into(),
         alias: alias.into(),
@@ -4340,7 +4934,7 @@ mod argfix_tests {
     #[test]
     fn dropna_how_all_any_thresh_are_distinct() {
         let mk = |how: &str, thresh: Option<i32>| LogicalPlan::NADrop {
-            input: Arc::new(base()),
+            input: Arc::new(base()).into(),
             how: how.to_string(),
             min_non_null: thresh,
             columns: vec![],
@@ -4384,7 +4978,7 @@ mod argfix_tests {
         // As PySpark's: a bool, a double, a string, or a null replacement, as a literal of its
         // type.
         let p = LogicalPlan::NAReplace {
-            input: Arc::new(base()),
+            input: Arc::new(base()).into(),
             replacements: vec![
                 (
                     LiteralExpression::boolean(true),
@@ -4488,7 +5082,7 @@ mod argfix_tests {
     #[test]
     fn fillna_double_literal() {
         let p = LogicalPlan::NAFill {
-            input: Arc::new(base()),
+            input: Arc::new(base()).into(),
             fill_value: crate::row::Value::Double(1.5),
             columns: vec![],
         };
@@ -4515,8 +5109,8 @@ mod with_relations_tests {
         let ids = PlanIds::new();
         let df = Arc::new(range(0, 3, 1));
         let plan = Arc::new(LogicalPlan::WithRelations {
-            root: Arc::new(sql("SELECT * FROM v")),
-            references: vec![Arc::new(subquery_alias(df.clone(), "v"))],
+            root: Arc::new(sql("SELECT * FROM v")).into(),
+            references: vec![Arc::new(subquery_alias(df.clone(), "v")).into()],
         });
         let relation = relation_with_ids(&plan, &ids).unwrap();
         let Some(proto::relation::RelType::WithRelations(with)) = &relation.rel_type else {
@@ -4754,7 +5348,7 @@ mod inline_udtf_tests {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let group_map = |initial_fails: bool| {
             let initial = LogicalPlan::Project {
-                input: Arc::new(range(0, 1, 1)),
+                input: Arc::new(range(0, 1, 1)).into(),
                 columns: vec![Column::new(
                     ExpressionNode::CommonInlineUserDefinedFunction(Box::new(pickled_udf(
                         recording_pickler(&calls, "initial", initial_fails),
@@ -4763,11 +5357,11 @@ mod inline_udtf_tests {
                 )],
             };
             LogicalPlan::GroupMap {
-                input: Arc::new(range(0, 1, 1)),
+                input: Arc::new(range(0, 1, 1)).into(),
                 grouping_expressions: vec![Expression::column("id")],
-                func: pickled_udf(recording_pickler(&calls, "function", false)),
+                func: Box::new(pickled_udf(recording_pickler(&calls, "function", false))),
                 sorting_expressions: vec![],
-                initial_input: Some(Arc::new(initial)),
+                initial_input: Some(Arc::new(initial).into()),
                 initial_grouping_expressions: vec![Expression::column("id")],
                 is_map_groups_with_state: None,
                 output_mode: Some("append".to_string()),
@@ -4826,7 +5420,7 @@ mod placeholder_tests {
             let mut node = Arc::new(range(0, 3, 1));
             for _ in 0..200 {
                 node = Arc::new(LogicalPlan::Limit {
-                    input: node,
+                    input: node.into(),
                     limit: 3,
                 });
             }
@@ -5006,7 +5600,7 @@ mod placeholder_tests {
             }))
         };
         let mut fitted = fit(shallow.clone());
-        resolve_command(&mut fitted).unwrap();
+        resolve_command(&mut fitted, None).unwrap();
         assert_eq!(fitted, fit(relation.clone()));
 
         let mut evaluated = command(proto::ml_command::Command::Evaluate(
@@ -5016,7 +5610,7 @@ mod placeholder_tests {
                 dataset: Some(shallow.clone()),
             },
         ));
-        resolve_command(&mut evaluated).unwrap();
+        resolve_command(&mut evaluated, None).unwrap();
         assert_eq!(
             evaluated,
             command(proto::ml_command::Command::Evaluate(
@@ -5034,7 +5628,7 @@ mod placeholder_tests {
                 dataset: Some(shallow.clone()),
             },
         ));
-        resolve_command(&mut summary).unwrap();
+        resolve_command(&mut summary, None).unwrap();
         assert_eq!(
             summary,
             command(proto::ml_command::Command::CreateSummary(
@@ -5046,13 +5640,13 @@ mod placeholder_tests {
         );
 
         // A request of a session hook: the root of its plan, or its command.
-        let mut root = proto::ExecutePlanRequest {
+        let root = proto::ExecutePlanRequest {
             plan: Some(proto::Plan {
                 op_type: Some(proto::plan::OpType::Root(transform_of(shallow.clone()))),
             }),
             ..Default::default()
         };
-        resolve_request(&mut root).unwrap();
+        let root = resolve_request(root).unwrap();
         assert_eq!(
             root.plan.unwrap().op_type,
             Some(proto::plan::OpType::Root(transform_of(relation)))
@@ -5148,7 +5742,7 @@ mod placeholder_tests {
             )),
         };
         let mut command = merge(expression_extension_of(&message(&standalone)));
-        resolve_command(&mut command).unwrap();
+        resolve_command(&mut command, None).unwrap();
         assert_eq!(command, merge(expression_extension_of(&message(&relation))));
         // A plan of no placeholder is left as it is.
         let mut plain = project_of(vec![expression_extension_of(&message(&relation))]);
@@ -5236,6 +5830,388 @@ mod placeholder_tests {
             .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
     }
 
+    /// `relation` resolved as `DataFrame::from_relation` resolves the relation of an encoding of the
+    /// Python client: decoded of its encoding, with its levels and the search of the resolution.
+    fn resolved_of_its_encoding(relation: &proto::Relation) -> (proto::Relation, usize, Search) {
+        let encoded = relation.encode_to_vec();
+        let (mut decoded, urls) =
+            BuiltOutside::decoded(encoded.as_slice(), proto::Relation::decode)
+                .unwrap()
+                .into_parts();
+        LAST_SEARCH.with(|last| last.set(None));
+        let levels = resolve_relation_levels(&mut decoded, urls).unwrap();
+        let search = LAST_SEARCH.with(|last| last.get()).unwrap();
+        (decoded, levels, search)
+    }
+
+    /// `relation` resolved as it was before the encodings were read: everywhere, as a relation of
+    /// the core given without its encoding is.
+    fn resolved_everywhere(relation: &proto::Relation) -> (proto::Relation, usize) {
+        let mut resolved = relation.clone();
+        LAST_SEARCH.with(|last| last.set(None));
+        let levels = resolve_relation_levels(&mut resolved, None).unwrap();
+        assert_eq!(
+            LAST_SEARCH.with(|last| last.get()),
+            Some(Search::Everywhere)
+        );
+        (resolved, levels)
+    }
+
+    /// The column `name` of no plan ID.
+    fn column_of(name: &str) -> proto::Expression {
+        proto::Expression {
+            common: None,
+            expr_type: Some(proto::expression::ExprType::UnresolvedAttribute(
+                proto::expression::UnresolvedAttribute {
+                    unparsed_identifier: name.to_string(),
+                    plan_id: None,
+                    is_metadata_column: None,
+                },
+            )),
+        }
+    }
+
+    /// A project over `input` of `expressions`.
+    fn project_over(
+        input: &proto::Relation,
+        expressions: Vec<proto::Expression>,
+    ) -> proto::Relation {
+        proto::Relation {
+            common: None,
+            rel_type: Some(proto::relation::RelType::Project(Box::new(
+                proto::Project {
+                    input: Some(Box::new(input.clone())),
+                    expressions,
+                },
+            ))),
+        }
+    }
+
+    /// A plugin's message that holds `input`, as Spark's SubqueryAlias stands for one here.
+    fn message_of(input: &proto::Relation) -> proto::SubqueryAlias {
+        proto::SubqueryAlias {
+            input: Some(Box::new(input.clone())),
+            alias: "s".to_string(),
+            qualifier: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn an_encoding_of_the_type_urls_of_the_placeholders_at_its_relations_alone_is_resolved_at_them()
+    {
+        // The fields and the messages of the extensions of a relation that the Python client
+        // encoded are not read when its encoding holds no type URL of a placeholder but those of
+        // the placeholders at its relations: of none, of inputs, of the inputs of a join, of an
+        // ML transform, of a fetched argument, of a `WithRelations`, and of a changed placeholder,
+        // whose `common` is merged. The relation and its levels are those of the resolution of
+        // every field and message.
+        let ids = Arc::new(PlanIds::new());
+        let node = Arc::new(range(0, 3, 1));
+        let other = Arc::new(range(0, 5, 1));
+        let standalone = placeholder(&node, &ids);
+        let other_standalone = placeholder(&other, &ids);
+        let mut changed = standalone.clone();
+        changed.common = Some(proto::RelationCommon {
+            plan_id: Some(424242),
+            ..Default::default()
+        });
+        let columns = vec![column_of("id"), column_of("k")];
+        let join = proto::Relation {
+            common: None,
+            rel_type: Some(proto::relation::RelType::Join(Box::new(proto::Join {
+                left: Some(Box::new(project_over(&standalone, columns.clone()))),
+                right: Some(Box::new(other_standalone.clone())),
+                join_condition: Some(column_of("c")),
+                ..Default::default()
+            }))),
+        };
+        let fetch = proto::Relation {
+            common: None,
+            rel_type: Some(proto::relation::RelType::MlRelation(Box::new(
+                proto::MlRelation {
+                    model_summary_dataset: Some(Box::new(other_standalone.clone())),
+                    ml_type: Some(proto::ml_relation::MlType::Fetch(proto::Fetch {
+                        obj_ref: None,
+                        methods: vec![proto::fetch::Method {
+                            method: "transform".to_string(),
+                            args: vec![proto::fetch::method::Args {
+                                args_type: Some(proto::fetch::method::args::ArgsType::Input(
+                                    standalone.clone(),
+                                )),
+                            }],
+                        }],
+                    })),
+                },
+            ))),
+        };
+        let with_relations = proto::Relation {
+            common: None,
+            rel_type: Some(proto::relation::RelType::WithRelations(Box::new(
+                proto::WithRelations {
+                    root: Some(Box::new(project_over(&standalone, columns.clone()))),
+                    references: vec![other_standalone.clone()],
+                },
+            ))),
+        };
+        let cases = [
+            ("no placeholder", project_of(columns.clone())),
+            ("an input", project_over(&standalone, columns.clone())),
+            ("the inputs of a join", join),
+            (
+                "an ML transform",
+                transform_of(transform_of(standalone.clone())),
+            ),
+            ("a fetched argument and a summary's dataset", fetch),
+            ("a WithRelations", with_relations),
+            (
+                "a changed placeholder",
+                project_over(&changed, columns.clone()),
+            ),
+        ];
+        for (name, relation) in cases {
+            let (resolved, levels, search) = resolved_of_its_encoding(&relation);
+            assert_eq!(search, Search::Relations, "{name}");
+            assert_eq!((resolved, levels), resolved_everywhere(&relation), "{name}");
+        }
+        // The changed placeholder is sent with its change, at its level.
+        let mut expected = relation_with_ids(&node, &ids).unwrap();
+        expected.common.get_or_insert_with(Default::default).plan_id = Some(424242);
+        let (resolved, _, _) = resolved_of_its_encoding(&project_over(&changed, columns.clone()));
+        assert_eq!(resolved, project_over(&expected, columns));
+    }
+
+    #[test]
+    fn an_encoding_of_a_type_url_elsewhere_is_resolved_everywhere() {
+        // A type URL of a placeholder that is not of one at the relations of the plan, which only
+        // a read of the fields or of the messages of the extensions tells apart: of a placeholder
+        // in the extension of an expression, also with one at an input, in the message of a
+        // relation's extension, also deep in it, in a string, which holds no placeholder, and in
+        // the bytes of a placeholder, whose relation holds the string. Each is resolved as every
+        // field and message are read, and so its placeholders are all replaced.
+        let ids = Arc::new(PlanIds::new());
+        let node = Arc::new(range(0, 3, 1));
+        let relation = relation_with_ids(&node, &ids).unwrap();
+        let standalone = placeholder(&node, &ids);
+        let url = PLACEHOLDER_TYPE_URL;
+        // A placeholder whose relation holds the type URL as a string, in its bytes.
+        let named = project_over(&relation, vec![column_of(url)]);
+        let mut value = 7i64.to_le_bytes().to_vec();
+        value.extend_from_slice(&2u64.to_le_bytes());
+        value.extend_from_slice(&named.encode_to_vec());
+        let holding = placeholder_of_value(value);
+        let deep = {
+            let mut message = message_of(&standalone);
+            for _ in 0..50 {
+                message = message_of(&extension_of(&message));
+            }
+            extension_of(&message)
+        };
+        let cases = [
+            (
+                "an expression",
+                project_of(vec![expression_extension_of(&message_of(&standalone))]),
+                project_of(vec![expression_extension_of(&message_of(&relation))]),
+            ),
+            (
+                "an expression and an input",
+                project_over(
+                    &standalone,
+                    vec![expression_extension_of(&message_of(&standalone))],
+                ),
+                project_over(
+                    &relation,
+                    vec![expression_extension_of(&message_of(&relation))],
+                ),
+            ),
+            (
+                "the message of an extension",
+                extension_of(&message_of(&standalone)),
+                extension_of(&message_of(&relation)),
+            ),
+            (
+                "a string",
+                project_over(&standalone, vec![column_of(url)]),
+                project_over(&relation, vec![column_of(url)]),
+            ),
+            (
+                "the bytes of a placeholder",
+                project_over(&holding, Vec::new()),
+                { project_over(&named, Vec::new()) },
+            ),
+        ];
+        for (name, plan, expected) in cases {
+            let (resolved, levels, search) = resolved_of_its_encoding(&plan);
+            assert_eq!(search, Search::Everywhere, "{name}");
+            assert_eq!(resolved, expected, "{name}");
+            assert_eq!((resolved, levels), resolved_everywhere(&plan), "{name}");
+        }
+        let (resolved, _, search) = resolved_of_its_encoding(&deep);
+        assert_eq!(search, Search::Everywhere);
+        assert_eq!(resolved, resolved_everywhere(&deep).0);
+        assert!(!resolved
+            .encode_to_vec()
+            .windows(url.len())
+            .any(|w| w == url.as_bytes()));
+    }
+
+    #[test]
+    fn the_commands_plans_analyses_and_requests_of_an_encoding_are_resolved_of_its_search() {
+        // As the relations: a command, a plan, an analysis and a request of a session hook whose
+        // encoding holds no type URL of a placeholder but those of the placeholders at their
+        // relations are resolved at them alone; another, of a placeholder in the condition of a
+        // merge, in the message of a command's extension or in an extension of the user context
+        // of a request, everywhere. Each is resolved as it is when it is given without its
+        // encoding.
+        let ids = Arc::new(PlanIds::new());
+        let node = Arc::new(range(0, 3, 1));
+        let standalone = placeholder(&node, &ids);
+        let write = proto::Command {
+            command_type: Some(proto::command::CommandType::WriteOperation(
+                proto::WriteOperation {
+                    input: Some(project_over(&standalone, vec![column_of("id")])),
+                    source: Some("noop".to_string()),
+                    ..Default::default()
+                },
+            )),
+        };
+        let fit = proto::Command {
+            command_type: Some(proto::command::CommandType::MlCommand(proto::MlCommand {
+                command: Some(proto::ml_command::Command::Fit(proto::ml_command::Fit {
+                    estimator: None,
+                    params: None,
+                    dataset: Some(standalone.clone()),
+                })),
+            })),
+        };
+        let merge = proto::Command {
+            command_type: Some(proto::command::CommandType::MergeIntoTableCommand(
+                proto::MergeIntoTableCommand {
+                    target_table_name: "t".to_string(),
+                    source_table_plan: Some(standalone.clone()),
+                    merge_condition: Some(expression_extension_of(&message_of(&standalone))),
+                    ..Default::default()
+                },
+            )),
+        };
+        let extension = proto::Command {
+            command_type: Some(proto::command::CommandType::Extension(prost_types::Any {
+                type_url: "type.googleapis.com/tests.PluginCommand".to_string(),
+                value: message_of(&standalone).encode_to_vec(),
+            })),
+        };
+        let resolved = |command: &proto::Command, encoded: bool| {
+            let bytes = command.encode_to_vec();
+            let (mut command, urls) = if encoded {
+                BuiltOutside::decoded(bytes.as_slice(), proto::Command::decode)
+                    .unwrap()
+                    .into_parts()
+            } else {
+                BuiltOutside::from(command.clone()).into_parts()
+            };
+            resolve_command(&mut command, urls).unwrap();
+            (command, LAST_SEARCH.with(|last| last.get()).unwrap())
+        };
+        for (command, search) in [
+            (&write, Search::Relations),
+            (&fit, Search::Relations),
+            (&merge, Search::Everywhere),
+            (&extension, Search::Everywhere),
+        ] {
+            let (of_encoding, of) = resolved(command, true);
+            assert_eq!(of, search, "{command:?}");
+            assert_eq!(resolved(command, false), (of_encoding, Search::Everywhere));
+        }
+
+        // A plan, and a request of a session hook, of its plan's search.
+        let plan = |command: &proto::Command| proto::Plan {
+            op_type: Some(proto::plan::OpType::Command(command.clone())),
+        };
+        for (command, search) in [(&write, Search::Relations), (&merge, Search::Everywhere)] {
+            let bytes = plan(command).encode_to_vec();
+            let (mut decoded, urls) = BuiltOutside::decoded(bytes.as_slice(), proto::Plan::decode)
+                .unwrap()
+                .into_parts();
+            resolve_plan(&mut decoded, urls).unwrap();
+            assert_eq!(LAST_SEARCH.with(|last| last.get()), Some(search));
+            let mut everywhere = plan(command);
+            resolve_plan(&mut everywhere, None).unwrap();
+            assert_eq!(decoded, everywhere);
+        }
+        let request = |context: Vec<prost_types::Any>| proto::ExecutePlanRequest {
+            plan: Some(plan(&write)),
+            user_context: Some(proto::UserContext {
+                extensions: context,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let marked = prost_types::Any {
+            type_url: PLACEHOLDER_TYPE_URL.to_string(),
+            value: Vec::new(),
+        };
+        for (context, search) in [
+            (Vec::new(), Search::Relations),
+            (vec![marked], Search::Everywhere),
+        ] {
+            let bytes = request(context.clone()).encode_to_vec();
+            let of_encoding = resolve_request(
+                BuiltOutside::decoded(bytes.as_slice(), proto::ExecutePlanRequest::decode).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(LAST_SEARCH.with(|last| last.get()), Some(search));
+            assert_eq!(of_encoding, resolve_request(request(context)).unwrap());
+        }
+
+        // An analysis of two plans, each over a placeholder.
+        let same = |command: &proto::Command| {
+            proto::analyze_plan_request::Analyze::SameSemantics(
+                proto::analyze_plan_request::SameSemantics {
+                    target_plan: Some(plan(command)),
+                    other_plan: Some(proto::Plan {
+                        op_type: Some(proto::plan::OpType::Root(standalone.clone())),
+                    }),
+                },
+            )
+        };
+        for (command, search) in [
+            (&write, Search::Relations),
+            (&extension, Search::Everywhere),
+        ] {
+            let bytes = proto::AnalyzePlanRequest {
+                analyze: Some(same(command)),
+                ..Default::default()
+            }
+            .encode_to_vec();
+            let (decoded, urls) =
+                BuiltOutside::decoded(bytes.as_slice(), proto::AnalyzePlanRequest::decode)
+                    .unwrap()
+                    .into_parts();
+            let mut analyze = decoded.analyze.unwrap();
+            resolve_analysis(&mut analyze, urls).unwrap();
+            assert_eq!(LAST_SEARCH.with(|last| last.get()), Some(search));
+            let mut everywhere = same(command);
+            resolve_analysis(&mut everywhere, None).unwrap();
+            assert_eq!(analyze, everywhere);
+        }
+    }
+
+    #[test]
+    fn a_message_that_does_not_decode_is_its_decoder_s_error() {
+        // `BuiltOutside::decoded` gives the error of the decoder of the message, as the client's
+        // decode of it does.
+        let error = BuiltOutside::decoded(&[0xff, 0xff][..], proto::Relation::decode).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            proto::Relation::decode(&[0xff, 0xff][..])
+                .unwrap_err()
+                .to_string()
+        );
+        assert_eq!(
+            placeholder_urls(PLACEHOLDER_TYPE_URL.repeat(3).as_bytes()),
+            3
+        );
+    }
+
     #[test]
     fn placeholders_resolve_in_the_messages_of_the_extensions_of_plugins() {
         // As the relation of Delta Lake's merge, the extension of a relation whose message, of a
@@ -5266,7 +6242,7 @@ mod placeholder_tests {
         let mut plan = extension_of(&join(&shallow));
         // The message of the extension, which the client serializes on its own, adds no level to
         // the plan, as PySpark's serializer counts them.
-        assert_eq!(resolve_relation_levels(&mut plan).unwrap(), 1);
+        assert_eq!(resolve_relation_levels(&mut plan, None).unwrap(), 1);
         assert_eq!(plan, extension_of(&join(&relation)));
 
         // Of the extension of a command, as a plugin's Python client sends it.
@@ -5282,7 +6258,7 @@ mod placeholder_tests {
             })),
         };
         let mut sent = command(&alias);
-        resolve_command(&mut sent).unwrap();
+        resolve_command(&mut sent, None).unwrap();
         let resolved = proto::SubqueryAlias {
             input: Some(Box::new(relation)),
             ..alias.clone()
@@ -5291,7 +6267,7 @@ mod placeholder_tests {
 
         // An extension of no placeholder is left as it is, of its levels.
         let mut plain = extension_of(&resolved);
-        assert_eq!(resolve_relation_levels(&mut plain).unwrap(), 1);
+        assert_eq!(resolve_relation_levels(&mut plain, None).unwrap(), 1);
         assert_eq!(plain, extension_of(&resolved));
         // So is one whose message holds the type URL in a string, which does not read as a
         // message, and in an Any of no marker.
@@ -5337,7 +6313,10 @@ mod placeholder_tests {
             ))),
         };
         let mut plan = alias(alias(shallow.clone()));
-        assert_eq!(resolve_relation_levels(&mut plan).unwrap(), 2 + levels);
+        assert_eq!(
+            resolve_relation_levels(&mut plan, None).unwrap(),
+            2 + levels
+        );
         assert_eq!(plan, alias(alias(relation.clone())));
 
         let sql = |view: proto::Relation| proto::Relation {
@@ -5378,7 +6357,10 @@ mod placeholder_tests {
             }))),
         };
         let mut plan = alias(limit(shallow.clone()));
-        assert_eq!(resolve_relation_levels(&mut plan).unwrap(), 2 + levels);
+        assert_eq!(
+            resolve_relation_levels(&mut plan, None).unwrap(),
+            2 + levels
+        );
         assert_eq!(plan, alias(limit(relation)));
     }
 
@@ -5476,7 +6458,10 @@ mod placeholder_tests {
         let expected = relations_over(&relation, &other);
         assert_eq!(plans.len(), expected.len());
         for (mut plan, expected) in plans.into_iter().zip(expected) {
-            assert_eq!(resolve_relation_levels(&mut plan).unwrap(), 1 + levels);
+            assert_eq!(
+                resolve_relation_levels(&mut plan, None).unwrap(),
+                1 + levels
+            );
             assert_eq!(plan, expected);
         }
         // And down a chain of them, of its levels.
@@ -5487,7 +6472,10 @@ mod placeholder_tests {
             })))
         };
         let mut plan = limit(limit(limit(shallow)));
-        assert_eq!(resolve_relation_levels(&mut plan).unwrap(), 3 + levels);
+        assert_eq!(
+            resolve_relation_levels(&mut plan, None).unwrap(),
+            3 + levels
+        );
         assert_eq!(plan, limit(limit(limit(relation))));
     }
 
@@ -5561,7 +6549,7 @@ mod placeholder_tests {
             let mut command = proto::Command {
                 command_type: Some(command_type),
             };
-            resolve_command(&mut command).unwrap();
+            resolve_command(&mut command, None).unwrap();
             assert_eq!(command.command_type, Some(expected));
         }
     }
@@ -5575,7 +6563,7 @@ mod placeholder_tests {
         resolve_relation(&mut relation).unwrap();
         assert_eq!(relation, before);
         let mut command = proto::Command::default();
-        resolve_command(&mut command).unwrap();
+        resolve_command(&mut command, None).unwrap();
         assert_eq!(command, proto::Command::default());
     }
 
@@ -5649,8 +6637,8 @@ mod deep_plan_tests {
         assert_eq!(chain(1).depth(), 1);
         assert_eq!(chain(5).depth(), 5);
         let with = LogicalPlan::WithRelations {
-            root: chain(3),
-            references: vec![chain(2), chain(7)],
+            root: chain(3).into(),
+            references: vec![chain(2).into(), chain(7).into()],
         };
         assert_eq!(with.depth(), 8);
     }
@@ -5661,8 +6649,8 @@ mod deep_plan_tests {
         let mut plan = Arc::new(range(0, 10, 1));
         for _ in 0..64 {
             plan = Arc::new(LogicalPlan::WithRelations {
-                root: Arc::clone(&plan),
-                references: vec![plan],
+                root: Arc::clone(&plan).into(),
+                references: vec![plan.into()],
             });
         }
         assert_eq!(plan.depth(), 65);
@@ -5708,7 +6696,7 @@ mod deep_plan_tests {
             );
         }
         Arc::new(LogicalPlan::Project {
-            input: chain(plan_levels),
+            input: chain(plan_levels).into(),
             columns: vec![crate::column::Column::new(expr)],
         })
     }
@@ -5749,7 +6737,7 @@ mod deep_plan_tests {
             crate::expression::SubqueryType::Exists,
         );
         let mut plan = Arc::new(LogicalPlan::Filter {
-            input: Arc::new(range(0, 10, 1)),
+            input: Arc::new(range(0, 10, 1)).into(),
             condition: crate::column::Column::new(Expression::new(ExpressionNode::Subquery(
                 Box::new(subquery),
             ))),
@@ -5847,12 +6835,13 @@ mod deep_plan_tests {
                 },
             ))),
         };
-        let depth = resolve_relation_levels(&mut relation).unwrap();
+        let depth = resolve_relation_levels(&mut relation, None).unwrap();
         Arc::new(LogicalPlan::Raw {
             relation: Box::new(relation),
             owner: None,
             depth,
             observations: Vec::new(),
+            holes: Default::default(),
         })
     }
 
@@ -5889,7 +6878,7 @@ mod deep_plan_tests {
                 crate::expression::SubqueryType::Exists,
             );
             let filter = Arc::new(LogicalPlan::Filter {
-                input: Arc::new(range(0, 10, 1)),
+                input: Arc::new(range(0, 10, 1)).into(),
                 condition: crate::column::Column::new(Expression::new(ExpressionNode::Subquery(
                     Box::new(subquery),
                 ))),
@@ -5953,7 +6942,10 @@ mod deep_plan_tests {
             "UNSUPPORTED_OPERATION",
             &[("operation", &format!("data type {value}"))],
         );
-        Arc::new(LogicalPlan::Unbuildable { input, error })
+        Arc::new(LogicalPlan::Unbuildable {
+            input: input.into(),
+            error: Box::new(error),
+        })
     }
 
     #[test]
@@ -5974,8 +6966,8 @@ mod deep_plan_tests {
         let left = unbuildable(Arc::new(range(0, 10, 1)), "left");
         let right = unbuildable(Arc::new(range(0, 10, 1)), "right");
         let both = LogicalPlan::SetOperation {
-            left: unbuildable(Arc::clone(&left), "outer left"),
-            right,
+            left: unbuildable(Arc::clone(&left), "outer left").into(),
+            right: right.into(),
             set_op_type: SetOpType::Union,
             is_all: true,
             by_name: true,
@@ -6006,7 +6998,7 @@ mod deep_plan_tests {
         };
         let filter = |input: Arc<LogicalPlan>, name: &str| {
             Arc::new(LogicalPlan::Filter {
-                input,
+                input: input.into(),
                 condition: unbuildable_column(name),
             })
         };
@@ -6029,7 +7021,7 @@ mod deep_plan_tests {
 
         let ids = Arc::new(PlanIds::new());
         let inner = Arc::new(LogicalPlan::Project {
-            input: Arc::new(range(0, 5, 1)),
+            input: Arc::new(range(0, 5, 1)).into(),
             columns: vec![crate::column::Column::new(Expression::function(
                 "max",
                 vec![Expression::column("id")],
@@ -6048,7 +7040,7 @@ mod deep_plan_tests {
         );
         let project = |expression: &Expression| {
             Arc::new(LogicalPlan::Project {
-                input: Arc::new(range(0, 3, 1)),
+                input: Arc::new(range(0, 3, 1)).into(),
                 columns: vec![crate::column::Column::new(expression.clone())],
             })
         };
@@ -6102,12 +7094,28 @@ mod deep_plan_tests {
             crate::expression::SubqueryType::Scalar,
         );
         let plan = Arc::new(LogicalPlan::Project {
-            input: Arc::new(range(0, 1, 1)),
+            input: Arc::new(range(0, 1, 1)).into(),
             columns: vec![crate::column::Column::new(Expression::new(
                 ExpressionNode::Subquery(Box::new(subquery)),
             ))],
         });
         let error = relation_with_ids(&plan, &PlanIds::new()).unwrap_err();
         assert!(error.message().contains("data type subquery"), "{error}");
+    }
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+
+    /// The size of a node of a plan, that of its largest variant, which each node of every plan
+    /// takes, whatever its variant (see `LogicalPlan`): a field that makes it grow goes in a box,
+    /// or this size changes on purpose. The largest variants are `Parse`, `GroupMap` and
+    /// `AsOfJoin`, of 177 bytes, of the 16 bytes of each of their inputs (`SharedPlan`).
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn a_node_of_a_plan_is_184_bytes() {
+        assert_eq!(std::mem::size_of::<SharedPlan>(), 16);
+        assert_eq!(std::mem::size_of::<LogicalPlan>(), 184);
     }
 }

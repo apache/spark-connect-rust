@@ -132,18 +132,31 @@ There are no justified non-gaps: anything in the diff is a real gap to close. Re
 diff until it shows none.
 
 `SparkSession.client` is not the gRPC `SparkConnectClient`: it has the public API of PySpark
-Connect's over the Rust transport (`python/pyspark/sql/connect/client/__init__.py`), which the
+Connect's over the Rust transport (`python/pyspark/sql/connect/client/core.py`), which the
 vendored `pyspark.ml` (and any module that builds its own `spark.connect` messages) uses -
 `execute_command(pb2.Command)`, `to_table(pb2.Plan)`, `schema(pb2.Plan)`, `config`, the ML cache
 RPCs, and the retry policies, which the transport retries with - with the
 `pyspark.sql.connect.proto`: always the Rust protobuf runtime (`crates/pyspark-rs/src/pbmsg`,
 exported by `pyspark/sql/connect/proto/_rust.py`; the generated `*_pb2.py` are not vendored, only
-their `.pyi` stubs), which `python/tests/test_proto_rust_offline.py` compares with upb. Where
-`protobuf` is installed, the runtime also adds the files of the protos to protobuf's default pool,
-so that a plugin's generated modules that import them build, and wraps protobuf's builder, so that
-those modules (of protoc 3.20 and later, which build their classes with it) get the runtime's
-classes, whose fields take ours as they are: their files are added to the runtime's pool at run
-time (`pbmsg::pool::register`; see `docs/compatibility.md`).
+their `.pyi` stubs, next to which a docstring-only `*_pb2.py` is the source that type checkers
+find, which the runtime's finder shadows), which `python/tests/test_proto_rust_offline.py`
+compares with upb. Where `protobuf` imports, the runtime's classes are of the shape of upb's
+(metaclass `MessageMeta`, subclasses of protobuf's `Message` and `WKTBASES`, of protobuf's
+descriptors of its default pool, to which the runtime adds the files of the protos), and the
+runtime wraps protobuf's metaclass (`reflection.GeneratedProtocolMessageType`) and
+`message_factory.GetMessageClass`, so that a plugin's generated modules (of any protoc) of files
+of proto2, proto3 or editions that import the protos get the runtime's classes, whose fields take
+ours as they are: their files are added to the runtime's pool at run time
+(`pbmsg::pool::register`; see `docs/compatibility.md`). So do the modules of the files of their
+package (of a package) that they import, and the modules of the files of any package (but
+Google's) that import a file that the runtime holds so, before or after it does. Any other file
+keeps protobuf's classes (the runtime has classes of its types of its own, which pickle as
+protobuf's): a file of another package or of no package that such a file imports, unless it imports
+a held file itself, Google's, and a file that the runtime cannot hold (of extensions, extension
+ranges or message sets), which also gives protobuf's classes back to the held files that it
+imports (but a proto of Spark Connect and a file that imports one), so that upb's classes of it
+take their messages. Never take over a module of a file that imports no file that the runtime
+holds, but a file of a plugin's own package that the plugin's file imports.
 `DataFrame(plan, session)`, `DataFrame._plan` and `Column._expr` are the other half of
 that bridge: a `LogicalPlan` of Python sends its `plan(session)` relation as it is, of the
 placeholder that `DataFrame._plan.plan(session)` gives, of one level, which holds the relation of
@@ -151,9 +164,11 @@ the DataFrame encoded, built at the call, and which the core replaces wherever a
 an analysis built in Python holds a relation: every input of every relation
 (`plan::relation_inputs_of`), the relation of each command that holds one, the inputs of the plans
 of `pyspark.ml`, the messages of the extensions of a plugin's relations and commands
-(`plan::resolve_relation`, `resolve_command`, `resolve_analysis`), and those of the extensions of
-the expressions of the relations and commands built in Python (`plan::resolve_own_fields`): "Plans
-of a DataFrame's relation" in `dev/parity/known-differences.md`.
+(`plan::resolve_relation_levels`, `resolve_command`, `resolve_analysis`), and those of the
+extensions of the expressions of the relations and commands built in Python
+(`plan::resolve_own_fields`), which it encodes and reads only when the bytes that the client gave
+hold a type URL of a placeholder that is not of one at the relations (`plan::BuiltOutside`):
+"Plans of a DataFrame's relation" in `dev/parity/known-differences.md`.
 
 ## 3. Close API gaps (three layers)
 
@@ -224,9 +239,14 @@ Rigorously classify before touching anything (diff our dir vs the version tag):
   shims can hold vendored files too, such as most of `errors/*`, `sql/session.py` and the
   classic modules of the objects of a session (`sql/{catalog,conf,readwriter,udf,udtf,group}.py`,
   `sql/streaming/{query,readwriter}.py`, `sql/pandas/group_ops.py` and others), whose objects on
-  Spark Connect are of the classes of `sql/connect/*`, as in PySpark, and `sql/utils.py`, whose
-  decorators run those of Spark Connect: `VENDORED_FILES` of `scripts/check_vendored_upstream.sh`
-  lists every vendored file.
+  Spark Connect are of the classes of `sql/connect/*`, as in PySpark, `sql/utils.py`, whose
+  decorators run those of Spark Connect, the package `sql/functions/` (with
+  `sql/connect/functions/partitioning.py`), whose functions run those of
+  `sql/connect/functions/builtin.py`, the drop-in's, which `_generated.py` there and the Rust
+  core implement, and `sql/column.py` and `sql/table_arg.py`, whose classes the metaclass of
+  `sql/_classic_bases.py` (the one of `sql/tvf_argument.py`, their base) makes the native Connect
+  classes virtual subclasses of: `VENDORED_DIRS` and `VENDORED_FILES` of
+  `scripts/check_vendored_upstream.sh` list every vendored file.
 
 Subtree conversion (serial, needs a **clean working tree**, one dir at a time):
 ```
@@ -284,7 +304,12 @@ Vendor the ones we don't have a Rust implementation for.
 
 ## 7. Pre-push discipline (mandatory)
 
-Run all of these green before pushing:
+Run all of these green before pushing. Workspace Clippy includes the experimental
+JNI host and requires macOS/Linux, a C compiler and `JAVA_HOME` pointing to a JDK
+with JNI headers (JDK 21 is used in CI). Client-only checks without a JDK can add
+`--exclude spark-connect-jni` to the workspace Clippy command.
+The frontend-only `cargo test --locked -p spark-connect-server` uses injected
+engines and needs no JDK; it does not establish JNI or Spark compatibility.
 ```
 cargo test -p apache-spark-connect --release --lib
 cargo test -p apache-spark-connect --release --no-run              # compiles ALL integration tests
@@ -294,6 +319,12 @@ cargo clippy --workspace --all-targets -- -D warnings              # BLOCKING CI
 # CI's lint job pins Rust 1.100.0, also lints datafusion,polars and the excluded crates, and runs
 # rustdoc of the published crates but proto with RUSTDOCFLAGS="-D warnings" (see docs/contributing.md)
 ```
+Native JAR license assets bind whole-file hashes for the `inputs` recorded in
+`crates/spark-connect-server/jvm/native-licenses/dependencies.json`. Run
+`python3 scripts/gen_native_binary_licenses.py --check` before pushing. If it reports
+stale assets, run `python3 scripts/gen_native_binary_licenses.py` and commit the
+regenerated native-license assets, even when the JNI dependency closure is unchanged.
+
 Then re-run the step-2 diff (0 user-facing gaps) and the parity gate
 `scripts/run_official_tests.py` (runs the official connect suite through our Rust
 transport; `FLAKY_FILES` = retry, not skip). Only then
@@ -459,10 +490,10 @@ For every method matching a pyspark name:
   are those of the `pyspark.ml` class and its JVM estimator. Check them against the reference
   client's `pyspark.ml` classes. In particular:
   - `fit`, `transform` and `evaluate` take Spark DataFrames only, with no implicit conversion
-    (`dataset_of`): a pandas DataFrame raises the `TypeError` of `reject_pandas`, and another
-    object the `AttributeError` of `sparkSession`, which `pyspark.ml` reads of the dataset first.
-    A helper call that `pyspark.ml` sends with its literal serialization of the dataset, such as
-    `Correlation.corr`, raises what that serialization raises (`helper_relation`, `fetch_arg_of`);
+    (`dataset_of`): a pandas DataFrame, or any other object, raises the `AttributeError` of
+    `sparkSession`, which `pyspark.ml` reads of the dataset first. A helper call that `pyspark.ml`
+    sends with its literal serialization of the dataset, such as `Correlation.corr`, raises what
+    that serialization raises (`helper_relation`, `fetch_arg_of`);
   - a features column must be a `VectorUDT` column, as the JVM checks it, with no implicit
     `array_to_vector`;
   - column params are sent as given, with no client-side respelling or casting;
@@ -504,12 +535,55 @@ For every method matching a pyspark name:
   a struct is not valid then). The offline test
   `test_objects_traversed_while_they_are_created_do_not_crash` makes a collection meet each such
   class there; add a new one to it.
-  A `__traverse__` reports each Python object once: what several objects share, such as the
-  plan `Arc` of a DataFrame and of its grouped data, is reported by none of them, unless one
-  answers for the others. A class that keeps a DataFrame and a clone of its plan, as grouped data
-  and the writers do, reports the DataFrame and holds a `crate::gc::Share` of its
-  `crate::gc::Holders` with the clone (`PyDataFrame::plan_share`), so that the DataFrame reports
-  what the plan holds; else the DataFrame reports nothing of its plan while the object lives.
+  A `__traverse__` reports each Python object once, for each reference that it holds. The parts
+  of plans and expressions that hold Python objects (the functions of UDFs in their picklers,
+  the plans of the Python client and the Observations as owners), which several values of the
+  core share as `Arc`s, are seen through one `crate::gc::SharedPart` each, which mirrors the part
+  and its references (see `crate::gc`). A class that keeps a value of the core of plans or
+  expressions holds a `crate::gc::Parts` of the references of the value (its `held_parts`, of
+  `spark_connect::gc`, each field once) for as long as it holds the value, reports it in
+  `__traverse__`, and releases it in `__clear__` and before it replaces the value; a state that
+  shallow copies share reports through one Python object that each copy holds (the `WriterParts`
+  of a `WriterState`). A value that a class keeps without a `Parts` of it, as a Rust structure
+  keeps one, keeps its parts alive and unreported (a `SharedPart` reports only while every
+  reference to its part is of a holder that reports it), which is safe but leaves its cycles
+  uncollected. A field of the core that holds a part goes in `spark_connect::gc` (`Part::held`),
+  whose tests check that the references that it gives are every reference to each part: a
+  reference given twice would let the collector free what a holder still uses. Of the same walk,
+  each node tells, as it is made, whether a pickler or an owner is at or below it
+  (`PartRef::holds_objects`, of the inputs of plan nodes, `plan::SharedPlan`, and of the nodes of
+  expressions), so that the binding neither walks nor remembers a part of none.
+  The collector must get the same references of an object in each of its passes, and the Rust code
+  that runs without the GIL clones and drops parts meanwhile (a request builds its plan without
+  it), which changes whether a part is covered: so every release of the GIL is counted for the
+  collector, as what it may clone or drop (`Python::detach` and the C functions that release it
+  are disallowed methods of `crates/pyspark-rs/clippy.toml`). A call that clones and drops only
+  the parts of the holders that it names, as a request of a DataFrame of its plan, goes through
+  `interrupt::interruptible_of` (`crate::gc::of_parts`, `in_use`); one of the parts of values of
+  the core that it holds, such as the clone of a DataFrame that an ML fit is of or the copy of a
+  writer's state that a write runs on, through `interrupt::interruptible_of_values`
+  (`crate::gc::of_values`, `in_use_of_values`, `detach_of_values`): the `SharedPart`s that those
+  reach are busy until it ends. It must reach no part through anything else, such as a weak
+  reference, a registry or another holder: the placeholders of a message that Python code built
+  are replaced with the GIL held (`client::resolved`). A call that clones no part and drops none
+  that a holder reports, of sessions, identifiers, protobufs and bytes, goes through
+  `crate::gc::detach_without_parts` or `interrupt::interruptible_without_parts`, which count
+  nothing: name such a call only when every path that it runs is of these. A call of code that the
+  binding does not know, which may clone or drop any part, goes through `crate::gc::detach` (and
+  an `interrupt::interruptible` that nothing marks): no `SharedPart` reports anything while it
+  runs. Code that runs without the GIL outside these calls, on a thread of the runtime or of the
+  core, may drop a value of the core that no holder reports, but must not clone a part, nor drop a
+  `Parts` or a value that a `Parts` covers. The tests check the calls that they make: the core
+  tells the binding of each new reference to a part (a `Clone` of the core's part types, a new
+  DataFrame's inputs, a lookup of a plan ID, which a new kind of reference must tell
+  `spark_connect::gc::cloned` of too), and a reference made without the GIL, outside a counted
+  call, to a part that no call marks busy fails the test (`crate::gc::check_clone`, the
+  `conftest.py` of `python/tests`, which also fails one between tests and after the last). As the
+  core tells only of some of its clones, a test of the offline suite also watches the parts that
+  are reported, with the GIL held, while calls of the main APIs run, of nothing that the core
+  tells (`crate::gc::_watch_reported_parts`,
+  `test_no_part_that_the_collector_sees_is_cloned_without_the_gil_by_a_call`): add a call of a new
+  API that runs without the GIL to it.
 - **Streaming listeners and progress holders:** Keep progress holders (`StreamingQueryProgress`,
   `StateOperatorProgress`, etc.) as faithful pure-Python implementations parsed from server
   JSON, not Rust-backed. The listener bus (subscribe/dispatch) is genuinely Rust-backed;
@@ -550,7 +624,7 @@ For every method matching a pyspark name:
   - **Internal pandas functions dispatch by NAME, not by client reimplementation.**
     `pyspark.sql.internal.InternalFunction` (`distributed_sequence_id`, `pandas_product`,
     `pandas_stddev`, ...) routes through `connect.functions.builtin._invoke_function_over_columns`,
-    which must build a plain `UnresolvedFunction(name, cols)` (via `functions._invoke_function` →
+    which must build a plain `UnresolvedFunction(name, cols)` (via its `_invoke_function` →
     Rust `pyfunc_invoke_function`). The Connect *server* resolves these internal names. Do NOT
     special-case them client-side (e.g. faking `distributed_sequence_id` with a `row_number`
     window — it is wrong and non-distributed).

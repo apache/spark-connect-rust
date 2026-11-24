@@ -49,6 +49,13 @@ pub fn _data_type_proto<'py>(
 /// of no conversion of its SQL type, which is read only when the core can read it.
 #[pyfunction]
 pub fn _data_type_of_proto(py: Python<'_>, data_type: &[u8]) -> PyResult<Py<PyAny>> {
+    // The type of a response nests up to `spark_connect_proto::MAX_KEPT_DEPTH` levels of messages,
+    // which its decode, checks and conversion recurse over: on a stack that holds them.
+    crate::on_grown_stack(|| data_type_of_proto(py, data_type))
+}
+
+/// [`_data_type_of_proto`], on the stack of the caller.
+fn data_type_of_proto(py: Python<'_>, data_type: &[u8]) -> PyResult<Py<PyAny>> {
     let mut data_type = proto::DataType::decode(data_type)
         .map_err(|error| PyValueError::new_err(error.to_string()))?;
     match unconverted(Some(&data_type)) {
@@ -174,4 +181,13 @@ fn unsupported_data_type(py: Python<'_>, node: &[u8]) -> PyErr {
         ),
         Err(err) => err,
     }
+}
+
+/// A new plan ID of the counter from which the core numbers the nodes of its plans, for a plan of
+/// `pyspark.sql.connect.plan`, as PySpark's `LogicalPlan._fresh_plan_id()` takes one of its
+/// counter for each plan: one counter for both, so that the `_plan_id` of such a plan, which a
+/// `DataFrame(plan, session)` keeps, is of no other node of any session.
+#[pyfunction]
+pub fn _fresh_plan_id() -> i64 {
+    spark_connect::plan::fresh_plan_id()
 }

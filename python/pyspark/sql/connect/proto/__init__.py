@@ -24,11 +24,13 @@ with the API, bytes, text and errors of protobuf's messages, and makes each of t
 needed. The modules of PySpark that build their own messages, such as ``pyspark.ml``, use them.
 The gRPC stubs of ``base_pb2_grpc`` are not exported: the Rust transport speaks gRPC.
 
-Where ``protobuf`` is installed, the files of the protos are added to its default descriptor
-pool too, as the generated modules add them, so that the modules that protoc generates of other
-protos that import them (those of a plugin, such as Delta Lake's) build, and those modules get the
-classes of the runtime, whose message fields take the messages of this package as they are, as
-protobuf's take PySpark's.
+Where ``protobuf`` imports, the classes are of the shape of upb's (the implementation of a
+``protobuf`` install), subclasses of protobuf's ``Message`` of protobuf's descriptors, of the files
+of the protos that the runtime adds to protobuf's default pool, as the generated modules add them,
+so that the modules that protoc generates of other protos that import them (those of a plugin, such
+as Delta Lake's) build. Those modules, and those of the files that they import, get the classes of
+the runtime, whose message fields take the messages of this package as they are, as protobuf's take
+PySpark's, and which protobuf's lookups of their types give.
 """
 from pyspark.sql.connect.proto import _rust
 

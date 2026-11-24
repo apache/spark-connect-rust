@@ -29,6 +29,118 @@ pub const PARAM_GRPC_KEEPALIVE_ENABLED: &str = "grpc_keepalive_enabled";
 pub const PARAM_GRPC_KEEPALIVE_TIME_MS: &str = "grpc_keepalive_time_ms";
 pub const PARAM_GRPC_KEEPALIVE_TIMEOUT_MS: &str = "grpc_keepalive_timeout_ms";
 pub const PARAM_GRPC_KEEPALIVE_WITHOUT_CALLS: &str = "grpc_keepalive_without_calls";
+/// The credentials of a channel, as PySpark's `DefaultChannelBuilder.toChannel` gives them to
+/// grpcio's channel: of no security unless the builder is `secure`, and then gRPC's local
+/// credentials when it is not `use_ssl` and its `_host` is `localhost`, else TLS, both with the
+/// token. A builder of them ([`ChannelBuilder::with_credentials`], which the Python binding sets
+/// of its channel builders) has them, in place of [`ChannelBuilder::secure`]'s rule of its
+/// parameters and its host; a connection string never sets them. Not a stable API.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Credentials {
+    /// `grpc.insecure_channel`: plaintext, and no token, of the parameters or of the environment.
+    Insecure,
+    /// `grpc.local_channel_credentials()`: plaintext, of the token of the parameters, to a peer of
+    /// a loopback address only, as gRPC's local credentials of TCP take no other.
+    Local,
+    /// `grpc.ssl_channel_credentials()`: TLS, of the token of the parameters.
+    Ssl,
+}
+
+/// A target of gRPC that a channel connects to, in place of the host and the port of its connection
+/// string, as the Python binding reads the `endpoint` of a channel builder, which PySpark's
+/// `toChannel` gives grpcio's channel, as gRPC's resolvers read a target (see
+/// [`ChannelBuilder::with_target`]). A connection string never sets it. Not a stable API.
+#[doc(hidden)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ChannelTarget {
+    /// A name of `dns:` (or of no scheme): its `host` and its `port`, and `name`, the name as
+    /// gRPC's errors and the tunnel of a proxy give it, which is the path of the target
+    /// (`localhost:15002`, `localhost:` of the port 443). The system's resolver resolves it, but
+    /// of `server`, the DNS server of the authority of the target (`dns://127.0.0.1:53/...`),
+    /// which is asked for it as gRPC's resolver asks it.
+    Name {
+        host: String,
+        port: u16,
+        name: String,
+        server: Option<std::net::SocketAddr>,
+    },
+    /// A name of `dns:` that gRPC's resolver does not resolve, of `detail`, the error that it
+    /// gives of it (`Failed to parse port in name: localhost:abc`).
+    Unresolvable { name: String, detail: String },
+    /// The addresses of `ipv4:` and `ipv6:`, in their order, which are tried in turn, and
+    /// `authority`, the path of the target, which the tunnel of a proxy names.
+    Addresses {
+        addresses: Vec<std::net::SocketAddr>,
+        authority: String,
+    },
+    /// The sockets of `unix:`, of their paths, or of `unix-abstract:`, of their names, in their
+    /// order, which are tried in turn.
+    Unix {
+        paths: Vec<Vec<u8>>,
+        abstract_names: bool,
+    },
+    /// A target whose calls fail with the status of `code`, of gRPC's codes, and `message`, as
+    /// those of gRPC's channel of a target that it does not take do.
+    Refused { code: i32, message: String },
+}
+
+/// gRPC's names of a target of gRPC (see [`ChannelTarget`]) that its channel takes besides what it
+/// connects to, as the Python binding reads them of the `endpoint` of a channel builder (see
+/// `grpc_target`), in place of the host and the port of its connection string, which stand for the
+/// target only. Not a stable API.
+#[doc(hidden)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub struct TargetNames {
+    /// gRPC's default authority of the target: its path of no first `/`, percent-encoded as an
+    /// authority (`localhost:15002`, `127.0.0.1:1,127.0.0.1:2`, `tmp%2Fa.sock`), the `:authority`
+    /// of its calls, of whose host TLS verifies the name (see [`TargetNames::tls_name`]).
+    pub authority: String,
+    /// Of a target that gRPC's proxy mapper proxies, any but one of `unix:`: the host of its path,
+    /// which the exclusions of the proxy are checked against, and the server of the `CONNECT` of
+    /// the tunnel, the `host:port` of the path, of the port 443 without one
+    /// (`[127.0.0.1:1,127.0.0.1:2]:443`), up to a NUL, as gRPC's argument of it is a C string.
+    pub proxied: Option<(String, String)>,
+}
+
+impl TargetNames {
+    /// The host of the authority, as gRPC's `SplitHostPort` gives it, an IPv6 address without its
+    /// brackets, or None of an authority that it does not split.
+    pub fn host(&self) -> Option<&str> {
+        crate::grpc_target::split_host_port(&self.authority).map(|(host, _)| host)
+    }
+
+    /// The name that TLS verifies of the target, as gRPC's `grpc_ssl_host_matches_name` takes it:
+    /// the host of the authority up to its first `%`, which would start the zone of an IPv6
+    /// address, or None of no host, which no certificate matches.
+    pub fn tls_name(&self) -> Option<&str> {
+        let host = self.host()?;
+        let name = &host[..host.find('%').unwrap_or(host.len())];
+        (!name.is_empty()).then_some(name)
+    }
+}
+
+/// The metadata of the calls of a client, which a binding reads for each call, as PySpark's client
+/// calls `self._builder.metadata()` for each attempt of a call, of a channel builder whose
+/// `metadata()` is its own (see `SparkConnectClient::set_metadata_source`). Not a stable API.
+#[doc(hidden)]
+pub trait MetadataSource: Send + Sync {
+    /// The metadata of a call that is sent now, as pairs of the bytes of a key and of a value, as
+    /// grpcio encodes them (a value of a key of `-bin` is the bytes that are sent in base64), or
+    /// the error of the call, which fails it as it is. A key or a value that gRPC does not send
+    /// fails the call of gRPC's `INTERNAL` (`Invalid metadata`).
+    #[allow(clippy::type_complexity)]
+    fn metadata(&self) -> futures::future::BoxFuture<'static, Result<Vec<(Vec<u8>, Vec<u8>)>>>;
+
+    /// The metadata of a call that is sent now, as [`MetadataSource::metadata`] gives it, read on
+    /// the calling thread if it can be read there without a wait, as of a thread of the binding's
+    /// interpreter, which PySpark's finalizer reads it on; else None, of a source that is then read
+    /// as the call is sent.
+    #[allow(clippy::type_complexity)]
+    fn metadata_now(&self) -> Option<Result<Vec<(Vec<u8>, Vec<u8>)>>> {
+        None
+    }
+}
 
 const GRPC_DEFAULT_KEEPALIVE_ENABLED: bool = true;
 const GRPC_DEFAULT_KEEPALIVE_TIME_MS: i64 = 60 * 1000;
@@ -41,6 +153,17 @@ pub struct ChannelBuilder {
     params: BTreeMap<String, String>,
     host: String, // display host; IPv6 wrapped in [ ]
     port: u16,
+    /// The [`Credentials`] that the binding gave the builder, apart from its parameters, which
+    /// no connection string sets.
+    credentials: Option<Credentials>,
+    /// The [`ChannelTarget`] that the binding gave the builder, which no connection string sets.
+    target: Option<ChannelTarget>,
+    /// gRPC's names of the target, which no connection string sets (see [`TargetNames`]).
+    names: Option<TargetNames>,
+    /// The metadata of the requests that the binding gave the builder, in place of the parameters
+    /// of the connection string that are not the channel's own (see
+    /// [`ChannelBuilder::with_metadata`]).
+    metadata: Option<Vec<(String, String)>>,
 }
 
 /// The gRPC/HTTP2 keepalive of a channel: PINGs after `time` without activity, a connection that
@@ -75,6 +198,27 @@ impl std::fmt::Debug for ChannelBuilder {
             .field("params", &params)
             .field("host", &self.host)
             .field("port", &self.port)
+            .field("credentials", &self.credentials)
+            .field("target", &self.target)
+            .field("names", &self.names)
+            .field(
+                "metadata",
+                &self.metadata.as_ref().map(|metadata| {
+                    metadata
+                        .iter()
+                        .map(|(key, value)| {
+                            (
+                                key.as_str(),
+                                if is_secret_param(key) {
+                                    "<redacted>"
+                                } else {
+                                    value.as_str()
+                                },
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                }),
+            )
             .finish()
     }
 }
@@ -159,7 +303,15 @@ impl ChannelBuilder {
             hostname
         };
 
-        Ok(Self { params, host, port })
+        Ok(Self {
+            params,
+            host,
+            port,
+            credentials: None,
+            target: None,
+            names: None,
+            metadata: None,
+        })
     }
 
     pub fn get(&self, key: &str) -> Option<&str> {
@@ -203,37 +355,127 @@ impl ChannelBuilder {
             .unwrap_or(false)
     }
 
-    /// Token from the connection string, falling back to the env var.
+    /// Token from the connection string, falling back to the env var. Of [`Credentials`], the
+    /// token is that of the parameters, which the binding gave as PySpark's `toChannel` reads it,
+    /// and none of a channel of no security.
     pub fn token(&self) -> Option<String> {
-        self.params
-            .get(PARAM_TOKEN)
-            .cloned()
-            .or_else(|| std::env::var("SPARK_CONNECT_AUTHENTICATE_TOKEN").ok())
+        match self.credentials() {
+            Some(Credentials::Insecure) => None,
+            Some(_) => self.params.get(PARAM_TOKEN).cloned(),
+            None => self
+                .params
+                .get(PARAM_TOKEN)
+                .cloned()
+                .or_else(|| std::env::var("SPARK_CONNECT_AUTHENTICATE_TOKEN").ok()),
+        }
+    }
+
+    /// The [`Credentials`] that the builder was given ([`ChannelBuilder::with_credentials`]), if
+    /// any. Not a stable API.
+    #[doc(hidden)]
+    pub fn credentials(&self) -> Option<Credentials> {
+        self.credentials
+    }
+
+    /// This builder, of the credentials `credentials`, which decide its TLS and its token in
+    /// place of the rule of its parameters (see [`ChannelBuilder::secure`]), as the Python binding
+    /// gives them of a channel builder of PySpark's `toChannel`. Not a stable API.
+    #[doc(hidden)]
+    pub fn with_credentials(mut self, credentials: Credentials) -> Self {
+        self.credentials = Some(credentials);
+        self
+    }
+
+    /// The [`ChannelTarget`] that the builder was given ([`ChannelBuilder::with_target`]), if
+    /// any. Not a stable API.
+    #[doc(hidden)]
+    pub fn target(&self) -> Option<&ChannelTarget> {
+        self.target.as_ref()
+    }
+
+    /// This builder, of the target of gRPC `target`, which its channel connects to in place of
+    /// its host and its port (see [`ChannelTarget`]), as the Python binding gives it of the
+    /// `endpoint` of a channel builder. Its host and its port stay those of the connection
+    /// string: the client shows them, and its TLS and its proxy are of the host. Not a stable API.
+    #[doc(hidden)]
+    pub fn with_target(mut self, target: ChannelTarget) -> Self {
+        self.target = Some(target);
+        self
+    }
+
+    /// gRPC's names of the target that the builder was given ([`ChannelBuilder::with_target_names`]),
+    /// if any. Not a stable API.
+    #[doc(hidden)]
+    pub fn target_names(&self) -> Option<&TargetNames> {
+        self.names.as_ref()
+    }
+
+    /// This builder, of gRPC's names `names` of its target (see [`TargetNames`]), which decide the
+    /// `:authority` of its calls, the name that its TLS verifies, its proxy and whether its host is
+    /// `localhost` in place of the host of its connection string, which stands for the target only,
+    /// as the Python binding gives them of the `endpoint` of a channel builder. Not a stable API.
+    #[doc(hidden)]
+    pub fn with_target_names(mut self, names: TargetNames) -> Self {
+        self.names = Some(names);
+        self
+    }
+
+    /// This builder, of the metadata `metadata`, which the requests carry in place of the
+    /// parameters that are not the channel's own (see [`ChannelBuilder::metadata`]), in its
+    /// order, as the Python binding gives it of the `metadata()` of a channel builder, which
+    /// PySpark's client reads. Not a stable API.
+    #[doc(hidden)]
+    pub fn with_metadata(mut self, metadata: Vec<(String, String)>) -> Self {
+        self.metadata = Some(metadata);
+        self
     }
 
     /// Whether the channel uses TLS, which is the scheme `SparkConnectClient::connect` dials.
     ///
     /// The reference client (`core.py` `ChannelBuilder.secure`) is TLS when `use_ssl` is set
     /// or a token is present, except for a token on `localhost`, which stays plaintext for
-    /// local development (`core.py` `toChannel` uses local channel credentials there). A
-    /// token is therefore never sent in cleartext to any other host, `127.0.0.1` and `[::1]`
-    /// included.
+    /// local development (`core.py` `toChannel` uses local channel credentials there). Of this
+    /// rule, of the parameters, a token is never sent in cleartext to any other host, `127.0.0.1`
+    /// and `[::1]` included, nor through a proxy: a loopback host of a channel that sends its token
+    /// in cleartext connects directly, never through the HTTP proxy of the environment, as no
+    /// local credentials check the address of its connection (see the HTTP proxies of
+    /// `docs/configuration.md`), where any other is proxied as grpcio proxies it.
+    ///
+    /// Of [`Credentials`] ([`ChannelBuilder::with_credentials`]), it is TLS of
+    /// [`Credentials::Ssl`] only, and the token of [`Credentials::Local`] is sent in cleartext,
+    /// whatever the host, over a connection of the loopback only, as gRPC's local credentials of
+    /// TCP send it: as PySpark's channel of a `DefaultChannelBuilder` of a `_host` of `localhost`
+    /// and an endpoint of `127.0.0.1` sends it.
     pub fn secure(&self) -> bool {
-        self.use_ssl() || (self.token().is_some() && !self.is_localhost())
+        match self.credentials() {
+            Some(credentials) => credentials == Credentials::Ssl,
+            None => self.use_ssl() || (self.token().is_some() && !self.is_localhost()),
+        }
     }
 
     /// Whether the host is `localhost`. The reference client compares `localhost` after
     /// `urllib` has lowercased the host (`core.py` `toChannel`), so the match is
     /// case-insensitive. The IP loopback literals are not `localhost`, so they use TLS with
-    /// a token.
+    /// a token. Of a target of gRPC ([`ChannelBuilder::with_target_names`]), the host is that of
+    /// its authority, and never the host of the connection string that stands for it.
     pub fn is_localhost(&self) -> bool {
-        self.host.eq_ignore_ascii_case("localhost")
+        match &self.names {
+            Some(names) => names
+                .host()
+                .is_some_and(|host| host.eq_ignore_ascii_case("localhost")),
+            None => self.host.eq_ignore_ascii_case("localhost"),
+        }
     }
 
     /// Whether the endpoint is a loopback address: `localhost` or the IPv4/IPv6 loopback
-    /// literals. Only `localhost` keeps a token in plaintext; see [`Self::secure`].
+    /// literals. Only `localhost` keeps a token in plaintext; see [`Self::secure`]. Of a target
+    /// of gRPC, of the host of its authority.
     pub fn is_loopback(&self) -> bool {
-        self.is_localhost() || matches!(self.host.as_str(), "127.0.0.1" | "[::1]")
+        let host = match &self.names {
+            Some(names) => names.host().unwrap_or_default(),
+            None => self.host.trim_start_matches('[').trim_end_matches(']'),
+        };
+        self.is_localhost() || matches!(host, "127.0.0.1" | "::1")
     }
 
     pub fn user_id(&self) -> Option<&str> {
@@ -349,13 +591,18 @@ impl ChannelBuilder {
             )));
         }
         Ok(format!(
-            "{ua} spark/{SPARK_VERSION} os/{} python/rust",
-            os_name(std::env::consts::OS)
+            "{ua} spark/{SPARK_VERSION} os/{} {}",
+            os_name(std::env::consts::OS),
+            user_agent_language()
         ))
     }
 
-    /// gRPC metadata: every param except the reserved channel-config keys.
+    /// gRPC metadata: every param except the reserved channel-config keys, or the metadata that
+    /// the builder was given ([`ChannelBuilder::with_metadata`]).
     pub fn metadata(&self) -> Vec<(String, String)> {
+        if let Some(metadata) = &self.metadata {
+            return metadata.clone();
+        }
         const RESERVED: &[&str] = &[
             PARAM_TOKEN,
             PARAM_USE_SSL,
@@ -387,6 +634,29 @@ impl ChannelBuilder {
             .and_then(|v| python_int(v))
             .unwrap_or(default)
     }
+}
+
+/// The language of the user agent of the requests, which ends it: `python/rust` of the Rust
+/// client, unless [`set_user_agent_language`] sets another.
+static USER_AGENT_LANGUAGE: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
+
+/// Make `language` the language that the user agents of the requests end with, of the sessions
+/// made from now on, in place of `python/rust`: as the Python binding gives it PySpark's
+/// `python/<version>` of the interpreter (`platform.python_version()`). Not a stable API.
+#[doc(hidden)]
+pub fn set_user_agent_language(language: &str) {
+    *USER_AGENT_LANGUAGE
+        .write()
+        .unwrap_or_else(|e| e.into_inner()) = Some(language.to_string());
+}
+
+/// The language that the user agent ends with (see [`set_user_agent_language`]).
+fn user_agent_language() -> String {
+    USER_AGENT_LANGUAGE
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .unwrap_or_else(|| "python/rust".to_string())
 }
 
 /// The name of the operating system `os` (of `std::env::consts::OS`) as Python's
@@ -1256,6 +1526,74 @@ mod tests {
     }
 
     #[test]
+    fn the_credentials_of_the_binding_decide_the_tls_and_the_token() {
+        // As PySpark's `toChannel`, whose credentials the Python binding gives the builder of a
+        // `DefaultChannelBuilder` (`with_credentials`): of no security, plaintext and no token, of
+        // the parameters or the environment; of local credentials, plaintext and the token of the
+        // parameters, whatever the host; of TLS, TLS whatever the host.
+        let _env = set_env(&[("SPARK_CONNECT_AUTHENTICATE_TOKEN", Some("ENV"))]);
+        for (url, credentials, tls, token) in [
+            (
+                "sc://example.com/;token=T",
+                Credentials::Insecure,
+                false,
+                None,
+            ),
+            (
+                "sc://example.com/;use_ssl=true",
+                Credentials::Insecure,
+                false,
+                None,
+            ),
+            (
+                "sc://127.0.0.1/;token=T",
+                Credentials::Local,
+                false,
+                Some("T"),
+            ),
+            (
+                "sc://example.com/;use_ssl=true",
+                Credentials::Local,
+                false,
+                None,
+            ),
+            ("sc://localhost", Credentials::Ssl, true, None),
+            ("sc://localhost/;token=T", Credentials::Ssl, true, Some("T")),
+        ] {
+            let c = ChannelBuilder::parse(url)
+                .unwrap()
+                .with_credentials(credentials);
+            assert_eq!(c.credentials(), Some(credentials), "{url}");
+            assert_eq!(c.secure(), tls, "{url}");
+            assert_eq!(c.token().as_deref(), token, "{url}");
+        }
+    }
+
+    #[test]
+    fn a_connection_string_never_sets_the_credentials() {
+        // A parameter of the name of a field of the builder is a parameter as any other, which is
+        // sent as metadata: of a key of a capital, which gRPC refuses, as PySpark's channel and
+        // master refused it. The rule of the parameters decides the TLS and the token.
+        let _env = set_env(&[("SPARK_CONNECT_AUTHENTICATE_TOKEN", None)]);
+        for url in [
+            "sc://127.0.0.1/;use_ssl=true;SPARK_CONNECT_RUST_CREDENTIALS=insecure",
+            "sc://127.0.0.1/;use_ssl=true;token=t;SPARK_CONNECT_RUST_CREDENTIALS=local",
+            "sc://127.0.0.1/;token=t;credentials=insecure",
+        ] {
+            let c = ChannelBuilder::parse(url).unwrap();
+            assert_eq!(c.credentials(), None, "{url}");
+            assert!(c.secure(), "{url}");
+            assert!(
+                c.metadata()
+                    .iter()
+                    .any(|(k, v)| k.to_ascii_lowercase().ends_with("credentials")
+                        && (v == "insecure" || v == "local")),
+                "{url}"
+            );
+        }
+    }
+
+    #[test]
     fn scheme_is_tls_for_a_token_on_any_host_but_localhost() {
         let _env = set_env(&[("SPARK_CONNECT_AUTHENTICATE_TOKEN", None)]);
         // (url, TLS). A token goes over TLS to any host but `localhost`, as PySpark does, so
@@ -1507,5 +1845,41 @@ mod tests {
                 rest(1)
             )
         );
+    }
+
+    #[test]
+    fn the_host_of_a_target_of_grpc_decides_its_tls_never_its_stand_in() {
+        // Of the review of SPARK-62220: the host of the connection string stands for the target
+        // only (`localhost` of a name that a URL cannot hold), so a token goes in cleartext to no
+        // host but `localhost`, of the authority of the target.
+        let of = |target: &str| {
+            let parsed = crate::grpc_target::parse(target);
+            ChannelBuilder::parse(&format!("sc://{}:{}/;token=t", parsed.host, parsed.port))
+                .unwrap()
+                .with_target(parsed.target)
+                .with_target_names(parsed.names)
+        };
+        for target in [
+            "[::1%25lo]:18613",
+            "x*y.localhost:18611",
+            "a/b.localhost:18611",
+            "localhost%00:18611",
+            "ipv4:127.0.0.1:1,127.0.0.1:2",
+            "unix:/tmp/a.sock",
+            "[fe80::1%25eth0]:15002",
+        ] {
+            let builder = of(target);
+            assert!(!builder.is_localhost(), "{target}");
+            assert!(builder.secure(), "{target}");
+        }
+        for target in ["localhost:18611", "LOCALHOST:18611", "dns:///localhost"] {
+            let builder = of(target);
+            assert!(builder.is_localhost(), "{target}");
+            assert!(!builder.secure(), "{target}");
+        }
+        // The stand-in of a name that a URL cannot hold, which decides nothing.
+        assert_eq!(of("x*y.localhost:18611").host(), "localhost");
+        assert!(of("ipv6:[::1]:1").is_loopback());
+        assert!(!of("[::1%25lo]:1").is_loopback());
     }
 }

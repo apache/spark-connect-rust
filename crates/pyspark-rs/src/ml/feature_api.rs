@@ -98,7 +98,7 @@ native_model! {
         slf: &Bound<'_, Self>,
         args: &Bound<'_, PyTuple>,
         _kwargs: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<PyDataFrame> {
+    ) -> PyResult<crate::dataframe::NewDataFrame> {
         let target = slf.try_borrow()?.core.target()?;
         let args: Vec<Bound<'_, PyAny>> = args.iter().collect();
         object::attribute_relation_py(&target, "approxNearestNeighbors", &args)
@@ -111,7 +111,7 @@ native_model! {
         slf: &Bound<'_, Self>,
         args: &Bound<'_, PyTuple>,
         _kwargs: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<PyDataFrame> {
+    ) -> PyResult<crate::dataframe::NewDataFrame> {
         let target = slf.try_borrow()?.core.target()?;
         let args: Vec<Bound<'_, PyAny>> = args.iter().collect();
         object::attribute_relation_py(&target, "approxSimilarityJoin", &args)
@@ -325,7 +325,7 @@ native_model! {
         slf: &Bound<'_, Self>,
         args: &Bound<'_, PyTuple>,
         _kwargs: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<PyDataFrame> {
+    ) -> PyResult<crate::dataframe::NewDataFrame> {
         let target = slf.try_borrow()?.core.target()?;
         let args: Vec<Bound<'_, PyAny>> = args.iter().collect();
         object::attribute_relation_py(&target, "approxNearestNeighbors", &args)
@@ -338,7 +338,7 @@ native_model! {
         slf: &Bound<'_, Self>,
         args: &Bound<'_, PyTuple>,
         _kwargs: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<PyDataFrame> {
+    ) -> PyResult<crate::dataframe::NewDataFrame> {
         let target = slf.try_borrow()?.core.target()?;
         let args: Vec<Bound<'_, PyAny>> = args.iter().collect();
         object::attribute_relation_py(&target, "approxSimilarityJoin", &args)
@@ -743,7 +743,7 @@ native_model! {
         let py = slf.py();
         let target = slf.try_borrow()?.core.target()?;
         let df = object::attribute_relation_py(&target, "categoryMapsDF", &[])?;
-        let rows = Py::new(py, df)?.bind(py).call_method0("collect")?;
+        let rows = df.into_pyobject(py)?.call_method0("collect")?;
         let maps = PyDict::new(py);
         for row in rows.try_iter()? {
             let row = row?;
@@ -804,7 +804,7 @@ native_model! {
         slf: &Bound<'_, Self>,
         args: &Bound<'_, PyTuple>,
         _kwargs: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<PyDataFrame> {
+    ) -> PyResult<crate::dataframe::NewDataFrame> {
         let target = slf.try_borrow()?.core.target()?;
         let args: Vec<Bound<'_, PyAny>> = args.iter().collect();
         object::attribute_relation_py(&target, "findSynonyms", &args)
@@ -819,7 +819,7 @@ native_model! {
         slf: &Bound<'_, Self>,
         args: &Bound<'_, PyTuple>,
         _kwargs: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<PyDataFrame> {
+    ) -> PyResult<crate::dataframe::NewDataFrame> {
         let target = slf.try_borrow()?.core.target()?;
         let args: Vec<Bound<'_, PyAny>> = args.iter().collect();
         object::attribute_relation_py(&target, "getVectors", &args)
@@ -850,24 +850,24 @@ native_model! {
 
 /// Register the typed feature models.
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<PyBucketedRandomProjectionLSHModel>()?;
-    m.add_class::<PyChiSqSelectorModel>()?;
-    m.add_class::<PyCountVectorizerModel>()?;
-    m.add_class::<PyIDFModel>()?;
-    m.add_class::<PyImputerModel>()?;
-    m.add_class::<PyMaxAbsScalerModel>()?;
-    m.add_class::<PyMinHashLSHModel>()?;
-    m.add_class::<PyMinMaxScalerModel>()?;
-    m.add_class::<PyOneHotEncoderModel>()?;
-    m.add_class::<PyPCAModel>()?;
-    m.add_class::<PyRobustScalerModel>()?;
-    m.add_class::<PyRFormulaModel>()?;
-    m.add_class::<PyStandardScalerModel>()?;
-    m.add_class::<PyStringIndexerModel>()?;
-    m.add_class::<PyTargetEncoderModel>()?;
-    m.add_class::<PyUnivariateFeatureSelectorModel>()?;
-    m.add_class::<PyVarianceThresholdSelectorModel>()?;
-    m.add_class::<PyVectorIndexerModel>()?;
-    m.add_class::<PyWord2VecModel>()?;
+    super::object::register_class::<PyBucketedRandomProjectionLSHModel>(m)?;
+    super::object::register_class::<PyChiSqSelectorModel>(m)?;
+    super::object::register_class::<PyCountVectorizerModel>(m)?;
+    super::object::register_class::<PyIDFModel>(m)?;
+    super::object::register_class::<PyImputerModel>(m)?;
+    super::object::register_class::<PyMaxAbsScalerModel>(m)?;
+    super::object::register_class::<PyMinHashLSHModel>(m)?;
+    super::object::register_class::<PyMinMaxScalerModel>(m)?;
+    super::object::register_class::<PyOneHotEncoderModel>(m)?;
+    super::object::register_class::<PyPCAModel>(m)?;
+    super::object::register_class::<PyRobustScalerModel>(m)?;
+    super::object::register_class::<PyRFormulaModel>(m)?;
+    super::object::register_class::<PyStandardScalerModel>(m)?;
+    super::object::register_class::<PyStringIndexerModel>(m)?;
+    super::object::register_class::<PyTargetEncoderModel>(m)?;
+    super::object::register_class::<PyUnivariateFeatureSelectorModel>(m)?;
+    super::object::register_class::<PyVarianceThresholdSelectorModel>(m)?;
+    super::object::register_class::<PyVectorIndexerModel>(m)?;
+    super::object::register_class::<PyWord2VecModel>(m)?;
     Ok(())
 }

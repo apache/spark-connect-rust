@@ -24,10 +24,11 @@ behaves as a subclass of PySpark's:
   `Transformer`, `Evaluator`, `MLWritable` and `MLReadable`), which run `_fit`, `_transform`,
   `_evaluate`, `copy`, `write` and `read` of the object: a subclass's `_fit` runs. `_fit`,
   `_transform` and `_evaluate` are the native class's, of no param map.
-- `copy` is PySpark's own; `copy.copy` is the native class's `__copy__`, of the class of the object
-  (a subclass) and a copy of the object's attributes, as `copy.copy` copies those of PySpark's, or
-  of the reduce of an object of a subclass of its own reduce or state, which `copy.copy` runs of
-  PySpark's. The state of `copy.deepcopy` and `pickle` is PySpark's, the object's attributes.
+- `copy` is PySpark's own; `copy.copy`, `copy.deepcopy` and `pickle` take the object's reduce, as
+  of PySpark's object, of no `__copy__`: an object of the class's `__new__` and the object's
+  attributes, PySpark's state (of the objects that the native object holds of a composite model
+  too), and of a model of a server-side object, the native copy of the same object, after a lock,
+  at which a pickle and a deep copy fail as PySpark's do at the lock of its `RemoteModelRef`.
 
 A public class of a native summary constructs of PySpark's own `JavaWrapper.__init__`, which keeps
 the `java_obj` in the object's attributes (`_java_obj`), which the native members read, and has
@@ -44,7 +45,11 @@ native member reads the params (a fit, a transform, an evaluation, a writer, a m
 native object's params are made those of the maps, and so are those of the objects that it holds
 (`_sync`): the native object reads them of their native objects. The maps of an object that
 PySpark's constructor did not make (a fit's model, a load, a native copy) are made of the native
-object's values at their first read.
+object's values at their first read, as the other attributes that PySpark's constructor, fit or load
+sets (its uid, its `_java_obj`, a model's `_summary`), by the `__getattr__` of the native class (see
+`_lazy_attribute`), which are of the object, not of its class. The public class reaches the native
+object by the functions of the native module (`_ml_params`, `_ml_sync`, `_ml_java_obj`, ...), of
+no member of the class.
 """
 
 import dis
@@ -57,12 +62,6 @@ import warnings
 
 from pyspark import _pyspark as _native
 from pyspark import keyword_only
-
-
-def _del(self):
-    """The native class releases its server-side objects itself: PySpark's `JavaWrapper.__del__`
-    has none to release, and its imports fail at the interpreter's exit."""
-
 
 # The names of PySpark's code of its server-side object, which a native class's own member
 # replaces: the members of PySpark's that read them are not PySpark's own Python code.
@@ -113,34 +112,100 @@ def _pysparks_own(member):
     return not (_SERVER_NAMES & _names_of(function.__code__))
 
 
-class _LazyParamMap:
-    """PySpark's `_paramMap` (or `_defaultParamMap`) of an object that PySpark's constructor did not
-    make (of a fit, a load, a native copy): at the first read, the dicts of the native object's
-    values, keyed by the object's Params (PySpark's `_copy_params`), in the object's attributes,
-    where PySpark's constructor, `copy` and `_resetUid` set them, with its uid, which PySpark's
-    `Identifiable.__init__` sets there."""
+# The attributes of PySpark's object that its constructor, fit or load sets, which an object of
+# a public class that PySpark's constructor did not make (of a fit, a load, a native copy) makes at
+# their first read, of its native object (see `_lazy_attribute`).
+_LAZY_PARAMS = ("uid", "_paramMap", "_defaultParamMap", "_params")
 
-    def __set_name__(self, owner, name):
-        self.name = name
 
-    def __get__(self, obj, owner=None):
-        if obj is None:
-            return self
+def _lazy_attribute(obj, name):
+    """The attribute `name` of `obj` that its attributes do not have yet, of PySpark's attributes
+    that its constructor, fit or load sets, which the `__getattribute__` of the native class gives
+    of a lookup that does not find it (it raises the AttributeError of another name), made in the
+    object's attributes, where PySpark's sets them: its uid and its param maps, of its native
+    values (see `_materialize`); of a model, its `_java_obj`, the `RemoteModelRef` of its
+    server-side object, the one of the `_remote_model_obj` of its training summary and of its
+    copies, as PySpark's fit and copies share it (None of a model of none), which its `_call_java`
+    reads, made with the model (see `_ml_make_java_obj`); of another Java wrapper of
+    PySpark's, its `_java_obj`, the name of its JVM class; and of a model of a training summary,
+    its `_summary` (see `_training_summary`). The uid of an object of no param maps yet is the
+    native object's, an attribute once the maps are made. An assignment or a deletion of the uid
+    or of `_java_obj` is of the attributes, of CPython's own `__setattr__`, which the native object
+    takes before its members, a copy, a pickle or its `__del__` read it (`apply_attributes` of the
+    native classes), as PySpark's model is of its `_java_obj`; a deleted `_java_obj` raises
+    PySpark's AttributeError."""
+    if name == "uid":
+        # The native object's, which the native code that makes the object may set after it makes
+        # it, until the param maps are made (see `_materialize`), which make it an attribute too:
+        # a read of the uid alone makes no param maps of the native values of the moment.
+        return _native._ml_uid(obj)
+    if name in _LAZY_PARAMS:
         _materialize(obj)
-        return obj.__dict__[self.name]
+        try:
+            return obj.__dict__[name]
+        except KeyError:
+            raise _no_attribute(obj, name) from None
+    kind = _native._ml_kind(type(obj))
+    if name == "_java_obj" and kind == "model":
+        _native._ml_make_java_obj(obj)
+        try:
+            return obj.__dict__["_java_obj"]
+        except KeyError:
+            # A deleted one, as PySpark's object has none then.
+            raise _no_attribute(obj, name) from None
+    if name == "_java_obj" and kind == "params":
+        jvm_class = _native._ml_jvm_class(type(obj))
+        if jvm_class is not None and _is_java_wrapper(type(obj)):
+            obj.__dict__["_java_obj"] = jvm_class
+            return jvm_class
+    if name == "_summary" and kind == "model" and _has_training_summary(type(obj)):
+        return _training_summary(obj)
+    raise _no_attribute(obj, name)
+
+
+def _has_java_obj(cls):
+    """Whether the objects of the public class `cls` have PySpark's `_java_obj` (see
+    `_lazy_attribute`): a model, and another Java wrapper of PySpark's of a JVM class."""
+    kind = _native._ml_kind(cls)
+    return kind == "model" or (
+        kind == "params" and _native._ml_jvm_class(cls) is not None and _is_java_wrapper(cls)
+    )
+
+
+def _dir(self):
+    """`dir()` of an object of a public class, as of PySpark's object: of its attributes that it
+    makes at their first read (see `_lazy_attribute`) too, its uid, its param maps and its
+    `_java_obj`. A training summary is listed once its first read made it (`_summary`), which may
+    request the server (as `numClasses` of its class)."""
+    names = set(object.__dir__(self))
+    names.update(_LAZY_PARAMS)
+    if _has_java_obj(type(self)):
+        try:
+            _lazy_attribute(self, "_java_obj")
+            names.add("_java_obj")
+        except AttributeError:
+            # A deleted one, which PySpark's object has not.
+            pass
+    return sorted(names)
 
 
 def _materialize(obj):
     """Make PySpark's param maps of `obj` of its native values, if it has none, and its uid, of the
-    native object's, an attribute of the object, as of PySpark's (see `uid` of the native classes),
-    so that the attributes are PySpark's state of the object, which `__getstate__` gives and a
-    subclass's own `__getstate__` takes of `__dict__`."""
+    native object's, attributes of the object, as of PySpark's, and its `_java_obj` (see
+    `_lazy_attribute`), so that the attributes are PySpark's state of the object, which
+    `__getstate__` gives and a subclass's own `__getstate__` takes of `__dict__`."""
     attributes = obj.__dict__
     if "_paramMap" in attributes and "_defaultParamMap" in attributes:
         return
-    attributes.setdefault("uid", obj.uid)
+    attributes.setdefault("uid", _native._ml_uid(obj))
+    if "_java_obj" not in attributes and _has_java_obj(type(obj)):
+        try:
+            _lazy_attribute(obj, "_java_obj")
+        except AttributeError:
+            # A deleted one stays deleted.
+            pass
     obj._copy_params()
-    set_values, defaults = obj._native_params()
+    set_values, defaults = _native._ml_params(obj)
     attributes.setdefault("_paramMap", {getattr(obj, n): v for n, v in set_values.items()})
     attributes.setdefault("_defaultParamMap", {getattr(obj, n): v for n, v in defaults.items()})
     attributes.setdefault("_params", None)
@@ -173,7 +238,7 @@ def _sync(obj, synced=None):
             held.append(getter.__get__(obj, type(obj)))
     for value in [*set_values.values(), *defaults.values(), *held]:
         _sync_values(value, synced)
-    obj._native_sync(set_values, defaults)
+    _native._ml_sync(obj, set_values, defaults)
 
 
 def _sync_values(value, synced):
@@ -185,8 +250,15 @@ def _sync_values(value, synced):
     elif isinstance(value, (list, tuple)):
         for item in value:
             _sync_values(item, synced)
-    elif not isinstance(value, type) and hasattr(type(value), "_native_sync"):
+    elif not isinstance(value, type) and _has_params(type(value)):
         _sync(value, synced)
+
+
+def _has_params(cls):
+    """Whether `cls` is a native class of params (an estimator, a transformer, a model, an
+    evaluator, a Pipeline, a validator), or a subclass of one, whose native object holds params of
+    its own (see `_ml_kind` of the native module)."""
+    return _native._ml_kind(cls) in ("params", "model")
 
 
 def _native_writer(obj):
@@ -327,6 +399,10 @@ class _NativeMember:
         """The member of `obj` of the class `cls`, as `__get__` of the descriptor gives it."""
         return self.member.__get__(obj, cls)
 
+    def of(self, obj):
+        """The member of `obj`, of its class, as an attribute of `obj` gives it (a getter's value)."""
+        return self.member.__get__(obj, type(obj))
+
     def __reduce__(self):
         return (_native_member, (self.native.__name__, self.name))
 
@@ -352,7 +428,7 @@ def _restore_readwrite(factory):
     return factory()
 
 
-def _synced(member, name, official, sync=True):
+def _synced(member, name, official, sync=True, prepare=None):
     """The member `name` of the public class of PySpark's class `official`, which runs the native
     method `member` of the native object's params synced first: a function of the parameters of
     PySpark's member of the name, as Python binds a call of it (`_binding_of`), which passes them
@@ -360,8 +436,9 @@ def _synced(member, name, official, sync=True):
     PySpark's member (of the class of PySpark's that has it, `JavaMLWritable.write`). So a call that
     does not bind raises PySpark's message (`JavaMLWritable.write() takes 1 positional argument but
     2 were given`). Of a name that PySpark's class does not have, it is the native member's.
-    Without `sync`, it syncs no params, as of an object of none (a summary). Of a class method or
-    a static method of PySpark's (see `_class_member`), it is of PySpark's function of it."""
+    Without `sync`, it syncs no params, as of an object of none (a summary); of `prepare`, it runs
+    `prepare` of the object in place of the sync (`_materialize`). Of a class method or a static
+    method of PySpark's (see `_class_member`), it is of PySpark's function of it."""
     _, pysparks = _member_of(official, name)
     if isinstance(pysparks, (classmethod, staticmethod)):
         pysparks = pysparks.__func__
@@ -382,13 +459,14 @@ def _synced(member, name, official, sync=True):
             arguments.append(parameter.name)
     # The object, of the first parameter, as every member of PySpark's has it (`self`).
     body = f"return __member({', '.join(arguments)})"
-    if sync:
-        body = f"_sync({parameters[0].name})\n    {body}"
+    if sync or prepare is not None:
+        # `_sync` of the scope, or `prepare` in its place.
+        body = f"_sync({parameters[0].name})\n{body}"
     qualname = getattr(pysparks, "__qualname__", None) or f"{official.__name__}.{name}"
     if name in ("write", "read"):
-        body = f"_ensure_readwrite_classes()\n    {body}"
+        body = f"_ensure_readwrite_classes()\n{body}"
     scope = {
-        "_sync": _sync,
+        "_sync": prepare or _sync,
         "__member": member,
         "_ensure_readwrite_classes": _ensure_readwrite_classes,
     }
@@ -413,25 +491,38 @@ def _class_member(own, name, official):
     return classmethod(_synced(of_class, name, official, sync=False))
 
 
-def _synced_property(descriptor, doc):
+def _synced_property(descriptor, official):
     """A property of the native getter `descriptor` (its `_NativeMember`), of the native object's
     params synced first, so that PySpark's `params` walk does not read it (it reads no property),
-    as of PySpark's property."""
+    as of PySpark's property `official` (see `_property_of`)."""
+    return _property_of(descriptor, official, sync=True)
 
-    def fget(self):
-        _sync(self)
-        return descriptor.get(self, type(self))
 
-    return property(fget, doc=doc)
+def _property_of(descriptor, official, sync=False):
+    """A property of the native getter `descriptor` (its `_NativeMember`), of the native object's
+    params synced first of `sync`, of the docstring of PySpark's property `official` and of a
+    getter of PySpark's getter (`LinearSVCModel.coefficients`, `JavaPredictionModel.numFeatures`):
+    of its name, qualified name, module, docstring, signature and annotations (see `_function`)."""
+    getter = official.fget
+    first = next(iter(inspect.signature(getter).parameters))
+    body = f"return __member.of({first})"
+    if sync:
+        body = f"_sync({first})\n{body}"
+    scope = {"_sync": _sync, "__member": descriptor}
+    function = _function(getter, getter.__name__, getter.__qualname__, body, scope)
+    return property(function, doc=official.__doc__)
 
 
 def _function(official, name, qualname, body, scope, binding=None):
     """A function `name` of the parameters of the function `official` (their names, kinds and
     defaults), or of the signature `binding` if given, of the qualified name `qualname`, whose body
-    is `body` of the names of `scope`: Python binds a call of it as it binds `official`, and raises
-    PySpark's messages of a call that does not bind (`LinearSVC.__init__() got an unexpected
-    keyword argument 'foo'`). Its module, docstring and signature are those of `official` (of
-    this module and of `binding`, of a native `official` of none)."""
+    is the lines of `body` over the names of `scope`: Python binds a call of it as it binds
+    `official`, and raises PySpark's messages of a call that does not bind
+    (`LinearSVC.__init__() got an unexpected keyword argument 'foo'`). Its module, docstring,
+    signature and annotations are those of `official` (of this module and of `binding`, of a native
+    `official` of none), and its globals those that `typing.get_type_hints` reads of PySpark's
+    function (of the function that a decorator's wrapper wraps), which resolve the names of its
+    annotations as of PySpark's (`"LinearSVCModel"`): the names of `scope` are of a closure."""
     try:
         signature = inspect.signature(official)
     except (TypeError, ValueError):
@@ -460,16 +551,43 @@ def _function(official, name, qualname, body, scope, binding=None):
         parts.append(text)
     if positional_only:
         parts.append("/")
-    namespace = {"__name__": __name__, **scope, **defaults}
-    exec(f"def {name}({', '.join(parts)}):\n    {body}\n", namespace)  # noqa: S102
-    function = namespace[name]
+    # The function of a closure of the names of `scope`, whose defaults are of the names of the
+    # closure's parameters, at the `def`.
+    free = [*scope, *defaults]
+    lines = "".join(f"        {line}\n" for line in body.split("\n"))
+    source = (
+        f"def __closure({', '.join(free)}):\n"
+        f"    def {name}({', '.join(parts)}):\n{lines}"
+        f"    return {name}\n"
+    )
+    namespace = {"__name__": __name__}
+    exec(source, namespace)  # noqa: S102
+    function = namespace["__closure"](*scope.values(), *defaults.values())
     if sys.version_info >= (3, 11):
         function.__code__ = function.__code__.replace(co_qualname=qualname)
+    own_globals = getattr(_unwrapped(official), "__globals__", None)
+    if own_globals is not None:
+        # Of no global name of its own: the code reads its parameters and the closure's names.
+        kwdefaults = function.__kwdefaults__
+        function = types.FunctionType(
+            function.__code__, own_globals, name, function.__defaults__, function.__closure__
+        )
+        function.__kwdefaults__ = kwdefaults
     function.__qualname__ = qualname
-    function.__module__ = getattr(official, "__module__", None) or function.__module__
+    function.__module__ = getattr(official, "__module__", None) or __name__
     function.__doc__ = getattr(official, "__doc__", None)
+    function.__annotations__ = dict(getattr(official, "__annotations__", None) or {})
     function.__signature__ = signature
     return function
+
+
+def _unwrapped(function):
+    """The function that the wrappers of the decorators of `function` wrap (`__wrapped__`), as
+    `typing.get_type_hints` reads the globals of its annotations of it; `function` of none."""
+    try:
+        return inspect.unwrap(function)
+    except ValueError:
+        return function
 
 
 def _member_of(official, name):
@@ -502,8 +620,8 @@ _PRIMITIVES = {"fit": "_fit", "transform": "_transform", "evaluate": "_evaluate"
 
 
 # The native members that a public class keeps of the native class whatever PySpark's are: the
-# persistence of the native writers and readers, and the uid of the native object.
-_NATIVE_ALWAYS = frozenset({"write", "read", "uid"})
+# persistence of the native writers and readers.
+_NATIVE_ALWAYS = frozenset({"write", "read"})
 
 
 def _is_java_wrapper(official):
@@ -512,6 +630,28 @@ def _is_java_wrapper(official):
     from pyspark.ml.wrapper import JavaWrapper
 
     return issubclass(official, JavaWrapper)
+
+
+def _del_of(official):
+    """The `__del__` of the public class of PySpark's Java wrapper `official`, as PySpark's
+    `JavaWrapper.__del__` (of `try_remote_del`), which releases a reference of the `RemoteModelRef`
+    of the object's `_java_obj`: of a model of a `RemoteModelRef` that its constructor or an
+    assignment of its `_java_obj` gave, the release of the native object (see `_ml_finalize` of the
+    native module), whose error Python reports as unraisable in this `__del__`, as in PySpark's,
+    and the AttributeError of a deleted `_java_obj`; of a model of a fit or a load, of its copies
+    and of its training summary, the release of their hold of the model's server-side object, the
+    last of which deletes it, as the last release of PySpark's `RemoteModelRef` does (see `Holders`
+    of the native module), where the training summary's `_remote_model_obj`, which this client does
+    not count (see `remote_model_ref` of the native module), is not released. A function of the name, qualified name, module, docstring, signature and annotations
+    of PySpark's (see `_function`)."""
+    _, pysparks = _member_of(official, "__del__")
+    return _function(
+        pysparks,
+        "__del__",
+        pysparks.__qualname__,
+        "_finalize(self)",
+        {"_finalize": _native._ml_finalize},
+    )
 
 
 def _is_summary(official):
@@ -549,10 +689,12 @@ def _constructors(native, official, holder):
         # object's attributes (`_java_obj`), which the native members read, as PySpark's do: so a
         # summary of a subclass reads the `java_obj` of its `super().__init__`, and a copy or a
         # pickle keeps it with the other attributes. And PySpark's own `JavaModel.__init__`, of no
-        # server-side object (the native constructor raises the AssertionError of PySpark's of
-        # another `java_model`, which asserts a `RemoteModelRef`): its `Params.__init__` makes the
-        # param maps and the Params of the object, `Identifiable.__init__` its uid (of the class's
-        # name), and the `_setDefault` of its classes the defaults in their order.
+        # server-side object or of the object of a `RemoteModelRef`, which the native constructor
+        # takes (and raises the AssertionError of PySpark's of another `java_model`): its
+        # `Params.__init__` makes the param maps and the Params of the object,
+        # `Identifiable.__init__` its uid (of the class's name), `JavaWrapper.__init__` its
+        # `_java_obj` (see `_lazy_attribute`), and the `_setDefault` of its classes the
+        # defaults in their order.
         __init__ = init
 
         def check(*args, **kwargs):
@@ -562,23 +704,41 @@ def _constructors(native, official, holder):
         # The native constructor takes the objects of the arguments (a PipelineModel's `stages`, a
         # OneVsRestModel's `models`, a validator model's `bestModel`), which PySpark's `__init__`
         # sets as attributes of the instance that are the native class's own; the `__init__` makes
-        # the param maps and the uid of the object (of PySpark's `Params.__init__`).
-        first = next(iter(signature.parameters))
+        # the param maps and the uid of the object (of PySpark's `Params.__init__`). Of a subclass
+        # of an `__init__` of its own, whose `__new__` made the native object of none, the
+        # `__init__` that it calls (`super().__init__(stages)`) is PySpark's, which sets them of
+        # the native class's setters (`self.stages = stages`).
+        parameters = list(signature.parameters.values())
+        cell = {}
         __init__ = _function(
-            inner, "__init__", qualname, f"_materialize({first})", {"_materialize": _materialize}
+            inner,
+            "__init__",
+            qualname,
+            f"_composite_init(_cell['init'], _official, {_forwarded(parameters)})",
+            {"_composite_init": _composite_init, "_cell": cell, "_official": inner},
         )
+        cell["init"] = __init__
 
         def check(*args, **kwargs):
-            checker(None, *args, **kwargs)
+            # Of no arguments, an object of none, as `object.__new__` makes PySpark's of
+            # `copyreg.__newobj__`, whose state gives its attributes (`stages`, `models`,
+            # `bestModel`, ...); the `__init__` of a call of none raises PySpark's TypeError.
+            if args or kwargs:
+                checker(None, *args, **kwargs)
 
     try:
+        native_parameters = list(inspect.signature(native).parameters.values())
+    except (TypeError, ValueError):
+        no_arguments = False
+    else:
+        if native_parameters and native_parameters[0].kind is inspect.Parameter.POSITIONAL_ONLY:
+            # The class of the native `__new__` (`(cls, /, stages=None)`), of no argument of a call.
+            native_parameters = native_parameters[1:]
         no_arguments = all(
             p.default is not inspect.Parameter.empty
             or p.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
-            for p in inspect.signature(native).parameters.values()
+            for p in native_parameters
         )
-    except (TypeError, ValueError):
-        no_arguments = False
 
     def __new__(cls, *args, **kwargs):
         if cls.__init__ is __init__:
@@ -595,25 +755,41 @@ def _constructors(native, official, holder):
     return __new__, __init__
 
 
-class _JavaObject:
-    """PySpark's `_java_obj` of an object of a native model or summary that PySpark's constructor
-    did not make (of a fit, a load, a copy, an evaluation, a fetch), at its first read, in the
-    object's attributes, where PySpark's sets it, which its `_call_java` (`try_remote_call`)
-    reads: of a model, the `RemoteModelRef` of its server-side object, the one of the
-    `_remote_model_obj` of its training summary and of its copies, as PySpark's fit and copies
-    share it (None of a model of none); of a summary, the id of its object and the methods of the
-    chain (`"<id>.summary"`). A summary of PySpark's constructor has the `java_obj` of its
-    `__init__` (and one of none PySpark's AttributeError)."""
+def _forwarded(parameters):
+    """The arguments of a call of the parameters `parameters` of a function, which passes each
+    parameter on as it is bound: of its position, `*args`, `name=name` and `**kwargs`."""
+    parts = []
+    for parameter in parameters:
+        if parameter.kind is inspect.Parameter.VAR_POSITIONAL:
+            parts.append("*" + parameter.name)
+        elif parameter.kind is inspect.Parameter.VAR_KEYWORD:
+            parts.append("**" + parameter.name)
+        elif parameter.kind is inspect.Parameter.KEYWORD_ONLY:
+            parts.append(f"{parameter.name}={parameter.name}")
+        else:
+            parts.append(parameter.name)
+    return ", ".join(parts)
 
-    def __get__(self, obj, owner=None):
-        if obj is None:
-            return self
-        value = obj._native_java_obj()
-        # A model of params, of no server-side object, has PySpark's None.
-        if value is None and not hasattr(type(obj), "_native_sync"):
-            raise _no_attribute(obj, "_java_obj")
-        obj.__dict__["_java_obj"] = value
-        return value
+
+def _composite_init(init, official, obj, *args, **kwargs):
+    """The `__init__` `init` of the public class of a composite (a PipelineModel, an
+    OneVsRestModel, a validator's model) of `obj`: of an object of a class of that `__init__`, whose
+    `__new__` made the native object of the arguments, its param maps and its uid
+    (`_materialize`); of a subclass of an `__init__` of its own, whose `__new__` made the native
+    object of none (as `object.__new__` leaves the arguments to the `__init__`), PySpark's
+    `__init__` `official`, which sets the objects of the arguments (`self.stages = stages`, of the
+    native class's setters), the param maps and the uid."""
+    if type(obj).__init__ is init:
+        _materialize(obj)
+    else:
+        official(obj, *args, **kwargs)
+
+
+def _is_remote_model_ref(value):
+    """Whether `value` is a `RemoteModelRef` of `pyspark.ml.util`."""
+    from pyspark.ml.util import RemoteModelRef
+
+    return isinstance(value, RemoteModelRef)
 
 
 def _no_attribute(obj, name):
@@ -627,26 +803,28 @@ def _no_attribute(obj, name):
 def _training_summary(obj):
     """PySpark's `_summary` of a native model, which PySpark's fit sets: at its first read, the
     model's training summary (`summary`), in the object's attributes, of a model that has one
-    (`hasSummary`); one of none (a load) has none, as PySpark's."""
+    (the native `hasSummary`); one of none (a load) has none, as PySpark's."""
     attributes = obj.__dict__
     if "_summary" in attributes:
         return attributes["_summary"]
-    if not obj.hasSummary:
+    if not _native_member_value(obj, "hasSummary"):
         raise _no_attribute(obj, "_summary")
-    summary = obj.summary
+    summary = _native_member_value(obj, "summary")
     # The `summary()` method of a LinearSVCModel, an MLP's and an FM classifier's.
     summary = summary() if callable(summary) else summary
     attributes["_summary"] = summary
     return summary
 
 
-def _set_training_summary(obj, summary):
-    obj.__dict__["_summary"] = summary
-
-
-# A property, as PySpark's params walk (`Params.params`) reads every attribute of `dir()` of the
-# object but its class's properties, and a model of no summary has no `_summary`.
-_TRAINING_SUMMARY = property(_training_summary, _set_training_summary)
+def _native_member_value(obj, name):
+    """The value of the member `name` of the native class of `obj` (its getter's, or its method),
+    of the object, as the native class reads it, not of the public class (whose PySpark's own
+    `hasSummary` and `summary` read `_summary`)."""
+    for cls in type(obj).__mro__:
+        member = vars(cls).get(name)
+        if type(member).__name__ in ("getset_descriptor", "method_descriptor"):
+            return member.__get__(obj, type(obj))
+    raise _no_attribute(obj, name)
 
 
 def _has_training_summary(official):
@@ -674,33 +852,35 @@ def _public_class(native, official, parents, public_module=None):
         "__doc__": official.__doc__ or native.__doc__,
         "__new__": __new__,
         "__init__": __init__,
-        "__del__": _del,
     }
     if _is_java_wrapper(official):
         # The object of the server of PySpark's Java wrappers, which the native class holds
-        # itself: `JavaWrapper.__del__` releases none. A model and a summary have PySpark's value
-        # of it, which its `_call_java` reads. PySpark's classes of no Java wrapper (a Pipeline, a
-        # OneVsRest, a validator and their models) have none.
-        namespace["_java_obj"] = _JavaObject() if hasattr(native, "_native_java_obj") else None
-    if _has_training_summary(official):
-        namespace["_summary"] = _TRAINING_SUMMARY
-    try:
-        # PySpark's signature, of its constructor (and of its `setParams`, which a class of params
-        # takes of PySpark's).
-        namespace["__signature__"] = inspect.signature(official)
-    except (TypeError, ValueError):
-        pass
-    if hasattr(native, "_native_sync"):
+        # itself, so that `__del__` releases none. A model and a summary have PySpark's value of
+        # it, which its `_call_java` reads. PySpark's classes of no Java wrapper (a Pipeline, a
+        # OneVsRest, a validator and their models) have none, and no `__del__`.
+        namespace["__del__"] = _del_of(official)
+    _sign_constructor(__new__, official)
+    if _has_params(native):
         _params_api(native, official, namespace)
     elif _is_summary(official):
         _summary_api(native, official, namespace)
-    getnewargs = _newargs_of(official)
-    if getnewargs is not None:
-        namespace["__getnewargs__"] = getnewargs
     public = meta(native.__name__, bases, namespace)
     holder[0] = public
     _native._register_public_class(native, public)
     return public
+
+
+def _sign_constructor(__new__, official):
+    """Give `__new__` of a public class PySpark's signature of the class `official`, of its
+    constructor, of a first parameter of the class: `inspect.signature` of the class gives it of
+    its own `__new__` (of a Python subclass, of the subclass's own `__init__`), as of PySpark's
+    `__init__`, and the class has no `__signature__`, as PySpark's has none."""
+    try:
+        signature = inspect.signature(official)
+    except (TypeError, ValueError):
+        return
+    first = inspect.Parameter("cls", inspect.Parameter.POSITIONAL_ONLY)
+    __new__.__signature__ = signature.replace(parameters=[first, *signature.parameters.values()])
 
 
 def _params_api(native, official, namespace):
@@ -709,14 +889,9 @@ def _params_api(native, official, namespace):
     and setters, `fit`, `copy`, `save`, `load`), and the native class's members of PySpark's
     server-side object (its fit, transform and evaluate, the model's members, the persistence), of
     the native object's params synced first."""
-    namespace.update(
-        {
-            # PySpark's param maps, of the object's attributes, and its cache of `params`.
-            "_paramMap": _LazyParamMap(),
-            "_defaultParamMap": _LazyParamMap(),
-            "_params": None,
-        }
-    )
+    # PySpark's attributes of the object that it makes at their first read, which `dir()` lists
+    # (see `_lazy_attribute`).
+    namespace["__dir__"] = _dir
     dispatchers = _dispatchers()
     for name in dir(native):
         if name.startswith("__") or name.startswith("_native") or name in _NATIVE_ALWAYS:
@@ -735,7 +910,7 @@ def _params_api(native, official, namespace):
             # A property, as PySpark's (its `params` walk reads none), of PySpark's docstring; a
             # getter of PySpark's instance attribute (a PipelineModel's `stages`) or cached member
             # (`trees`) stays the native one, which the walk reads, as PySpark's reads them.
-            namespace[name] = _synced_property(_NativeMember(native, name), member.__doc__)
+            namespace[name] = _synced_property(_NativeMember(native, name), member)
         elif kind == "method_descriptor":
             namespace[name] = _synced(_NativeMember(native, name), name, official)
         elif kind in ("classmethod_descriptor", "staticmethod") and isinstance(
@@ -747,8 +922,10 @@ def _params_api(native, official, namespace):
         if hasattr(native, name) and (_member_of(official, name)[0], name) in dispatchers:
             namespace[primitive] = _synced(_NativeMember(native, name), primitive, official)
     if hasattr(native, "__getstate__"):
+        # PySpark's state, the attributes of the object, of its param maps made first, which
+        # `copy.copy`, `copy.deepcopy` and `pickle` take (see `_materialize`).
         namespace["__getstate__"] = _synced(
-            _NativeMember(native, "__getstate__"), "__getstate__", official
+            _NativeMember(native, "__getstate__"), "__getstate__", official, prepare=_materialize
         )
     if hasattr(native, "write"):
         # The native writer, of the params of the object (and of the objects that it holds) as of
@@ -757,6 +934,20 @@ def _params_api(native, official, namespace):
     if hasattr(native, "read") and isinstance(_member_of(official, "read")[1], classmethod):
         # The native reader, of PySpark's class method (`JavaMLReadable.read`, `Pipeline.read`).
         namespace["read"] = _class_member(_NativeMember(native, "read"), "read", official)
+    _text_api(native, official, namespace)
+
+
+def _text_api(native, official, namespace):
+    """The `__repr__` and `__str__` of the public class of the native class `native` and PySpark's
+    class `official`, in `namespace`: the native class's own (the uid, `Identifiable.__repr__`, or
+    the server's description of a model, `JavaModel.__repr__`), of PySpark's function of the name
+    (see `_synced`), of no params to sync, as PySpark's reads none."""
+    for name in ("__repr__", "__str__"):
+        own = inspect.getattr_static(native, name)
+        if own is inspect.getattr_static(object, name):
+            continue
+        if isinstance(_member_of(official, name)[1], types.FunctionType):
+            namespace[name] = _synced(_NativeMember(native, name), name, official, sync=False)
 
 
 def _is_readwrite(official):
@@ -814,47 +1005,16 @@ def _summary_api(native, official, namespace):
             continue
         kind = type(inspect.getattr_static(native, name)).__name__
         if kind == "getset_descriptor" and isinstance(member, property):
-            namespace[name] = _property_of(_NativeMember(native, name), member.__doc__)
+            namespace[name] = _property_of(_NativeMember(native, name), member)
         elif kind == "method_descriptor":
             namespace[name] = _method_of(_NativeMember(native, name), name, official)
-
-
-def _property_of(descriptor, doc):
-    """A property of the native getter `descriptor` (its `_NativeMember`), of PySpark's docstring
-    `doc`."""
-
-    def fget(self):
-        return descriptor.get(self, type(self))
-
-    return property(fget, doc=doc)
+    _text_api(native, official, namespace)
 
 
 def _method_of(member, name, official):
     """The native method `member` (`name`, its `_NativeMember`) of PySpark's class `official`, as
     PySpark names it, documents it and binds a call of it (see `_synced`), of no params to sync."""
     return _synced(member, name, official, sync=False)
-
-
-def _newargs_of(official):
-    """The `__getnewargs__` of a class whose PySpark constructor takes the objects of the instance
-    (a PipelineModel's `stages`, a CrossValidatorModel's `bestModel`, `avgMetrics`, ...), which
-    `copy.deepcopy` and `pickle` construct a copy of, as of PySpark's instance attributes of the
-    same names; None of the others."""
-    _, init = _member_of(official, "__init__")
-    parameters = list(inspect.signature(getattr(init, "__wrapped__", init)).parameters.values())[1:]
-    positional = [
-        p
-        for p in parameters
-        if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
-    ]
-    if not any(p.default is inspect.Parameter.empty for p in positional):
-        return None
-    names = tuple(p.name for p in positional)
-
-    def __getnewargs__(self):
-        return tuple(getattr(self, name) for name in names)
-
-    return __getnewargs__
 
 
 def publish(namespace, official_module, *, public_module=None):

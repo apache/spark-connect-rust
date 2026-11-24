@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Native bindings for standard pyspark.ml.feature stages.
 use super::*;
-use pyo3::sync::PyOnceLock;
 use spark_connect::ml as core;
 
 /// The transform of a feature stage, after the check of its `params` argument (see
@@ -10,7 +9,7 @@ fn transform_native<T>(
     slf: &Bound<'_, T>,
     dataset: &Bound<'_, PyAny>,
     params: Option<&Bound<'_, PyAny>>,
-) -> PyResult<PyDataFrame>
+) -> PyResult<crate::dataframe::NewDataFrame>
 where
     T: Native + PyClass,
     T::Core: Transformer,
@@ -18,70 +17,13 @@ where
     check_params(params)?;
     let input = dataset_of(dataset, "transform")?;
     let mut transformer = snapshot(slf)?;
-    let output = slf
-        .py()
-        .detach(|| transformer.transform(&input).map_err(Box::new))
-        .to_pyerr()?;
+    // Of the plan of the input, which the transform is built over.
+    let output = crate::gc::detach_of_values(slf.py(), input.held_parts(), || {
+        transformer.transform(&input).map_err(Box::new)
+    })
+    .to_pyerr()?;
     Ok(PyDataFrame::new(output))
 }
-// inspect cannot parse a textual NaN default; construct a Signature with the real float. A method's
-// signature (`with_self`) starts with `self`.
-fn signature(py: Python<'_>, defaults: &str, with_self: bool) -> PyResult<Py<PyAny>> {
-    let inspect = py.import("inspect")?;
-    let parameter = inspect.getattr("Parameter")?;
-    let values = py.import("json")?.call_method1("loads", (defaults,))?;
-    let parameters = PyList::empty(py);
-    if with_self {
-        parameters
-            .append(parameter.call1(("self", parameter.getattr("POSITIONAL_OR_KEYWORD")?))?)?;
-    }
-    for (key, value) in values.cast::<PyDict>()?.iter() {
-        let kw = PyDict::new(py);
-        kw.set_item(
-            "default",
-            if value.is_instance_of::<PyDict>() {
-                py.import("builtins")?
-                    .getattr("float")?
-                    .call1((value.get_item("float")?,))?
-            } else {
-                value
-            },
-        )?;
-        parameters.append(parameter.call((key, parameter.getattr("KEYWORD_ONLY")?), Some(&kw))?)?;
-    }
-    Ok(inspect.getattr("Signature")?.call1((parameters,))?.unbind())
-}
-
-/// The `setParams` of a feature stage, a Python function that calls its native `_setParams`, so
-/// that `inspect.signature` gives the keyword-only params of PySpark's `setParams` with their real
-/// defaults, as the constructor's `__signature__` does: a text signature cannot hold a NaN default.
-fn set_params_function(py: Python<'_>, class: &str, defaults: &str) -> PyResult<Py<PyAny>> {
-    static FACTORY: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
-    let factory = FACTORY.get_or_try_init(py, || -> PyResult<Py<PyAny>> {
-        let module = PyModule::from_code(
-            py,
-            SET_PARAMS_SOURCE,
-            c"pyspark/_ml_set_params.py",
-            c"pyspark._ml_set_params",
-        )?;
-        Ok(module.getattr("make_set_params")?.unbind())
-    })?;
-    Ok(factory
-        .bind(py)
-        .call1((class, signature(py, defaults, true)?))?
-        .unbind())
-}
-
-const SET_PARAMS_SOURCE: &std::ffi::CStr = c"def make_set_params(class_name, signature):
-    def setParams(self, *args, **kwargs):
-        return self._setParams(*args, **kwargs)
-
-    setParams.__qualname__ = class_name + '.setParams'
-    setParams.__module__ = 'pyspark.ml.connect.feature'
-    setParams.__signature__ = signature
-    return setParams
-";
-
 /// A transformer of `pyspark.ml.feature` (`$wrapper`, over the core `$core`): PySpark's Params API,
 /// persistence and `copy` of [`native_pymethods!`] over the params `$rows` (of
 /// `scripts/gen_native_params_table.py`), its constructor and `setParams`, its setters
@@ -99,6 +41,9 @@ macro_rules! feature_transformer {
             unsendable: Vec<&'static str>,
             raw: Vec<(&'static str, Py<PyAny>)>,
             own_defaults: params_api::OwnDefaults,
+            /// Whether the value is written, which `__traverse__` checks first (see
+            /// `crate::gc::GcReady`).
+            gc_ready: crate::gc::GcReady,
         }
         impl Native for $wrapper {
             type Core = core::$core;
@@ -130,21 +75,38 @@ macro_rules! feature_transformer {
             fn new(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
                 bind_params("__init__", $name, &[], &[$(($param, Kind::$kind)),*], args, kwargs)?;
                 let own_defaults = Vec::new();
-                let mut this = Self { inner: core::$core::new(), unsendable: Vec::new(), raw: Vec::new(), own_defaults };
+                let mut this = Self {
+                    inner: core::$core::new(),
+                    unsendable: Vec::new(),
+                    raw: Vec::new(),
+                    own_defaults,
+                    gc_ready: crate::gc::GcReady::new(),
+                };
                 init_params(&mut this, $name, &[], &[$(($param, Kind::$kind)),*], args, kwargs)?;
                 Ok(this)
             }
-            #[classattr]
-            fn __signature__(py: Python<'_>) -> PyResult<Py<PyAny>> {
-                signature(py, $defaults, false)
+            /// Visit the Python values of the params that the stage holds, of Python's garbage
+            /// collector, as PySpark's param maps hold them (see `params_api::visit_values`).
+            fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
+                if !self.gc_ready.get() {
+                    return Ok(());
+                }
+                params_api::visit_values(&self.raw, &visit)?;
+                params_api::visit_values(&self.own_defaults, &visit)
+            }
+            /// Break a reference cycle that the garbage collector found unreachable: the stage
+            /// drops the Python values of its params.
+            fn __clear__(&mut self) {
+                if self.gc_ready.get() {
+                    self.raw.clear();
+                    self.own_defaults.clear();
+                }
             }
             // PySpark's setParams, keyword-only, which sets the params that it is given and
-            // returns the object (see set_params_function and set_params_of).
-            #[classattr]
-            fn setParams(py: Python<'_>) -> PyResult<Py<PyAny>> {
-                set_params_function(py, $name, $defaults)
-            }
-            #[pyo3(name = "_setParams", signature = (*args, **kwargs))]
+            // returns the object (see set_params_of): the public class takes PySpark's own
+            // function, of its signature, and its own `__signature__` of PySpark's constructor
+            // (see `_native_classes`).
+            #[pyo3(name = "setParams", signature = (*args, **kwargs))]
             fn set_params_native<'py>(
                 slf: Bound<'py, Self>,
                 args: &Bound<'py, PyTuple>,
@@ -169,7 +131,7 @@ macro_rules! feature_transformer {
                     let copy = params_api::copy(slf, Some(map))?;
                     return Ok(copy.as_any().call_method1("transform", (dataset,))?.unbind());
                 }
-                Ok(crate::ml::object::new_py(slf.py(), transform_native(slf, dataset, params)?)?.into_any())
+                Ok(transform_native(slf, dataset, params)?.into_py(slf.py())?.into_any())
             }
             $($($extra)*)?
         }
@@ -181,6 +143,7 @@ macro_rules! feature_transformer {
                     unsendable: self.unsendable.clone(),
                     raw: self.raw.iter().map(|(name, value)| (*name, value.clone_ref(py))).collect(),
                     own_defaults: params_api::clone_own_defaults(py, &self.own_defaults),
+                    gc_ready: crate::gc::GcReady::new(),
                 })
             }
 
@@ -235,6 +198,9 @@ macro_rules! feature_estimator {
             unsendable: Vec<&'static str>,
             raw: Vec<(&'static str, Py<PyAny>)>,
             own_defaults: params_api::OwnDefaults,
+            /// Whether the value is written, which `__traverse__` checks first (see
+            /// `crate::gc::GcReady`).
+            gc_ready: crate::gc::GcReady,
         }
         impl Native for $wrapper {
             type Core = core::$core;
@@ -266,21 +232,38 @@ macro_rules! feature_estimator {
             fn new(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
                 bind_params("__init__", $name, &[], &[$(($param, Kind::$kind)),*], args, kwargs)?;
                 let own_defaults = Vec::new();
-                let mut this = Self { inner: core::$core::new(), unsendable: Vec::new(), raw: Vec::new(), own_defaults };
+                let mut this = Self {
+                    inner: core::$core::new(),
+                    unsendable: Vec::new(),
+                    raw: Vec::new(),
+                    own_defaults,
+                    gc_ready: crate::gc::GcReady::new(),
+                };
                 init_params(&mut this, $name, &[], &[$(($param, Kind::$kind)),*], args, kwargs)?;
                 Ok(this)
             }
-            #[classattr]
-            fn __signature__(py: Python<'_>) -> PyResult<Py<PyAny>> {
-                signature(py, $defaults, false)
+            /// Visit the Python values of the params that the stage holds, of Python's garbage
+            /// collector, as PySpark's param maps hold them (see `params_api::visit_values`).
+            fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
+                if !self.gc_ready.get() {
+                    return Ok(());
+                }
+                params_api::visit_values(&self.raw, &visit)?;
+                params_api::visit_values(&self.own_defaults, &visit)
+            }
+            /// Break a reference cycle that the garbage collector found unreachable: the stage
+            /// drops the Python values of its params.
+            fn __clear__(&mut self) {
+                if self.gc_ready.get() {
+                    self.raw.clear();
+                    self.own_defaults.clear();
+                }
             }
             // PySpark's setParams, keyword-only, which sets the params that it is given and
-            // returns the object (see set_params_function and set_params_of).
-            #[classattr]
-            fn setParams(py: Python<'_>) -> PyResult<Py<PyAny>> {
-                set_params_function(py, $name, $defaults)
-            }
-            #[pyo3(name = "_setParams", signature = (*args, **kwargs))]
+            // returns the object (see set_params_of): the public class takes PySpark's own
+            // function, of its signature, and its own `__signature__` of PySpark's constructor
+            // (see `_native_classes`).
+            #[pyo3(name = "setParams", signature = (*args, **kwargs))]
             fn set_params_native<'py>(
                 slf: Bound<'py, Self>,
                 args: &Bound<'py, PyTuple>,
@@ -313,6 +296,7 @@ macro_rules! feature_estimator {
                     unsendable: self.unsendable.clone(),
                     raw: self.raw.iter().map(|(name, value)| (*name, value.clone_ref(py))).collect(),
                     own_defaults: params_api::clone_own_defaults(py, &self.own_defaults),
+                    gc_ready: crate::gc::GcReady::new(),
                 })
             }
 
@@ -761,9 +745,12 @@ feature_estimator!(PyQuantileDiscretizer, QuantileDiscretizer, "QuantileDiscreti
             let df = dataset_of(dataset, "fit")?;
             let mut estimator = snapshot(slf)?;
             let session = df.spark_session();
-            let bucketizer = interruptible(py, &session, || {
-                estimator.fit_bucketizer(&df).map_err(Box::new)
-            })?;
+            let bucketizer = crate::interrupt::interruptible_of_values(
+                py,
+                &session,
+                df.held_parts(),
+                || estimator.fit_bucketizer(&df).map_err(Box::new),
+            )?;
             let names = if bucketizer.params().get_param("splits").is_some() {
                 ["splits", "inputCol", "outputCol", "handleInvalid"]
             } else {
@@ -935,7 +922,8 @@ StopWordsRemover,
             };
             literal.to_literal_proto()
         };
-        interruptible(py, &session, || {
+        // A fetch of the ML helper, of a literal.
+        crate::interrupt::interruptible_without_parts(py, &session, || {
             core::ml_helper_attribute(
                 &session,
                 "stopWordsRemoverLoadDefaultStopWords",
@@ -1154,44 +1142,44 @@ feature_estimator!(PyWord2Vec, Word2Vec, PyWord2VecModel, "Word2Vec", "org.apach
 ]);
 
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<PyBinarizer>()?;
-    m.add_class::<PyBucketedRandomProjectionLSH>()?;
-    m.add_class::<PyBucketizer>()?;
-    m.add_class::<PyChiSqSelector>()?;
-    m.add_class::<PyCountVectorizer>()?;
-    m.add_class::<PyDCT>()?;
-    m.add_class::<PyElementwiseProduct>()?;
-    m.add_class::<PyFeatureHasher>()?;
-    m.add_class::<PyHashingTF>()?;
-    m.add_class::<PyIDF>()?;
-    m.add_class::<PyImputer>()?;
-    m.add_class::<PyIndexToString>()?;
-    m.add_class::<PyInteraction>()?;
-    m.add_class::<PyMaxAbsScaler>()?;
-    m.add_class::<PyMinHashLSH>()?;
-    m.add_class::<PyMinMaxScaler>()?;
-    m.add_class::<PyNGram>()?;
-    m.add_class::<PyNormalizer>()?;
-    m.add_class::<PyOneHotEncoder>()?;
-    m.add_class::<PyPCA>()?;
-    m.add_class::<PyPolynomialExpansion>()?;
-    m.add_class::<PyQuantileDiscretizer>()?;
-    m.add_class::<PyRobustScaler>()?;
-    m.add_class::<PyRegexTokenizer>()?;
-    m.add_class::<PyRFormula>()?;
-    m.add_class::<PySQLTransformer>()?;
-    m.add_class::<PyStandardScaler>()?;
-    m.add_class::<PyStopWordsRemover>()?;
-    m.add_class::<PyStringIndexer>()?;
-    m.add_class::<PyTargetEncoder>()?;
-    m.add_class::<PyTokenizer>()?;
-    m.add_class::<PyUnivariateFeatureSelector>()?;
-    m.add_class::<PyVarianceThresholdSelector>()?;
-    m.add_class::<PyVectorAssembler>()?;
-    m.add_class::<PyVectorIndexer>()?;
-    m.add_class::<PyVectorSizeHint>()?;
-    m.add_class::<PyVectorSlicer>()?;
-    m.add_class::<PyWord2Vec>()?;
+    super::object::register_class::<PyBinarizer>(m)?;
+    super::object::register_class::<PyBucketedRandomProjectionLSH>(m)?;
+    super::object::register_class::<PyBucketizer>(m)?;
+    super::object::register_class::<PyChiSqSelector>(m)?;
+    super::object::register_class::<PyCountVectorizer>(m)?;
+    super::object::register_class::<PyDCT>(m)?;
+    super::object::register_class::<PyElementwiseProduct>(m)?;
+    super::object::register_class::<PyFeatureHasher>(m)?;
+    super::object::register_class::<PyHashingTF>(m)?;
+    super::object::register_class::<PyIDF>(m)?;
+    super::object::register_class::<PyImputer>(m)?;
+    super::object::register_class::<PyIndexToString>(m)?;
+    super::object::register_class::<PyInteraction>(m)?;
+    super::object::register_class::<PyMaxAbsScaler>(m)?;
+    super::object::register_class::<PyMinHashLSH>(m)?;
+    super::object::register_class::<PyMinMaxScaler>(m)?;
+    super::object::register_class::<PyNGram>(m)?;
+    super::object::register_class::<PyNormalizer>(m)?;
+    super::object::register_class::<PyOneHotEncoder>(m)?;
+    super::object::register_class::<PyPCA>(m)?;
+    super::object::register_class::<PyPolynomialExpansion>(m)?;
+    super::object::register_class::<PyQuantileDiscretizer>(m)?;
+    super::object::register_class::<PyRobustScaler>(m)?;
+    super::object::register_class::<PyRegexTokenizer>(m)?;
+    super::object::register_class::<PyRFormula>(m)?;
+    super::object::register_class::<PySQLTransformer>(m)?;
+    super::object::register_class::<PyStandardScaler>(m)?;
+    super::object::register_class::<PyStopWordsRemover>(m)?;
+    super::object::register_class::<PyStringIndexer>(m)?;
+    super::object::register_class::<PyTargetEncoder>(m)?;
+    super::object::register_class::<PyTokenizer>(m)?;
+    super::object::register_class::<PyUnivariateFeatureSelector>(m)?;
+    super::object::register_class::<PyVarianceThresholdSelector>(m)?;
+    super::object::register_class::<PyVectorAssembler>(m)?;
+    super::object::register_class::<PyVectorIndexer>(m)?;
+    super::object::register_class::<PyVectorSizeHint>(m)?;
+    super::object::register_class::<PyVectorSlicer>(m)?;
+    super::object::register_class::<PyWord2Vec>(m)?;
     feature_api::register(m)?;
     m.add(
         "_ml_feature_names",

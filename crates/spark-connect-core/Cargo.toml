@@ -17,7 +17,7 @@ name = "spark_connect_core"
 
 [dependencies]
 spark-connect-proto = { package = "apache-spark-connect-proto", path = "../spark-connect-proto", version = "4.4.0" }
-tonic = { workspace = true, features = ["tls-ring", "tls-native-roots"] }
+tonic.workspace = true
 prost.workspace = true
 tokio = { workspace = true, features = ["net", "io-util"] }
 futures.workspace = true
@@ -32,16 +32,31 @@ prost-types.workspace = true
 crc32fast = "1"
 sha2 = "0.10"
 # Transport errors that tonic keeps as a status's source, for `RetryPolicy::can_retry`.
-h2 = "0.4"
+h2.workspace = true
 hyper = "1"
 # The Basic credential and the percent-decoded userinfo of a proxy URI, already built for tonic.
 base64 = "0.22"
 percent-encoding = "2"
-# The tokio stream of a channel through a proxy, as tonic's own connector gives it to hyper, and
-# the connector of a direct channel, tonic's own (whose `channel` feature builds it).
+# The tokio stream of the connections of the connector, as tonic's own connector gives it to hyper.
 hyper-util = { version = "0.1", features = ["client-legacy", "tokio"] }
 # Grows the stack for the clones and drops of the requests of deep plans.
 stacker = "0.1"
+# The TLS sessions of the channels, which the connector makes itself, as tonic's own TLS (its
+# `tls-ring` and `tls-native-roots` features, which the client does not use) makes them, so that the
+# settings of a TLS server are bounded by the connect deadline and its failures have grpcio's texts.
+tokio-rustls = { version = "0.26", default-features = false, features = ["logging", "tls12", "ring"] }
+rustls-native-certs = "0.8"
+
+[target.'cfg(unix)'.dependencies]
+# The texts of `gai_strerror`, which tell the failures of the system's resolver apart.
+libc = "0.2"
+# The connections of the connector, of TCP and of Unix sockets, whose `connect` it makes itself, so
+# that a failure as it starts is told from one later, as gRPC's core tells them.
+socket2 = "0.6"
+
+[target.'cfg(windows)'.dependencies]
+# The search list of DNS of the registry, as c-ares reads it for a `dns://<server>/` target.
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Registry"] }
 
 [target.'cfg(all(target_arch = "aarch64", not(target_os = "windows")))'.dependencies]
 # sha2 0.10 requires this feature for ARM hardware acceleration; sha2-asm excludes Windows.
@@ -50,5 +65,10 @@ sha2 = { version = "0.10", features = ["asm"] }
 [dev-dependencies]
 # The gRPC servers of the tests.
 tonic = { workspace = true, features = ["server", "router"] }
+# The paused clock of the tests of the backoff of the connections.
+tokio = { workspace = true, features = ["test-util"] }
+# The certificates and the keys of the TLS servers of the tests, made as the tests run, so that
+# no key is kept in the source; of ring, which rustls builds on here.
+rcgen = { version = "0.14", default-features = false, features = ["ring"] }
 tempfile = "3"
 tonic-prost.workspace = true

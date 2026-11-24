@@ -4,7 +4,7 @@
 //! (`spark.sql.pyspark.udf.profiler`) send their results. PySpark's client unpickles them with
 //! `specialAccumulatorSer` into its `ConnectProfilerCollector`, of `spark.profile`.
 
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex};
 
 use spark_connect_proto as proto;
 
@@ -14,38 +14,16 @@ pub const PYTHON_ACCUMULATOR_METRICS: &str = "__python_accumulator__";
 /// A handler of the pickled `(id, update)` of each update of the Python accumulators.
 pub type PythonAccumulatorHandler = Arc<dyn Fn(&[u8]) + Send + Sync>;
 
-/// The handler of the updates of the Python accumulators of a session, shared by its clones.
-#[derive(Clone, Default)]
+/// The handler of the updates of the Python accumulators of a session, shared by its clones, of
+/// the state of the session that they share.
+#[derive(Default)]
 pub(crate) struct PythonAccumulators {
-    handler: Arc<Mutex<Option<PythonAccumulatorHandler>>>,
-}
-
-/// A handle of the [`PythonAccumulators`] of a session that does not keep their handler, of
-/// [`PythonAccumulators::downgrade`], for a [`WeakSparkSession`](crate::session::WeakSparkSession).
-#[derive(Clone)]
-pub(crate) struct WeakPythonAccumulators {
-    handler: Weak<Mutex<Option<PythonAccumulatorHandler>>>,
-}
-
-impl WeakPythonAccumulators {
-    /// The accumulators, while a handle of them is alive.
-    pub(crate) fn upgrade(&self) -> Option<PythonAccumulators> {
-        Some(PythonAccumulators {
-            handler: self.handler.upgrade()?,
-        })
-    }
+    handler: Mutex<Option<PythonAccumulatorHandler>>,
 }
 
 impl PythonAccumulators {
     pub(crate) fn set_handler(&self, handler: PythonAccumulatorHandler) {
         *self.handler.lock().unwrap() = Some(handler);
-    }
-
-    /// A handle of these accumulators that does not keep them.
-    pub(crate) fn downgrade(&self) -> WeakPythonAccumulators {
-        WeakPythonAccumulators {
-            handler: Arc::downgrade(&self.handler),
-        }
     }
 
     /// Hand each pickled update of the `__python_accumulator__` metrics of `metrics` to the

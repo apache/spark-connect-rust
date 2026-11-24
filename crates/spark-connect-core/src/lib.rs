@@ -8,15 +8,26 @@ pub mod artifact;
 pub mod bytes_codec;
 pub mod channel;
 pub mod client;
+pub mod client_log;
+mod connector;
+mod dns;
 pub mod error;
+#[doc(hidden)]
+pub mod fork;
 pub mod grpc_log;
+// The Python binding reads the endpoint of a channel builder of it.
+#[doc(hidden)]
+pub mod grpc_target;
+mod metadata;
 mod proxy;
 pub mod reattach;
 pub mod retries;
+mod rpc_status;
 pub mod runtime;
 // Shared with `apache-spark-connect`, whose session keeps per-thread tags the same way.
 #[doc(hidden)]
 pub mod thread_entries;
+mod tls_names;
 
 pub use artifact::{
     build_artifact_request_stream, compute_crc32, ArtifactData, FileArtifact, InMemoryArtifact,
@@ -24,6 +35,8 @@ pub use artifact::{
 };
 pub use channel::ChannelBuilder;
 pub use client::{ExecutePlanHook, ResultChunking, RpcDeadlines, SparkConnectClient};
+#[doc(hidden)]
+pub use connector::set_grpcio_dialect;
 pub use error::{QueryContext, QueryContextType, Result, SparkError, SparkErrorKind};
 pub use reattach::ExecutePlanResponseReattachableIterator;
 pub use retries::{RetryPolicy, RetryPolicyState, DEFAULT_MAX_RETRY_EXCEPTION_ELAPSED_TIME};

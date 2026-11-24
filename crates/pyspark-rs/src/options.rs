@@ -1,49 +1,11 @@
-//! The options of the readers, the writers and the catalog, as PySpark converts them.
-//!
-//! PySpark treats an option of `None` in two ways, and each helper here is named after the one
-//! it implements:
-//!
-//! - **skip**: the `None` is left out, and whatever the builder already holds under that key
-//!   stays. This is `OptionUtils._set_opts`, which the format methods (`csv`, `json`, ...) pass
-//!   their keyword arguments to, and the `option` and `options` of the writers and of the
-//!   stream reader.
-//! - **unset**: the `None` removes the key from the builder. This is `DataFrameReader.option`,
-//!   `options` and `load`.
-//!
-//! Every other value goes through [`coerce_option_value`], or through [`stream_option_text`] for
-//! the option and the format methods of the stream reader, which PySpark converts differently.
+//! The options of the session builder and the catalog, as PySpark converts them, and those of the
+//! plans of the reads of PySpark's readers (see `reader_plans`).
 
 use std::collections::HashMap;
 
 use pyo3::prelude::*;
-use pyo3::types::{PyBool, PyBytes, PyDict, PyList, PyString, PyTuple};
-use spark_connect::readwriter::{DataFrameReader, DataFrameWriter, DataFrameWriterV2};
-use spark_connect::streaming::DataStreamReader;
+use pyo3::types::{PyBool, PyBytes, PyDict, PyString};
 use spark_connect_core::error::SparkError;
-
-use crate::dataframe::WriterState;
-
-/// Coerce a Python option value the way reference pyspark's `to_str` does:
-/// `None` -> `None` (the option is left unset, NOT the literal string "None"), a
-/// bool -> lowercase `"true"`/`"false"` (not Python's `"True"`/`"False"`), and
-/// everything else -> its `str()`. Used by every reader/writer/conf `option(s)`
-/// binding so option handling matches the reference client.
-pub(crate) fn coerce_option_value(v: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
-    if v.is_none() {
-        return Ok(None);
-    }
-    if let Ok(b) = v.cast::<PyBool>() {
-        return Ok(Some(if b.is_true() { "true" } else { "false" }.to_string()));
-    }
-    Ok(Some(str_text(v)?))
-}
-
-/// The `str()` of `v`, as the reference client sends it in a protobuf string field, which raises
-/// the `UnicodeEncodeError` of a str that UTF-8 cannot encode (a lone surrogate), as
-/// [`str_argument`], where a lossy conversion would send another text, such as another path.
-pub(crate) fn str_text(v: &Bound<'_, PyAny>) -> PyResult<String> {
-    str_argument(v.str()?.as_any())
-}
 
 /// The text of `v` that PySpark sets in a protobuf string field as it is, as protobuf's default
 /// (upb) backend converts it: a str as its UTF-8, and bytes decoded as UTF-8, with the error of
@@ -108,19 +70,15 @@ pub(crate) fn check_unexpected_keywords(
 // PySpark keeps an option in a dict, and its plan encodes the strs of the dict when the plan is
 // built: a key or a value with a lone surrogate fails the request that sends the plan, not the call
 // that sets it. A key that is not a str fails the plan too, or, for a method whose `DataSource`
-// asserts its keys, the call of that method. The core holds only the strs that encode, and the
-// other entries are kept here, in the order of the dict, with the error that PySpark raises.
+// asserts its keys, the call of that method. The core takes only the strs that encode: each entry
+// of the dict is converted when the plan is built ([`plan_entry`]), and the plan fails with the
+// error that PySpark raises of the first entry that the core does not take.
 
 /// The UTF-32LE bytes of a str, which keep its lone surrogates: the form of
 /// [`SparkError::unencodable_str`].
 pub(crate) fn utf32le_of(text: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
     let encoded = text.call_method1("encode", ("utf-32-le", "surrogatepass"))?;
     Ok(encoded.cast::<PyBytes>()?.as_bytes().to_vec())
-}
-
-/// The str of UTF-32LE bytes of a str, as Python makes it, which keeps its lone surrogates.
-pub(crate) fn utf32le_text<'py>(py: Python<'py>, utf32le: &[u8]) -> PyResult<Bound<'py, PyAny>> {
-    PyBytes::new(py, utf32le).call_method1("decode", ("utf-32-le", "surrogatepass"))
 }
 
 /// The text of an option or of its key: its UTF-32LE bytes, and the text that the core takes,
@@ -139,27 +97,6 @@ impl OptionText {
             text: text.extract::<String>().ok(),
         })
     }
-
-    /// The text of a name that this crate gives, which is ASCII.
-    pub(crate) fn literal(name: &str) -> Self {
-        OptionText {
-            utf32le: name
-                .chars()
-                .flat_map(|c| (c as u32).to_le_bytes())
-                .collect(),
-            text: Some(name.to_string()),
-        }
-    }
-
-    /// The text that the core reader takes, None for a str that UTF-8 cannot encode.
-    pub(crate) fn into_text(self) -> Option<String> {
-        self.text
-    }
-
-    /// The text of the value, as a Python str.
-    fn to_object<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        utf32le_text(py, &self.utf32le)
-    }
 }
 
 /// What a key that is not a str is, which decides the error of its plan.
@@ -173,14 +110,11 @@ pub(crate) enum ObjectKind {
     Other,
 }
 
-/// The key of an option: a str, or another object, which PySpark keeps in its dict as it is.
-#[derive(Clone)]
+/// The key of an option: a str, or another object, which PySpark keeps in its dict as it is, of
+/// the kind that decides the error of its plan.
 pub(crate) enum OptionKey {
     Text(OptionText),
-    Object {
-        object: std::sync::Arc<Py<PyAny>>,
-        kind: ObjectKind,
-    },
+    Object { kind: ObjectKind },
 }
 
 impl OptionKey {
@@ -196,35 +130,6 @@ impl OptionKey {
             OptionKey::Object { .. } => None,
         }
     }
-
-    /// Whether `other` is the same key, as PySpark's dict takes it: the same str, or an object
-    /// that is equal to it.
-    fn same_as(&self, other: &OptionKey) -> bool {
-        match (self, other) {
-            (OptionKey::Text(a), OptionKey::Text(b)) => a.utf32le == b.utf32le,
-            (OptionKey::Object { object: a, .. }, OptionKey::Object { object: b, .. }) => {
-                Python::attach(|py| {
-                    pyo3::types::PyAnyMethods::eq(a.bind(py), b.bind(py)).unwrap_or(false)
-                })
-            }
-            _ => false,
-        }
-    }
-
-    /// The key as the object that PySpark keeps.
-    fn to_object<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        match self {
-            OptionKey::Text(text) => text.to_object(py),
-            OptionKey::Object { object, .. } => Ok(object.bind(py).clone()),
-        }
-    }
-}
-
-/// The key of an option, as PySpark's `option` keeps it in a dict, which hashes it first, so that
-/// an unhashable key raises its TypeError at the call.
-pub(crate) fn option_key(key: &Bound<'_, PyAny>) -> PyResult<OptionKey> {
-    key.hash()?;
-    option_object(key)
 }
 
 /// The object of an option, a key or a value, as PySpark's dict keeps it, without hashing it: a
@@ -241,10 +146,7 @@ pub(crate) fn option_object(object: &Bound<'_, PyAny>) -> PyResult<OptionKey> {
     } else {
         ObjectKind::Other
     };
-    Ok(OptionKey::Object {
-        object: std::sync::Arc::new(object.clone().unbind()),
-        kind,
-    })
+    Ok(OptionKey::Object { kind })
 }
 
 /// The error that PySpark's plan raises for a key that is not a str, which protobuf rejects.
@@ -279,8 +181,8 @@ fn value_error(value: &OptionKey) -> Option<SparkError> {
 }
 
 /// The error that the plan raises for an entry: PySpark encodes the key first, then the value.
-fn entry_error(key: &OptionKey, value: Option<&OptionKey>) -> Option<SparkError> {
-    let bad_value = || value.and_then(value_error);
+fn entry_error(key: &OptionKey, value: &OptionKey) -> Option<SparkError> {
+    let bad_value = || value_error(value);
     match key {
         OptionKey::Text(text) if text.text.is_none() => {
             Some(SparkError::unencodable_str(&text.utf32le))
@@ -301,404 +203,24 @@ fn entry_error(key: &OptionKey, value: Option<&OptionKey>) -> Option<SparkError>
     }
 }
 
-/// The entries of the options of a reader, writer, builder or table properties that the core
-/// cannot take, in the order of PySpark's dict: a key that is not a str that encodes, or a value
-/// that the core does not take, which is a str that does not encode, or an object that is not
-/// a str or bytes that are UTF-8. The plan fails with the error of the first entry.
-#[derive(Clone, Default)]
-pub(crate) struct UnencodableOptions(Vec<(OptionKey, Option<OptionKey>)>);
-
-impl UnencodableOptions {
-    /// Whether an entry of `key` and `value` is kept: a key that is not a str, or a str that does
-    /// not encode, or a value that the core does not take.
-    fn kept(key: &OptionKey, value: Option<&OptionKey>) -> bool {
-        match key {
-            OptionKey::Text(text) => {
-                text.text.is_none() || value.is_some_and(|v| v.core_text().is_none())
-            }
-            OptionKey::Object { .. } => true,
-        }
+/// The pair of an entry of `key` and `value` of the options of a plan, which PySpark sets in the map
+/// of its message when it sends the plan, as the core takes it, or the error that the map raises, of
+/// the key and then of the value: of a str that UTF-8 cannot encode, bytes that are not UTF-8, or
+/// another object, None included.
+pub(crate) fn plan_entry(
+    key: &Bound<'_, PyAny>,
+    value: &Bound<'_, PyAny>,
+) -> PyResult<Result<(String, String), SparkError>> {
+    let key = option_object(key)?;
+    let value = option_object(value)?;
+    if let Some(error) = entry_error(&key, &value) {
+        return Ok(Err(error));
     }
-
-    fn position(&self, key: &OptionKey) -> Option<usize> {
-        self.0.iter().position(|(entry, _)| entry.same_as(key))
-    }
-
-    /// Remove the entry of `key`, which is set to a value that the core takes, or unset.
-    pub(crate) fn remove(&mut self, key: &OptionKey) {
-        if let Some(position) = self.position(key) {
-            self.0.remove(position);
-        }
-    }
-
-    /// Set the entry of `key` to `value`, as PySpark's dict is set: an entry keeps its place, and
-    /// is removed when neither its key nor its value needs it.
-    pub(crate) fn set(&mut self, key: &OptionKey, value: Option<OptionKey>) {
-        if !Self::kept(key, value.as_ref()) {
-            self.remove(key);
-            return;
-        }
-        match self.position(key) {
-            Some(position) => self.0[position] = (key.clone(), value),
-            None => self.0.push((key.clone(), value)),
-        }
-    }
-
-    /// Whether an entry has a key that is not a str, which a reader's `DataSource` asserts.
-    pub(crate) fn has_object_key(&self) -> bool {
-        self.0
-            .iter()
-            .any(|(key, _)| matches!(key, OptionKey::Object { .. }))
-    }
-
-    /// The options of the bytes keys that are UTF-8, with their values, which PySpark's plan
-    /// sends as the text of the key, for the values that encode.
-    pub(crate) fn decodable_pairs(&self) -> Vec<(String, String)> {
-        self.0
-            .iter()
-            .filter_map(|(key, value)| match (key, value) {
-                (
-                    OptionKey::Object {
-                        kind: ObjectKind::Bytes(name),
-                        ..
-                    },
-                    Some(value),
-                ) => Some((name.text.clone()?, value.core_text()?.text.clone()?)),
-                _ => None,
-            })
-            .collect()
-    }
-
-    /// The error of the plan for the first entry, or None when every entry encodes.
-    pub(crate) fn error(&self) -> Option<SparkError> {
-        self.0
-            .iter()
-            .find_map(|(key, value)| entry_error(key, value.as_ref()))
-    }
-
-    /// The entries as a list of pairs of Python objects, which a reduce gives back.
-    pub(crate) fn to_list<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
-        let entries = PyList::empty(py);
-        for (key, value) in self.to_objects(py)? {
-            entries.append(PyTuple::new(py, [key, value])?)?;
-        }
-        Ok(entries)
-    }
-
-    /// Report the Python objects of the entries, the keys that are not strs and the values that
-    /// are objects, to Python's garbage collector, as PySpark's dict of its options holds them:
-    /// those that only these options hold, so that a copy of them, which a request makes of the
-    /// state, does not count one reference twice (see [`SharedObjects`]).
-    pub(crate) fn visit_objects(
-        &self,
-        visit: &pyo3::PyVisit<'_>,
-    ) -> Result<(), pyo3::PyTraverseError> {
-        for (key, value) in &self.0 {
-            for entry in std::iter::once(key).chain(value.as_ref()) {
-                if let OptionKey::Object { object, .. } = entry {
-                    if std::sync::Arc::strong_count(object) == 1 {
-                        visit.call(&**object)?;
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// The entries as Python objects, which a reduce gives back: the key, and the value, if any.
-    pub(crate) fn to_objects<'py>(
-        &self,
-        py: Python<'py>,
-    ) -> PyResult<Vec<(Bound<'py, PyAny>, Bound<'py, PyAny>)>> {
-        self.0
-            .iter()
-            .map(|(key, value)| {
-                let value = match value {
-                    Some(value) => value.to_object(py)?,
-                    None => py.None().into_bound(py),
-                };
-                Ok((key.to_object(py)?, value))
-            })
-            .collect()
-    }
-}
-
-/// The Python objects of a state that the shallow copies of a reader, a writer or a session
-/// builder share, as PySpark's copies share the attributes of their `__dict__`, such as the dict
-/// of their options, whose keys and values may be any objects. A state that copies share has no
-/// one holder among them that could report its objects to Python's garbage collector once, so the
-/// state is held by a Python object too, a [`PySharedObjects`], which each copy holds and reports,
-/// and which reports the objects: so each is reported once, and freed with the last copy that
-/// holds the state, as in PySpark.
-pub(crate) trait SharedObjects: Send + Sync {
-    /// Report the Python objects that the state holds, unless another thread holds its lock.
-    fn visit(&self, visit: &pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError>;
-
-    /// Drop the Python objects of the state, which the garbage collector found unreachable with
-    /// every holder of the state. They are dropped once the lock is left, as their drop may run
-    /// Python code.
-    fn clear(&self);
-}
-
-impl SharedObjects for WriterState<UnencodableOptions> {
-    fn visit(&self, visit: &pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
-        match self.try_lock() {
-            Some(options) => options.visit_objects(visit),
-            None => Ok(()),
-        }
-    }
-
-    fn clear(&self) {
-        let cleared = self
-            .try_lock()
-            .map(|mut options| std::mem::take(&mut *options));
-        drop(cleared);
-    }
-}
-
-/// The Python object that holds a state that the shallow copies of an object share, for Python's
-/// garbage collector (see [`SharedObjects`]): each copy holds it and reports it in its
-/// `__traverse__`, and it reports the objects of the state.
-#[pyclass(name = "_SharedObjects", module = "pyspark._pyspark")]
-pub(crate) struct PySharedObjects(std::sync::Arc<dyn SharedObjects>);
-
-impl PySharedObjects {
-    /// The holder of `state`.
-    pub(crate) fn new(state: std::sync::Arc<dyn SharedObjects>) -> Self {
-        PySharedObjects(state)
-    }
-
-    /// The Python object of `state`, for a new holder of it, or None when it cannot be made, which
-    /// reports nothing of the state: its objects are kept alive then, rather than freed while
-    /// reachable.
-    pub(crate) fn of(state: std::sync::Arc<dyn SharedObjects>) -> Option<Py<PySharedObjects>> {
-        Python::attach(|py| Py::new(py, PySharedObjects(state)).ok())
-    }
-}
-
-#[pymethods]
-impl PySharedObjects {
-    /// The objects of the state. The object has no `__dict__`, so a collection does not meet it
-    /// before its value is written.
-    fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
-        self.0.visit(&visit)
-    }
-
-    /// Break a reference cycle that the garbage collector found unreachable: as every holder of
-    /// the state is unreachable then, the objects of the state are dropped.
-    fn __clear__(&mut self) {
-        self.0.clear();
-    }
-}
-
-/// A reader that takes its options one at a time, and unsets one of them.
-pub(crate) trait ReaderOptionBuilder: OptionBuilder {
-    fn without_option(self, key: &str) -> Self;
-}
-
-impl ReaderOptionBuilder for DataFrameReader {
-    fn without_option(self, key: &str) -> Self {
-        self.unset_option(key)
-    }
-}
-
-impl ReaderOptionBuilder for DataStreamReader {
-    fn without_option(self, key: &str) -> Self {
-        self.unset_option(key)
-    }
-}
-
-/// `builder` with the option `key` set to `value`, or unset when `value` is None, as a reader's
-/// `option` sets it. The core reader takes only a str key whose value encodes, and the other
-/// entries are kept in `unencodable`.
-pub(crate) fn put_reader_option<B: ReaderOptionBuilder>(
-    builder: B,
-    unencodable: &mut UnencodableOptions,
-    key: &OptionKey,
-    value: Option<&OptionText>,
-) -> B {
-    match value {
-        Some(value) => unencodable.set(key, Some(OptionKey::Text(value.clone()))),
-        None => unencodable.remove(key),
-    }
-    match key {
-        OptionKey::Text(OptionText {
-            text: Some(name), ..
-        }) => match value {
-            Some(OptionText {
-                text: Some(value), ..
-            }) => builder.with_option(name, value),
-            _ => builder.without_option(name),
-        },
-        _ => builder,
-    }
-}
-
-/// `builder` with the option `key` set to `value`, as a writer's `option` sets it: the core writer
-/// takes a key that is a str, or bytes that are UTF-8, with a value that encodes, and the other
-/// entries are kept in `unencodable`.
-pub(crate) fn put_writer_option<B: OptionBuilder>(
-    builder: B,
-    unencodable: &mut UnencodableOptions,
-    key: &OptionKey,
-    value: &OptionText,
-) -> B {
-    match (
-        key.core_text().and_then(|name| name.text.as_deref()),
-        value.text.as_deref(),
-    ) {
-        (Some(name), Some(value)) => {
-            unencodable.remove(key);
-            builder.with_option(name, value)
-        }
-        _ => {
-            unencodable.set(key, Some(OptionKey::Text(value.clone())));
-            builder
-        }
-    }
-}
-
-/// `builder` with the option `key` set to `value`, or unset when `value` is None, on a reader whose
-/// state is shared by its copies, as [`put_reader_option`] does.
-pub(crate) fn put_shared_option<B: ReaderOptionBuilder>(
-    builder: B,
-    shared: &WriterState<UnencodableOptions>,
-    key: &OptionKey,
-    value: Option<&OptionText>,
-) -> B {
-    let mut unencodable = shared.get();
-    let builder = put_reader_option(builder, &mut unencodable, key, value);
-    shared.set(unencodable);
-    builder
-}
-
-/// `builder` with the option `key` set to `value`, converted by `to_text`, **skipping** a `value`
-/// that is absent or None, as [`set_option_skip_none`] does.
-pub(crate) fn put_option_skip_none<B: ReaderOptionBuilder>(
-    builder: B,
-    unencodable: &mut UnencodableOptions,
-    key: &OptionKey,
-    value: Option<&Bound<'_, PyAny>>,
-    to_text: fn(&Bound<'_, PyAny>) -> PyResult<Option<OptionText>>,
-) -> PyResult<B> {
-    let Some(value) = value else {
-        return Ok(builder);
-    };
-    match to_text(value)? {
-        Some(text) => Ok(put_reader_option(builder, unencodable, key, Some(&text))),
-        None => Ok(builder),
-    }
-}
-
-/// `builder` with each of `options` set, **skipping** those that are None, as
-/// [`put_option_skip_none`] does for each one, on a reader whose state is shared by its copies.
-pub(crate) fn skip_none_shared<B: ReaderOptionBuilder>(
-    mut builder: B,
-    shared: &WriterState<UnencodableOptions>,
-    options: &[(&str, Option<&Bound<'_, PyAny>>)],
-    to_text: fn(&Bound<'_, PyAny>) -> PyResult<Option<OptionText>>,
-) -> PyResult<B> {
-    let mut unencodable = shared.get();
-    for (name, value) in options {
-        let key = OptionKey::Text(OptionText::literal(name));
-        builder = put_option_skip_none(builder, &mut unencodable, &key, *value, to_text)?;
-    }
-    shared.set(unencodable);
-    Ok(builder)
-}
-
-/// The text of the value of a `DataFrameReader` option, as its `option` takes it: None for None,
-/// a bool lowercased, and else the `str()` of the value.
-pub(crate) fn reader_option_text(value: &Bound<'_, PyAny>) -> PyResult<Option<OptionText>> {
-    if value.is_none() {
-        return Ok(None);
-    }
-    if let Ok(b) = value.cast::<PyBool>() {
-        let text = if b.is_true() { "true" } else { "false" };
-        return Ok(Some(OptionText::literal(text)));
-    }
-    stream_option_text(value)
-}
-
-/// The text of the value of a `DataStreamReader` option, as its `option` takes it: None for None,
-/// else the `str()` of the value, so that a bool is `True`.
-pub(crate) fn stream_option_text(value: &Bound<'_, PyAny>) -> PyResult<Option<OptionText>> {
-    if value.is_none() {
-        return Ok(None);
-    }
-    Ok(Some(OptionText::of(value.str()?.as_any())?))
-}
-
-/// A reader or writer that takes string options one at a time.
-pub(crate) trait OptionBuilder: Sized {
-    fn with_option(self, key: &str, value: &str) -> Self;
-}
-
-impl OptionBuilder for DataFrameReader {
-    fn with_option(self, key: &str, value: &str) -> Self {
-        self.option(key, value)
-    }
-}
-
-impl OptionBuilder for DataFrameWriter {
-    fn with_option(self, key: &str, value: &str) -> Self {
-        self.option(key, value)
-    }
-}
-
-impl OptionBuilder for DataFrameWriterV2 {
-    fn with_option(self, key: &str, value: &str) -> Self {
-        self.option(key, value)
-    }
-}
-
-impl OptionBuilder for DataStreamReader {
-    fn with_option(self, key: &str, value: &str) -> Self {
-        self.option(key, value)
-    }
-}
-
-/// `builder` with the option `name` of `value`, **skipping** a `value` that is absent or None.
-pub(crate) fn set_option_skip_none<B: OptionBuilder>(
-    builder: B,
-    name: &str,
-    value: Option<&Bound<'_, PyAny>>,
-) -> PyResult<B> {
-    match value {
-        Some(value) => match coerce_option_value(value)? {
-            Some(value) => Ok(builder.with_option(name, &value)),
-            None => Ok(builder),
-        },
-        None => Ok(builder),
-    }
-}
-
-/// `builder` with each of `options` in order, **skipping** those that are absent or None, as
-/// [`set_option_skip_none`] one after the other: the first value that fails to convert raises.
-pub(crate) fn set_options_skip_none<B: OptionBuilder>(
-    mut builder: B,
-    options: &[(&str, Option<&Bound<'_, PyAny>>)],
-) -> PyResult<B> {
-    for (name, value) in options {
-        builder = set_option_skip_none(builder, name, *value)?;
-    }
-    Ok(builder)
-}
-
-/// The `**options` of a call as a map of strings, **skipping** those that are None.
-pub(crate) fn kwargs_skip_none(
-    options: Option<&Bound<'_, PyDict>>,
-) -> PyResult<HashMap<String, String>> {
-    check_keyword_keys(options)?;
-    let mut map = HashMap::new();
-    if let Some(options) = options {
-        for (key, value) in options.iter() {
-            if let Some(value) = coerce_option_value(&value)? {
-                map.insert(str_text(&key)?, value);
-            }
-        }
-    }
-    Ok(map)
+    let text = |option: &OptionKey| option.core_text().and_then(|text| text.text.clone());
+    Ok(match (text(&key), text(&value)) {
+        (Some(key), Some(value)) => Ok((key, value)),
+        _ => Err(builtin_type_error()),
+    })
 }
 
 /// The `**options` of `Catalog.createTable`, **skipping** those that are None. Unlike the
@@ -719,28 +241,6 @@ pub(crate) fn str_kwargs_skip_none(
         map.insert(key, str_argument(&value)?);
     }
     Ok(map)
-}
-
-/// The `_set_opts` of the readers and writers, as PySpark's `OptionUtils._set_opts`: the schema of
-/// `slf`, if any, and its options of `options`, **skipping** those that are None, through its own
-/// Python `schema` and `option`, which convert them and raise their errors.
-pub(crate) fn set_opts(
-    slf: &Bound<'_, PyAny>,
-    schema: Option<&Bound<'_, PyAny>>,
-    options: Option<&Bound<'_, PyDict>>,
-) -> PyResult<()> {
-    check_keyword_keys(options)?;
-    if let Some(schema) = schema.filter(|schema| !schema.is_none()) {
-        slf.call_method1("schema", (schema,))?;
-    }
-    if let Some(options) = options {
-        for (key, value) in options.iter() {
-            if !value.is_none() {
-                slf.call_method1("option", (key, value))?;
-            }
-        }
-    }
-    Ok(())
 }
 
 /// An option argument of a format method whose Python default is not None, which PySpark's

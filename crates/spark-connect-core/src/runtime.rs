@@ -7,22 +7,35 @@
 use std::cell::RefCell;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Once, OnceLock};
+use std::sync::{Arc, OnceLock};
 use tokio::runtime::Runtime;
 
-static RUNTIME_INIT: Once = Once::new();
-static RUNTIME: OnceLock<Runtime> = OnceLock::new();
+/// The shared runtime of each generation of the process, leaked: a child of a `fork()` has none of
+/// the threads of its parent's runtime, and makes its own, and the runtime of the parent, which
+/// cannot be shut down there, is left as it is (see [`crate::fork`]).
+static RUNTIME: crate::fork::PerGeneration<OnceLock<&'static Runtime>> =
+    crate::fork::PerGeneration::new();
+
+/// The generation of the process, which the state of a process that threads of its own keep, such
+/// as its channels, is of: a child of a `fork()` makes its own (see [`crate::fork`]). Not a stable
+/// API.
+#[doc(hidden)]
+pub fn fork_generation() -> u64 {
+    crate::fork::generation()
+}
 
 /// Get or initialize the shared tokio runtime.
 ///
-/// Returns a reference to a multi-threaded runtime that is created once
-/// and reused for all async operations.
+/// Returns a reference to a multi-threaded runtime that is created once and reused for all
+/// async operations, once in each process: a child of a `fork()`, which has none of the threads
+/// of its parent's runtime, gets a runtime of its own, as grpcio's fork support makes the threads
+/// of a child again.
 pub fn get_runtime() -> &'static Runtime {
-    RUNTIME_INIT.call_once(|| {
-        let rt = Runtime::new().expect("Failed to create tokio runtime");
-        let _ = RUNTIME.set(rt);
-    });
-    RUNTIME.get().expect("Runtime should be initialized")
+    RUNTIME.get_or_init(|_| OnceLock::new()).get_or_init(|| {
+        let runtime = Runtime::new().expect("Failed to create tokio runtime");
+        crate::fork::record_runtime(&runtime);
+        Box::leak(Box::new(runtime))
+    })
 }
 
 /// Block on a future using the shared runtime.
@@ -43,7 +56,8 @@ pub fn get_runtime() -> &'static Runtime {
 /// leaves for the nested `block_on`.
 ///
 /// The future is driven from the heap, so that the stack of the calling thread holds no copy of
-/// it, however large it is.
+/// it, however large it is, and is polled on a stack with room for its polls: that of the thread,
+/// or, of a thread of a small stack, a segment of a few MiB.
 pub fn block_on<F>(f: F) -> F::Output
 where
     F: std::future::Future + Send,
@@ -58,11 +72,35 @@ where
     let watch = WAIT_WATCH.with(|watch| watch.borrow().clone());
     match tokio::runtime::Handle::try_current() {
         Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
-            tokio::task::block_in_place(|| drive(f, watch))
+            tokio::task::block_in_place(|| on_wait_stack(|| drive(f, watch)))
         }
         Ok(_) => block_on_other_thread(f),
-        _ => drive(f, watch),
+        _ => on_wait_stack(|| drive(f, watch)),
     }
+}
+
+/// The stack that the polls of the future of a wait take, and the segment that a wait on a thread
+/// with less room left polls it on: the futures of the RPCs nest tonic's, hyper's, the deadlines'
+/// and the retries', whose polls keep frames of tens of KiB each, so that the polls of an analysis
+/// or an execution take up to about 320 KiB of stack in a release build (many times that in a
+/// debug one), more than a thread of a small stack has, such as a Python thread of 256 KiB, of
+/// `threading.stack_size`. A thread of 512 KiB has the room, so its waits map no segment.
+const WAIT_STACK_RED_ZONE: usize = if cfg!(debug_assertions) {
+    4 << 20
+} else {
+    448 << 10
+};
+const WAIT_STACK_SEGMENT: usize = if cfg!(debug_assertions) {
+    16 << 20
+} else {
+    4 << 20
+};
+
+/// Run `f`, which drives the future of a wait, on the stack of the thread when it has room for the
+/// polls of the future, as the main thread of Python and the threads of the runtime have, else on
+/// a segment of [`WAIT_STACK_SEGMENT`].
+fn on_wait_stack<R>(f: impl FnOnce() -> R) -> R {
+    stacker::maybe_grow(WAIT_STACK_RED_ZONE, WAIT_STACK_SEGMENT, f)
 }
 
 /// What a wait for the server does at a poll of the signals of the process (see
@@ -71,7 +109,10 @@ pub enum Watch {
     /// Keep waiting for the server.
     Continue,
     /// Interrupt the execution that the wait is for, by this future, which the wait drives to its
-    /// end. The wait then ends with the server's cancellation of the execution.
+    /// end. The wait then ends with the server's cancellation of the execution. The future runs
+    /// on the threads of the runtime, as the calls of the thread that waits ([`calling_thread_id`]
+    /// is that thread while it is polled), so that its requests carry the state that the client
+    /// keeps for that thread, as PySpark's interrupt is sent from the thread of the execution.
     Interrupt(Pin<Box<dyn Future<Output = ()> + Send>>),
     /// Stop waiting, when no execution is in flight to interrupt. A wait of
     /// [`block_on_abortable`] ends at once, without the output of its future; any other wait
@@ -115,6 +156,25 @@ impl Drop for AbortScope {
         let previous = self.0.take();
         WAIT_ABORT.with(|abort| *abort.borrow_mut() = previous);
     }
+}
+
+/// The identity of the watch of the waits of the calling thread (see [`with_wait_watch`]), if any:
+/// of the innermost call that set it, which a call that runs during it, as of a handler of a log
+/// of the client, replaces until it ends.
+pub(crate) fn wait_watch_id() -> Option<usize> {
+    WAIT_WATCH.with(|watch| {
+        watch
+            .borrow()
+            .as_ref()
+            .map(|watch| Arc::as_ptr(watch) as *const () as usize)
+    })
+}
+
+/// Whether the calling thread runs a wait that a watch polls, whose signals end the parts of it
+/// that [`until_abort`] covers. Not a stable API.
+#[doc(hidden)]
+pub fn in_watched_wait() -> bool {
+    WAIT_ABORT.with(|abort| abort.borrow().is_some())
 }
 
 /// `f`, which a wait of the calling thread ends at once, dropping it unfinished, when the wait
@@ -195,7 +255,11 @@ pub fn catch_signal() -> bool {
 /// Run `f` on this thread, with `watch` called by the waits for the server that `f` makes on this
 /// thread, as [`block_on`] makes them: the waits poll `watch` every [`POLL_INTERVAL`] while the
 /// future of each waits. A wait on another thread (see [`block_on`]) does not poll it. The watch of
-/// `f` ends with it, and the watch of an enclosing call is restored.
+/// `f` ends with it, and the watch of an enclosing call is restored. `f`, a call of the client that
+/// waits for the server and reads its responses, runs on a stack with room for the polls of its
+/// waits and for its recursions over the responses, which nest up to
+/// `spark_connect_proto::MAX_KEPT_DEPTH` levels of messages: of a thread of a small stack, on a
+/// segment of a few MiB, as [`block_on`] polls its future.
 pub fn with_wait_watch<R>(watch: Arc<WaitWatch>, f: impl FnOnce() -> R) -> R {
     struct Restore(Option<Arc<WaitWatch>>);
 
@@ -208,7 +272,7 @@ pub fn with_wait_watch<R>(watch: Arc<WaitWatch>, f: impl FnOnce() -> R) -> R {
 
     let previous = WAIT_WATCH.with(|current| current.replace(Some(watch)));
     let _restore = Restore(previous);
-    f()
+    on_wait_stack(f)
 }
 
 /// How often a wait for the server polls its [`WaitWatch`].
@@ -238,11 +302,11 @@ where
     };
     match tokio::runtime::Handle::try_current() {
         Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
-            tokio::task::block_in_place(|| drive(f))
+            tokio::task::block_in_place(|| on_wait_stack(|| drive(f)))
         }
         // The wait runs on another thread, which does not poll the watch (see `block_on`).
         Ok(_) => Some(block_on_other_thread(f)),
-        _ => drive(f),
+        _ => on_wait_stack(|| drive(f)),
     }
 }
 
@@ -290,7 +354,7 @@ async fn watched_abortable<F: Future>(
                 Watch::Interrupt(sent) => {
                     abort.send_replace(ABORT_RETRIES);
                     if interrupt.is_none() {
-                        interrupt = Some(tokio::spawn(sent));
+                        interrupt = Some(tokio::spawn(acting_for(calling_thread_id(), sent)));
                     }
                 }
                 Watch::Continue => {}
@@ -359,7 +423,7 @@ async fn watched<F: Future>(
                 Watch::Interrupt(sent) => {
                     abort.send_replace(ABORT_RETRIES);
                     if interrupt.is_none() {
-                        interrupt = Some(tokio::spawn(sent));
+                        interrupt = Some(tokio::spawn(acting_for(calling_thread_id(), sent)));
                     }
                 }
                 Watch::Abort => {
@@ -376,24 +440,36 @@ async fn watched<F: Future>(
 /// block in place and cannot start another runtime.
 ///
 /// The future is polled on the other thread, so the state that the client keeps per thread is
-/// that of the caller: [`calling_thread_id`] is the caller's ID there, and the callback depth
-/// and the recursion failure of the caller carry over, then back, so a call made from inside a
-/// callback bounds its recursion as on the caller's own thread.
+/// that of the caller: [`calling_thread_id`] is the caller's ID there, the entries that it makes
+/// of that state end with the caller (see [`crate::thread_entries`]), and the callback depth and
+/// the recursion failure of the caller carry over, then back, so a call made from inside a
+/// callback bounds its recursion as on the caller's own thread; and so do the conversions of
+/// failures that the caller polls (see [`polling_conversion`]), as of a call of a handler of a
+/// record of one.
 fn block_on_other_thread<F>(f: F) -> F::Output
 where
     F: std::future::Future + Send,
     F::Output: Send,
 {
-    let caller = std::thread::current().id();
+    // The thread that this one acts for, if it runs a future for another.
+    let caller = calling_thread_id();
     let depth = CALLBACK_DEPTH.with(std::cell::Cell::get);
     let recursion_failed = CALLBACK_RECURSION_FAILED.with(std::cell::Cell::get);
-    let (output, recursion_failed) = std::thread::scope(|scope| {
+    // The future runs within the polls of the conversions that the caller polls now, as of a call
+    // of a handler of a record of one, which the caller waits for.
+    let conversions = CONVERSION_POLLS.with(|polls| polls.borrow().clone());
+    let (output, recursion_failed, registrations) = std::thread::scope(|scope| {
         let worker = scope.spawn(move || {
             CALLER_THREAD.with(|caller_thread| caller_thread.set(Some(caller)));
+            CONVERSION_POLLS.with(|polls| *polls.borrow_mut() = conversions);
             CALLBACK_DEPTH.with(|d| d.set(depth));
             CALLBACK_RECURSION_FAILED.with(|failed| failed.set(recursion_failed));
             let output = get_runtime().block_on(f);
-            (output, CALLBACK_RECURSION_FAILED.with(std::cell::Cell::get))
+            (
+                output,
+                CALLBACK_RECURSION_FAILED.with(std::cell::Cell::get),
+                crate::thread_entries::take_registrations_for_caller(),
+            )
         });
         match worker.join() {
             Ok(result) => result,
@@ -401,13 +477,75 @@ where
         }
     });
     CALLBACK_RECURSION_FAILED.with(|failed| failed.set(recursion_failed));
+    // The entries that the future made of the per-thread state of the caller end with it.
+    crate::thread_entries::adopt_registrations(registrations);
     output
+}
+
+/// `f`, polled as the calls of the thread `caller` are, on whichever thread of the runtime polls
+/// it: [`calling_thread_id`] is `caller` during each of its polls, as for a future of a call of
+/// that thread, such as the interrupt of the execution that it waits for (see
+/// [`Watch::Interrupt`]), which reads the per-thread state of the client and makes none of it.
+fn acting_for<F: Future>(caller: std::thread::ThreadId, f: F) -> impl Future<Output = F::Output> {
+    struct Restore(Option<std::thread::ThreadId>);
+
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let previous = self.0;
+            CALLER_THREAD.with(|caller_thread| caller_thread.set(previous));
+            // A thread of the runtime cannot hand `caller` the registration of an entry of its
+            // state that the future made, which is not kept on this thread either.
+            drop(crate::thread_entries::take_registrations_for_caller());
+        }
+    }
+
+    let mut f = Box::pin(f);
+    std::future::poll_fn(move |cx| {
+        let previous = CALLER_THREAD.with(|caller_thread| caller_thread.replace(Some(caller)));
+        let _restore = Restore(previous);
+        f.as_mut().poll(cx)
+    })
 }
 
 thread_local! {
     /// The thread that the calls of this thread act for, while [`block_on_other_thread`] runs a
     /// future on this thread for it.
     static CALLER_THREAD: std::cell::Cell<Option<std::thread::ThreadId>> = const { std::cell::Cell::new(None) };
+    /// The clients of the conversions of failures that this thread polls now, innermost last (see
+    /// [`polling_conversion`]), with those of the thread that it acts for, while
+    /// [`block_on_other_thread`] runs a future on it for that thread within one.
+    static CONVERSION_POLLS: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+}
+
+/// `conversion`, the conversion of the failure of a call of the client of the identity `client`,
+/// of whose polls the thread converts a failure of the client (see [`polls_conversion_of`]): a
+/// call of the client that runs within a poll, as a call of a handler of a record of the
+/// conversion, runs during the conversion, and a task that the thread polls between two polls,
+/// as a call of the client of another task of an async caller, does not.
+pub(crate) async fn polling_conversion<F: Future>(client: usize, conversion: F) -> F::Output {
+    struct Polled;
+
+    impl Drop for Polled {
+        fn drop(&mut self) {
+            CONVERSION_POLLS.with(|polls| {
+                polls.borrow_mut().pop();
+            });
+        }
+    }
+
+    let mut conversion = std::pin::pin!(conversion);
+    std::future::poll_fn(move |cx| {
+        CONVERSION_POLLS.with(|polls| polls.borrow_mut().push(client));
+        let _polled = Polled;
+        conversion.as_mut().poll(cx)
+    })
+    .await
+}
+
+/// Whether the calling thread polls a conversion of a failure of the client of the identity
+/// `client` now (see [`polling_conversion`]).
+pub(crate) fn polls_conversion_of(client: usize) -> bool {
+    CONVERSION_POLLS.with(|polls| polls.borrow().contains(&client))
 }
 
 /// The thread whose per-thread state the calls on this thread use: the thread that calls the
@@ -594,6 +732,55 @@ mod tests {
         });
         assert_eq!(output, 9);
         assert!(interrupted.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_the_interrupt_of_a_watch_runs_as_a_call_of_the_thread_that_waits() {
+        // The interrupt runs on a thread of the runtime, as the calls of the thread that waits,
+        // whose per-thread state its requests carry, in a wait of `block_on` and of
+        // `block_on_abortable` alike, and then no longer on that thread of the runtime.
+        use std::sync::atomic::{AtomicBool, Ordering};
+        type Seen =
+            Arc<std::sync::Mutex<Vec<(std::thread::ThreadId, std::thread::ThreadId, bool)>>>;
+        fn watch_recording(seen: &Seen) -> Arc<WaitWatch> {
+            let fired = AtomicBool::new(false);
+            let seen = Arc::clone(seen);
+            Arc::new(move || {
+                if fired.swap(true, Ordering::SeqCst) {
+                    return Watch::Continue;
+                }
+                let seen = Arc::clone(&seen);
+                Watch::Interrupt(Box::pin(async move {
+                    let acting_for = calling_thread_id();
+                    let polled_on = std::thread::current().id();
+                    // A task of the runtime that the interrupt waits for acts for its own thread.
+                    let after =
+                        tokio::spawn(async { calling_thread_id() == std::thread::current().id() })
+                            .await
+                            .unwrap_or(false);
+                    seen.lock().unwrap().push((acting_for, polled_on, after));
+                }))
+            })
+        }
+        let seen: Seen = Arc::default();
+        let waiter = std::thread::current().id();
+        with_wait_watch(watch_recording(&seen), || {
+            block_on(async { tokio::time::sleep(POLL_INTERVAL * 3).await })
+        });
+        let output = with_wait_watch(watch_recording(&seen), || {
+            block_on_abortable(async {
+                tokio::time::sleep(POLL_INTERVAL * 3).await;
+                5
+            })
+        });
+        assert_eq!(output, Some(5));
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        for (acting_for, polled_on, after) in seen.iter() {
+            assert_eq!(*acting_for, waiter);
+            assert_ne!(*polled_on, waiter);
+            assert!(after);
+        }
     }
 
     #[test]
@@ -839,6 +1026,22 @@ mod tests {
         assert!(interrupted.load(std::sync::atomic::Ordering::SeqCst));
         // Outside a watch, a future is awaited as it is.
         assert_eq!(block_on(until_abort(ABORT_ALL, async { 8 })), Some(8));
+    }
+
+    #[test]
+    fn test_in_watched_wait_is_of_the_waits_that_a_watch_polls() {
+        // A wait of a watch, of `block_on` or of `block_on_abortable`, and the futures that it
+        // polls on the calling thread; not a wait without one, nor a task of the runtime.
+        let watched = with_wait_watch(Arc::new(|| Watch::Continue), || {
+            let polled = block_on(async {
+                let spawned = tokio::spawn(async { in_watched_wait() }).await.unwrap();
+                (in_watched_wait(), spawned)
+            });
+            let abortable = block_on_abortable(async { in_watched_wait() });
+            (polled, abortable, in_watched_wait())
+        });
+        assert_eq!(watched, ((true, false), Some(true), false));
+        assert!(!block_on(async { in_watched_wait() }));
     }
 
     #[test]

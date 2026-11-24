@@ -89,7 +89,7 @@ native_model! {
         let target = slf.try_borrow()?.core.target()?;
         let output = object::fetch_py(py, &target, "evaluate", std::slice::from_ref(dataset))?;
         let summary = spark_connect::ml::evaluated_summary(&target, output).to_pyerr()?;
-        let object = crate::ml::object::new_py(py, PyFMClassificationSummary::from(summary))?;
+        let object = crate::ml::object::new_py(py, PyFMClassificationSummary::from(py, summary))?;
         crate::ml::object::evaluated(slf.as_any(), object)
     }
 }
@@ -151,13 +151,16 @@ fn fm_training_summary(
     _model: &object::ModelCore,
     target: spark_connect::ml::MlTarget,
 ) -> PyResult<Py<PyAny>> {
-    Ok(crate::ml::object::new_py(py, PyFMClassificationTrainingSummary::from(target))?.into_any())
+    Ok(
+        crate::ml::object::new_py(py, PyFMClassificationTrainingSummary::from(py, target))?
+            .into_any(),
+    )
 }
 
 /// Register the typed classes of the family.
 pub(super) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<PyFMClassificationModel>()?;
-    m.add_class::<PyFMClassificationSummary>()?;
-    m.add_class::<PyFMClassificationTrainingSummary>()?;
+    crate::ml::object::register_class::<PyFMClassificationModel>(m)?;
+    crate::ml::object::register_class::<PyFMClassificationSummary>(m)?;
+    crate::ml::object::register_class::<PyFMClassificationTrainingSummary>(m)?;
     Ok(())
 }

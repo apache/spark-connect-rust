@@ -19,7 +19,8 @@
 
 import sys
 from typing import Sequence, Union
-from pyspark.util import JVM_LONG_MIN, JVM_LONG_MAX
+from pyspark.sql.utils import dispatch_window_method as dispatch_window_method
+from pyspark.util import JVM_LONG_MIN as JVM_LONG_MIN, JVM_LONG_MAX as JVM_LONG_MAX
 from py4j.java_gateway import JavaObject
 from pyspark.sql._typing import ColumnOrName
 

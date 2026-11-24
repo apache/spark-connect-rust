@@ -464,11 +464,12 @@ def test_the_params_take_numpy_values_as_pysparks_type_converters_do():
     with pytest.raises(TypeError, match=f"^{message}$"):
         lr.setRegParam(np.float32(0.5))
     if native_module() is not None:
-        lr._native_sync(
+        native_module()._ml_sync(
+            lr,
             {p.name: v for p, v in lr._paramMap.items()},
             {p.name: v for p, v in lr._defaultParamMap.items()},
         )
-        assert lr._native_params()[0]["family"] == "multinomial"
+        assert native_module()._ml_params(lr)[0]["family"] == "multinomial"
     StringIndexer = _cls("feature", "StringIndexer")
     columns = StringIndexer(inputCols=[np.str_("a"), "b"]).getInputCols()
     assert [type(c) for c in columns] == [np.str_, str]
@@ -556,7 +557,7 @@ def test_a_native_member_takes_the_params_of_the_maps_of_the_objects_that_its_ob
     Binarizer = _cls("feature", "Binarizer")
 
     def native_set(obj):
-        return obj._native_params()[0]
+        return native_module()._ml_params(obj)[0]
 
     lr = LR(maxIter=3)
     assert native_set(lr) == {}
@@ -601,6 +602,8 @@ def test_the_meta_algorithms_and_their_models_have_no_java_obj_as_pysparks():
         with pytest.raises(AttributeError, match=f"^'{name}' object has no attribute '_java_obj'$"):
             obj._java_obj  # noqa: B018
         assert not hasattr(obj, "_java_obj") and "uid" in vars(obj), name
+        # Nor their `__del__`, of `JavaWrapper`.
+        assert "__del__" not in dir(obj), name
     lr = _cls("classification", "LogisticRegression")()
     assert lr._java_obj == "org.apache.spark.ml.classification.LogisticRegression"
     assert model._java_obj is None
@@ -655,6 +658,158 @@ def test_the_native_members_of_a_public_class_have_pysparks_docstrings_and_signa
         assert inspect.signature(member) == inspect.signature(getattr(pysparks, name)), name
         assert member.__qualname__ == qualname
         assert member.__module__ == getattr(pysparks, name).__module__, name
+
+
+def _native_and_pysparks_classes():
+    """The public class of each native class of `pyspark.ml.connect` and PySpark's class of its
+    name: of the `__all__` of each module of `pyspark.ml` (and Pipeline and PipelineModel), but
+    PySpark's own classes, which the package has as they are (`Evaluator`, `ParamGridBuilder`)."""
+    import importlib
+
+    pairs = []
+    for module in (*_PARAMS_MODULES, "pipeline"):
+        reference = importlib.import_module(f"pyspark.ml.{module}")
+        ours = importlib.import_module(f"pyspark.ml.connect.{module}")
+        for name in getattr(reference, "__all__", ["Pipeline", "PipelineModel"]):
+            public, pysparks = getattr(ours, name, None), getattr(reference, name)
+            if isinstance(public, type) and public is not pysparks:
+                pairs.append((public, pysparks))
+    return pairs
+
+
+_PARAMS_MODULES = (
+    "classification",
+    "clustering",
+    "evaluation",
+    "feature",
+    "fpm",
+    "recommendation",
+    "regression",
+    "tuning",
+)
+
+
+def _function_metadata(function):
+    """What `inspect`, `help` and `typing` read of a function: its module, qualified name, name,
+    docstring, signature, annotations and resolved type hints (or the type of their error)."""
+    import inspect
+    import typing
+
+    try:
+        hints = typing.get_type_hints(function)
+    except Exception as error:  # noqa: BLE001 - PySpark's forward references of TYPE_CHECKING
+        hints = type(error)
+    return (
+        function.__module__,
+        function.__qualname__,
+        function.__name__,
+        function.__doc__,
+        inspect.signature(function),
+        function.__annotations__,
+        hints,
+    )
+
+
+def test_the_getters_and_functions_of_every_native_class_are_of_pysparks_functions():
+    # The getter of a native property (`LinearSVCModel.coefficients`, `numFeatures` of
+    # `JavaPredictionModel`, `accuracy` of a summary's `_ClassificationSummary`) and every function
+    # of a native member (the methods, `__repr__`, `__str__`, a Java wrapper's `__del__`) has the
+    # module, qualified name, name, docstring, signature and annotations of PySpark's function,
+    # whose names `typing.get_type_hints` resolves as of PySpark's (`-> "LinearSVCModel"`).
+    import inspect
+
+    if native_module() is None:
+        pytest.skip("of this client's native classes")
+    compared = 0
+    for public, pysparks in _native_and_pysparks_classes():
+        for name in dir(pysparks):
+            theirs = inspect.getattr_static(pysparks, name)
+            ours = inspect.getattr_static(public, name)
+            if isinstance(theirs, property):
+                assert isinstance(ours, property), (public, name)
+                theirs, ours = theirs.fget, ours.fget
+            elif isinstance(theirs, (classmethod, staticmethod)):
+                assert type(ours) is type(theirs), (public, name)
+                theirs, ours = theirs.__func__, ours.__func__
+            elif not inspect.isfunction(theirs):
+                continue
+            assert inspect.isfunction(ours), (public, name, ours)
+            if ours is not theirs:
+                compared += 1
+                assert _function_metadata(ours) == _function_metadata(theirs), (public, name)
+    # The native members of every class and their getters, more than a thousand.
+    assert compared > 1000
+
+
+# The members that `dir()` lists of a native class and of its objects, where PySpark's has none:
+# the state of a pickle of an earlier version of this client (`__setstate__`). The attributes that
+# PySpark's constructor, fit or load sets of each object (`uid`, `_paramMap`, `_defaultParamMap`,
+# `_params`, `_java_obj`), which an object of this client's fit, load or copy makes at their first
+# read, are of the object, as PySpark's, not of its class. Of a class, also the objects that the
+# native class holds of those constructors, native properties (`INSTANCE_ATTRIBUTES` of
+# test_ml_api_offline.py).
+_NATIVE_ONLY_MEMBERS = {"__setstate__"}
+
+
+def _names(obj):
+    """`dir(obj)`, but `__slotnames__`, the cache of `copyreg._slotnames` that a pickle of an
+    object of a class sets of the class, PySpark's too."""
+    return set(dir(obj)) - {"__slotnames__"}
+
+
+def test_dir_lists_of_a_native_class_only_the_members_that_it_needs_more_than_pysparks():
+    # `dir()` of a public class has PySpark's members and those of `_NATIVE_ONLY_MEMBERS` only:
+    # no `__signature__` (PySpark's signature is of its `__new__`), no `__deepcopy__` of a summary,
+    # no `_setParams` of a feature stage, and a `__del__` where PySpark's class has one (of a Java
+    # wrapper), not of a Pipeline, a OneVsRest, a validator or their models.
+    from test_ml_api_offline import INSTANCE_ATTRIBUTES
+
+    if native_module() is None:
+        pytest.skip("of this client's native classes")
+    for public, pysparks in _native_and_pysparks_classes():
+        extra = _names(public) - _names(pysparks)
+        allowed = _NATIVE_ONLY_MEMBERS | INSTANCE_ATTRIBUTES.get(public.__name__, set())
+        assert extra <= allowed, (public, sorted(extra - allowed))
+        assert _names(pysparks) <= _names(public), public
+        assert ("__del__" in dir(public)) == ("__del__" in dir(pysparks)), public
+
+
+def test_dir_of_the_objects_of_the_native_classes_is_pysparks_and_the_native_members():
+    # Of an estimator, a model of no server-side object, a summary of PySpark's constructor, a
+    # Pipeline, a PipelineModel and a validator, against PySpark's objects of the vendored
+    # `pyspark.ml` classes: the names of `_NATIVE_ONLY_MEMBERS` that each has, and no other.
+    import pyspark.ml.classification as classification
+    import pyspark.ml.feature as feature
+    import pyspark.ml.pipeline as pipeline
+    import pyspark.ml.tuning as tuning
+
+    if native_module() is None:
+        pytest.skip("of this client's native classes")
+    of_params = {"__setstate__"}
+    cases = [
+        (_cls("classification", "LinearSVC")(), classification.LinearSVC(), of_params),
+        (_cls("feature", "Tokenizer")(), feature.Tokenizer(), of_params),
+        (
+            _cls("classification", "LinearSVCModel")(),
+            classification.LinearSVCModel(),
+            of_params,
+        ),
+        (
+            _cls("classification", "LinearSVCSummary")("id.summary"),
+            classification.LinearSVCSummary("id.summary"),
+            set(),
+        ),
+        (_cls("pipeline", "Pipeline")(stages=[]), pipeline.Pipeline(stages=[]), of_params),
+        (
+            _cls("pipeline", "PipelineModel")([]),
+            pipeline.PipelineModel([]),
+            of_params,
+        ),
+        (_cls("tuning", "CrossValidator")(), tuning.CrossValidator(), of_params),
+    ]
+    for ours, pysparks, extra in cases:
+        assert _names(ours) - _names(pysparks) == extra, type(ours)
+        assert _names(pysparks) <= _names(ours), type(ours)
 
 
 def test_the_native_members_bind_a_call_as_pysparks_functions():
@@ -969,3 +1124,192 @@ def test_a_summary_constructs_as_pysparks_java_wrapper():
         Summary().accuracy
     with pytest.raises(AttributeError, match="^'LinearSVCTrainingSummary' object has no attribute 'foo'$"):
         Summary().foo
+
+
+def test_object_setattr_and_delattr_of_a_subclass_set_its_attributes_as_pysparks():
+    # PySpark's class has no `__setattr__` nor `__delattr__` of its own, so a subclass's hooks may
+    # call `object.__setattr__` and `object.__delattr__` (CPython refuses them of a class whose
+    # native base has its own), as may any code of the object's attributes.
+    LR = _cls("classification", "LogisticRegression")
+
+    class Hooked(LR):
+        def __setattr__(self, name, value):
+            object.__setattr__(self, name, value)
+
+        def __delattr__(self, name):
+            object.__delattr__(self, name)
+
+    hooked = Hooked(maxIter=3)
+    assert hooked.getMaxIter() == 3 and hooked.uid.startswith("Hooked_")
+    hooked.tag = "t"
+    del hooked.tag
+    assert not hasattr(hooked, "tag")
+    plain = LR()
+    object.__setattr__(plain, "tag", 1)
+    object.__setattr__(plain, "uid", "LogisticRegression_abcdefabcdef")
+    assert plain.tag == 1 and plain.uid == "LogisticRegression_abcdefabcdef"
+    object.__delattr__(plain, "tag")
+    assert not hasattr(plain, "tag")
+
+
+def test_a_getter_that_raises_attribute_error_runs_once_as_pysparks():
+    # Of no `__getattr__` of PySpark's class, a property whose getter raises `AttributeError` runs
+    # once per read and raises its own error, and a missing attribute raises Python's message.
+    LR = _cls("classification", "LogisticRegression")
+    calls = []
+
+    class Probed(LR):
+        @property
+        def probe(self):
+            calls.append(1)
+            raise AttributeError("the probe is not there")
+
+    probed = Probed()
+    with pytest.raises(AttributeError, match="^the probe is not there$"):
+        probed.probe
+    assert len(calls) == 1
+    assert not hasattr(probed, "probe") and len(calls) == 2
+    with pytest.raises(AttributeError, match="^'Probed' object has no attribute 'missing'$") as e:
+        probed.missing
+    if sys.version_info >= (3, 10):
+        assert e.value.name == "missing" and e.value.obj is probed
+
+
+def test_a_subclass_of_a_composite_model_of_its_own_init_constructs_as_pysparks():
+    # `object.__new__` leaves the arguments to the subclass's own `__init__`, whose
+    # `super().__init__(stages)` sets the objects of PySpark's `__init__` (`self.stages = stages`).
+    PipelineModel = _cls("pipeline", "PipelineModel")
+    CrossValidatorModel = _cls("tuning", "CrossValidatorModel")
+    OneVsRestModel = _cls("classification", "OneVsRestModel")
+    tokenizer = _cls("feature", "Tokenizer")()
+    best = _cls("classification", "LinearSVCModel")()
+
+    class Own(PipelineModel):
+        def __init__(self, stages, extra=1):
+            super().__init__(stages)
+            self.extra = extra
+
+    class OwnValidator(CrossValidatorModel):
+        def __init__(self, bestModel, note="x", avgMetrics=None):
+            super().__init__(bestModel, avgMetrics=avgMetrics)
+            self.note = note
+
+    class OwnOneVsRest(OneVsRestModel):
+        def __init__(self, models, tag=0):
+            super().__init__(models)
+            self.tag = tag
+
+    for own in (Own([tokenizer], extra=5), Own([tokenizer], 5)):
+        assert own.extra == 5 and own.stages[0] is tokenizer and own.uid.startswith("Own_")
+    assert Own([tokenizer]).extra == 1
+    with pytest.raises(TypeError, match="missing 1 required positional argument: 'stages'"):
+        Own()
+    validator = OwnValidator(best, note="y")
+    assert validator.note == "y" and validator.bestModel is best
+    assert validator.avgMetrics == [] and validator.subModels is None
+    assert validator.stdMetrics == [] and validator.getNumFolds() == 3
+    assert OwnValidator(best, avgMetrics=[1.0]).avgMetrics == [1.0]
+    one_vs_rest = OwnOneVsRest([best], tag=3)
+    assert one_vs_rest.tag == 3 and one_vs_rest.models[0] is best
+
+
+class _OwnReduceModel(_cls("classification", "LinearSVCModel")):
+    def __reduce__(self):
+        return (_OwnReduceModel, ())
+
+
+class _OwnStateModel(_cls("classification", "LinearSVCModel")):
+    def __getstate__(self):
+        state = dict(self.__dict__)
+        state.pop("_java_obj", None)
+        return state
+
+
+class _SlotsModel(_cls("classification", "LinearSVCModel")):
+    __slots__ = ("tag",)
+
+
+def test_a_subclass_of_a_model_of_a_reference_copies_and_pickles_of_its_own_reduce_and_slots(
+    monkeypatch,
+):
+    # PySpark's model of a `RemoteModelRef` copies and pickles of `object.__reduce_ex__`: of a
+    # subclass's own `__reduce__`, `__getstate__` or slots too, which run as of PySpark's, where
+    # the model of the reference itself fails at the lock of its `_java_obj`. The `__del__` of a
+    # copy of no `_java_obj`, and of the object that a failed deep copy made, raises the
+    # AttributeError of its read, which Python reports as unraisable.
+    import copy
+    import gc
+    import pickle
+
+    from pyspark.ml.util import RemoteModelRef
+
+    unraisable = []
+    monkeypatch.setattr(sys, "unraisablehook", lambda u: unraisable.append(type(u.exc_value)))
+    reference = RemoteModelRef("reduced-model")
+    for _ in range(6):
+        reference.add_ref()
+    reduced = _OwnReduceModel(reference)
+    for copier in (copy.copy, copy.deepcopy, lambda obj: pickle.loads(pickle.dumps(obj))):
+        copied = copier(reduced)
+        assert type(copied) is _OwnReduceModel and copied._java_obj is None
+    state = _OwnStateModel(reference)
+    state._set(maxIter=7)
+    for copier in (copy.copy, copy.deepcopy, lambda obj: pickle.loads(pickle.dumps(obj))):
+        copied = copier(state)
+        assert type(copied) is _OwnStateModel and not hasattr(copied, "_java_obj")
+        assert copied.uid == state.uid and copied.getMaxIter() == 7
+    slots = _SlotsModel(reference)
+    slots.tag = "slot-value"
+    copied = copy.copy(slots)
+    assert type(copied) is _SlotsModel and copied.tag == "slot-value"
+    assert copied._java_obj is reference
+    for fails in (copy.deepcopy, pickle.dumps):
+        with pytest.raises(TypeError, match="cannot pickle '_thread.lock' object"):
+            fails(slots)
+    del copied
+    gc.collect()
+    assert unraisable == [AttributeError] * 4
+
+
+def test_a_deleted_java_obj_is_not_listed_nor_copied_as_pysparks(monkeypatch):
+    # A deleted `_java_obj` of a model of a `RemoteModelRef`, as PySpark's attribute: not listed by
+    # `dir()`, deleted in its copies and its pickles, and read of the `__del__` of each, which
+    # Python reports as unraisable.
+    import copy
+    import gc
+    import pickle
+
+    from pyspark.ml.util import RemoteModelRef
+
+    unraisable = []
+    monkeypatch.setattr(sys, "unraisablehook", lambda u: unraisable.append(type(u.exc_value)))
+    model = _cls("classification", "LinearSVCModel")(RemoteModelRef("deleted-java-obj"))
+    del model._java_obj
+    assert not hasattr(model, "_java_obj") and "_java_obj" not in dir(model)
+    copies = [copy.copy(model), pickle.loads(pickle.dumps(model))]
+    assert [hasattr(c, "_java_obj") for c in copies] == [False, False]
+    del model, copies
+    gc.collect()
+    assert unraisable == [AttributeError] * 3
+
+
+def test_each_call_of_the_del_of_a_model_of_a_reference_releases_one_as_pysparks(monkeypatch):
+    # PySpark's `__del__` releases a reference of the `RemoteModelRef` at each call, an explicit
+    # one too: so one released too often raises the AssertionError of `release_ref` at the
+    # collection, which Python reports as unraisable in it.
+    import gc
+
+    from pyspark.ml.util import RemoteModelRef
+
+    unraisable = []
+    monkeypatch.setattr(sys, "unraisablehook", lambda u: unraisable.append(type(u.exc_value)))
+    reference = RemoteModelRef("released-twice")
+    reference.add_ref()
+    model = _cls("classification", "LinearSVCModel")(reference)
+    model.__del__()
+    assert reference._ref_count == 1
+    model.__del__()
+    assert reference._ref_count == 0
+    del model
+    gc.collect()
+    assert unraisable == [AssertionError] and reference._ref_count == 0

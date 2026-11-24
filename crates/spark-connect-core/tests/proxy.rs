@@ -432,9 +432,11 @@ async fn proxy_credentials_are_sent_as_basic_authorization() {
 }
 
 #[tokio::test]
-async fn a_loopback_host_is_never_proxied() {
+async fn a_loopback_host_is_proxied_but_of_a_token_in_plaintext() {
+    // As gRPC's proxy mapper, a loopback host is proxied as any other; but a channel that sends its
+    // token to `localhost` in plaintext, of no local credentials that would check the address of
+    // its connection, connects directly, so that a proxy never carries the token.
     let env = EnvTurn::take().await;
-    // A token goes to localhost in plaintext, so a proxy must not carry it.
     let server = spark_server().await;
     let proxy = Proxy::start(Behavior::Tunnel(server.address)).await;
     let port = server.address.port();
@@ -445,6 +447,7 @@ async fn a_loopback_host_is_never_proxied() {
                 let client = client(&format!("sc://{host}:{port}/;session_id={SESSION}")).await;
                 bounded(client.config(config())).await.unwrap();
             }
+            assert_eq!(proxy.accepted(), 2);
             let client = client(&format!(
                 "sc://localhost:{port}/;token={TOKEN};session_id={SESSION}"
             ))
@@ -453,7 +456,7 @@ async fn a_loopback_host_is_never_proxied() {
         },
     )
     .await;
-    assert_eq!(proxy.accepted(), 0);
+    assert_eq!(proxy.accepted(), 2);
 }
 
 #[tokio::test]
@@ -503,12 +506,13 @@ async fn a_proxy_that_refuses_the_tunnel_is_unavailable() {
 #[tokio::test]
 async fn a_proxy_that_is_down_is_unavailable() {
     let env = EnvTurn::take().await;
-    // A port that nothing listens on.
-    let address = TcpListener::bind("127.0.0.1:0")
-        .await
-        .unwrap()
-        .local_addr()
-        .unwrap();
+    // A port that nothing listens on, reserved by a socket that is bound to it and never listens,
+    // so that no listener of another test takes it meanwhile, as a port that is freed goes to the
+    // next `bind` of port 0.
+    let reserved = tokio::net::TcpSocket::new_v4().unwrap();
+    reserved.set_reuseaddr(true).unwrap();
+    reserved.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let address = reserved.local_addr().unwrap();
     let error = env
         .with(&[("https_proxy", &format!("http://{address}"))], async {
             let client = client(&format!("sc://spark.invalid:15002/;session_id={SESSION}")).await;
@@ -524,9 +528,11 @@ async fn a_proxy_that_never_answers_is_unavailable() {
     // As grpcio, which retries it: UNAVAILABLE once the tunnel is not open by the deadline of
     // the connection, with an error that names the proxy.
     let proxy = Proxy::start(Behavior::Silent).await;
+    let proxy_url = proxy.url();
+    let vars = [("https_proxy", proxy_url.as_str())];
     let start = Instant::now();
-    let error = env
-        .with(&[("https_proxy", &proxy.url())], async {
+    let (error, connects) = tokio::join!(
+        env.with(&vars, async {
             let mut client = client(&format!(
                 "sc://spark.invalid:443/;token={TOKEN};session_id={SESSION}"
             ))
@@ -539,8 +545,9 @@ async fn a_proxy_that_never_answers_is_unavailable() {
                 .await
                 .expect("the tunnel is bounded")
                 .unwrap_err()
-        })
-        .await;
+        }),
+        within_the_deadline(start, || proxy.connects().len()),
+    );
     assert_eq!(error.grpc_code, Some(Code::Unavailable as i32), "{error:?}");
     assert!(
         error.to_string().contains("did not open the tunnel"),
@@ -549,7 +556,7 @@ async fn a_proxy_that_never_answers_is_unavailable() {
     // The tunnel has the whole deadline, as grpcio's 20 s.
     let elapsed = start.elapsed();
     assert!(elapsed >= Duration::from_secs(15), "{elapsed:?}");
-    assert_eq!(proxy.connects().len(), 1);
+    assert_eq!(connects, 1);
 }
 
 #[tokio::test]
@@ -584,9 +591,11 @@ async fn a_tls_handshake_that_stalls_in_the_tunnel_is_unavailable() {
     // connection ends it as UNAVAILABLE, which is retried, as grpcio's connect deadline does.
     let env = EnvTurn::take().await;
     let proxy = Proxy::start(Behavior::Stall).await;
+    let proxy_url = proxy.url();
+    let vars = [("https_proxy", proxy_url.as_str())];
     let start = Instant::now();
-    let error = env
-        .with(&[("https_proxy", &proxy.url())], async {
+    let (error, connects) = tokio::join!(
+        env.with(&vars, async {
             let mut client = client(&format!(
                 "sc://spark.invalid:443/;token={TOKEN};session_id={SESSION}"
             ))
@@ -599,13 +608,26 @@ async fn a_tls_handshake_that_stalls_in_the_tunnel_is_unavailable() {
                 .await
                 .expect("the connection is bounded")
                 .unwrap_err()
-        })
-        .await;
+        }),
+        within_the_deadline(start, || proxy.connects().len()),
+    );
     assert_eq!(error.grpc_code, Some(Code::Unavailable as i32), "{error:?}");
     // Past the bound of the tunnel alone: the tunnel opened, and the handshake timed out.
     let elapsed = start.elapsed();
     assert!(elapsed >= Duration::from_secs(15), "{elapsed:?}");
-    assert_eq!(proxy.connects().len(), 1);
+    assert_eq!(connects, 1);
+}
+
+/// What `read` gives 15 s after `start`: within the connect deadline of a connection that started
+/// then, before it fails. Once it failed, its channel connects again in the background, as
+/// grpcio's does, whose backoff of 1 s has passed by then, so that a count of the connections read
+/// after the failure may hold one of the background too.
+async fn within_the_deadline<T>(start: Instant, read: impl FnOnce() -> T) -> T {
+    tokio::time::sleep_until(tokio::time::Instant::from_std(
+        start + Duration::from_secs(15),
+    ))
+    .await;
+    read()
 }
 
 /// A server that accepts TCP connections, holds them, and never answers. It returns its address
@@ -633,8 +655,8 @@ async fn a_tls_handshake_that_stalls_on_a_direct_connection_is_unavailable() {
     let env = EnvTurn::take().await;
     let (address, accepted) = silent_server().await;
     let start = Instant::now();
-    let error = env
-        .with(&[], async {
+    let (error, accepted) = tokio::join!(
+        env.with(&[], async {
             let mut client = client(&format!(
                 "sc://{address}/;use_ssl=true;token={TOKEN};session_id={SESSION}"
             ))
@@ -647,13 +669,14 @@ async fn a_tls_handshake_that_stalls_on_a_direct_connection_is_unavailable() {
                 .await
                 .expect("the connection is bounded")
                 .unwrap_err()
-        })
-        .await;
+        }),
+        within_the_deadline(start, || *accepted.lock().unwrap()),
+    );
     assert_eq!(error.grpc_code, Some(Code::Unavailable as i32), "{error:?}");
     // Past the bound of the TCP connection alone: it connected, and the handshake timed out.
     let elapsed = start.elapsed();
     assert!(elapsed >= Duration::from_secs(15), "{elapsed:?}");
-    assert_eq!(*accepted.lock().unwrap(), 1);
+    assert_eq!(accepted, 1);
 }
 
 #[tokio::test]
@@ -665,9 +688,15 @@ async fn a_server_that_never_sends_its_settings_is_unavailable_at_the_connect_de
     let env = EnvTurn::take().await;
     let (address, accepted) = silent_server().await;
     let proxy = Proxy::start(Behavior::Stall).await;
+    let proxy_url = proxy.url();
+    // The silent server is a host of `no_proxy`, which connects directly.
+    let vars = [
+        ("https_proxy", proxy_url.as_str()),
+        ("no_proxy", "127.0.0.1"),
+    ];
     let start = Instant::now();
-    let failures = env
-        .with(&[("https_proxy", &proxy.url())], async {
+    let (failures, (accepted, connects)) = tokio::join!(
+        env.with(&vars, async {
             let call = |url: String| async move {
                 let mut client = client(&url).await;
                 client.set_retry_policy(RetryPolicy {
@@ -680,13 +709,17 @@ async fn a_server_that_never_sends_its_settings_is_unavailable_at_the_connect_de
                     .unwrap_err();
                 (error, start.elapsed())
             };
-            // A loopback host is never proxied, and `spark.invalid` is reached only by the proxy.
+            // The silent server directly, and `spark.invalid`, which only the proxy reaches.
             tokio::join!(
                 call(format!("sc://{address}/;session_id={SESSION}")),
                 call(format!("sc://spark.invalid:15002/;session_id={SESSION}")),
             )
-        })
-        .await;
+        }),
+        within_the_deadline(start, || (
+            *accepted.lock().unwrap(),
+            proxy.connects().len()
+        )),
+    );
     for (error, elapsed) in [failures.0, failures.1] {
         assert_eq!(error.grpc_code, Some(Code::Unavailable as i32), "{error:?}");
         assert!(
@@ -697,8 +730,8 @@ async fn a_server_that_never_sends_its_settings_is_unavailable_at_the_connect_de
         );
         assert!(elapsed >= Duration::from_secs(15), "{elapsed:?}");
     }
-    assert_eq!(*accepted.lock().unwrap(), 1);
-    assert_eq!(proxy.connects().len(), 1);
+    assert_eq!(accepted, 1);
+    assert_eq!(connects, 1);
 }
 
 /// When a plaintext server in front of the Spark server sends its first bytes, its settings.

@@ -14,13 +14,95 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""The partition transform functions under the connect import path, as PySpark Connect's
-``pyspark.sql.connect.functions.partitioning``: copies of those of
-``pyspark.sql.functions.partitioning``, which the Rust core builds, of this module (see
-``_copies``)."""
+from typing import Union, TYPE_CHECKING
 
-from pyspark.sql.connect.functions._copies import connect_functions as _connect_functions
-from pyspark.sql.connect.functions.builtin import lit  # noqa: F401
-from pyspark.sql.functions import partitioning as _partitioning
+from pyspark.errors import PySparkTypeError
+from pyspark.sql import functions as pysparkfuncs
+from pyspark.sql.column import Column
+from pyspark.sql.connect.functions.builtin import _to_col, _invoke_function_over_columns
+from pyspark.sql.connect.functions.builtin import lit, _invoke_function
 
-_connect_functions(globals(), _partitioning, __name__)
+if TYPE_CHECKING:
+    from pyspark.sql.connect._typing import ColumnOrName
+
+
+def bucket(numBuckets: Union[Column, int], col: "ColumnOrName") -> Column:
+    if isinstance(numBuckets, int):
+        _numBuckets = lit(numBuckets)
+    elif isinstance(numBuckets, Column):
+        _numBuckets = numBuckets
+    else:
+        raise PySparkTypeError(
+            errorClass="NOT_EXPECTED_TYPE",
+            messageParameters={
+                "expected_type": "Column or int",
+                "arg_name": "numBuckets",
+                "arg_type": type(numBuckets).__name__,
+            },
+        )
+
+    return _invoke_function("bucket", _numBuckets, _to_col(col))
+
+
+bucket.__doc__ = pysparkfuncs.partitioning.bucket.__doc__
+
+
+def years(col: "ColumnOrName") -> Column:
+    return _invoke_function_over_columns("years", col)
+
+
+years.__doc__ = pysparkfuncs.partitioning.years.__doc__
+
+
+def months(col: "ColumnOrName") -> Column:
+    return _invoke_function_over_columns("months", col)
+
+
+months.__doc__ = pysparkfuncs.partitioning.months.__doc__
+
+
+def days(col: "ColumnOrName") -> Column:
+    return _invoke_function_over_columns("days", col)
+
+
+days.__doc__ = pysparkfuncs.partitioning.days.__doc__
+
+
+def hours(col: "ColumnOrName") -> Column:
+    return _invoke_function_over_columns("hours", col)
+
+
+hours.__doc__ = pysparkfuncs.partitioning.hours.__doc__
+
+
+def _test() -> None:
+    import sys
+    import os
+    import doctest
+    from pyspark.sql import SparkSession as PySparkSession
+    import pyspark.sql.connect.functions.partitioning
+
+    globs = pyspark.sql.connect.functions.partitioning.__dict__.copy()
+
+    globs["spark"] = (
+        PySparkSession.builder.appName("sql.connect.functions tests")
+        .remote(os.environ.get("SPARK_CONNECT_TESTING_REMOTE", "local[4]"))
+        .getOrCreate()
+    )
+
+    failure_count, test_count = doctest.testmod(
+        pyspark.sql.connect.functions.partitioning,
+        globs=globs,
+        optionflags=doctest.ELLIPSIS
+        | doctest.NORMALIZE_WHITESPACE
+        | doctest.IGNORE_EXCEPTION_DETAIL,
+    )
+
+    globs["spark"].stop()
+
+    if failure_count:
+        sys.exit(-1)
+
+
+if __name__ == "__main__":
+    _test()

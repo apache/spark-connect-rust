@@ -14,10 +14,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""The Avro functions under the connect import path, as PySpark Connect's
-``pyspark.sql.connect.avro.functions``: copies of those of ``pyspark.sql.avro.functions``,
-which the Rust core builds, of this module (see ``pyspark.sql.connect.functions._copies``), as
-PySpark Connect's are its own functions."""
+# The Avro functions under the connect import path, as PySpark Connect's
+# ``pyspark.sql.connect.avro.functions``: copies of those of ``pyspark.sql.avro.functions``,
+# which the Rust core builds, of this module (see ``pyspark.sql.connect.functions._copies``), as
+# PySpark Connect's are its own functions.
+"""
+A collections of builtin avro functions
+"""
 
 from pyspark.sql.avro import functions as _avro
 from pyspark.sql.connect.functions._copies import connect_functions as _connect_functions

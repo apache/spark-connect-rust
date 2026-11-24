@@ -32,7 +32,9 @@ import collections
 import collections.abc as abc
 import copy
 import datetime
+import gc
 import importlib
+import io
 import json
 import os
 import pathlib
@@ -123,6 +125,39 @@ def _protobuf_7():
 
 def ours(full_name):
     return _rust._CLASSES[full_name]
+
+
+def _own(full_name):
+    """The runtime's own descriptor of the message type ``full_name``, which its class has where
+    protobuf does not import: where it imports, the class has protobuf's (see
+    ``_protobuf_descriptor``), as upb's has."""
+    return _pyspark._proto_message_descriptor(full_name)
+
+
+def _protobuf_descriptor(full_name):
+    """protobuf's descriptor of the message type ``full_name`` of its default pool."""
+    from google.protobuf import descriptor_pool
+
+    return descriptor_pool.Default().FindMessageTypeByName(full_name)
+
+
+_OWN_CLASSES = {}
+
+
+def _own_class(full_name):
+    """The class of the message type ``full_name`` as the runtime makes it where protobuf does not
+    import: of the runtime's own descriptor, of its base ``_rust._MessageBase`` and, of ``Any``
+    and ``Timestamp``, of its own methods of them, rather than protobuf's (``WKTBASES``)."""
+    cls = _OWN_CLASSES.get(full_name)
+    if cls is None:
+        methods = {"google.protobuf.Any": _rust._AnyMethods, "google.protobuf.Timestamp": _rust._TimestampMethods}
+        bases = (_pyspark.ProtoMessage, _rust._MessageBase) + (
+            (methods[full_name],) if full_name in methods else ()
+        )
+        descriptor = _own(full_name)
+        cls = type(descriptor.name, bases, {"__slots__": (), "DESCRIPTOR": descriptor})
+        _OWN_CLASSES[full_name] = cls
+    return cls
 
 
 def _outcome(fn):
@@ -464,12 +499,10 @@ def test_map_entries_of_fields_of_no_field_of_their_type_are_unknown_fields_as_u
 
 
 def test_parse_errors_are_protobufs_decode_errors_as_upbs(upb):
-    # As upb's: a parse that fails raises protobuf's google.protobuf.message.DecodeError, of upb's
-    # message and arguments, so that code that catches protobuf's DecodeError (or its Error)
-    # catches it. Its class is the runtime's DecodeError, a subclass of protobuf's and of the
-    # native ProtoDecodeError, which pickles and copies as itself; upb's is protobuf's class
-    # itself, which the runtime's does not catch. With protobuf's pure-Python implementation too,
-    # whose DecodeError is the same class.
+    # As upb's: a parse that fails raises protobuf's google.protobuf.message.DecodeError itself,
+    # of upb's message and arguments, which pickles and copies as itself. With protobuf's
+    # pure-Python implementation too, whose DecodeError is the same class. (Without protobuf, the
+    # runtime's own DecodeError: see test_messages_work_without_protobuf.)
     from google.protobuf import message
 
     literal, relation = "spark.connect.Expression.Literal", "spark.connect.Relation"
@@ -499,19 +532,17 @@ def test_parse_errors_are_protobufs_decode_errors_as_upbs(upb):
     for full_name, data in cases:
         for name, parse in parses.items():
             mine, real = raised(ours(full_name), parse, data), raised(upb(full_name), parse, data)
-            assert type(real) is message.DecodeError and type(mine) is _rust.DecodeError
+            assert type(real) is message.DecodeError and type(mine) is message.DecodeError
             assert (str(mine), mine.args, repr(mine)) == (str(real), real.args, repr(real)), (
                 full_name,
                 data.hex(),
                 name,
             )
-            assert isinstance(mine, message.Error) and isinstance(mine, _pyspark.ProtoDecodeError)
-            assert not isinstance(real, _rust.DecodeError)
-    assert issubclass(_rust.DecodeError, message.DecodeError)
+    assert _rust.DecodeError is message.DecodeError
     error = raised(ours("spark.connect.Plan"), parses["FromString"], b"\xff")
     copies = [pickle.loads(pickle.dumps(error, p)) for p in range(pickle.HIGHEST_PROTOCOL + 1)]
     for copied in copies + [copy.copy(error), copy.deepcopy(error)]:
-        assert type(copied) is _rust.DecodeError and copied.args == error.args
+        assert type(copied) is message.DecodeError and copied.args == error.args
 
     script = textwrap.dedent(
         """
@@ -526,8 +557,8 @@ def test_parse_errors_are_protobufs_decode_errors_as_upbs(upb):
             _rust._CLASSES["spark.connect.Plan"].FromString(b"\\xff")
         except message.DecodeError as error:
             loaded = pickle.loads(pickle.dumps(error))
-            out = [api_implementation.Type(), str(error), type(error) is _rust.DecodeError]
-            out.append(type(loaded) is _rust.DecodeError and isinstance(loaded, message.Error))
+            out = [api_implementation.Type(), str(error), type(error) is message.DecodeError]
+            out.append(type(loaded) is message.DecodeError and _rust.DecodeError is message.DecodeError)
         print(json.dumps(out))
         """
     )
@@ -672,6 +703,10 @@ class _Lockstep:
     def __init__(self, upb, seed):
         self.upb = upb
         self.rng = random.Random(seed)
+        # The objects of the fields read at a comparison (a message, a container, its first
+        # message), of either runtime, held so that each later comparison tells whether the field
+        # gives the same object still (see `compare_identities`).
+        self.kept = []
 
     def value(self, f):
         rng = self.rng
@@ -796,6 +831,29 @@ class _Lockstep:
         except KeyError:
             text = None
         assert text is None or str(b) == text, f"str() after {where}"
+        self.compare_identities(a, b, where)
+
+    def compare_identities(self, a, b, where):
+        """Whether each field of a message (a message field, a repeated message field and its first
+        message) gives the object that it gave at an earlier comparison, of either runtime alike;
+        the objects that it gives now are held for the later ones."""
+
+        def objects(m, f):
+            value = getattr(m, f.name)
+            if not f.is_repeated:
+                return [value]
+            return [value] + ([value[0]] if len(value) else [None])
+
+        for f in a.DESCRIPTOR.fields:
+            if f.type != f.TYPE_MESSAGE or f.message_type.GetOptions().map_entry:
+                continue
+            now_a, now_b = objects(a, f), objects(b, f)
+            for ka, kb, name, then_a, then_b in self.kept:
+                if ka is a and kb is b and name == f.name:
+                    same = [x is y for x, y in zip(then_a, now_a)], [x is y for x, y in zip(then_b, now_b)]
+                    assert same[0] == same[1], f"the objects of {name} (upb's, ours: {same}) after {where}"
+            if not any(ka is a and name == f.name for ka, _, name, _, _ in self.kept):
+                self.kept.append((a, b, f.name, now_a, now_b))
 
 
 @pytest.mark.parametrize("seed", range(8))
@@ -1427,13 +1485,17 @@ def test_operations_on_maps_of_many_keys_take_no_scan_of_their_keys(upb):
 
 
 def _protobuf_class(full_name):
-    """protobuf's class of the type ``full_name`` of its default pool, which ``message_factory``
-    gives, as a module that keeps protobuf's classes (Delta Lake's ``base_pb2``) has: a class of
-    the type besides the runtime's, whose maps are protobuf's."""
-    from google.protobuf import descriptor_pool, message_factory
+    """protobuf's own class of the type ``full_name`` of its default pool, of protobuf's metaclass
+    (upb's ``MessageMeta``) that the runtime's hook wraps, as a module of the type built before
+    the drop-in installs has: a class of the type besides the runtime's, whose maps are
+    protobuf's. (protobuf's lookups give the runtime's class.)"""
+    from google.protobuf import descriptor_pool, reflection
+    from google.protobuf import message as protobuf_message
 
-    return message_factory.GetMessageClass(
-        descriptor_pool.Default().FindMessageTypeByName(full_name)
+    metaclass = reflection.GeneratedProtocolMessageType._protobuf_class
+    descriptor = descriptor_pool.Default().FindMessageTypeByName(full_name)
+    return metaclass(
+        descriptor.name, (protobuf_message.Message,), {"DESCRIPTOR": descriptor, "__module__": None}
     )
 
 
@@ -2246,16 +2308,19 @@ def test_messages_of_nested_mappings_build_as_upbs(upb):
 
 
 def test_deep_messages_discard_and_build_on_a_small_stack():
-    # DiscardUnknownFields of a message of thousands of levels (here parsed, which upb refuses
-    # past 100 levels) and the messages of mappings nested as deep finish on a thread of a small
-    # stack, as upb's (which builds a message of 1,000 levels of mappings on it, of the same
-    # bytes), where they recursed over the levels on the stack and overflowed it from 1,500 and
-    # 200 levels. A stack overflow ends the process, so they run in one of their own.
+    # DiscardUnknownFields of a message of thousands of levels (here of the drop-in's own parse of
+    # any depth, as FromString refuses past 100 levels, as upb's does) and the messages of mappings
+    # nested as deep finish on a thread of a small stack, as upb's (which builds a message of
+    # 1,000 levels of mappings on it, of the same bytes), where they recursed over the levels on
+    # the stack and overflowed it from 1,500 and 200 levels. A stack overflow ends the process, so
+    # they run in one of their own.
     script = textwrap.dedent(
         """
         import threading
 
         import pyspark.sql.connect.proto as proto
+        from pyspark import _pyspark
+        from pyspark.sql.connect.proto._rust import DecodeError
         from tests.test_proto_rust_offline import (
             _nested_arguments,
             _nested_limits,
@@ -2267,7 +2332,12 @@ def test_deep_messages_discard_and_build_on_a_small_stack():
 
 
         def run():
-            relation = proto.Relation.FromString(_relation_bytes(LEVELS, lambda level: True))
+            data = _relation_bytes(LEVELS, lambda level: True)
+            try:
+                proto.Relation.FromString(data)
+            except DecodeError:
+                pass
+            relation = _pyspark._proto_parse_deep(proto.Relation, data)
             relation.DiscardUnknownFields()
             # As upb's: the Relations of 64 levels below it or deeper keep their unknown fields.
             kept = _relation_bytes(LEVELS, lambda level: 2 * level >= 64)
@@ -2296,9 +2366,9 @@ def test_deep_messages_discard_and_build_on_a_small_stack():
 
 
 # The messages of a large message of the tests of the checkpoints of its operations: steps enough
-# for another thread to wait for the GIL at the checkpoints, every 1,024 messages, for a few tens
-# of milliseconds at least.
-_LARGE = 262144
+# for an operation to hold checkpoints, every 1,024 messages, at which another thread reads it
+# (see `LocalDataConversionProbe`).
+_LARGE = 16384
 
 
 class _References:
@@ -2364,7 +2434,10 @@ def _large_operation(operation):
     # code) take one budget, not one of each message.
     elements = list(literal.array.elements) + [5]
     if operation == "constructor of a list":
-        return lambda: literal_class.Array(elements=elements), TypeError, made
+        # The constructor copies the messages natively, making no object of them: it is in
+        # progress while it holds the list, of its iteration, beyond the keyword argument.
+        in_list = _References(elements, lambda extra: extra >= 2)
+        return lambda: literal_class.Array(elements=elements), TypeError, in_list
     if operation == "extend":
         return lambda: literal_class.Array().elements.extend(elements), TypeError, made
     if operation == "map constructor":
@@ -2421,28 +2494,22 @@ def test_python_thread_runs_before_operations_on_large_messages_finish(operation
     from _local_data_conversion_probe import LocalDataConversionProbe
 
     action, failure, in_progress = _large_operation(operation)
-    # The other thread takes the GIL at the checkpoints that the operating system schedules it
-    # at: an operation in which it read none is run again, a few times, and so is one whose
-    # signal came only after it ended, as a read near its end leaves no checkpoint after it.
-    # With no checkpoint, it reads none.
-    for _ in range(5):
-        in_progress.arm()
-        probe = LocalDataConversionProbe(in_progress, in_progress, cancel=cancel)
-        interrupted = False
-        with probe:
-            try:
-                if failure is None:
+    # The other thread reads the operation at each of its checkpoints, where the operation waits
+    # for it (see `LocalDataConversionProbe`), of no scheduling of the operating system: with no
+    # checkpoint, it reads none.
+    in_progress.arm()
+    probe = LocalDataConversionProbe(in_progress, in_progress, cancel=cancel)
+    interrupted = False
+    with probe:
+        try:
+            if failure is None:
+                probe.convert(action)
+            else:
+                with pytest.raises(failure):
                     probe.convert(action)
-                else:
-                    with pytest.raises(failure):
-                        probe.convert(action)
-            except KeyboardInterrupt:
-                interrupted = True
-        assert not probe.failures, probe.failures
-        if "progress" in probe.observed and not (
-            cancel and "late_or_unproven_signal" in probe.observed
-        ):
-            break
+        except KeyboardInterrupt:
+            interrupted = True
+    assert not probe.failures, probe.failures
     progress = probe.observed.get("progress")
     assert progress is not None, probe.observed
     assert progress["captured_at"] < probe.observed["conversion_ended_at"], probe.observed
@@ -2502,7 +2569,8 @@ def test_descriptors_are_upbs(upb):
         ]
 
     for full_name, cls in _rust._CLASSES.items():
-        real, mine = upb(full_name).DESCRIPTOR, cls.DESCRIPTOR
+        real, mine = upb(full_name).DESCRIPTOR, _own(full_name)
+        assert cls.DESCRIPTOR is _protobuf_descriptor(full_name)
         assert mine._concrete_class is cls
         assert (mine.name, mine.full_name, mine.has_options, mine.file.name) == (
             real.name,
@@ -2577,7 +2645,7 @@ def test_messages_work_without_protobuf():
         import pyspark.sql.connect.proto as proto
         from pyspark import _pyspark
         from pyspark.sql.connect.proto import example_plugins_pb2, expressions_pb2
-        from tests.test_proto_rust_offline import _text_cases
+        from tests.test_proto_rust_offline import _relation_bytes, _text_cases
 
         assert issubclass(proto.Relation, _pyspark.ProtoMessage)
         assert expressions_pb2.Expression is proto.Expression
@@ -2606,7 +2674,35 @@ def test_messages_work_without_protobuf():
             decode_error = str(error)
             decode_error_class = type(error) is _rust.DecodeError
             decode_error_pickle = type(pickle.loads(pickle.dumps(error))) is _rust.DecodeError
+        deep = _pyspark._proto_parse_deep(proto.Relation, _relation_bytes(60, lambda level: False))
+        try:
+            proto.Relation.FromString(deep.SerializeToString())
+        except _rust.DecodeError as error:
+            too_deep = str(error)
+        try:
+            type("Sub", (proto.Relation,), {})
+        except TypeError as error:
+            subclassing = str(error)
         out = {
+            "metaclass": type(proto.Relation).__name__,
+            "bases": [c.__qualname__ for c in proto.Relation.__mro__[1:]],
+            "subclassing": subclassing,
+            "too deep": too_deep,
+            "maps": [type(proto.Read.DataSource().options).__name__,
+                     type(proto.SQL().named_arguments).__name__],
+            "copy": copy.copy(nested) == nested and type(copy.copy(nested)) is type(nested),
+            "dir": "string" in dir(nested) and "Extensions" not in dir(nested),
+            "any pickle": b"google_dot_protobuf_dot_any__pb2" in pickle.dumps(context.extensions[0]),
+            "any pickle 2": [
+                b"_new_message" in pickle.dumps(context.extensions[0], 2),
+                type(pickle.loads(pickle.dumps(context.extensions[0], 2))) is _rust.Any,
+                repr(_rust.Any),
+            ],
+            "class pickles": [
+                pickle.loads(pickle.dumps(cls, protocol)) is cls
+                for cls in (_rust.Any, _rust.Timestamp, proto.Expression.Literal)
+                for protocol in range(pickle.HIGHEST_PROTOCOL + 1)
+            ],
             "bytes": [relation.SerializeToString().hex(), context.SerializeToString().hex()],
             "str": [str(relation), str(context)],
             "pickle": pickle.loads(pickle.dumps(relation)) == relation,
@@ -2634,7 +2730,33 @@ def test_messages_work_without_protobuf():
     assert result.returncode == 0, result.stderr
     out = json.loads(result.stdout)
     assert out["pickle"] and out["pickle nested"] and out["deepcopy"]
-    assert out["pickle well-known"] == [True, True]
+    assert out["pickle well-known"] == [True, True] and out["any pickle"]
+    # Of a protocol before 4, of no dotted name, of the runtime's function of the type; of 4 and
+    # later, of the name that base_pb2 binds the class to, which is the class's.
+    assert out["any pickle 2"] == [
+        True,
+        True,
+        "<class 'pyspark.sql.connect.proto.base_pb2.google_dot_protobuf_dot_any__pb2.Any'>",
+    ]
+    # The classes pickle at every protocol: of one before 4, the class of the dotted name pickles
+    # as the attribute of the runtime's module of its file, which pickles by its name.
+    assert out["class pickles"] == [True] * 3 * (pickle.HIGHEST_PROTOCOL + 1)
+    for name in ("any_pb2", "timestamp_pb2"):
+        module = sys.modules[f"pyspark.sql.connect.proto._rust.{name}"]
+        assert pickle.loads(pickle.dumps(module, 2)) is module
+    # The classes are of the shape of upb's, of the runtime's base of protobuf's methods of
+    # Message, and of upb's errors of a subclass and of a message too deep to parse.
+    assert out["metaclass"] == "MessageMeta"
+    assert out["bases"] == ["Message", "_MessageBase", "object"]
+    assert out["subclassing"] == (
+        "A Message class can only inherit from Message, not "
+        "(<class 'pyspark.sql.connect.proto.relations_pb2.Relation'>,)"
+    )
+    assert out["too deep"] == (
+        "Error parsing message with type 'spark.connect.Relation': Exceeded upb_DecodeOptions_MaxDepth"
+    )
+    assert out["maps"] == ["ScalarMapContainer", "MessageMapContainer"]
+    assert out["copy"] and out["dir"]
     assert out["numpy"] == [1.5, 2.5] and out["sequence"] and out["mapping"]
     assert out["enum"] == 4
     assert out["decode error"] == (
@@ -2663,9 +2785,17 @@ def test_messages_work_without_protobuf():
 def test_enums_of_the_classes_and_modules_are_upbs(upb):
     # The enum wrappers of the classes, as protobuf's EnumTypeWrapper, of their errors too.
     real_operator, mine_operator = upb("spark.connect.MlOperator"), ours("spark.connect.MlOperator")
+    # Of protobuf's EnumTypeWrapper where protobuf imports, as upb's, and of the runtime's own of
+    # its descriptors where it does not.
+    own = [
+        _rust.EnumTypeWrapper(_pyspark._proto_enum_descriptor(name))
+        for name in ("spark.connect.MlOperator.OperatorType", "spark.connect.Join.JoinType")
+    ]
     for real, mine in [
         (real_operator.OperatorType, mine_operator.OperatorType),
         (upb("spark.connect.Join").JoinType, ours("spark.connect.Join").JoinType),
+        (real_operator.OperatorType, own[0]),
+        (upb("spark.connect.Join").JoinType, own[1]),
     ]:
         assert mine.keys() == real.keys() and mine.values() == real.values()
         assert mine.items() == real.items() and mine.ValueType is real.ValueType
@@ -2861,7 +2991,8 @@ def test_options_and_protos_of_the_descriptors_are_upbs(upb):
     for full_name, cls in _rust._CLASSES.items():
         if not full_name.startswith("spark.connect."):
             continue
-        real, mine = upb(full_name).DESCRIPTOR, cls.DESCRIPTOR
+        real, mine = upb(full_name).DESCRIPTOR, _own(full_name)
+        assert cls.DESCRIPTOR is _protobuf_descriptor(full_name)
         assert options(mine) == options(real), full_name
         assert copied(mine, descriptor_pb2.DescriptorProto) == copied(
             real, descriptor_pb2.DescriptorProto
@@ -2874,13 +3005,14 @@ def test_options_and_protos_of_the_descriptors_are_upbs(upb):
             check_enum(real_enum, enum)
         files.add(mine.file.name)
     # A map entry's options are its map_entry, of which json_format and text_format tell a map.
-    entry = proto.SQL.DESCRIPTOR.nested_types_by_name["NamedArgumentsEntry"]
+    entry = _own("spark.connect.SQL").nested_types_by_name["NamedArgumentsEntry"]
     assert entry.GetOptions().map_entry and entry.has_options
-    deprecated = proto.SQL.DESCRIPTOR.fields_by_name["args"]
+    deprecated = _own("spark.connect.SQL").fields_by_name["args"]
     assert deprecated.GetOptions().deprecated and deprecated.has_options
 
     for name in sorted(files):
-        real, mine = pool.FindFileByName(name), proto.Relation.DESCRIPTOR.file.pool.FindFileByName(name)
+        own_pool = _own("spark.connect.Relation").file.pool
+        real, mine = pool.FindFileByName(name), own_pool.FindFileByName(name)
         assert options(mine) == options(real), name
         assert copied(mine, descriptor_pb2.FileDescriptorProto) == copied(
             real, descriptor_pb2.FileDescriptorProto
@@ -2917,7 +3049,7 @@ def test_options_and_protos_of_the_descriptors_are_upbs(upb):
                     real_method.input_type.full_name,
                     real_method.output_type.full_name,
                 )
-                assert method.input_type is ours(method.input_type.full_name).DESCRIPTOR
+                assert method.input_type is _own(method.input_type.full_name)
                 assert options(method) == options(real_method)
                 assert copied(method, descriptor_pb2.MethodDescriptorProto) == copied(
                     real_method, descriptor_pb2.MethodDescriptorProto
@@ -2927,7 +3059,7 @@ def test_options_and_protos_of_the_descriptors_are_upbs(upb):
             )
 
     # The errors of CopyToProto of a message of another type and of an object that is no message.
-    real, mine = upb("spark.connect.Relation").DESCRIPTOR, proto.Relation.DESCRIPTOR
+    real, mine = upb("spark.connect.Relation").DESCRIPTOR, _own("spark.connect.Relation")
     wrong = descriptor_pb2.FileDescriptorProto
     assert _outcome(lambda: mine.CopyToProto(wrong())) == _outcome(lambda: real.CopyToProto(wrong()))
     outcome, expected = _outcome(lambda: mine.CopyToProto(1)), _outcome(lambda: real.CopyToProto(1))
@@ -2939,8 +3071,8 @@ def test_pool_of_the_files_finds_their_descriptors_as_upbs(upb):
     # default pool finds its own, and fails on the names that it does not have as upb's does.
     from google.protobuf import descriptor_pool
 
-    real_pool, pool = descriptor_pool.Default(), proto.Relation.DESCRIPTOR.file.pool
-    assert proto.Plan.DESCRIPTOR.file.pool is pool
+    real_pool, pool = descriptor_pool.Default(), _own("spark.connect.Relation").file.pool
+    assert _own("spark.connect.Plan").file.pool is pool
 
     def file_of(pool, symbol):
         return pool.FindFileContainingSymbol(symbol).name
@@ -2952,8 +3084,8 @@ def test_pool_of_the_files_finds_their_descriptors_as_upbs(upb):
             assert file_of(pool, symbol) == file_of(real_pool, symbol), symbol
 
     files = {}
-    for full_name, cls in _rust._CLASSES.items():
-        descriptor = cls.DESCRIPTOR
+    for full_name in _rust._CLASSES:
+        descriptor = _own(full_name)
         assert pool.FindMessageTypeByName(full_name) is descriptor
         assert pool.FindFileContainingSymbol(full_name) is descriptor.file
         files[descriptor.file.name] = descriptor.file
@@ -2995,8 +3127,8 @@ def test_pool_of_the_files_finds_their_descriptors_as_upbs(upb):
         ("FindMethodByName", ("Nope",), None),
         ("FindFileContainingSymbol", ("spark.connect.Nope",), None),
         ("FindFileContainingSymbol", ("spark.connect.Relation.nope",), None),
-        ("FindExtensionByNumber", (proto.Relation.DESCRIPTOR, 5), (real_relation, 5)),
-        ("FindAllExtensions", (proto.Relation.DESCRIPTOR,), (real_relation,)),
+        ("FindExtensionByNumber", (_own("spark.connect.Relation"), 5), (real_relation, 5)),
+        ("FindAllExtensions", (_own("spark.connect.Relation"),), (real_relation,)),
     ]:
         outcome = _outcome(lambda: getattr(pool, method)(*args))
         expected = _outcome(lambda: getattr(real_pool, method)(*(real_args or args)))
@@ -3020,14 +3152,24 @@ def _same_results(mine, expected, exact=True):
     return mine == expected if exact else mine[0] == expected[0]
 
 
-def test_well_known_types_have_the_methods_of_protobufs(upb):
+@pytest.mark.parametrize("bases", ["protobuf", "own"])
+def test_well_known_types_have_the_methods_of_protobufs(upb, bases):
     # The classes of google.protobuf.Any and google.protobuf.Timestamp have the methods of
-    # protobuf's, of their results and errors, and the other classes none of those.
+    # protobuf's, of their results and errors, and the other classes none of those: protobuf's own
+    # (WKTBASES) where protobuf imports, and the runtime's of the same results and errors (of
+    # protobuf 7) where it does not, as _own_class makes them.
     from google.protobuf import duration_pb2
 
+    def ours(full_name):  # noqa: F811 - the classes of the runtime of `bases`
+        if bases == "own" and full_name.startswith("google.protobuf."):
+            return _own_class(full_name)
+        return _rust._CLASSES[full_name]
+
     methods = {"Pack", "Unpack", "Is", "TypeName", "ToJsonString", "FromDatetime", "ToDatetime"}
-    for full_name, cls in _rust._CLASSES.items():
-        real = upb(full_name)
+    for full_name in _rust._CLASSES:
+        if _own(full_name).file.name not in _rust._EMBEDDED_FILES:
+            continue
+        cls, real = ours(full_name), upb(full_name)
         assert {m for m in methods if hasattr(cls, m)} == {m for m in methods if hasattr(real, m)}
 
     # Any: a message of either runtime packs into the Any of either, of each type URL prefix.
@@ -3223,14 +3365,15 @@ def test_pickles_of_nested_messages_load_as_upbs(upb):
         assert type(loaded) is ours(full_name) and loaded == mine, full_name
 
 
-def test_pickles_of_the_well_known_types_load_of_the_classes_of_the_runtime():
-    # The classes of the runtime of the well-known types, Any and Timestamp, are of its modules
-    # pyspark.sql.connect.proto._rust.any_pb2 and timestamp_pb2, which are in sys.modules, so
-    # their messages pickle of their classes, as the others do, cloudpickle pickles them by
-    # reference, and their pickles load in another process of the drop-in, with or without
-    # protobuf. protobuf's are of its modules (google.protobuf.any_pb2), so, where it is
-    # installed, their pickles load as protobuf's classes, which the fields of the runtime take as
-    # they are.
+def test_pickles_of_the_well_known_types_are_upbs_where_protobuf_imports():
+    # Where protobuf imports, a message of the runtime's class of a well-known type, Any or
+    # Timestamp, pickles as upb's does, of protobuf's class of the type
+    # (google.protobuf.any_pb2.Any), so that it loads wherever protobuf imports, as a message of
+    # protobuf's class, which the fields of the runtime take as they are. Without protobuf, it
+    # pickles of the runtime's class (see test_messages_work_without_protobuf), which loads of the
+    # runtime's class in another process of the drop-in, with protobuf too. copy.copy keeps the
+    # runtime's class. The runtime's modules of the types (pyspark.sql.connect.proto._rust.any_pb2
+    # and timestamp_pb2) are in sys.modules, so that the pickles of earlier drop-ins load.
     from pyspark import cloudpickle
 
     packed = _rust.Any()
@@ -3238,19 +3381,27 @@ def test_pickles_of_the_well_known_types_load_of_the_classes_of_the_runtime():
     stamp = _rust.Timestamp(seconds=7, nanos=8)
     assert sys.modules["pyspark.sql.connect.proto._rust.any_pb2"].Any is _rust.Any
     assert sys.modules["pyspark.sql.connect.proto._rust.timestamp_pb2"].Timestamp is _rust.Timestamp
+    try:
+        from google.protobuf import any_pb2, timestamp_pb2
+    except ImportError:  # the drop-in runs without protobuf
+        any_pb2 = timestamp_pb2 = None
+    expected = {}
+    if any_pb2 is not None:
+        expected = {"google.protobuf.Any": any_pb2.Any, "google.protobuf.Timestamp": timestamp_pb2.Timestamp}
     for message in (packed, stamp, proto.Relation(extension=packed).extension):
+        assert type(copy.copy(message)) is type(message) and copy.copy(message) == message
+        full_name = message.DESCRIPTOR.full_name
         for dumps in (pickle.dumps, cloudpickle.dumps):
             loaded = pickle.loads(dumps(message))
-            assert type(loaded) is type(message) and loaded == message
+            assert type(loaded) is expected.get(full_name, type(message))
+            assert loaded == message and message == loaded
+        if any_pb2 is not None:
+            theirs = expected[full_name].FromString(message.SerializeToString())
+            for protocol in range(pickle.HIGHEST_PROTOCOL + 1):
+                assert pickle.dumps(message, protocol) == pickle.dumps(theirs, protocol)
     assert pickle.loads(cloudpickle.dumps(lambda: packed))() == packed
-    try:
-        from google.protobuf import any_pb2
-    except ImportError:  # the drop-in runs without protobuf
-        any_pb2 = None
     if any_pb2 is not None:
-        theirs = pickle.loads(pickle.dumps(any_pb2.Any.FromString(packed.SerializeToString())))
-        assert type(theirs) is any_pb2.Any
-        assert proto.Relation(extension=theirs).extension == packed
+        assert proto.Relation(extension=pickle.loads(pickle.dumps(packed))).extension == packed
     script = textwrap.dedent(
         """
         import json, pickle, sys
@@ -3260,8 +3411,9 @@ def test_pickles_of_the_well_known_types_load_of_the_classes_of_the_runtime():
         from pyspark.sql.connect.proto import _rust
 
         relation = proto.Relation()
-        out = [type(packed) is _rust.Any, packed.Unpack(relation), relation.range.end]
-        out += [type(stamp) is _rust.Timestamp, stamp.ToJsonString()]
+        runtime = [type(packed) is _rust.Any, type(stamp) is _rust.Timestamp]
+        out = [type(packed).__module__, packed.Unpack(relation), relation.range.end]
+        out += [type(stamp).__module__, stamp.ToJsonString(), runtime]
         print(json.dumps(out))
         """
     )
@@ -3274,7 +3426,20 @@ def test_pickles_of_the_well_known_types_load_of_the_classes_of_the_runtime():
         cwd=root,
     )
     assert result.returncode == 0, result.stderr.decode()[-3000:]
-    assert json.loads(result.stdout) == [True, True, 3, True, "1970-01-01T00:00:07.000000008Z"]
+    # (Of the runtime's classes in another process of the drop-in, of protobuf, of their modules
+    # there. Without protobuf, a class is named by the module of the first proto that imports its
+    # file, as that module's name of the file's module, so that the pickle loads in PySpark as
+    # protobuf's class: Any is base_pb2's google_dot_protobuf_dot_any__pb2.Any.)
+    modules = ["google.protobuf.any_pb2", "google.protobuf.timestamp_pb2", [False, False]]
+    if any_pb2 is None:
+        modules = [
+            "pyspark.sql.connect.proto.base_pb2",
+            "pyspark.sql.connect.proto.pipelines_pb2",
+            [True, True],
+        ]
+    assert json.loads(result.stdout) == [
+        modules[0], True, 3, modules[1], "1970-01-01T00:00:07.000000008Z", modules[2]
+    ]
 
 
 # Unknown fields of each wire type: a varint, a fixed64, bytes, a group of a varint and bytes, a
@@ -3494,55 +3659,76 @@ def _plugin_cases(cls, table):
 def test_generated_modules_of_plugins_have_the_classes_of_the_runtime(plugin):
     # The module that protoc generates of a plugin's file that imports the protos of Spark Connect
     # has the classes of the runtime, of its module and qualified names, as protobuf's builder
-    # names them, and the runtime's wrappers of its enums; the module of its file that does not
-    # import them, as protobuf's own modules, keeps protobuf's classes.
+    # names them, which protobuf's lookups of the types give, as upb gives its one class of a
+    # type. So does the module of a file that it imports that does not import them (base.proto,
+    # as Delta Lake's delta/connect/base.proto), which protobuf's builder built first.
+    from google.protobuf import descriptor_pool, message_factory, reflection, symbol_database
     from google.protobuf import message as protobuf_message
-    from google.protobuf import message_factory
+    from google.protobuf.internal import enum_type_wrapper
 
     plugin_pb2, base_pb2, _ = plugin
     delete = plugin_pb2.DeleteFromTable
-    assert issubclass(delete, _pyspark.ProtoMessage)
+    assert issubclass(delete, _pyspark.ProtoMessage) and issubclass(delete, protobuf_message.Message)
     assert delete is ours("thirdparty.DeleteFromTable")
+    assert type(delete) is type(proto.Relation) and type(delete).__name__ == "MessageMeta"
     assert delete.__module__ == "plugin_protos.plugin_pb2"
     assert delete.__qualname__ == "DeleteFromTable"
     update = plugin_pb2.MergeIntoTable.Action.UpdateAction
     assert update.__qualname__ == "MergeIntoTable.Action.UpdateAction"
     assert update.DESCRIPTOR.full_name == "thirdparty.MergeIntoTable.Action.UpdateAction"
-    assert isinstance(plugin_pb2.Mode, _rust.EnumTypeWrapper)
+    assert isinstance(plugin_pb2.Mode, enum_type_wrapper.EnumTypeWrapper)
     assert (plugin_pb2.Mode.Value("MODE_UPSERT"), plugin_pb2.MODE_INSERT) == (2, 1)
     assert plugin_pb2.Mode.DESCRIPTOR is plugin_pb2.MergeIntoTable.DESCRIPTOR.fields_by_name[
         "mode"
     ].enum_type
-    assert not issubclass(base_pb2.Table, _pyspark.ProtoMessage)
-    assert issubclass(base_pb2.Table, protobuf_message.Message)
+    table = base_pb2.Table
+    assert table is ours("thirdparty.Table") and table.__module__ == "plugin_protos.base_pb2"
 
-    # The descriptors of the module stay protobuf's, which the generated code of protobuf's
-    # pure-Python implementation changes; those of the classes are the runtime's, of its pool.
-    assert plugin_pb2._DELETEFROMTABLE.full_name == "thirdparty.DeleteFromTable"
-    assert not isinstance(plugin_pb2._DELETEFROMTABLE, _pyspark.ProtoDescriptor)
-    assert not isinstance(plugin_pb2.DESCRIPTOR, _pyspark.ProtoFileDescriptor)
-    file = delete.DESCRIPTOR.file
-    assert isinstance(file, _pyspark.ProtoFileDescriptor)
-    assert (file.name, file.package) == ("plugin_protos/plugin.proto", "thirdparty")
+    # The descriptors of the classes are protobuf's, those of the module, as upb's.
+    pool = descriptor_pool.Default()
+    assert plugin_pb2._DELETEFROMTABLE is delete.DESCRIPTOR
+    assert delete.DESCRIPTOR.file is plugin_pb2.DESCRIPTOR
+    assert table.DESCRIPTOR.file is base_pb2.DESCRIPTOR
+    assert proto.Relation.DESCRIPTOR.file.pool is pool
+    assert pool.FindMessageTypeByName("thirdparty.DeleteFromTable") is delete.DESCRIPTOR
+    # The runtime's pool holds the files, of the same bytes.
+    file = _pyspark._proto_file_descriptor("plugin_protos/plugin.proto")
     assert file.serialized_pb == plugin_pb2.DESCRIPTOR.serialized_pb
     assert [d.name for d in file.dependencies] == [
         "spark/connect/relations.proto",
         "spark/connect/expressions.proto",
         "plugin_protos/base.proto",
     ]
-    pool = proto.Relation.DESCRIPTOR.file.pool
-    assert pool.FindMessageTypeByName("thirdparty.DeleteFromTable") is delete.DESCRIPTOR
-    assert pool.FindFileContainingSymbol("thirdparty.MODE_UPSERT") is file
-    # As protobuf's builder made them first, protobuf's own lookups give protobuf's classes.
-    made = message_factory.GetMessageClass(plugin_pb2._DELETEFROMTABLE)
-    assert issubclass(made, protobuf_message.Message) and made is not delete
-    # One hook wraps the builder's own function, however many times the runtime installs it.
-    from google.protobuf.internal import builder
-
-    own = builder.BuildTopDescriptorsAndMessages._protobuf_build
-    assert own.__module__ == "google.protobuf.internal.builder"
-    _rust._hook_protobuf_builder()
-    assert builder.BuildTopDescriptorsAndMessages._protobuf_build is own
+    # protobuf's lookups give the runtime's classes, of nested types and of base.proto too.
+    database = symbol_database.Default()
+    for full_name in (
+        "thirdparty.DeleteFromTable",
+        "thirdparty.MergeIntoTable.Action",
+        "thirdparty.Table",
+    ):
+        cls = ours(full_name)
+        assert message_factory.GetMessageClass(cls.DESCRIPTOR) is cls
+        assert database.GetSymbol(full_name) is cls
+        assert reflection.GeneratedProtocolMessageType(
+            cls.__name__, (protobuf_message.Message,), {"DESCRIPTOR": cls.DESCRIPTOR}
+        ) is cls
+    assert database.GetMessages(["plugin_protos/base.proto"]) == {
+        "thirdparty.Table": table,
+        "thirdparty.Table.OptionsEntry": table.OptionsEntry,
+    }
+    # One hook wraps protobuf's own metaclass and function, however many times the runtime
+    # installs them, which protobuf's other classes keep.
+    hooked = reflection.GeneratedProtocolMessageType
+    own = hooked._protobuf_class
+    assert own.__module__ != _rust.__name__ and isinstance(type(proto.Relation.DESCRIPTOR), type)
+    _rust._hook_message_types()
+    assert reflection.GeneratedProtocolMessageType._protobuf_class is own
+    assert message_factory.GetMessageClass._protobuf_function.__module__ == message_factory.__name__
+    # As of protobuf's: a class of upb's metaclass is not of the class of the hook, nor of
+    # protobuf's subclass of upb's metaclass that it wraps.
+    for cls in (proto.Relation, _upb_classes()("spark.connect.Relation")):
+        assert not isinstance(cls, reflection.GeneratedProtocolMessageType)
+    assert repr(reflection.GeneratedProtocolMessageType) == repr(own)
 
     # A module of the file built again has the same classes, as upb's has.
     assert importlib.reload(plugin_pb2).DeleteFromTable is delete
@@ -3553,39 +3739,37 @@ def test_generated_modules_of_plugins_have_the_classes_of_the_runtime(plugin):
     assert module["ExamplePluginRelation"] is ours("spark.connect.ExamplePluginRelation")
 
 
-def test_installs_register_the_classes_of_the_protos_only_in_protobufs_database(plugin):
+def test_installs_register_the_classes_of_the_runtime_in_protobufs_database(plugin):
     # The runtime registers the classes of its own files in protobuf's symbol database, where
-    # PySpark's pickles of nested messages load (Expression.Literal), but not those that it made
-    # for a plugin's module: protobuf's lookups of a plugin's file give protobuf's classes, also
-    # when the package installs again, of a file whose class the database lacks too.
-    from google.protobuf import symbol_database
+    # PySpark's pickles of nested messages load (Expression.Literal), as protobuf's builder
+    # registers those of a plugin's module, and keeps the database's own classes of the
+    # well-known types. A message of a nested type pickles as upb's, of protobuf's
+    # _InternalConstructMessage of the database.
+    from google.protobuf import any_pb2, symbol_database
+    from google.protobuf import message as protobuf_message
 
     plugin_pb2, _, _ = plugin
     database = symbol_database.Default()
-    descriptor = plugin_pb2._DELETEFROMTABLE
-    kept = database._classes.pop(descriptor)
-    try:
-        _rust._add_files_to_protobuf()
-        assert descriptor not in database._classes
-    finally:
-        database._classes[descriptor] = kept
-    assert database.GetSymbol("thirdparty.DeleteFromTable") is kept
-    assert not issubclass(kept, _pyspark.ProtoMessage)
     literal = "spark.connect.Expression.Literal"
     assert database.GetSymbol(literal) is ours(literal)
-    assert all(
-        descriptor.file.name in _rust._EMBEDDED_FILES
-        for descriptor, cls in database._classes.items()
-        if issubclass(cls, _pyspark.ProtoMessage)
+    assert database.GetSymbol("google.protobuf.Any") is any_pb2.Any
+    _rust._register_classes_in_protobuf()
+    assert database.GetSymbol("google.protobuf.Any") is any_pb2.Any
+    action = plugin_pb2.MergeIntoTable.Action(condition={"literal": {"integer": 1}})
+    assert action.__reduce__()[:2] == (
+        protobuf_message._InternalConstructMessage,
+        ("thirdparty.MergeIntoTable.Action",),
     )
+    assert pickle.loads(pickle.dumps(action)) == action
+    assert type(pickle.loads(pickle.dumps(action))) is plugin_pb2.MergeIntoTable.Action
 
 
 def test_messages_of_plugins_take_the_messages_of_the_package_as_upbs(plugin):
     # The messages of the module of a plugin take those of pyspark.sql.connect.proto as they are,
     # as upb's take PySpark's of the official client, in CopyFrom, MergeFrom, their constructors,
     # containers and maps (relation.delete_from_table.target.CopyFrom(plan) of Delta Lake's plan
-    # code), and a field of a type of a file that keeps protobuf's classes takes protobuf's
-    # messages of the type. The messages are upb's, of their bytes, text, JSON, pickles and Any.
+    # code), and those of the module of base.proto. The messages are upb's, of their bytes, text,
+    # JSON, pickles and Any.
     from google.protobuf import json_format, text_format
 
     plugin_pb2, base_pb2, upb = plugin
@@ -3608,10 +3792,13 @@ def test_messages_of_plugins_take_the_messages_of_the_package_as_upbs(plugin):
     unpacked = plugin_pb2.DeleteFromTable()
     assert extension.extension.Unpack(unpacked) and unpacked == delete
     assert extension.extension.TypeName() == "thirdparty.DeleteFromTable"
-    # The message of a field of a type of base.proto is of the runtime's class of the type, which
-    # takes protobuf's messages of it, not of the class of its module, which is protobuf's.
-    assert type(scan.table) is not base_pb2.Table
-    assert scan.table.DESCRIPTOR.full_name == "thirdparty.Table"
+    # The message of a field of a type of base.proto is of the class of its module, the runtime's,
+    # as upb's is of its one class of the type: the module's class takes it as it is, and it
+    # pickles alone, of its class.
+    assert type(scan.table) is base_pb2.Table and isinstance(scan.table, base_pb2.Table)
+    copied = base_pb2.Table()
+    copied.CopyFrom(scan.table)
+    assert copied == scan.table and type(pickle.loads(pickle.dumps(scan.table))) is base_pb2.Table
     table = base_pb2.Table(path="/p", options={"k": "v"})
     assert scan.table.SerializeToString() == table.SerializeToString(deterministic=True)
 
@@ -3632,10 +3819,9 @@ def test_messages_of_plugins_take_the_messages_of_the_package_as_upbs(plugin):
 
 def test_generated_modules_of_plugins_build_with_protobufs_pure_python_implementation(plugin):
     # With protobuf's pure-Python implementation, whose generated code sets the serialized ranges
-    # and options of the module's descriptors (_DELETEFROMTABLE._serialized_start), which stay
-    # protobuf's, the module of the plugin has the classes of the runtime too, of upb's messages,
-    # and a message of the runtime equals protobuf's message of the type of the same contents (a
-    # message of protobuf's class of base.proto's Table), on either side, and no other one.
+    # and options of the module's descriptors (_DELETEFROMTABLE._serialized_start), the modules of
+    # the plugin have the classes of the runtime too, of upb's messages, whose descriptors are
+    # those of the module, which give the runtime's classes as their _concrete_class.
     _, base_pb2, upb = plugin
     script = textwrap.dedent(
         """
@@ -3653,7 +3839,9 @@ def test_generated_modules_of_plugins_build_with_protobufs_pure_python_implement
         print(json.dumps({
             "implementation": api_implementation.Type(),
             "runtime": issubclass(plugin_pb2.DeleteFromTable, _pyspark.ProtoMessage),
-            "protobuf": not issubclass(base_pb2.Table, _pyspark.ProtoMessage),
+            "base": base_pb2.Table is _rust._CLASSES["thirdparty.Table"],
+            "descriptor": plugin_pb2.DeleteFromTable.DESCRIPTOR is plugin_pb2._DELETEFROMTABLE
+            and plugin_pb2._DELETEFROMTABLE._concrete_class is plugin_pb2.DeleteFromTable,
             "start": plugin_pb2._DELETEFROMTABLE._serialized_start,
             "bytes": [case.SerializeToString().hex() for case in cases],
             "equal": [
@@ -3677,17 +3865,29 @@ def test_generated_modules_of_plugins_build_with_protobufs_pure_python_implement
     )
     assert result.returncode == 0, result.stderr
     out = json.loads(result.stdout)
-    assert out["implementation"] == "python" and out["runtime"] and out["protobuf"]
+    assert out["implementation"] == "python" and out["runtime"] and out["base"]
+    assert out["descriptor"]
     assert out["start"] > 0
     real = _plugin_cases(upb, upb("thirdparty.Table"))
     assert out["bytes"] == [r.SerializeToString(deterministic=True).hex() for r in real]
     assert out["equal"] == [True, True, True, False]
 
 
-def _add_plugin_file(name, dependencies, fields, syntax="proto3"):
+def _add_plugin_file(
+    name,
+    dependencies,
+    fields,
+    syntax="proto3",
+    package=None,
+    message="M",
+    extendable=False,
+    nested=None,
+):
     """The file ``name`` of protobuf's default pool, as a generated module adds it, of one message
-    ``M`` of ``fields``, each its name and its message type, of the package of the file's stem. A
-    file of the syntax ``editions`` is of the edition 2023."""
+    ``message`` of ``fields``, each its name and its message type, of ``package``, else of the
+    package of the file's stem, of the extension range 100 to 200 if ``extendable`` (of proto2),
+    and of a nested message ``nested`` of no fields if given. A file of the syntax ``editions`` is
+    of the edition 2023."""
     from google.protobuf import descriptor_pb2, descriptor_pool
 
     pool = descriptor_pool.Default()
@@ -3695,13 +3895,18 @@ def _add_plugin_file(name, dependencies, fields, syntax="proto3"):
         return pool.FindFileByName(name)
     except KeyError:
         pass
-    package = "tests." + name.rsplit("/", 1)[-1][: -len(".proto")]
+    if package is None:
+        package = "tests." + name.rsplit("/", 1)[-1][: -len(".proto")]
     file = descriptor_pb2.FileDescriptorProto(
         name=name, package=package, dependency=dependencies, syntax=syntax
     )
     if syntax == "editions":
         file.edition = descriptor_pb2.EDITION_2023
-    message = file.message_type.add(name="M")
+    message = file.message_type.add(name=message)
+    if extendable:
+        message.extension_range.add(start=100, end=201)
+    if nested is not None:
+        message.nested_type.add(name=nested)
     for number, (field, type_name) in enumerate(fields, 1):
         message.field.add(
             name=field,
@@ -3765,20 +3970,57 @@ def test_generated_modules_of_plugins_build_in_threads_at_once(upb):
     assert shared_classes == {ours("tests.shared.M")}
 
 
+def _add_extendable_file(name, dependencies, fields):
+    """The file ``name`` of protobuf's default pool, as ``_add_plugin_file`` adds one, of proto2,
+    whose message ``M`` declares an extension range."""
+    from google.protobuf import descriptor_pb2, descriptor_pool
+
+    pool = descriptor_pool.Default()
+    try:
+        return pool.FindFileByName(name)
+    except KeyError:
+        pass
+    package = "tests." + name.rsplit("/", 1)[-1][: -len(".proto")]
+    file = descriptor_pb2.FileDescriptorProto(
+        name=name, package=package, dependency=dependencies, syntax="proto2"
+    )
+    message = file.message_type.add(name="M")
+    for number, (field, type_name) in enumerate(fields, 1):
+        message.field.add(
+            name=field,
+            number=number,
+            type=descriptor_pb2.FieldDescriptorProto.TYPE_MESSAGE,
+            label=descriptor_pb2.FieldDescriptorProto.LABEL_OPTIONAL,
+            type_name=type_name,
+        )
+    message.extension_range.add(start=100, end=200)
+    return pool.AddSerializedFile(file.SerializeToString())
+
+
 def test_files_that_the_runtime_does_not_hold_keep_protobufs_classes(upb):
     # A module of a file keeps protobuf's classes, as without the drop-in, when the file imports
-    # no proto of Spark Connect, when it is not proto3 (the runtime reads the fields of proto3,
-    # whose presence, defaults and packing are not those of proto2), when it imports a well-known
-    # type other than Any and Timestamp, whose protobuf classes have methods that the runtime's
-    # classes would lack (Duration, Struct, ...), and when it is of another pool than the default
-    # one (as _upb_classes_of builds the classes of upb of the protos).
-    from google.protobuf import duration_pb2
+    # no proto of Spark Connect, when it declares extensions or extension ranges, which the
+    # runtime does not hold, or imports a file that does (as one of custom options imports
+    # google/protobuf/descriptor.proto), and when it is of another pool than the default one (as
+    # _upb_classes_of builds the classes of upb of the protos). A file of proto2, of editions, or
+    # that imports well-known types other than Any and Timestamp has the runtime's classes.
+    from google.protobuf import descriptor_pb2, duration_pb2
     from google.protobuf import message as protobuf_message
 
-    assert duration_pb2.Duration.DESCRIPTOR.full_name == "google.protobuf.Duration"
     relations = "spark/connect/relations.proto"
-    cases = [
+    assert duration_pb2.Duration.DESCRIPTOR.full_name == "google.protobuf.Duration"
+    kept = [
         _add_plugin_file("tests/keeps/no_spark.proto", [], []),
+        _add_extendable_file(
+            "tests/keeps/extendable.proto", [relations], [("input", ".spark.connect.Relation")]
+        ),
+        _add_plugin_file(
+            "tests/keeps/options.proto",
+            [relations, descriptor_pb2.DESCRIPTOR.name],
+            [("input", ".spark.connect.Relation"), ("options", ".google.protobuf.FileOptions")],
+        ),
+    ]
+    held = [
         _add_plugin_file(
             "tests/keeps/proto2.proto",
             [relations],
@@ -3786,70 +4028,210 @@ def test_files_that_the_runtime_does_not_hold_keep_protobufs_classes(upb):
             syntax="proto2",
         ),
         _add_plugin_file(
+            "tests/keeps/editions.proto",
+            [relations],
+            [("input", ".spark.connect.Relation")],
+            syntax="editions",
+        ),
+        _add_plugin_file(
             "tests/keeps/duration.proto",
             [relations, "google/protobuf/duration.proto"],
             [("input", ".spark.connect.Relation"), ("timeout", ".google.protobuf.Duration")],
         ),
     ]
-    for file in cases:
+    for file in kept:
         cls = _build_generated_module(file)["M"]
         assert issubclass(cls, protobuf_message.Message), file.name
         assert not issubclass(cls, _pyspark.ProtoMessage), file.name
         with pytest.raises(KeyError):
             _pyspark._proto_message_descriptor(cls.DESCRIPTOR.full_name)
+    for file in held:
+        cls = _build_generated_module(file)["M"]
+        assert cls is ours(cls.DESCRIPTOR.full_name), file.name
+        assert type(cls(input=proto.Relation()).input) is proto.Relation
     assert not issubclass(upb("spark.connect.Relation"), _pyspark.ProtoMessage)
 
 
-def test_classes_of_a_file_built_before_the_hook_are_of_its_generated_module(upb):
-    # A file that a plugin's file imports and whose generated module protobuf's builder built
-    # before the hook was installed, as Delta Lake's delta/connect/proto/__init__.py imports
-    # base_pb2 (of delta/connect/base.proto) before the modules that import the protos of Spark
-    # Connect: the runtime's classes of its messages are of that module, as protobuf's are
-    # (delta.connect.proto.base_pb2), not of protoc's name of the file's path.
-    import types
-
-    from google.protobuf.internal import builder
-
-    early = _add_plugin_file("tests/before/early.proto", [], [])
-    late = _add_plugin_file(
-        "tests/before/late.proto",
-        ["spark/connect/relations.proto", early.name],
-        [("input", ".spark.connect.Relation"), ("early", ".tests.early.M")],
-    )
-    module = types.ModuleType("tests_before.generated.early_pb2")
-    namespace = vars(module)
-    namespace["DESCRIPTOR"] = early
-    builder.BuildMessageAndEnumDescriptors(early, namespace)
-    # As the module of the file, which protobuf's own builder built before the hook.
-    builder.BuildTopDescriptorsAndMessages._protobuf_build(early, module.__name__, namespace)
-    assert namespace["M"].__module__ == module.__name__
+def _generated_module(file, name=None):
+    """A generated module of ``file`` of the name of its path, as protoc names it
+    (``tests.same.early_pb2`` of ``tests/same/early.proto``), or of ``name``, of the globals that
+    protobuf's builder builds, which protobuf's symbol database registers the classes of, put in
+    ``sys.modules``."""
+    module_name = file.name[: -len(".proto")].replace("/", ".") + "_pb2"
+    module = types.ModuleType(name or module_name)
+    vars(module).update(_build_generated_module(file), DESCRIPTOR=file)
     sys.modules[module.__name__] = module
+    return module
+
+
+def test_a_file_of_the_package_of_a_plugins_file_that_it_imports_gets_the_runtimes_classes(upb):
+    # A file that imports no proto of Spark Connect keeps protobuf's classes, as protobuf's other
+    # modules do, until a plugin's file of its package that imports the protos imports it, as
+    # Delta Lake's delta/connect/relations.proto imports delta/connect/base.proto, whose module
+    # delta/connect/proto/__init__.py star-imports first: then its module gets the runtime's
+    # classes, of its name, as does a name of a module of its package bound to one of protobuf's
+    # classes that they replace (the package's), and protobuf's lookups give them, as upb's give
+    # its one class. The module is the one of protobuf's class, not the package that star-imports
+    # it (which binds the DESCRIPTOR of the file too); a name of the module bound to another object
+    # (a class of the application of the name of a message), and any name of a module of another
+    # package, stay.
+    from google.protobuf import message as protobuf_message
+    from google.protobuf import message_factory, symbol_database
+
+    early = _add_plugin_file("tests/same/early.proto", [], [], package="tests.same", message="Early")
+    other = _add_plugin_file("tests/same/app.proto", [], [], package="tests.same", message="App")
+    late = _add_plugin_file(
+        "tests/same/late.proto",
+        ["spark/connect/relations.proto", early.name, other.name],
+        [("input", ".spark.connect.Relation"), ("early", ".tests.same.Early")],
+        package="tests.same",
+    )
+    # The package, which star-imports the module first, is in sys.modules before it.
+    package = types.ModuleType("tests.same")
+    sys.modules[package.__name__] = package
+    names = [package.__name__]
     try:
+        module = _generated_module(early)
+        apps = _generated_module(other)
+        names += [module.__name__, apps.__name__]
+        kept = vars(module)["Early"]
+        assert kept.__module__ == "tests.same.early_pb2"
+        assert not issubclass(kept, _pyspark.ProtoMessage)
+        assert issubclass(kept, protobuf_message.Message)
+        vars(package).update(Early=kept, DESCRIPTOR=early, kept=[kept])
+        unrelated = types.ModuleType("tests_other_package.unrelated")
+        vars(unrelated).update(Early=kept)
+        sys.modules[unrelated.__name__] = unrelated
+        names.append(unrelated.__name__)
+
+        class App:
+            """A class of the application of the name of a message of the module."""
+
+        vars(apps)["App"] = App
         built = _build_generated_module(late)
     finally:
-        del sys.modules[module.__name__]
+        for name in names:
+            del sys.modules[name]
     assert issubclass(built["M"], _pyspark.ProtoMessage)
-    assert not issubclass(namespace["M"], _pyspark.ProtoMessage)
-    held = type(built["M"]().early)
-    assert held is ours("tests.early.M")
-    assert (held.__module__, held.__qualname__) == (module.__name__, "M")
+    held = ours("tests.same.Early")
+    assert vars(module)["Early"] is held and type(built["M"]().early) is held
+    assert vars(package)["Early"] is held and vars(package)["kept"] == [kept]
+    assert vars(package)["DESCRIPTOR"] is early and kept.DESCRIPTOR is held.DESCRIPTOR
+    assert vars(unrelated)["Early"] is kept and vars(apps)["App"] is App
+    assert (held.__module__, held.__qualname__) == (module.__name__, "Early")
+    assert message_factory.GetMessageClass(held.DESCRIPTOR) is held
+    assert symbol_database.Default().GetSymbol("tests.same.Early") is held
+    # A message of protobuf's class that the module had before compares equal to the runtime's,
+    # and the runtime's fields take it.
+    assert kept() == held() and built["M"](early=kept()).HasField("early")
 
 
-def test_a_protobuf_whose_builder_lacks_the_hooked_function_imports_the_package(upb):
-    # The hook wraps a function of protobuf's internal builder. Where a protobuf's builder lacks
-    # it, as where there is no builder (protobuf before 3.20), the package imports without the
-    # hook, of the classes of the runtime.
+def test_a_file_of_another_package_that_a_plugins_file_imports_keeps_protobufs_classes(upb):
+    # A file of another package that a plugin's file imports (a company's shared proto, or Google's
+    # google/rpc/status.proto), which imports no proto of Spark Connect, keeps protobuf's classes,
+    # in its module and of protobuf's lookups, so that the modules of upb that import it take its
+    # messages as they do without the drop-in: in constructors, CopyFrom, containers, maps,
+    # isinstance and pickles, of messages made before the plugin's module built too. The plugin's
+    # message fields of its types hold the runtime's class of the type, of the module and
+    # qualified names of protobuf's, which pickles as upb's of protobuf's class, and take
+    # protobuf's messages of the type, of their bytes.
+    from google.protobuf import message_factory, symbol_database
+
+    common = _add_plugin_file(
+        "tests/shared/common.proto", [], [], package="tests.shared", message="Common"
+    )
+    user = _add_plugin_file(
+        "tests/shared/user.proto",
+        [common.name],
+        [("c", ".tests.shared.Common")],
+        package="tests.user",
+        message="User",
+    )
+    plugin_file = _add_plugin_file(
+        "tests/shared/plugin.proto",
+        ["spark/connect/relations.proto", common.name],
+        [("input", ".spark.connect.Relation"), ("c", ".tests.shared.Common")],
+        package="tests.shared_plugin",
+    )
+    module = _generated_module(common)
+    try:
+        common_class = vars(module)["Common"]
+        early = common_class()
+        plugin = _build_generated_module(plugin_file)
+        user_class = _build_generated_module(user)["User"]
+        assert vars(module)["Common"] is common_class
+        assert not issubclass(common_class, _pyspark.ProtoMessage)
+        assert message_factory.GetMessageClass(common_class.DESCRIPTOR) is common_class
+        assert symbol_database.Default().GetSymbol("tests.shared.Common") is common_class
+        # upb's messages of a file that imports it take protobuf's messages of it.
+        assert user_class(c=common_class()).HasField("c")
+        copied = user_class()
+        copied.c.CopyFrom(common_class())
+        assert copied.HasField("c") and isinstance(user_class().c, common_class)
+        assert type(pickle.loads(pickle.dumps(early))) is common_class
+        assert type(pickle.loads(pickle.dumps(copied.c))) is common_class
+        # The plugin's messages of its type: of the runtime's class of the type.
+        message = plugin["M"](c=common_class(), input=proto.Relation())
+        held = type(message.c)
+        assert message.HasField("c") and issubclass(held, _pyspark.ProtoMessage)
+        assert held is not common_class and held.DESCRIPTOR is common_class.DESCRIPTOR
+        assert (held.__module__, held.__qualname__) == (module.__name__, "Common")
+        assert message.c == common_class() and common_class() == message.c
+        assert pickle.dumps(message.c) == pickle.dumps(common_class())
+        assert type(pickle.loads(pickle.dumps(message.c))) is common_class
+        assert type(copy.copy(message.c)) is held
+    finally:
+        del sys.modules[module.__name__]
+
+
+def test_googles_files_that_a_plugins_file_imports_keep_protobufs_classes(upb):
+    # Google's files (google/rpc/status.proto of googleapis-common-protos) that a plugin's file
+    # imports keep protobuf's classes, of whatever package the plugin's file is, so that the
+    # modules of other libraries that import them (grpcio-status, google/longrunning) take their
+    # messages, as they do without the drop-in.
+    status_pb2 = pytest.importorskip("google.rpc.status_pb2")
+    from google.protobuf import message_factory
+
+    status = status_pb2.Status
+    plugin_file = _add_plugin_file(
+        "google/rpc/tests_plugin.proto",
+        ["spark/connect/relations.proto", "google/rpc/status.proto"],
+        [("input", ".spark.connect.Relation"), ("status", ".google.rpc.Status")],
+        package="google.rpc",
+    )
+    plugin = _build_generated_module(plugin_file)
+    assert status_pb2.Status is status and not issubclass(status, _pyspark.ProtoMessage)
+    assert message_factory.GetMessageClass(status.DESCRIPTOR) is status
+    message = plugin["M"](status=status(code=5, message="m"))
+    assert message.status.code == 5 and message.status == status(code=5, message="m")
+    assert type(pickle.loads(pickle.dumps(message.status))) is status
+    try:
+        from google.longrunning import operations_proto_pb2
+    except ImportError:
+        return
+    operation = operations_proto_pb2.Operation(name="op", error=status(code=5))
+    operation.error.CopyFrom(status(code=6))
+    assert operation.error.code == 6 and isinstance(operation.error, status)
+
+
+def test_a_protobuf_that_lacks_the_hooked_metaclass_and_function_imports_the_package(upb):
+    # The hooks wrap protobuf's metaclass of its message classes and message_factory's
+    # GetMessageClass. Where a protobuf lacks them, the package imports without them, of the
+    # classes of the runtime.
     script = textwrap.dedent(
         """
-        from google.protobuf.internal import builder
+        from google.protobuf import message_factory, reflection
 
-        del builder.BuildTopDescriptorsAndMessages
+        del reflection.GeneratedProtocolMessageType
+        del message_factory._GENERATED_PROTOCOL_MESSAGE_TYPE
+        del message_factory.GetMessageClass
         from pyspark import _pyspark
         import pyspark.sql.connect.proto as proto
 
         assert issubclass(proto.Relation, _pyspark.ProtoMessage)
         assert proto.Relation(sql={"query": "q"}).sql.query == "q"
-        assert not hasattr(builder, "BuildTopDescriptorsAndMessages")
+        assert not hasattr(reflection, "GeneratedProtocolMessageType")
+        assert not hasattr(message_factory, "GetMessageClass")
         print("imported")
         """
     )
@@ -3865,13 +4247,14 @@ def test_a_protobuf_whose_builder_lacks_the_hooked_function_imports_the_package(
     assert result.stdout.split() == ["imported"]
 
 
-def test_protobufs_own_classes_of_a_plugins_file_take_the_messages_through_bytes(upb):
+def test_classes_of_a_plugins_file_that_message_factory_makes_are_the_runtimes(upb):
     # The files of the protos are in protobuf's default pool, as the generated modules add them,
     # so that a file of a plugin that imports them builds, as the module that protoc generates of
-    # it adds it (Delta Lake's do). A class that protobuf's message_factory makes of a message of
-    # such a file, rather than its generated module, is protobuf's, which takes a message of
-    # pyspark.sql.connect.proto through its bytes or a dict (not as it is, which protobuf's
-    # messages take of their own classes only), and which an Any of the package packs and unpacks.
+    # it adds it (Delta Lake's do). The class that protobuf's message_factory gives of a message
+    # of such a file, of no generated module, is the runtime's, as upb's gives its one class of
+    # the type (of no module): it takes a message of pyspark.sql.connect.proto as it is, and an
+    # Any of the package packs and unpacks it. protobuf's own class of the type (as a module built
+    # before the drop-in installs has) takes the package's messages through their bytes or a dict.
     from google.protobuf import descriptor_pb2, descriptor_pool, message_factory
 
     pool = descriptor_pool.Default()
@@ -3908,18 +4291,15 @@ def test_protobufs_own_classes_of_a_plugins_file_take_the_messages_through_bytes
         pool.FindFileByName(file.name)
     except KeyError:
         pool.AddSerializedFile(file.SerializeToString())
-    plugin_class = message_factory.GetMessageClass(
-        pool.FindMessageTypeByName("tests.plugin.PluginRelation")
-    )
+    descriptor = pool.FindMessageTypeByName("tests.plugin.PluginRelation")
+    plugin_class = message_factory.GetMessageClass(descriptor)
+    assert plugin_class is ours("tests.plugin.PluginRelation") and plugin_class.__module__ is None
+    assert plugin_class.DESCRIPTOR is descriptor
 
     relation = proto.Relation(sql=proto.SQL(query="select 1"))
-    plugin = plugin_class(custom="c")
-    plugin.input.ParseFromString(relation.SerializeToString())
+    plugin = plugin_class(input=relation, custom="c")
+    assert type(plugin.input) is proto.Relation and plugin.input == relation
     assert plugin == plugin_class(input={"sql": {"query": "select 1"}}, custom="c")
-    with pytest.raises(TypeError):
-        plugin_class(input=relation)
-    with pytest.raises(TypeError):
-        plugin.input.CopyFrom(relation)
     wrapped = proto.Relation()
     wrapped.extension.Pack(plugin)
     assert wrapped.extension.TypeName() == "tests.plugin.PluginRelation"
@@ -3929,28 +4309,33 @@ def test_protobufs_own_classes_of_a_plugins_file_take_the_messages_through_bytes
     back.CopyFrom(unpacked.input)
     assert back == relation and back.SerializeToString() == plugin.input.SerializeToString()
 
+    protobufs = _protobuf_class("tests.plugin.PluginRelation")
+    assert protobufs is not plugin_class and not issubclass(protobufs, _pyspark.ProtoMessage)
+    kept = protobufs(custom="c")
+    kept.input.ParseFromString(relation.SerializeToString())
+    assert kept == protobufs(input={"sql": {"query": "select 1"}}, custom="c") == plugin
+    with pytest.raises(TypeError):
+        protobufs(input=relation)
+    with pytest.raises(TypeError):
+        kept.input.CopyFrom(relation)
+
 
 def test_messages_of_a_type_of_protobufs_classes_and_of_the_runtimes_compare_as_upbs(plugin):
     # upb has one class of a type of protobuf's default pool, so its messages of the type compare
-    # by their contents. The runtime has a class of the type besides protobuf's, which protobuf's
-    # own lookups give (message_factory, symbol_database, the pickles of upb's nested messages) and
-    # which the module of a plugin's file that imports no proto of Spark Connect keeps (base.proto,
-    # as Delta Lake's): a message of the runtime equals protobuf's message of the type of the same
-    # contents, on either side of == and !=, and so in a container and a map, as upb's messages of
-    # one class do, and equals no message of another pool (of another class for upb too), class or
-    # other object.
-    from google.protobuf import descriptor_pool, message_factory
-
+    # by their contents. The runtime has a class of the type besides protobuf's own, which a
+    # module of the type that protobuf's builder built before the drop-in installed has, as the
+    # well-known types other than Any and Timestamp do: a message of the runtime equals protobuf's
+    # message of the type of the same contents, on either side of == and !=, and so in a container
+    # and a map, as upb's messages of one class do, and equals no message of another pool (of
+    # another class for upb too), class or other object.
     plugin_pb2, base_pb2, upb = plugin
-    pool = descriptor_pool.Default()
+    protobufs = _protobuf_class
+    protobuf_table = protobufs("thirdparty.Table")
 
-    def protobufs(full_name):
-        return message_factory.GetMessageClass(pool.FindMessageTypeByName(full_name))
-
-    scan = plugin_pb2.Scan(table=base_pb2.Table(path="/p", options={"k": "v"}))
-    table = base_pb2.Table(path="/p", options={"k": "v"})
-    other = base_pb2.Table(path="/q")
-    assert type(scan.table) is not base_pb2.Table
+    scan = plugin_pb2.Scan(table=protobuf_table(path="/p", options={"k": "v"}))
+    table = protobuf_table(path="/p", options={"k": "v"})
+    other = protobuf_table(path="/q")
+    assert type(scan.table) is base_pb2.Table and type(table) is not base_pb2.Table
     assert scan.table == table and table == scan.table
     assert not (scan.table != table) and not (table != scan.table)
     assert scan.table != other and other != scan.table and not (scan.table == other)
@@ -3986,7 +4371,7 @@ def test_messages_of_a_type_of_protobufs_classes_and_of_the_runtimes_compare_as_
     # NotImplemented of, is not equal, nor is a class, a dict or another object.
     assert table != real_table and not (table == real_table)
     assert scan.table != real_table and real_table != scan.table and not (scan.table == real_table)
-    for value in (base_pb2.Table, type(scan.table), {"path": "/p"}, None, "/p"):
+    for value in (base_pb2.Table, protobuf_table, {"path": "/p"}, None, "/p"):
         assert not (scan.table == value) and scan.table != value
 
     # A message of protobuf's of the type of a field named keys (Expression.Literal.Map), which is
@@ -4201,16 +4586,15 @@ def test_messages_take_only_protobufs_messages_of_their_type_of_its_default_pool
             assert _outcome(mine_cases[label]) == _outcome(real_cases[label]), (kind, label)
 
 
-def test_modules_that_keep_protobufs_classes_take_the_runtimes_messages_through_bytes(upb):
-    # A module of a plugin's file that keeps protobuf's classes (a proto3 file that imports a
-    # well-known type other than Any and Timestamp, a proto2 file or one of editions) and imports
-    # a file whose module has the runtime's classes (a proto3 file that imports the protos of
-    # Spark Connect) takes the messages of that module only through their bytes or dicts, as it
-    # takes those of pyspark.sql.connect.proto: its fields of their type are protobuf's, where
-    # upb's take the messages of its one class of the type as they are. Its messages and those of
-    # the runtime of the same contents compare equal, as upb's of one class do.
-    from google.protobuf import descriptor_pb2, duration_pb2
-    from google.protobuf import message as protobuf_message
+def test_modules_of_files_of_proto2_editions_and_well_known_types_take_the_runtimes_messages(upb):
+    # A module of a plugin's file of proto2, of editions or that imports a well-known type other
+    # than Any and Timestamp, which imports a file whose module has the runtime's classes (a
+    # proto3 file that imports the protos of Spark Connect), has the runtime's classes too, so it
+    # takes the messages of that module as they are, as upb's take those of its one class of the
+    # type. One that keeps protobuf's classes (of an extension range) takes them only through
+    # their bytes or dicts, and its messages and those of the runtime of the same contents
+    # compare equal, as upb's of one class do.
+    from google.protobuf import duration_pb2
 
     held = _add_plugin_file(
         "tests/importers/runtime_held.proto",
@@ -4218,78 +4602,82 @@ def test_modules_that_keep_protobufs_classes_take_the_runtimes_messages_through_
         [("input", ".spark.connect.Relation")],
     )
     dependency = [("held", ".tests.runtime_held.M")]
-    kept = [
+    importers = [
         _add_plugin_file(
             "tests/importers/with_duration.proto",
             [held.name, duration_pb2.DESCRIPTOR.name],
             dependency + [("timeout", ".google.protobuf.Duration")],
         ),
         _add_plugin_file("tests/importers/of_proto2.proto", [held.name], dependency, "proto2"),
+        _add_plugin_file("tests/importers/of_editions.proto", [held.name], dependency, "editions"),
     ]
-    if hasattr(descriptor_pb2, "EDITION_2023"):
-        kept.append(
-            _add_plugin_file(
-                "tests/importers/of_editions.proto", [held.name], dependency, "editions"
-            )
-        )
     runtime_class = _build_generated_module(held)["M"]
     assert issubclass(runtime_class, _pyspark.ProtoMessage)
     real = _upb_classes_of(
         [(duration_pb2.DESCRIPTOR.serialized_pb, duration_pb2.__name__)]
         + [(file.serialized_pb, file.name[: -len(".proto")].replace("/", ".") + "_pb2")
-           for file in [held] + kept]
+           for file in [held] + importers]
     )
     message = runtime_class(input={"sql": {"query": "select 1"}})
-    for file in kept:
-        kept_class = _build_generated_module(file)["M"]
-        assert issubclass(kept_class, protobuf_message.Message), file.name
-        assert not issubclass(kept_class, _pyspark.ProtoMessage), file.name
-        with pytest.raises(TypeError):
-            kept_class(held=message)
-        with pytest.raises(TypeError):
-            kept_class().held.CopyFrom(message)
-        with pytest.raises(TypeError):
-            kept_class().held.MergeFrom(message)
-        through_bytes = kept_class()
-        through_bytes.held.ParseFromString(message.SerializeToString())
-        through_dict = kept_class(held={"input": {"sql": {"query": "select 1"}}})
-        assert through_bytes == through_dict
-        assert through_bytes.held == message and message == through_dict.held
+    for file in importers:
+        cls = _build_generated_module(file)["M"]
+        assert issubclass(cls, _pyspark.ProtoMessage), file.name
+        built = cls(held=message)
+        copied = cls()
+        copied.held.CopyFrom(message)
+        merged = cls()
+        merged.held.MergeFrom(message)
+        assert type(built.held) is runtime_class and built == copied == merged
         # upb's take the messages of the class of the type of the file that they import as they are.
-        real_kept = real[kept_class.DESCRIPTOR.full_name]
+        real_kept = real[cls.DESCRIPTOR.full_name]
         real_message = real["tests.runtime_held.M"](input={"sql": {"query": "select 1"}})
-        assert real_kept(held=real_message).SerializeToString() == through_dict.SerializeToString()
+        assert real_kept(held=real_message).SerializeToString() == built.SerializeToString()
+
+    kept = _build_generated_module(
+        _add_extendable_file("tests/importers/extendable_importer.proto", [held.name], dependency)
+    )["M"]
+    assert not issubclass(kept, _pyspark.ProtoMessage)
+    with pytest.raises(TypeError):
+        kept(held=message)
+    with pytest.raises(TypeError):
+        kept().held.CopyFrom(message)
+    through_bytes = kept()
+    through_bytes.held.ParseFromString(message.SerializeToString())
+    through_dict = kept(held={"input": {"sql": {"query": "select 1"}}})
+    assert through_bytes == through_dict
+    assert through_bytes.held == message and message == through_dict.held
 
 
-def test_modules_of_protoc_before_3_20_keep_protobufs_classes(upb):
+def test_modules_of_protoc_before_3_20_have_the_classes_of_the_runtime(upb):
     # A module of protoc before 3.20 (plugin_protos/old_style_pb2.py, of protoc 3.19's form) makes
     # its classes with protobuf's reflection.GeneratedProtocolMessageType, not with protobuf's
-    # builder, which the drop-in wraps, so its classes stay protobuf's, of a file that imports the
-    # protos of Spark Connect too: they take the messages of pyspark.sql.connect.proto only through
-    # their bytes or dicts, where upb's take PySpark's as they are, and their messages and those of
-    # the runtime of the same contents compare equal.
+    # builder: the drop-in wraps it, so the module of a file that imports the protos of Spark
+    # Connect has the classes of the runtime, as a module of a later protoc, which take the
+    # messages of pyspark.sql.connect.proto as they are, as upb's take PySpark's, and which
+    # protobuf's symbol database registers.
     from google.protobuf import message as protobuf_message
+    from google.protobuf import symbol_database
     from plugin_protos import old_style_pb2
 
     old_style = old_style_pb2.OldStyleRelation
+    assert old_style is ours("thirdparty.old.OldStyleRelation")
     assert issubclass(old_style, protobuf_message.Message)
-    assert not issubclass(old_style, _pyspark.ProtoMessage)
-    with pytest.raises(KeyError):
-        _pyspark._proto_message_descriptor("thirdparty.old.OldStyleRelation")
+    assert old_style.__module__ == "plugin_protos.old_style_pb2"
+    assert old_style.DESCRIPTOR is old_style_pb2._OLDSTYLERELATION
+    assert symbol_database.Default().GetSymbol("thirdparty.old.OldStyleRelation") is old_style
     relation = proto.Relation(sql=proto.SQL(query="select 1"))
-    with pytest.raises(TypeError):
-        old_style(input=relation)
-    with pytest.raises(TypeError):
-        old_style().input.CopyFrom(relation)
-    through_bytes = old_style(name="n")
-    through_bytes.input.ParseFromString(relation.SerializeToString())
+    built = old_style(input=relation, name="n")
+    assert type(built.input) is proto.Relation
+    copied = old_style()
+    copied.input.CopyFrom(relation)
+    copied.name = "n"
     through_dict = old_style(input={"sql": {"query": "select 1"}}, name="n")
-    assert through_bytes == through_dict and through_dict.input == relation
+    assert built == copied == through_dict and through_dict.input == relation
     # As upb's of a pool of their own, as the official client's of its upb classes of the protos.
     real = _upb_classes_of([(old_style_pb2.DESCRIPTOR.serialized_pb, old_style_pb2.__name__)])
     real_relation = real["spark.connect.Relation"](sql={"query": "select 1"})
     real_old_style = real["thirdparty.old.OldStyleRelation"](input=real_relation, name="n")
-    assert real_old_style.SerializeToString() == through_dict.SerializeToString()
+    assert real_old_style.SerializeToString() == built.SerializeToString()
 
 
 def test_example_plugins_are_messages_of_the_runtime(upb):
@@ -4509,3 +4897,3930 @@ def test_maps_of_integer_keys_and_of_doubles_compare_as_upbs(upb):
         assert not (with_nan.d == with_nan.d) and with_nan.d != {"x": nan}, cls
         assert cls(d={"x": -0.0}) != cls(d={"x": 0.0}), cls
         assert cls(d={"x": -0.0}).d == cls(d={"x": 0.0}).d, cls
+
+
+def test_classes_are_of_upbs_metaclass_bases_and_attributes(upb):
+    # As upb's: the classes are of a metaclass MessageMeta, of the bases of a C message (the
+    # runtime's Message), protobuf's Message and protobuf's methods of a well-known type, of the
+    # attributes of the builder (DESCRIPTOR, the nested classes, __slots__), of the dir() of their
+    # class and of their messages (and a __copy__ of the runtime's Message, which copies a message
+    # of its fields, where upb's copy parses its bytes), and of the attributes that upb's
+    # metaclass binds when they are read, which the runtime's binds when it makes the class: the
+    # wrappers of the nested enums, the numbers of their values, and the numbers of all the
+    # fields. A message class cannot be subclassed, and the metaclass gives the class of a
+    # descriptor, with upb's errors.
+    from google.protobuf import message as protobuf_message
+    from google.protobuf.internal import enum_type_wrapper, well_known_types
+
+    for name in ("spark.connect.Join", "spark.connect.Expression.Literal", "google.protobuf.Any"):
+        mine, real = ours(name), upb(name)
+        assert type(mine).__name__ == type(real).__name__ == "MessageMeta"
+        assert mine.__mro__[1] is _pyspark.ProtoMessage and mine.__mro__[2:] == real.__mro__[2:]
+        # (The runtime's class of a well-known type is of a module of its own.)
+        assert mine.__qualname__ == real.__qualname__
+        assert mine.__module__ == real.__module__ or name.startswith("google.protobuf.")
+        # (Of the attributes of the class but those that the metaclass binds once they are read.)
+        bound = {e.name for e in mine.DESCRIPTOR.enum_types} | set(mine.DESCRIPTOR.enum_values_by_name)
+
+        def names(obj):
+            return {n for n in dir(obj) if not n.endswith("_FIELD_NUMBER") and n not in bound}
+
+        assert names(mine) - {"__copy__"} == names(real) and "__copy__" not in names(real)
+        assert names(mine()) - {"__copy__"} == names(real())
+        assert isinstance(mine(), protobuf_message.Message)
+        for cls in (mine, real):
+            subclassing = _outcome(lambda: type("Sub", (cls,), {}))
+            assert subclassing[2].endswith(f"not (<class '{cls.__module__}.{cls.__qualname__}'>,)")
+        meta = type(mine)
+        descriptor = {"DESCRIPTOR": mine.DESCRIPTOR}
+        assert meta(mine.__name__, (protobuf_message.Message,), descriptor) is mine
+        assert meta(mine.__name__, (), {"DESCRIPTOR": mine.DESCRIPTOR}) is mine
+        assert _outcome(lambda: meta("X", (protobuf_message.Message,), {})) == _outcome(
+            lambda: type(real)("X", (protobuf_message.Message,), {})
+        )
+        mine_error = _outcome(lambda: meta("X", (mine,), {"DESCRIPTOR": 1}))
+        real_error = _outcome(lambda: type(real)("X", (real,), {"DESCRIPTOR": 1}))
+        assert mine_error[:2] == real_error[:2] == ("raise", "TypeError")
+        assert mine_error[2].replace(mine.__module__, real.__module__) == real_error[2]
+    assert ours("google.protobuf.Any").__mro__[3] is well_known_types.WKTBASES["google.protobuf.Any"]
+
+    join, real_join = ours("spark.connect.Join"), upb("spark.connect.Join")
+    fresh = [n for n in vars(join) if n.isupper() or n.endswith("Type")]
+    for cls in (join, real_join):
+        assert isinstance(cls.JoinType, enum_type_wrapper.EnumTypeWrapper) and "JoinType" in vars(cls)
+        assert cls.JOIN_TYPE_INNER == 1 and "JOIN_TYPE_INNER" in vars(cls)
+        assert cls.LEFT_FIELD_NUMBER == 1 and "JOIN_CONDITION_FIELD_NUMBER" in vars(cls)
+        assert _outcome(lambda: cls.nope)[:2] == ("raise", "AttributeError")
+    assert set(vars(join)) == set(vars(real_join)) | set(fresh)
+    # (upb's error of a name that a class lacks is of the name; the runtime's, of no __getattr__
+    # of its metaclass, Python's.)
+    assert _outcome(lambda: join.nope)[2] == "type object 'Join' has no attribute 'nope'"
+    assert _outcome(lambda: real_join.nope)[2] == "nope"
+
+    # __new__ makes an empty message of any arguments, and __init__ sets the fields of its
+    # keyword arguments over those that the message has.
+    for cls in (ours("spark.connect.Relation"), upb("spark.connect.Relation")):
+        made = cls.__new__(cls, 1, range={"end": 3})
+        assert made.ListFields() == []
+        made.__init__(common={"plan_id": 1})
+        made.__init__(range={"end": 3})
+        assert [f.name for f, _ in made.ListFields()] == ["common", "range"]
+        assert _outcome(lambda: made.__init__(1)) == (
+            "raise", "TypeError", "No positional arguments allowed"
+        )
+
+
+class _AllowList(pickle.Unpickler):
+    """An unpickler of an allow-list of globals, as Python's documentation restricts them
+    ("Restricting Globals"): those of pyspark and protobuf only, and the function of the bytes of
+    the protocols before 3."""
+
+    def find_class(self, module, name):
+        if module.startswith(("pyspark.", "google.protobuf.")) or (module, name) == (
+            "_codecs",
+            "encode",
+        ):
+            return super().find_class(module, name)
+        raise pickle.UnpicklingError(f"global '{module}.{name}' is forbidden")
+
+
+def test_pickles_are_upbs_and_those_of_any_and_timestamp_load_in_pyspark(upb, tmp_path):
+    # A message pickles as upb's, of protobuf's Message.__reduce__: of its class, or of protobuf's
+    # _InternalConstructMessage of the full name of a nested type, which protobuf's symbol
+    # database gives the class of. An Any and a Timestamp pickle as upb's of protobuf's classes
+    # (google.protobuf.any_pb2.Any), which load where protobuf does. Without protobuf, they pickle
+    # of the name that the module of the first proto of Spark Connect that imports their file
+    # binds their class to, of protocols 4 and later
+    # (pyspark.sql.connect.proto.base_pb2's google_dot_protobuf_dot_any__pb2.Any), which is
+    # protobuf's class in PySpark, whose generated module binds protobuf's module there, and the
+    # runtime's in the drop-in, with or without protobuf: of no other global, so that an
+    # unpickler of an allow-list of modules loads them.
+    from google.protobuf import message as protobuf_message
+
+    for name in ("spark.connect.Relation", "spark.connect.Expression.Literal"):
+        mine, real = ours(name)(), upb(name)()
+        assert mine.__reduce__()[1:] == real.__reduce__()[1:]
+        assert (mine.__reduce__()[0] is protobuf_message._InternalConstructMessage) == (
+            real.__reduce__()[0] is protobuf_message._InternalConstructMessage
+        )
+    literal = proto.Expression.Literal(string="x")
+    assert type(copy.copy(literal)) is type(literal) and copy.copy(literal) == literal
+    relation = proto.Relation(range={"end": 3})
+    extension = _rust.Any()
+    extension.Pack(relation)
+    stamp = _rust.Timestamp(seconds=5, nanos=6)
+    upbs = [b"google.protobuf.any_pb2", b"google.protobuf.timestamp_pb2"]
+    for message, module in zip((extension, stamp), upbs):
+        for protocol in range(pickle.HIGHEST_PROTOCOL + 1):
+            data = pickle.dumps(message, protocol)
+            assert module in data and b"pyspark" not in data
+            assert _AllowList(io.BytesIO(data)).load() == message
+
+    # Without protobuf, of the names of the generated modules of the protos: PySpark's modules of
+    # the protos, which bind protobuf's modules there, load them of protobuf's classes.
+    script = textwrap.dedent(
+        """
+        import importlib.abc, json, pickle, sys
+
+        class Block(importlib.abc.MetaPathFinder):
+            def find_spec(self, name, path, target=None):
+                if name == "google.protobuf" or name.startswith("google.protobuf."):
+                    raise ImportError("no protobuf")
+
+        sys.meta_path.insert(0, Block())
+        import pyspark.sql.connect.proto as proto
+        from pyspark.sql.connect.proto import _rust
+
+        extension = _rust.Any()
+        extension.Pack(proto.Relation(range={"end": 3}))
+        stamp = _rust.Timestamp(seconds=5, nanos=6)
+        data = [pickle.dumps(m, protocol) for m in (extension, stamp) for protocol in (4, 5)]
+        print(json.dumps([d.hex() for d in data]))
+        """
+    )
+    root = str(pathlib.Path(__file__).resolve().parent.parent)
+    dumped = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, timeout=120, cwd=root
+    )
+    assert dumped.returncode == 0, dumped.stderr[-3000:]
+    data = [bytes.fromhex(d) for d in json.loads(dumped.stdout)]
+    for d in data:
+        assert b"pyspark.sql.connect.proto" in d and b"google_dot_protobuf_dot_" in d
+        assert b"importlib" not in d and b"getattr" not in d
+    assert [type(_AllowList(io.BytesIO(d)).load()) for d in data] == [_rust.Any] * 2 + [
+        _rust.Timestamp
+    ] * 2
+    package = tmp_path / "pyspark" / "sql" / "connect" / "proto"
+    package.mkdir(parents=True)
+    for parent in [tmp_path / "pyspark", *package.parents][:3]:
+        (parent / "__init__.py").write_text("")
+    (package / "__init__.py").write_text("")
+    (package / "base_pb2.py").write_text(
+        "from google.protobuf import any_pb2 as google_dot_protobuf_dot_any__pb2\n"
+    )
+    (package / "pipelines_pb2.py").write_text(
+        "from google.protobuf import any_pb2 as google_dot_protobuf_dot_any__pb2\n"
+        "from google.protobuf import timestamp_pb2 as google_dot_protobuf_dot_timestamp__pb2\n"
+    )
+    script = textwrap.dedent(
+        """
+        import json, pickle, sys
+        from google.protobuf import any_pb2, timestamp_pb2
+
+        loaded = [pickle.loads(bytes.fromhex(data)) for data in json.load(sys.stdin)]
+        print(json.dumps([[type(m).__module__ + "." + type(m).__name__, m.SerializeToString().hex()]
+                          for m in loaded]))
+        """
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        input=json.dumps([d.hex() for d in data]),
+        capture_output=True,
+        text=True,
+        timeout=120,
+        cwd=str(tmp_path),
+        env=dict(os.environ, PYTHONPATH=str(tmp_path)),
+    )
+    assert result.returncode == 0, result.stderr[-3000:]
+    expected = [extension.SerializeToString().hex()] * 2 + [stamp.SerializeToString().hex()] * 2
+    assert json.loads(result.stdout) == [
+        [name, value]
+        for name, value in zip(
+            ["google.protobuf.any_pb2.Any"] * 2 + ["google.protobuf.timestamp_pb2.Timestamp"] * 2,
+            expected,
+        )
+    ]
+
+
+def _nested_limits_of(levels):
+    """A Relation of `levels` limits, of the mappings of _nested_limits."""
+    return _nested_limits(levels)
+
+
+def _depth_cases(cls):
+    """The operations whose message of 51 limits (102 levels below it) upb refuses, as it copies
+    their message by a parse of its bytes, and those that it does not, of what each keeps."""
+    relation = cls("spark.connect.Relation")
+    deep = relation(**_nested_limits(51))
+    fine = relation(**_nested_limits(50))
+    literal = cls("spark.connect.Expression.Literal")
+    any_of = cls("spark.connect.Relation")()
+    any_of.extension.Pack(deep)
+
+    def kept(container):
+        return [m.SerializeToString(deterministic=True) for m in container]
+
+    def into(make):
+        def run():
+            target = make()
+            try:
+                operation = target[1](target[0])
+            except Exception as e:  # noqa: BLE001
+                operation = (type(e).__name__, str(e))
+            return operation, target[2](target[0])
+
+        return run
+
+    with_relations = cls("spark.connect.WithRelations")
+    plan = cls("spark.connect.Plan")
+
+    def message_bytes(message):
+        return message.SerializeToString(deterministic=True)
+
+    def references(message):
+        return kept(message.references)
+
+    return {
+        "FromString": lambda: relation.FromString(deep.SerializeToString()),
+        "pickle": lambda: pickle.loads(pickle.dumps(deep)),
+        "copy.copy": lambda: copy.copy(deep),
+        "Unpack": into(lambda: (relation(), any_of.extension.Unpack, message_bytes)),
+        "MergeFrom": into(lambda: (relation(), lambda m: m.MergeFrom(deep), message_bytes)),
+        "MergeFrom of a field": into(
+            lambda: (plan(), lambda m: m.root.MergeFrom(deep), message_bytes)
+        ),
+        "constructor": lambda: plan(root=deep),
+        "constructor of a repeated field": lambda: with_relations(references=[deep]),
+        "append": into(
+            lambda: (with_relations(), lambda m: m.references.append(deep), references)
+        ),
+        "extend": into(
+            lambda: (with_relations(), lambda m: m.references.extend([fine, deep, fine]), references)
+        ),
+        "insert": into(
+            lambda: (with_relations(), lambda m: m.references.insert(0, deep), references)
+        ),
+        "fine": lambda: relation.FromString(fine.SerializeToString()),
+        "CopyFrom": lambda: plan().root.CopyFrom(deep),
+        "deepcopy": lambda: copy.deepcopy(deep),
+        "map value": lambda: cls("spark.connect.SQL")(
+            named_arguments={"a": {"literal": {"integer": 1}}}
+        ),
+        "add": lambda: with_relations().references.add(**_nested_limits(51)),
+        "SerializeToString": lambda: deep.SerializeToString(),
+        "literal": lambda: literal(string="x"),
+    }
+
+
+def test_messages_of_more_than_100_levels_fail_where_upb_parses_their_bytes(upb):
+    # As upb's: a parse of a message of more than 100 levels of messages below it fails, of upb's
+    # error, keeping what it read: of FromString, of a pickle, of Unpack, and of the operations
+    # that upb makes of a parse of the bytes of the message, MergeFrom, copy.copy, a constructor
+    # given a message for a field or a repeated field, and append, extend and insert (whose
+    # messages upb appends before the parse, so that a failed one stays, but of insert). CopyFrom,
+    # deepcopy, the value of a map and the mappings of add copy any depth. The drop-in's own parse
+    # of a message that PySpark builds in Python takes any depth.
+    real_cases = _depth_cases(upb)
+    for label, mine in _depth_cases(ours).items():
+        if label == "pickle":
+            # (upb's classes of the tests are of the names of the package's, so do not pickle.)
+            real = lambda: upb("spark.connect.Relation").FromString(  # noqa: E731
+                ours("spark.connect.Relation")(**_nested_limits(51)).SerializeToString()
+            )
+        else:
+            real = real_cases[label]
+        assert _outcome(mine) == _outcome(real), label
+    deep = proto.Relation(**_nested_limits(51))
+    assert _pyspark._proto_parse_deep(proto.Relation, deep.SerializeToString()) == deep
+    message = _outcome(lambda: proto.Relation.FromString(deep.SerializeToString()))
+    assert message[1:] == (
+        "DecodeError",
+        "Error parsing message with type 'spark.connect.Relation': Exceeded upb_DecodeOptions_MaxDepth",
+    )
+    from pyspark.sql.connect.types import pyspark_types_to_proto_types
+    from pyspark.sql.types import IntegerType, StructField, StructType
+
+    nested = IntegerType()
+    for _ in range(60):
+        nested = StructType([StructField("a", nested)])
+    assert pyspark_types_to_proto_types(nested).struct.fields[0].name == "a"
+
+
+def _corrupt(rng, data):
+    """`data` corrupted: cut short, of a changed byte, of bytes inserted or of bytes removed."""
+    data = bytearray(data)
+    kind = rng.randint(0, 3)
+    if kind == 0 and data:
+        del data[rng.randint(0, len(data) - 1) :]
+    elif kind == 1 and data:
+        data[rng.randint(0, len(data) - 1)] = rng.randint(0, 255)
+    elif kind == 2:
+        at = rng.randint(0, len(data))
+        data[at:at] = bytes(rng.randint(0, 255) for _ in range(rng.randint(1, 3)))
+    elif data:
+        at = rng.randint(0, len(data) - 1)
+        del data[at : at + rng.randint(1, 4)]
+    return bytes(data)
+
+
+@pytest.mark.parametrize("seed", range(3))
+def test_corrupt_bytes_fail_and_keep_what_upbs_parse_keeps(upb, seed):
+    # As upb's decoder of its input stream: a value, a tag or a length that runs past the end of
+    # its message reads the bytes that follow it in the data, and zeros past the end of the data,
+    # and is set before the parse fails; a string reads past the end of its message but not of
+    # the data, and a packed field of a fixed width up to 16 bytes past the data once its stream
+    # is in its patch buffer; a field of presence is set before its bytes are read; the run of
+    # fields of numbers of no field is kept at the next field of a number of the type, or at the
+    # end of the message, so a failure before either drops it. Random messages of every type,
+    # cut short, of a byte changed and of bytes inserted or removed, keep what upb's keep.
+    def state(cls, data):
+        message = cls()
+        try:
+            message.MergeFromString(data)
+            failure = None
+        except Exception as e:  # noqa: BLE001
+            failure = (type(e).__name__, str(e))
+        try:
+            text = str(message)
+        except Exception as e:  # noqa: BLE001
+            text = type(e).__name__
+        fields = [f.name for f, _ in message.ListFields()]
+        return failure, fields, message.SerializeToString(deterministic=True), text
+
+    generator = _Generator(upb, seed)
+    rng = random.Random(seed + 1000)
+    mismatches = []
+    embedded = [
+        name
+        for name in sorted(_rust._CLASSES)
+        if ours(name).DESCRIPTOR.file.name in _rust._EMBEDDED_FILES
+        and not ours(name).DESCRIPTOR.GetOptions().map_entry
+    ]
+    for full_name in embedded:
+        real = upb(full_name)()
+        generator.fill(real, depth=generator.rng.randint(0, 3))
+        data = real.SerializeToString(deterministic=True)
+        for _ in range(2):
+            bad = _corrupt(rng, data)
+            if state(ours(full_name), bad) != state(upb(full_name), bad):
+                mismatches.append((full_name, bad.hex()))
+    assert not mismatches, mismatches[:5]
+
+
+@pytest.fixture(scope="module")
+def kinds(plugin):
+    """The modules of the plugin's files of proto2, of the edition 2023 and of well-known types,
+    and the class of upb of a message of their files by full name, of a pool of their own."""
+    from google.protobuf import duration_pb2, empty_pb2, field_mask_pb2, struct_pb2, wrappers_pb2
+    from plugin_protos import editions_pb2, legacy_pb2, wkt_pb2
+
+    known = [duration_pb2, empty_pb2, field_mask_pb2, struct_pb2, wrappers_pb2]
+    classes = _upb_classes_of(
+        [
+            (m.DESCRIPTOR.serialized_pb, m.__name__)
+            for m in known + [legacy_pb2, editions_pb2, wkt_pb2]
+        ]
+    )
+    return legacy_pb2, editions_pb2, wkt_pb2, classes.__getitem__
+
+
+def _kind_cases(cls):
+    """Operations on the messages of the plugin's files of proto2, editions and well-known types,
+    of the classes of ``cls`` by full name: defaults and presence, required fields, closed enums,
+    packing, groups, strings of no UTF-8, the features of editions, and the methods, assignments,
+    comparisons and membership of the well-known types."""
+    from google.protobuf import json_format, text_format
+
+    defaults, legacy = cls("thirdparty.legacy.Defaults"), cls("thirdparty.legacy.Legacy")
+    required = cls("thirdparty.legacy.Required")
+    featured, wkt = cls("thirdparty.editions.Featured"), cls("thirdparty.wkt.Wkt")
+    names = ["count", "name", "data", "ratio", "scale", "flag", "color", "first_color", "big",
+             "negative", "plain", "plain_name"]  # fmt: skip
+
+    def nested():
+        message = legacy()
+        message.required.next.next.SetInParent()
+        message.many_required.add(a=1)
+        message.many_required.add()
+        message.item.x = 1
+        message.by_name["k"].SetInParent()
+        return message
+
+    def groups():
+        message = legacy(id="x")
+        message.item.x, message.item.label = 7, "l"
+        message.entry.add(key=1).value.sql.query = "q"
+        return message
+
+    def featured_set():
+        message = featured(required="r", packed=[1, 2], expanded=[3, 4], implicit=0, explicit=0)
+        message.delimited.value = 5
+        message.delimited_values.add(value=6)
+        return message
+
+    def struct():
+        return wkt(options={"a": 1, "b": "x"}, list=[1, 2])
+
+    errors = []
+    unknown_enums = bytes.fromhex("0a0178280930093001" "3a03010902")
+    bad_utf8 = bytes.fromhex("0a01ff" "a20103ff6162")
+    return [
+        lambda: [repr(getattr(defaults(), n)) for n in names],
+        lambda: [defaults().HasField(n) for n in names],
+        lambda: defaults(count=5, plain=0, name="", color=1),
+        lambda: defaults(count=5) == defaults(),
+        lambda: legacy().IsInitialized(),
+        lambda: nested().FindInitializationErrors(),
+        lambda: nested().SerializeToString(),
+        lambda: nested().ByteSize(),
+        lambda: nested().SerializePartialToString(),
+        lambda: (nested().IsInitialized(errors), errors),
+        lambda: nested().IsInitialized(5),
+        lambda: legacy.FromString(b""),
+        lambda: cls("spark.connect.Relation")().extension.Pack(required()),
+        lambda: legacy(color=9),
+        lambda: legacy(colors=[1, 9]),
+        lambda: legacy(id="x").colors.extend([1, 9]),
+        lambda: legacy(color="PURPLE"),
+        lambda: legacy.FromString(unknown_enums),
+        lambda: list(legacy.FromString(unknown_enums).packed_colors),
+        lambda: legacy.FromString(bytes.fromhex("0a0178" "9801" "09")).WhichOneof("choice"),
+        lambda: legacy(id="x", unpacked=[1, 2], packed=[3, 4]),
+        lambda: list(legacy.FromString(bytes.fromhex("0a01781a020102")).unpacked),
+        lambda: groups(),
+        lambda: str(groups()),
+        lambda: text_format.MessageToString(groups()),
+        lambda: json_format.MessageToJson(groups()),
+        lambda: legacy.FromString(groups().SerializeToString()) == groups(),
+        lambda: str(legacy.FromString(bytes.fromhex("0a0178" "4202" "4801"))),
+        lambda: legacy.FromString(bytes.fromhex("0a0178" "43" "4801")),
+        lambda: legacy.FromString(bytes.fromhex("0a0178" "43" "4801" "5c")),
+        lambda: text_format.Parse('id: "x" Item { x: 3 label: "q" }', legacy()),
+        lambda: legacy(id="x", input=cls("spark.connect.Relation")(sql={"query": "q"})),
+        lambda: [(f.name, v) for f, v in legacy.FromString(bad_utf8).ListFields()],
+        lambda: (str(legacy.FromString(bad_utf8)), legacy.FromString(bad_utf8).SerializeToString()),
+        lambda: json_format.MessageToJson(legacy.FromString(bad_utf8)),
+        lambda: setattr(legacy(), "raw", b"\xff"),
+        lambda: featured().HasField("implicit"),
+        lambda: (featured().explicit, featured().HasField("explicit"), featured().closed),
+        lambda: featured().FindInitializationErrors(),
+        lambda: featured_set(),
+        lambda: str(featured_set()),
+        lambda: json_format.MessageToJson(featured_set()),
+        lambda: setattr(featured(), "closed", 7),
+        lambda: str(featured.FromString(bytes.fromhex("1a017230073807"))),
+        lambda: featured.FromString(bytes.fromhex("1a017262" "01ff")).unchecked,
+        lambda: featured.FromString(bytes.fromhex("1a01ff")),
+        lambda: wkt(timeout=datetime.timedelta(seconds=3, microseconds=5)).timeout.ToJsonString(),
+        lambda: str(wkt(options={"a": 1, "b": [1, "x"], "c": {"d": None}})),
+        lambda: wkt(options={"fields": {"a": {"number_value": 1}}}),
+        lambda: wkt(list=[1, "a", None, True]),
+        lambda: wkt(at=datetime.datetime(2020, 1, 2)),
+        lambda: wkt(mask={"paths": ["a.b"]}).mask.ToJsonString(),
+        lambda: [value in struct().options for value in ("a", "z")]
+        + [value in struct().list for value in (1, 3)],
+        lambda: (struct().options == {"a": 1, "b": "x"}, struct().options != {"a": 1, "b": "x"}),
+        lambda: (struct().list == [1, 2], struct().list != [1, 2], struct().list == [2]),
+        lambda: sorted(struct().options.items()),
+        lambda: setattr(struct(), "value", 3),
+        lambda: struct().timeouts.append(datetime.timedelta(seconds=1)),
+        lambda: json.loads(json_format.MessageToJson(struct())),
+        lambda: wkt(timeout={"seconds": 1}).timeout + datetime.timedelta(seconds=1),
+        lambda: wkt(input=cls("spark.connect.Relation")(sql={"query": "q"})),
+        lambda: (wkt(nothing={}).HasField("nothing"), str(wkt(nothing={}))),
+    ]
+
+
+def test_messages_of_files_of_proto2_editions_and_well_known_types_are_upbs(kinds):
+    # The runtime's classes of the plugin's files of proto2, of editions and of well-known types
+    # other than Any and Timestamp behave as upb's: the defaults and presence of proto2 and of the
+    # features of editions, required fields (IsInitialized, FindInitializationErrors and the
+    # EncodeError of SerializeToString), closed enums (whose unknown values a parse keeps in the
+    # unknown fields), packing, groups and delimited messages, strings that a parse does not check
+    # (of bytes that are not UTF-8), and protobuf's methods of the well-known types, of upb's
+    # assignments, comparisons and membership of a Struct and a ListValue. A class of a well-known
+    # type is the runtime's own, which errors name. A map pickles and serializes of the order of
+    # its keys, as upb's deterministic serialization.
+    legacy_pb2, editions_pb2, wkt_pb2, upb = kinds
+    for module in (legacy_pb2, editions_pb2, wkt_pb2):
+        for name, cls in vars(module).items():
+            if isinstance(cls, type) and hasattr(cls, "DESCRIPTOR"):
+                assert cls is ours(cls.DESCRIPTOR.full_name), name
+
+    def normalized(outcome):
+        text = repr(outcome)
+        for stem in ("struct", "duration", "wrappers", "field_mask", "empty"):
+            ours_module = f"pyspark.sql.connect.proto._rust.{stem}_pb2"
+            text = text.replace(ours_module, f"google.protobuf.{stem}_pb2")
+        return text
+
+    mine, real = _kind_cases(ours), _kind_cases(upb)
+    for at, (m, r) in enumerate(zip(mine, real)):
+        assert normalized(_outcome(m)) == normalized(_outcome(r)), at
+    struct = wkt_pb2.Wkt(options={"a": 1, "b": "x"}, list=[1, 2])
+    assert pickle.loads(pickle.dumps(struct)) == struct
+    timeout = wkt_pb2.Wkt(timeout={"seconds": 1}).timeout
+    assert pickle.dumps(timeout).count(b"google.protobuf.duration_pb2") == 1
+    assert type(pickle.loads(pickle.dumps(timeout))).__module__ == "google.protobuf.duration_pb2"
+    assert type(copy.copy(timeout)) is type(timeout)
+
+
+def test_modules_built_before_the_package_get_its_classes():
+    # A module of a proto of Spark Connect or of a plugin's file that imports them, which
+    # protobuf's builder built before pyspark.sql.connect.proto was imported (as only a copy of
+    # Apache Spark's generated modules of the same protos can), gets the classes of the package,
+    # as upb gives the module of a file built again the class that it made of it, or the
+    # runtime's, as do the names that other modules bound to its classes. (Of protobuf's builder.)
+    pytest.importorskip("google.protobuf")
+    script = textwrap.dedent(
+        """
+        import sys, types
+        from google.protobuf import descriptor_pb2, descriptor_pool
+        from google.protobuf.internal import builder
+        from pyspark import _pyspark
+
+        pool = descriptor_pool.Default()
+        for name, _, _, _ in _pyspark._proto_files():
+            if name.startswith("google/"):
+                __import__("google.protobuf." + name.rsplit("/", 1)[1][:-6] + "_pb2")
+            else:
+                pool.AddSerializedFile(_pyspark._proto_file_descriptor(name).serialized_pb)
+
+        def build(file, name):
+            module = types.ModuleType(name)
+            module.DESCRIPTOR = file
+            builder.BuildMessageAndEnumDescriptors(file, vars(module))
+            builder.BuildTopDescriptorsAndMessages(file, name, vars(module))
+            sys.modules[name] = module
+            return module
+
+        copy = build(pool.FindFileByName("spark/connect/relations.proto"), "copy.relations_pb2")
+        plugin = descriptor_pb2.FileDescriptorProto(
+            name="early/plugin.proto", package="early", syntax="proto3",
+            dependency=["spark/connect/relations.proto"])
+        field = plugin.message_type.add(name="M").field.add(
+            name="input", number=1, type=11, label=1, type_name=".spark.connect.Relation")
+        early = build(pool.AddSerializedFile(plugin.SerializeToString()), "early.plugin_pb2")
+        bound = types.ModuleType("early.bound")
+        bound.M = early.M
+        sys.modules["early.bound"] = bound
+        before = (issubclass(copy.Relation, _pyspark.ProtoMessage), issubclass(early.M, _pyspark.ProtoMessage))
+
+        import pyspark.sql.connect.proto as proto
+        after = [copy.Relation is proto.Relation, issubclass(early.M, _pyspark.ProtoMessage),
+                 bound.M is early.M, type(early.M(input=proto.Relation()).input) is proto.Relation]
+        print(before, after)
+        """
+    )
+    root = str(pathlib.Path(__file__).resolve().parent.parent)
+    result = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, timeout=120, cwd=root
+    )
+    assert result.returncode == 0, result.stderr[-3000:]
+    assert result.stdout.strip() == "(False, False) [True, True, True, True]"
+
+
+def test_modules_of_the_messages_have_files_for_type_checkers():
+    # Each module of messages, of a stub of PySpark (base_pb2.pyi), has a file next to it, which
+    # pyright takes as its source (with no reportMissingModuleSource), as it takes PySpark's
+    # generated module: the runtime's finder gives the module that the runtime makes, of the file
+    # as its origin, rather than the file, which holds only its docstring.
+    import ast
+
+    package = pathlib.Path(proto.__file__).parent
+    for stub in sorted(package.glob("*_pb2.pyi")):
+        source = stub.with_suffix(".py")
+        assert source.exists(), source
+        module = importlib.import_module(f"pyspark.sql.connect.proto.{stub.stem}")
+        assert module.__file__ == str(source) and module.__spec__.loader is _rust._LOADER
+        assert module.DESCRIPTOR.name == f"spark/connect/{stub.stem[: -len('_pb2')]}.proto"
+        body = ast.parse(source.read_text()).body
+        assert len(body) == 1 and isinstance(body[0].value, ast.Constant), source
+
+
+def test_the_runtimes_own_base_and_descriptors_where_protobuf_does_not_import_are_upbs(upb):
+    # Where protobuf does not import, the classes are of the runtime's base _MessageBase, in place
+    # of protobuf's Message, of its methods: the pickle of a message, of its class and its bytes,
+    # its copy and its dir(); and of the runtime's descriptors, which _descriptor_of and the others
+    # give where the classes do not take protobuf's (as where protobuf's pool has other files of the
+    # names of the protos, which _same_files tells, of their shapes).
+    from google.protobuf import descriptor_pb2, descriptor_pool, reflection
+
+    relation = _own_class("spark.connect.Relation")
+    message = relation(sql={"query": "q"})
+    # ListFields gives the descriptors of the fields of the DESCRIPTOR of the class of the type,
+    # protobuf's, read of the class once.
+    listed = [proto.Relation(sql={"query": "q"}).ListFields()[0][0] for _ in range(2)]
+    assert listed[0] is listed[1] is proto.Relation.DESCRIPTOR.fields_by_name["sql"]
+    reduced = message.__reduce__()
+    assert reduced[0] is relation and reduced[1] == () and reduced[2] == {
+        "serialized": message.SerializeToString()
+    }
+    restored = relation()
+    restored.__setstate__({"serialized": message.SerializeToString().decode("latin1")})
+    assert restored == message and copy.copy(message) == message
+    assert type(copy.copy(message)) is relation
+    assert set(dir(message)) - {"__copy__"} == set(
+        dir(upb("spark.connect.Relation")(sql={"query": "q"}))
+    )
+
+    import pyspark.sql.connect.proto._rust as runtime
+
+    saved = runtime._USE_PROTOBUF_DESCRIPTORS
+    runtime._USE_PROTOBUF_DESCRIPTORS = False
+    try:
+        assert runtime._descriptor_of("spark.connect.Relation") is _own("spark.connect.Relation")
+        enum = runtime._enum_descriptor_of("spark.connect.Join.JoinType")
+        assert enum is _pyspark._proto_enum_descriptor("spark.connect.Join.JoinType")
+        file = runtime._file_descriptor_of("spark/connect/base.proto")
+        assert file is _pyspark._proto_file_descriptor("spark/connect/base.proto")
+        assert runtime._class_for(proto.Relation.DESCRIPTOR, None) is None
+    finally:
+        runtime._USE_PROTOBUF_DESCRIPTORS = saved
+
+    # The files of protobuf's pool of the names of the protos are the runtime's of the same bytes,
+    # or of the same shapes of other bytes (of JSON names), and no other.
+    name = "spark/connect/common.proto"
+    same = descriptor_pb2.FileDescriptorProto.FromString(
+        _pyspark._proto_file_descriptor(name).serialized_pb
+    )
+    for message_proto in same.message_type:
+        for field in message_proto.field:
+            field.json_name = field.json_name or field.name
+    other = descriptor_pb2.FileDescriptorProto()
+    other.CopyFrom(same)
+    other.message_type[0].field[0].number += 1000
+    pool = descriptor_pool.DescriptorPool()
+    for dependency in same.dependency:
+        pool.AddSerializedFile(_pyspark._proto_file_descriptor(dependency).serialized_pb)
+    assert runtime._same_files(pool.AddSerializedFile(same.SerializeToString()), name)
+    other_pool = descriptor_pool.DescriptorPool()
+    for dependency in other.dependency:
+        other_pool.AddSerializedFile(_pyspark._proto_file_descriptor(dependency).serialized_pb)
+    assert not runtime._same_files(other_pool.AddSerializedFile(other.SerializeToString()), name)
+
+    # The hooks pass over what is not a descriptor of protobuf's default pool, and an object of
+    # sys.modules of no globals.
+    assert runtime._class_for(object(), None) is None
+    assert issubclass(type(upb("spark.connect.Relation")), reflection.GeneratedProtocolMessageType) is (
+        issubclass(type(upb("spark.connect.Relation")), reflection.GeneratedProtocolMessageType._protobuf_class)
+    )
+    sys.modules["tests_of_no_globals"] = 1  # type: ignore[assignment]
+    try:
+        assert runtime._imported_module_of_file(proto.Relation.DESCRIPTOR.file) is not None
+        runtime._rebind({id(object()): (object(), object())}, "tests_of_no_globals")
+    finally:
+        del sys.modules["tests_of_no_globals"]
+
+
+def test_holds_of_files_find_the_modules_of_a_package_once_and_rebind_them_at_their_end(upb):
+    # A hold of files (of the take-overs of many generated modules) finds the imported modules of a
+    # top-level package once, and rebinds the names of its modules once, at its end, to the
+    # runtime's classes that replaced protobuf's: of the package only, and of no other name.
+    import pyspark.sql.connect.proto._rust as runtime
+
+    old, new, other = type("Old", (), {}), type("New", (), {}), type("Other", (), {})
+    names = ["tests_hold_pkg", "tests_hold_pkg.sub", "tests_hold_pkgx", "tests_hold_pkg.late"]
+    modules = {name: types.ModuleType(name) for name in names}
+    for module in modules.values():
+        module.Old, module.Other = old, other
+    for name in names[:3]:
+        sys.modules[name] = modules[name]
+    try:
+        with runtime._held_together():
+            found = runtime._modules_of_packages({"tests_hold_pkg"})
+            assert {m.__name__ for m in found} == {"tests_hold_pkg", "tests_hold_pkg.sub"}
+            with runtime._held_together():  # a hold in a hold is the one hold
+                runtime._rebind({id(old): (old, new)}, "tests_hold_pkg.sub")
+            sys.modules["tests_hold_pkg.late"] = modules["tests_hold_pkg.late"]
+            assert runtime._modules_of_packages({"tests_hold_pkg"}) == found
+            assert modules["tests_hold_pkg"].Old is old
+        assert [modules[name].Old for name in names] == [new, new, old, old]
+        assert {m.Other for m in modules.values()} == {other}
+        assert len(runtime._modules_of_packages({"tests_hold_pkg"})) == 3
+        runtime._rebind({id(old): (old, new)}, "tests_hold_pkg.late")
+        assert modules["tests_hold_pkg.late"].Old is new and modules["tests_hold_pkgx"].Old is old
+        assert runtime._modules_of_packages(set()) == []
+    finally:
+        for name in names:
+            sys.modules.pop(name, None)
+
+
+def _run_script(script, **env):
+    """The JSON that ``script`` prints of a Python of the drop-in, of the environment of this one
+    and of ``env`` (without ``PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION`` unless it is given)."""
+    root = str(pathlib.Path(__file__).resolve().parent.parent)
+    environment = {k: v for k, v in os.environ.items() if k != "PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"}
+    environment.update(env)
+    result = subprocess.run(
+        [sys.executable, "-c", textwrap.dedent(script)],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        cwd=root,
+        env=environment,
+    )
+    assert result.returncode == 0, result.stderr[-3000:]
+    return json.loads(result.stdout.strip().splitlines()[-1])
+
+
+def test_protobufs_classes_stay_those_of_its_descriptors_of_its_pure_python_implementation(upb):
+    # Of protobuf's pure-Python implementation, whose descriptors hold the class of their type
+    # (_concrete_class), which its containers and message_factory read: the runtime sets it of a
+    # descriptor of a type that it holds of no class, as protobuf's metaclass sets it, and never in
+    # place of protobuf's class of a descriptor, of the well-known types and of the files that a
+    # plugin's file imports, so protobuf's messages of other modules make and take theirs.
+    out = _run_script(
+        """
+        import json
+        from google.protobuf import any_pb2, duration_pb2, message_factory, struct_pb2
+        from google.protobuf import timestamp_pb2
+        from google.protobuf.internal import api_implementation
+
+        import pyspark.sql.connect.proto as proto
+        from plugin_protos import wkt_pb2
+
+        out = [api_implementation.Type()]
+        out += [m.DESCRIPTOR._concrete_class is m for m in (any_pb2.Any, timestamp_pb2.Timestamp,
+                                                             duration_pb2.Duration, struct_pb2.Struct)]
+        out.append(message_factory.GetMessageClass(any_pb2.Any.DESCRIPTOR) is any_pb2.Any)
+        out.append(proto.Relation.DESCRIPTOR._concrete_class is proto.Relation)
+        out.append(wkt_pb2.Wkt.DESCRIPTOR._concrete_class is wkt_pb2.Wkt)
+        value = struct_pb2.Value()
+        value.struct_value.fields["a"].number_value = 1
+        listed = struct_pb2.ListValue()
+        listed.values.add().number_value = 2
+        out.append([type(value.struct_value) is struct_pb2.Struct, listed.values[0].number_value])
+        try:
+            from google.rpc import status_pb2
+        except ImportError:
+            out.append(True)
+        else:
+            status = status_pb2.Status()
+            out.append(type(status.details.add()) is any_pb2.Any)
+        print(json.dumps(out))
+        """,
+        PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION="python",
+        PYTHONPATH=str(pathlib.Path(__file__).resolve().parent),
+    )
+    assert out == ["python", True, True, True, True, True, True, True, [True, 2.0], True]
+
+
+def test_maps_of_strings_of_no_utf8_validation_take_bytes_that_are_not_utf8_as_upbs(kinds):
+    # A map of proto2 (whose entries take any bytes of a string) and one of the NONE validation of
+    # editions parse a key or a value that is not UTF-8, as upb's do, which then gives it as
+    # bytes; one of the VERIFY validation refuses it.
+    legacy_pb2, editions_pb2, _, upb = kinds
+
+    def outcome(cls, data):
+        message = cls()
+        failure = _outcome(lambda: message.MergeFromString(data))
+        keys = {name: list(getattr(message, name)) for name in ("by_name", "names", "checked_names")
+                if name in cls.DESCRIPTOR.fields_by_name}
+        return failure[:2], message.SerializePartialToString(), keys, str(message)
+
+    cases = [
+        (legacy_pb2.Legacy, "thirdparty.legacy.Legacy", bytes.fromhex("7a030a01ff")),
+        (editions_pb2.Strict, "thirdparty.editions.Strict", bytes.fromhex("12060a01ff120161")),
+        (editions_pb2.Strict, "thirdparty.editions.Strict", bytes.fromhex("12060a016112016c") + b"\xff"),
+        (editions_pb2.Strict, "thirdparty.editions.Strict", bytes.fromhex("12060a016112") + b"\x01\xff"),
+        (editions_pb2.Strict, "thirdparty.editions.Strict", bytes.fromhex("1a060a01ff120161")),
+    ]
+    for cls, full_name, data in cases:
+        assert outcome(cls, data) == outcome(upb(full_name), data), data.hex()
+    parsed = legacy_pb2.Legacy.FromString(bytes.fromhex("7a030a01ff"))
+    assert list(parsed.by_name) == [b"\xff"]
+    with pytest.raises(Exception, match="String field had bad UTF-8"):
+        editions_pb2.Strict.FromString(bytes.fromhex("1a060a01ff120161"))
+
+
+def test_required_message_fields_of_editions_are_required_as_upbs(kinds):
+    # A message field of the LEGACY_REQUIRED presence of editions is required, as upb's: a message
+    # that lacks it is not initialized and does not serialize.
+    _, editions_pb2, _, upb = kinds
+    for cls in (editions_pb2.Strict, upb("thirdparty.editions.Strict")):
+        message = cls()
+        assert message.FindInitializationErrors() == ["inner"] and not message.IsInitialized()
+        assert _outcome(message.SerializeToString)[2] == (
+            "Message thirdparty.editions.Strict is missing required fields: inner"
+        )
+        message.inner.value = 1
+        assert message.IsInitialized() and message.SerializeToString() == b"\x0a\x02\x08\x01"
+
+
+def _parse_outcome(cls, data):
+    """What a merge of ``data`` into a message of ``cls`` gives: its failure, the bytes of the
+    message (of its required fields too) and its text."""
+    message = cls()
+    failure = _outcome(lambda: message.MergeFromString(data))
+    return failure[:3] if failure[0] == "raise" else None, message.SerializePartialToString(), str(
+        message
+    )
+
+
+def test_the_decoder_keeps_and_refuses_what_upbs_does(kinds):
+    # As upb's decoder: a value of a closed enum that it does not declare is kept in the unknown
+    # fields of the bytes of its field as they are (of a packed field, of a tag of its own and the
+    # 64 bits of the value), and not kept when it is read past the end of its message; a length of
+    # more than five bytes is corrupt, even of a small value; a field of the number 0 is an unknown
+    # field of a message type of no fields; a string field that is not UTF-8 prints its UTF-8
+    # characters and the escapes of the other bytes; a group past the limit of the levels is
+    # corrupt ("Wire format was corrupt").
+    legacy_pb2, editions_pb2, _, upb = kinds
+    negative = b"\xff" * 9 + b"\x01"
+    legacy = "thirdparty.legacy.Legacy"
+    defaults = "thirdparty.legacy.Defaults"
+    cases = [
+        (legacy, b"\x28" + negative),  # color = -1, 10 bytes
+        (legacy, b"\x30" + negative),  # colors (repeated) = -1
+        (legacy, b"\xa8\x80\x00\x33"),  # color = 51, of a tag of 3 bytes
+        (legacy, b"\x28\xb3\x80\x00"),  # color = 51, of 3 bytes
+        (legacy, b"\x3a\x0b" + negative + b"\x01"),  # packed_colors = [-1, 1]
+        (legacy, b"\x3a\x05\xb3\x80\x80\x80\x10"),  # packed_colors = [2^32 + 51]
+        (legacy, b"\x7a\x0e\x0a\x01k\x10" + negative),  # by_name's value, a message, of a varint
+        (defaults, b"\x40"),  # first_color, read past the end
+        (defaults, b"\x08\x01\x40"),
+        (defaults, b"\x40\x81"),  # first_color = 1, cut short
+        (legacy, b"\x72\x01\x40\x05"),  # defaults.first_color = 5, read past its message
+        (legacy, b"\x72\x01\x40\x02"),  # defaults.first_color = 2, read past its message
+        (legacy, b"\x28\x80"),
+        ("spark.connect.Relation", b"\x1a\x80\x80\x80\x80\x80\x00"),
+        ("spark.connect.RelationCommon", b"\x0a\x80\x80\x80\x80\x80\x00"),
+        ("spark.connect.AnalyzePlanRequest.Explain", b"\x0a\x80\x80\x80\x80\x80"),
+        ("spark.connect.Relation", b"\x1a\x80\x80\x80\x80\x00"),
+        ("spark.connect.Relation", b"\xfa\x3e\x80\x80\x80\x80\x80\x00"),
+        ("spark.connect.ExecutePlanResponse.ResultComplete", b"\x00\x00"),
+        ("spark.connect.ExecutePlanResponse.ResultComplete", b"\x05\x01\x02\x03\x04\x02\x01\x00"),
+        ("spark.connect.ExecutePlanResponse.ResultComplete", b"\x03\x00"),
+        # Groups of the number 0 in a message type of no fields, which are unknown fields.
+        ("spark.connect.ExecutePlanResponse.ResultComplete", b"\x03\x04"),
+        ("spark.connect.ExecutePlanResponse.ResultComplete", bytes.fromhex("03080104")),
+        ("spark.connect.ExecutePlanResponse.ResultComplete", bytes.fromhex("03030404")),
+        ("spark.connect.ExecutePlanResponse.ResultComplete", bytes.fromhex("030b0c04")),
+        ("spark.connect.ExecutePlanResponse.ResultComplete", b"\x04"),
+        ("spark.connect.CurrentDatabase", b"\x03\x04"),
+        ("spark.connect.ExecutePlanResponse", bytes.fromhex("72020304")),
+        ("spark.connect.ExecutePlanResponse", b"\x72\x02\x00\x00"),
+        ("spark.connect.Relation", b"\x00\x00"),
+        ("thirdparty.legacy.Legacy.Item", bytes.fromhex("520668c3a96cc66f")),
+        ("spark.connect.Relation", b"\xc3\x3e" * 100 + b"\xc4\x3e" * 100),
+        ("spark.connect.Relation", b"\xc3\x3e" * 101 + b"\xc4\x3e" * 101),
+        # Undeclared values of a packed closed enum read past the end of the packed values, which
+        # are kept.
+        (legacy, b"\x3a\x02\x29\x94\x02"),
+        ("thirdparty.editions.Featured", bytes.fromhex("3a01e697a5e69cace8aa9e01")),
+        # A map entry of an unknown field, of a key of the default that it read (of proto2 and of
+        # editions, of entry fields of presence, written again), and of proto3 (not written).
+        (legacy, bytes.fromhex("7a0d0a001200212be6708b68120000")),
+        ("thirdparty.editions.Strict", bytes.fromhex("12060a0012001805")),
+        ("spark.connect.Read.DataSource", bytes.fromhex("1a060a0012001805")),
+    ]
+    mine = {
+        defaults: legacy_pb2.Defaults,
+        legacy: legacy_pb2.Legacy,
+        "thirdparty.legacy.Legacy.Item": legacy_pb2.Legacy.Item,
+        "thirdparty.editions.Featured": editions_pb2.Featured,
+        "thirdparty.editions.Strict": editions_pb2.Strict,
+    }
+    for full_name, data in cases:
+        cls = mine.get(full_name) or ours(full_name)
+        assert _parse_outcome(cls, data) == _parse_outcome(upb(full_name), data), (full_name, data.hex())
+    item = legacy_pb2.Legacy.Item.FromString(bytes.fromhex("520668c3a96cc66f"))
+    assert str(item) == 'label: "h\u00e9l\\306o"\n'
+    assert _parse_outcome(ours("spark.connect.Relation"), b"\xc3\x3e" * 101 + b"\xc4\x3e" * 101)[0][2] == (
+        "Error parsing message with type 'spark.connect.Relation': Wire format was corrupt"
+    )
+    assert legacy_pb2.Legacy.FromString(b"\x28" + negative).SerializePartialToString() == b"\x28" + negative
+    # A key of a map that is not UTF-8, which the runtime holds as bytes, sorts among the others of
+    # its bytes, of the text and of a deterministic serialization, as upb's.
+    data = bytes.fromhex("7a050a016112007a060a02fc7f1200")
+    mine_parsed, real_parsed = legacy_pb2.Legacy.FromString(data), upb(legacy).FromString(data)
+    assert set(mine_parsed.by_name) == set(real_parsed.by_name) == {"a", b"\xfc\x7f"}
+    assert str(mine_parsed) == str(real_parsed)
+    assert mine_parsed.SerializePartialToString(deterministic=True) == (
+        real_parsed.SerializePartialToString(deterministic=True)
+    )
+
+
+def test_copy_from_and_eq_of_protobufs_messages_take_any_depth_as_upbs(upb):
+    # CopyFrom of protobuf's message of the type of a message, and ==, copy and compare messages of
+    # any depth, as upb's deep copy and comparison do, where a parse of their bytes stops at 100
+    # levels.
+    from google.protobuf import struct_pb2
+
+    deep = struct_pb2.Struct()
+    inner = deep
+    for _ in range(60):
+        inner = inner.fields["a"].struct_value
+    inner.fields["b"].number_value = 1
+    shadow = _rust._CLASSES.get("google.protobuf.Struct")
+    if shadow is None:  # the runtime holds Struct once a plugin's file imports it
+        pytest.importorskip("plugin_protos.wkt_pb2")
+        shadow = _rust._CLASSES["google.protobuf.Struct"]
+    held = shadow()
+    held.CopyFrom(deep)
+    assert held.SerializeToString(deterministic=True) == deep.SerializeToString(deterministic=True)
+    assert held == deep and deep == held
+    relation_class = _protobuf_class("spark.connect.Relation")
+    relation = relation_class()
+    top = relation
+    for _ in range(120):
+        relation = relation.limit.input
+    relation.range.end = 3
+    mine = proto.Relation()
+    mine.CopyFrom(top)
+    assert mine.SerializeToString() == top.SerializeToString() and mine == top and top == mine
+    with pytest.raises(Exception, match="Exceeded upb_DecodeOptions_MaxDepth"):
+        proto.Relation(limit={"input": top})
+
+
+def test_parses_follow_upbs_set_allow_oversize_protos(upb):
+    # Once upb's SetAllowOversizeProtos(True) is called, before the package imports or after, upb's
+    # parsers read messages of up to 65535 levels, and so do the runtime's, of 100 levels before.
+    script = """
+        import json, sys
+        from google.protobuf.internal import api_implementation
+
+        before = len(sys.argv) > 1
+        if "{when}" == "before":
+            api_implementation._c_module.SetAllowOversizeProtos(True)
+        import pyspark.sql.connect.proto as proto
+        from pyspark import _pyspark
+
+        data = b""
+        for _ in range(150):
+            data = bytes([0x42, len(data) + 2 if len(data) < 126 else 0]) if False else data
+        deep = proto.Relation(range={{"end": 1}})
+        for _ in range(150):
+            outer = proto.Relation()
+            outer.limit.input.CopyFrom(deep)
+            deep = outer
+        data = deep.SerializeToString()
+        out = []
+        def parse():
+            try:
+                return len(proto.Relation.FromString(data).SerializeToString())
+            except Exception as e:
+                return type(e).__name__
+        if "{when}" == "after":
+            out.append(parse())
+            api_implementation._c_module.SetAllowOversizeProtos(True)
+        out.append(parse())
+        api_implementation._c_module.SetAllowOversizeProtos(False)
+        out.append(parse())
+        print(json.dumps(out))
+        """
+    assert _run_script(script.format(when="before")) == [_relation_size(150), "DecodeError"]
+    assert _run_script(script.format(when="after")) == [
+        "DecodeError",
+        _relation_size(150),
+        "DecodeError",
+    ]
+    # Of that limit, a copy of a message of tens of thousands of levels (copy.copy walks its levels
+    # to tell whether upb would parse it) runs on a stack that grows, in a thread of a small stack
+    # too, where upb's parser can end the process.
+    deep = _run_script(
+        """
+        import copy, json, threading
+        from google.protobuf.internal import api_implementation
+        import pyspark.sql.connect.proto as proto
+        from pyspark import _pyspark
+
+        def varint(value):
+            out = bytearray()
+            while value > 0x7F:
+                out.append((value & 0x7F) | 0x80)
+                value >>= 7
+            out.append(value)
+            return bytes(out)
+
+        api_implementation._c_module.SetAllowOversizeProtos(True)
+        size, prefixes = 0, []
+        for _ in range(30000):
+            # Relation.limit (8) of a Limit, whose input (1) is the Relation below.
+            limit = b"\\x0a" + varint(size)
+            size += len(limit)
+            relation = b"\\x42" + varint(size)
+            size += len(relation)
+            prefixes.append(relation + limit)
+        data = b"".join(reversed(prefixes))
+        message = _pyspark._proto_parse_deep(proto.Relation, data)
+        out = []
+
+        def run():
+            out.append(len(copy.copy(message).SerializeToString()) == len(data))
+            out.append(len(proto.Plan(root=message).SerializeToString()) > len(data))
+
+        threading.stack_size(256 * 1024)
+        thread = threading.Thread(target=run)
+        thread.start()
+        thread.join()
+        print(json.dumps(out))
+        """
+    )
+    assert deep == [True, True]
+
+
+def _relation_size(levels):
+    """The size of a Relation of ``levels`` limits over a range of end 1."""
+    deep = proto.Relation(range={"end": 1})
+    for _ in range(levels):
+        outer = proto.Relation()
+        outer.limit.input.CopyFrom(deep)
+        deep = outer
+    return len(deep.SerializeToString())
+
+
+def test_lazy_modules_of_sys_modules_stay_lazy(upb):
+    # The package and the hooks read the globals of the modules of sys.modules without their
+    # __getattribute__, so that a module of importlib.util.LazyLoader is not loaded (its error, of
+    # an import that fails, is raised at its first use, as without the drop-in).
+    tests_dir = pathlib.Path(__file__).resolve().parent
+    out = _run_script(
+        """
+        import importlib.abc, importlib.machinery, importlib.util, json, sys
+
+        class Source(importlib.abc.SourceLoader):
+            def get_filename(self, fullname):
+                return "<broken_lazy>"
+
+            def get_data(self, path):
+                return b"import this_module_does_not_exist_of_the_drop_in\\nX = 1\\n"
+
+        spec = importlib.machinery.ModuleSpec("broken_lazy", importlib.util.LazyLoader(Source()))
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["broken_lazy"] = module
+        spec.loader.exec_module(module)
+        import pyspark.sql.connect.proto
+        from plugin_protos import plugin_pb2
+
+        lazy = type(sys.modules["broken_lazy"]).__name__
+        try:
+            module.X
+            first_use = None
+        except Exception as error:
+            first_use = type(error).__name__
+        print(json.dumps([lazy, first_use]))
+        """,
+        PYTHONPATH=str(tests_dir),
+    )
+    assert out == ["_LazyModule", "ModuleNotFoundError"]
+
+
+def test_classes_bind_the_attributes_of_upbs_metaclass_when_they_are_made():
+    # The attributes that upb's metaclass binds when they are read (the wrappers of nested enums,
+    # the numbers of their values and of the fields) are bound when the class is made, so that the
+    # metaclass has no __getattr__, which would slow every read of an attribute of a class.
+    out = _run_script(
+        """
+        import copy, json
+        import pyspark.sql.connect.proto as proto
+
+        join = vars(proto.Join)
+        print(json.dumps([
+            "__getattr__" in vars(type(proto.Relation)),
+            "READ_FIELD_NUMBER" in vars(proto.Relation),
+            "JOIN_TYPE_INNER" in join and "JoinType" in join and "LEFT_FIELD_NUMBER" in join,
+            "__copy__" in vars(proto.Relation.__mro__[1]),
+        ]))
+        """
+    )
+    assert out == [False, True, True, True]
+
+
+def test_lookups_of_types_that_keep_protobufs_classes_are_known_once(upb):
+    # message_factory.GetMessageClass of a type that keeps protobuf's class looks it up once: the
+    # type is known after (of _NOT_OWNED), until the runtime takes a file over. Whether a file
+    # imports the protos of Spark Connect is known of each file once.
+    from google.protobuf import duration_pb2, message_factory
+
+    descriptor = duration_pb2.Duration.DESCRIPTOR
+    assert message_factory.GetMessageClass(descriptor) is duration_pb2.Duration
+    assert descriptor in _rust._NOT_OWNED
+    assert message_factory.GetMessageClass(descriptor) is duration_pb2.Duration
+    assert message_factory.GetMessageClass(proto.Relation.DESCRIPTOR) is proto.Relation
+    assert _rust._IMPORTS_HELD.get(descriptor.file.name) is None or not (
+        _rust._IMPORTS_HELD[descriptor.file.name]
+    )
+    from google.protobuf import reflection
+
+    # One wrapper of protobuf's metaclass, which reflection and message_factory both name.
+    assert reflection.GeneratedProtocolMessageType is message_factory._GENERATED_PROTOCOL_MESSAGE_TYPE
+
+
+def test_the_hooks_take_over_a_file_of_the_runtimes_classes_of_another_package(upb):
+    # A file of another package that a plugin's file imports gets the runtime's own classes of its
+    # types, which pickle as protobuf's classes (of a nested type, of protobuf's
+    # _InternalConstructMessage); once a plugin's file of the file's own package imports it, those
+    # classes become the ones that protobuf's lookups give, and pickle of their own, and the file,
+    # of no generated module, is registered in protobuf's symbol database.
+    from google.protobuf import descriptor_pb2, descriptor_pool, message_factory, symbol_database
+    from google.protobuf import message as protobuf_message
+
+    pool = descriptor_pool.Default()
+    name = "tests/convert/shared.proto"
+    try:
+        shared = pool.FindFileByName(name)
+    except KeyError:
+        proto_file = descriptor_pb2.FileDescriptorProto(
+            name=name, package="tests.convert", syntax="proto3"
+        )
+        outer = proto_file.message_type.add(name="Shared")
+        outer.nested_type.add(name="Inner").field.add(
+            name="x", number=1, type=descriptor_pb2.FieldDescriptorProto.TYPE_INT32,
+            label=descriptor_pb2.FieldDescriptorProto.LABEL_OPTIONAL,
+        )
+        outer.field.add(
+            name="inner", number=1, type=descriptor_pb2.FieldDescriptorProto.TYPE_MESSAGE,
+            label=descriptor_pb2.FieldDescriptorProto.LABEL_OPTIONAL,
+            type_name=".tests.convert.Shared.Inner",
+        )
+        shared = pool.AddSerializedFile(proto_file.SerializeToString())
+    other = _add_plugin_file(
+        "tests/convert/other.proto",
+        ["spark/connect/relations.proto", name],
+        [("input", ".spark.connect.Relation"), ("shared", ".tests.convert.Shared")],
+        package="tests.convert_other",
+    )
+    own = _add_plugin_file(
+        "tests/convert/own.proto",
+        ["spark/connect/relations.proto", name],
+        [("input", ".spark.connect.Relation"), ("shared", ".tests.convert.Shared")],
+        package="tests.convert",
+        message="Own",
+    )
+    held = _build_generated_module(other)["M"](shared={"inner": {"x": 3}}).shared
+    shadow, inner = type(held), type(held.inner)
+    descriptor = shared.message_types_by_name["Shared"]
+    assert shadow.DESCRIPTOR is descriptor and shadow.__module__ is None
+    assert "__reduce__" in vars(shadow)
+    reduced = held.inner.__reduce__()
+    assert reduced[:2] == (protobuf_message._InternalConstructMessage, ("tests.convert.Shared.Inner",))
+    assert message_factory.GetMessageClass(descriptor) is not shadow
+    built = _build_generated_module(own)
+    assert type(built["Own"]().shared) is shadow and "__reduce__" not in vars(shadow)
+    assert message_factory.GetMessageClass(descriptor) is shadow
+    assert symbol_database.Default().GetSymbol("tests.convert.Shared.Inner") is inner
+    # (Of its own class, of no module, as upb's class of a type of no module pickles.)
+    assert held.__reduce__()[0] is shadow
+
+
+def test_the_hooks_pass_over_what_is_no_descriptor_and_hold_modules_built_before(upb):
+    # message_factory.GetMessageClass of an object that is no descriptor (of no hash) is
+    # protobuf's, with its error, and a module that protobuf's own metaclass built of a plugin's
+    # file, whose class protobuf's symbol database has, gets the runtime's classes once the hooks
+    # hold the modules built before them (as at the install of the package).
+    from google.protobuf import message as protobuf_message
+    from google.protobuf import message_factory, reflection, symbol_database
+
+    unhashable = []
+    assert _rust._class_for(unhashable, None) is None
+    get = message_factory.GetMessageClass._protobuf_function
+    assert _outcome(lambda: message_factory.GetMessageClass(unhashable)) == _outcome(
+        lambda: get(unhashable)
+    )
+    file = _add_plugin_file(
+        "tests/built/plugin.proto",
+        ["spark/connect/relations.proto"],
+        [("input", ".spark.connect.Relation")],
+        package="tests.built",
+    )
+    descriptor = file.message_types_by_name["M"]
+    metaclass = reflection.GeneratedProtocolMessageType._protobuf_class
+    module = types.ModuleType("tests.built.plugin_pb2")
+    old = metaclass(
+        "M", (protobuf_message.Message,), {"DESCRIPTOR": descriptor, "__module__": module.__name__}
+    )
+    vars(module).update(M=old, _M=descriptor, DESCRIPTOR=file)
+    database = symbol_database.Default()
+    database._classes[descriptor] = old
+    sys.modules[module.__name__] = module
+    try:
+        _rust._hold_built_modules()
+    finally:
+        del sys.modules[module.__name__]
+    cls = vars(module)["M"]
+    assert cls is not old and issubclass(cls, _pyspark.ProtoMessage)
+    assert database.GetSymbol("tests.built.M") is cls and cls.__module__ == module.__name__
+    assert type(cls(input=proto.Relation()).input) is proto.Relation
+
+
+def test_the_runtimes_helpers_of_pickles_without_protobuf_and_of_python_protobuf(upb):
+    # The helpers of the pickles of Any and Timestamp without protobuf (the name that base_pb2
+    # binds the class to, and the function of the protocols before 4), the unknown fields of a
+    # message as protobuf's pure-Python messages hold them, and the hook of upb's
+    # SetAllowOversizeProtos (a protobuf of no such function is passed over).
+    from google.protobuf import any_pb2
+    from google.protobuf.internal import api_implementation
+
+    assert _rust._path_in_package("google/protobuf/any.proto") == (
+        "pyspark.sql.connect.proto.base_pb2",
+        "google_dot_protobuf_dot_any__pb2",
+    )
+    assert _rust._path_in_package("google/protobuf/timestamp.proto")[0] == (
+        "pyspark.sql.connect.proto.pipelines_pb2"
+    )
+    assert type(_rust._new_message("google.protobuf.Any")) is _rust.Any
+    packed = _rust.Any(type_url="x/y", value=b"z")
+    assert _rust._reduce_ex_by_path(packed, 2) == (
+        _rust._new_message, ("google.protobuf.Any",), {"serialized": packed.SerializeToString()}
+    )
+    assert _rust._reduce_ex_by_path(packed, 4) == (any_pb2.Any, (), packed.__getstate__())
+    message = proto.Relation.FromString(b"\x08\x01\xfa\x3e\x01x\xc3\x3e\x08\x05\xc4\x3e")
+    assert _pyspark._proto_unknown_field_pairs(message) == [
+        (b"\x08", b"\x01"), (b"\xfa\x3e", b"\x01x"), (b"\xc3\x3e", b"\x08\x05\xc4\x3e")
+    ]
+    assert _pyspark._proto_unknown_field_pairs(proto.Relation()) == []
+    module = api_implementation._c_module
+    hooked = module.SetAllowOversizeProtos
+    assert hooked(False) == hooked._protobuf_function(False) and hooked._protobuf_function is not hooked
+    saved = _rust._PROTOBUF.api_implementation
+    _rust._PROTOBUF.api_implementation = types.SimpleNamespace()
+    try:
+        _rust._hook_depth_limit()
+    finally:
+        _rust._PROTOBUF.api_implementation = saved
+    assert module.SetAllowOversizeProtos is hooked
+    from google.protobuf import unknown_fields
+
+    assert issubclass(unknown_fields.UnknownFieldSet._protobuf_class, unknown_fields.UnknownFieldSet)
+
+
+def test_files_of_no_package_that_a_plugins_file_of_no_package_imports_keep_protobufs_classes(
+    upb,
+):
+    # The files of no package are of no one package: a file of no package that a plugin's file of
+    # no package imports keeps protobuf's classes, so that the modules of upb that import it take
+    # its messages, as without the drop-in.
+    shared = _add_plugin_file("tests/np/shared_np.proto", [], [], package="", message="SharedNp")
+    other = _add_plugin_file(
+        "tests/np/other_np.proto", [shared.name], [("c", ".SharedNp")], package="", message="OtherNp"
+    )
+    plugin_file = _add_plugin_file(
+        "tests/np/plugin_np.proto",
+        ["spark/connect/relations.proto", shared.name],
+        [("input", ".spark.connect.Relation"), ("c", ".SharedNp")],
+        package="",
+        message="PluginNp",
+    )
+    shared_module, other_module = _generated_module(shared), _generated_module(other)
+    try:
+        plugin = _build_generated_module(plugin_file)["PluginNp"]
+        shared_class, other_class = vars(shared_module)["SharedNp"], vars(other_module)["OtherNp"]
+        assert not issubclass(shared_class, _pyspark.ProtoMessage)
+        assert not issubclass(other_class, _pyspark.ProtoMessage)
+        assert other_class(c=shared_class()).HasField("c")
+        assert isinstance(other_class().c, shared_class)
+        assert issubclass(plugin, _pyspark.ProtoMessage) and plugin(c=shared_class()).HasField("c")
+    finally:
+        for module in (shared_module, other_module):
+            del sys.modules[module.__name__]
+
+
+def _delta_like(prefix, order):
+    """The generated modules of three files of the package ``tests.<prefix>``, as Delta Lake's:
+    ``base`` (of ``Table``), ``commands`` (of ``Clone``, which imports only ``base``) and
+    ``relations`` (of ``Scan``, which imports ``base`` and the protos of Spark Connect), built in
+    ``order``, a permutation of their names, as the imports of an application build them: the
+    modules by name."""
+    package = f"tests.{prefix}"
+    files = {
+        "base": _add_plugin_file(f"tests/{prefix}/base.proto", [], [], package=package, message="Table"),
+    }
+    files["commands"] = _add_plugin_file(
+        f"tests/{prefix}/commands.proto",
+        [files["base"].name],
+        [("table", f".{package}.Table")],
+        package=package,
+        message="Clone",
+    )
+    files["relations"] = _add_plugin_file(
+        f"tests/{prefix}/relations.proto",
+        ["spark/connect/relations.proto", files["base"].name],
+        [("input", ".spark.connect.Relation"), ("table", f".{package}.Table")],
+        package=package,
+        message="Scan",
+    )
+    return {name: _generated_module(files[name]) for name in order}
+
+
+def test_files_of_the_package_that_import_a_file_that_the_runtime_takes_over_get_its_classes(
+    upb,
+):
+    # A file of the package of a plugin's file that imports a file that the runtime takes over but
+    # no proto of Spark Connect (as Delta Lake's commands.proto would of base.proto alone) gets the
+    # runtime's classes too, of its module built before (taken over of protobuf's symbol
+    # database) or after, so that its messages take the messages of the file that the runtime took
+    # over, and theirs, as upb's of one class of each type.
+    from google.protobuf import message_factory
+
+    for prefix, order in (
+        ("dlbefore", ("base", "commands", "relations")),
+        ("dlafter", ("base", "relations", "commands")),
+    ):
+        modules = _delta_like(prefix, order)
+        try:
+            table = vars(modules["base"])["Table"]
+            clone = vars(modules["commands"])["Clone"]
+            scan = vars(modules["relations"])["Scan"]
+            for cls in (table, clone, scan):
+                assert issubclass(cls, _pyspark.ProtoMessage), (prefix, cls)
+                assert message_factory.GetMessageClass(cls.DESCRIPTOR) is cls
+            assert clone(table=table()).HasField("table")
+            assert clone(table=scan(table=table()).table).HasField("table")
+            assert type(clone().table) is table and type(scan().table) is table
+            copied = clone()
+            copied.table.CopyFrom(scan(table=table()).table)
+            assert copied.HasField("table")
+        finally:
+            for module in modules.values():
+                del sys.modules[module.__name__]
+
+
+def test_a_module_of_another_name_than_its_builders_is_found_in_its_package(upb):
+    # A generated module of a name of another path than protoc's of its file (protoc's of
+    # tests/mm/base.proto is tests.mm.base_pb2, which its builder names, imported as
+    # tests.mm.proto.base_pb2) is found in the top-level package of the plugin's file that imports
+    # it, so that the runtime takes it over, of the module name of upb's class; one that the runtime
+    # does not find keeps protobuf's classes, of protobuf's lookups too, rather than the module and
+    # the lookups giving two classes.
+    from google.protobuf import message_factory
+
+    base = _add_plugin_file("tests/mm/base.proto", [], [], package="tests.mm", message="Table")
+    module = _generated_module(base, name="tests.mm.proto.base_pb2")
+    plugin_file = _add_plugin_file(
+        "tests/mm/relations.proto",
+        ["spark/connect/relations.proto", base.name],
+        [("input", ".spark.connect.Relation"), ("table", ".tests.mm.Table")],
+        package="tests.mm",
+        message="Scan",
+    )
+    lost = _add_plugin_file("tests/mm2/base.proto", [], [], package="tests.mm2", message="Table")
+    hidden = _generated_module(lost, name="tests_unfound_mm2.base_pb2")
+    lost_plugin = _add_plugin_file(
+        "tests/mm2/relations.proto",
+        ["spark/connect/relations.proto", lost.name],
+        [("input", ".spark.connect.Relation"), ("table", ".tests.mm2.Table")],
+        package="tests.mm2",
+        message="Scan",
+    )
+    try:
+        built = _build_generated_module(plugin_file)
+        table = vars(module)["Table"]
+        assert issubclass(table, _pyspark.ProtoMessage) and type(built["Scan"]().table) is table
+        assert (table.__module__, message_factory.GetMessageClass(table.DESCRIPTOR)) == (
+            "tests.mm.base_pb2",
+            table,
+        )
+        kept = vars(hidden)["Table"]
+        held = type(_build_generated_module(lost_plugin)["Scan"]().table)
+        assert not issubclass(kept, _pyspark.ProtoMessage) and held is not kept
+        assert message_factory.GetMessageClass(kept.DESCRIPTOR) is kept
+    finally:
+        for found in (module, hidden):
+            del sys.modules[found.__name__]
+
+
+def _unheld_importer_case(order):
+    """What a file that the runtime cannot hold (of an extension range), which imports a file of
+    the package of a plugin's file, built ``before`` the plugin's file or ``after``, and a file of
+    another package that imports it, built after both, make of the classes of that file (see the
+    test of a file that the runtime cannot hold below)."""
+    from google.protobuf import message_factory, symbol_database
+
+    package = f"tests.unheld{order}"
+    prefix = package.replace(".", "/")
+    common = _add_plugin_file(f"{prefix}/common.proto", [], [], package=package, message="Common")
+    extendable = _add_plugin_file(
+        f"{prefix}/extendable.proto",
+        [common.name],
+        [("c", f".{package}.Common")],
+        syntax="proto2",
+        package=package,
+        message="Extendable",
+        extendable=True,
+    )
+    other = _add_plugin_file(
+        f"{prefix}/other.proto", [common.name], [("c", f".{package}.Common")],
+        package=package + "x", message="Other",
+    )
+    plugin_file = _add_plugin_file(
+        f"{prefix}/plugin.proto",
+        ["spark/connect/relations.proto", common.name],
+        [("input", ".spark.connect.Relation"), ("c", f".{package}.Common")],
+        package=package,
+        message="Plug",
+    )
+    common_module = _generated_module(common)
+    protobufs = vars(common_module)["Common"]
+    # A module of the package that star-imports the module of the file.
+    star = types.ModuleType(package)
+    star.Common = protobufs
+    sys.modules[package] = star
+    modules = {"common": common_module}
+    try:
+        if order == "before":
+            modules["extendable"] = _generated_module(extendable)
+        plugin = _build_generated_module(plugin_file)["Plug"]
+        taken_over = vars(common_module)["Common"] is not protobufs
+        if order == "after":
+            modules["extendable"] = _generated_module(extendable)
+        modules["other"] = _generated_module(other)
+        common_class = vars(common_module)["Common"]
+        extendable_class = vars(modules["extendable"])["Extendable"]
+        other_class = vars(modules["other"])["Other"]
+        return [
+            taken_over,
+            common_class is protobufs and star.Common is protobufs,
+            [
+                issubclass(c, _pyspark.ProtoMessage)
+                for c in (common_class, extendable_class, other_class, plugin)
+            ],
+            extendable_class(c=common_class()).HasField("c"),
+            other_class(c=common_class()).HasField("c"),
+            plugin(c=common_class()).HasField("c"),
+            message_factory.GetMessageClass(common_class.DESCRIPTOR) is common_class,
+            symbol_database.Default().GetSymbol(f"{package}.Common") is common_class,
+            type(pickle.loads(pickle.dumps(plugin(c=common_class()).c))) is common_class,
+        ]
+    finally:
+        for module in [*modules.values(), star]:
+            sys.modules.pop(module.__name__, None)
+
+
+@pytest.mark.parametrize("order", ["before", "after"])
+def test_a_file_that_the_runtime_cannot_hold_keeps_protobufs_classes_of_the_files_it_imports(
+    upb, order
+):
+    # A file that the runtime cannot hold (of extension ranges) keeps protobuf's classes, whose
+    # message fields take only protobuf's messages of the types of the files that it imports: a
+    # file of the package of a plugin's file that it imports gets protobuf's classes back (in its
+    # module, a module of its package that star-imports it and protobuf's lookups), whether it was
+    # built before the plugin's file took the file over or after, so that the file's messages take
+    # its messages, as without the drop-in, as do the plugin's (of their bytes) and those of a file
+    # of another package that imports it, which keeps protobuf's classes. The plugin's message of
+    # the type pickles as protobuf's. Of protobuf's pure-Python implementation too.
+    expected = [order == "after", True, [False, False, False, True]] + [True] * 6
+    assert _unheld_importer_case(order) == expected
+    out = _run_script(
+        f"""
+        import json
+        from tests.test_proto_rust_offline import _unheld_importer_case
+        print(json.dumps(_unheld_importer_case({order!r})))
+        """,
+        PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION="python",
+    )
+    assert out == expected
+
+
+def test_a_give_back_reaches_the_files_of_the_files_given_back(upb):
+    # A file that the runtime cannot hold, built after a plugin's file took files of its package
+    # over, gives protobuf's classes back to those that it imports and to those that they import
+    # (once each, of their nested types too), and to one whose module was never built (of the
+    # runtime's classes of no module), of upb's class of the type then: protobuf's lookups give
+    # protobuf's classes, of which the file's messages take theirs. A name that the application
+    # removed from a module stays removed, the runtime's classes of the types are of types that keep
+    # protobuf's classes (their messages pickle as protobuf's), and the plugin's messages take
+    # protobuf's.
+    from google.protobuf import message_factory, symbol_database
+
+    package = "tests.giveback"
+    y = _add_plugin_file(
+        "tests/giveback/y.proto", [], [("inner", f".{package}.Y.Inner")],
+        package=package, message="Y", nested="Inner",
+    )
+    x = _add_plugin_file(
+        "tests/giveback/x.proto", [y.name], [("y", f".{package}.Y")], package=package, message="X"
+    )
+    no_module = _add_plugin_file(
+        "tests/giveback/nomodule.proto", [], [], package=package, message="NoModule"
+    )
+    fields = [("x", f".{package}.X"), ("y", f".{package}.Y"), ("n", f".{package}.NoModule")]
+    plugin_file = _add_plugin_file(
+        "tests/giveback/plugin.proto",
+        ["spark/connect/relations.proto", x.name, y.name, no_module.name],
+        [("input", ".spark.connect.Relation")] + fields,
+        package=package,
+        message="Plug",
+    )
+    extendable = _add_plugin_file(
+        "tests/giveback/extendable.proto", [x.name, y.name, no_module.name], fields,
+        syntax="proto2", package=package, message="Extendable", extendable=True,
+    )
+    y_module, x_module = _generated_module(y), _generated_module(x)
+    protobufs_y, protobufs_x = vars(y_module)["Y"], vars(x_module)["X"]
+    del vars(y_module)["Y"]
+    modules = [y_module, x_module]
+    try:
+        plugin = _build_generated_module(plugin_file)["Plug"]
+        assert _rust._hold_files(plugin_file, None)
+        assert issubclass(vars(x_module)["X"], _pyspark.ProtoMessage)
+        modules.append(_generated_module(extendable))
+        assert vars(x_module)["X"] is protobufs_x and "Y" not in vars(y_module)
+        database = symbol_database.Default()
+        assert database.GetSymbol(f"{package}.Y") is protobufs_y
+        assert database.GetSymbol(f"{package}.Y.Inner") is protobufs_y.Inner
+        no_modules = message_factory.GetMessageClass(no_module.message_types_by_name["NoModule"])
+        assert not issubclass(no_modules, _pyspark.ProtoMessage)
+        message = vars(modules[-1])["Extendable"](
+            x=protobufs_x(y=protobufs_y()), y=protobufs_y(inner={}), n=no_modules()
+        )
+        assert message.x.HasField("y") and message.y.HasField("inner") and message.HasField("n")
+        assert plugin(x=protobufs_x(), y=protobufs_y()).HasField("x")
+        inner = plugin(y={"inner": {}}).y.inner
+        for _ in range(2):  # the second of the name of the nested type known
+            assert type(pickle.loads(pickle.dumps(inner))) is protobufs_y.Inner
+        assert not _rust._imports_spark_connect(x) and _rust._imports_spark_connect(plugin_file)
+        assert _rust._declares_unheld(extendable) and _rust._declares_unheld(extendable)
+    finally:
+        for module in modules:
+            sys.modules.pop(module.__name__, None)
+
+
+def test_built_importers_are_held_of_one_read_and_one_of_no_module_gives_its_imports_back(upb):
+    # The modules built before of the files that import a file that a plugin's file takes over are
+    # held of one read of protobuf's symbol database, of which one that the hold of another held
+    # (as a file of its package that it imports) is passed over. A file of such a module that the
+    # runtime does not find keeps protobuf's classes, and gives protobuf's classes back to the file
+    # that it imports, so that its messages take that file's messages.
+    package = "tests.batch"
+    base = _add_plugin_file("tests/batch/base.proto", [], [], package=package, message="Base")
+    b = _add_plugin_file(
+        "tests/batch/b.proto", [base.name], [("base", f".{package}.Base")], package=package,
+        message="B",
+    )
+    a = _add_plugin_file(
+        "tests/batch/a.proto", [b.name, base.name], [("b", f".{package}.B")], package=package,
+        message="A",
+    )
+    plugin_file = _add_plugin_file(
+        "tests/batch/plugin.proto",
+        ["spark/connect/relations.proto", base.name],
+        [("input", ".spark.connect.Relation"), ("base", f".{package}.Base")],
+        package=package,
+        message="Plug",
+    )
+    modules = [_generated_module(file) for file in (base, a, b)]  # of a before b
+    try:
+        _build_generated_module(plugin_file)
+        base_class, a_class, b_class = (
+            vars(module)[name] for module, name in zip(modules, ("Base", "A", "B"))
+        )
+        assert all(issubclass(c, _pyspark.ProtoMessage) for c in (base_class, a_class, b_class))
+        assert a_class(b=b_class(base=base_class())).b.HasField("base")
+    finally:
+        for module in modules:
+            sys.modules.pop(module.__name__, None)
+
+    package = "tests.unfound"
+    base = _add_plugin_file("tests/unfound/base.proto", [], [], package=package, message="Base")
+    user = _add_plugin_file(
+        "tests/unfound/user.proto", [base.name], [("base", f".{package}.Base")], package=package,
+        message="User",
+    )
+    plugin_file = _add_plugin_file(
+        "tests/unfound/plugin.proto",
+        ["spark/connect/relations.proto", base.name],
+        [("input", ".spark.connect.Relation"), ("base", f".{package}.Base")],
+        package=package,
+        message="Plug",
+    )
+    base_module = _generated_module(base)
+    protobufs = vars(base_module)["Base"]
+    user_class = _build_generated_module(user)["User"]  # of no module of sys.modules
+    try:
+        plugin = _build_generated_module(plugin_file)["Plug"]
+        assert vars(base_module)["Base"] is protobufs and user.name in _rust._UNHELD
+        assert user_class(base=protobufs()).HasField("base")
+        assert plugin(base=protobufs()).HasField("base")
+    finally:
+        sys.modules.pop(base_module.__name__, None)
+
+
+def test_the_runtimes_branches_of_protobufs_pure_python_implementation(upb):
+    # Of protobuf's pure-Python implementation (of the runtime's flag of it, here, of upb's
+    # protobuf): the parses follow its decoder's limit (decoder.SetRecursionLimit, which the runtime
+    # wraps), a class that the metaclass makes out of a batch of registrations has its messages'
+    # unknown fields (_unknown_fields) and registers with the Rust runtime at once, the class that
+    # a descriptor of no class holds (_concrete_class) is the runtime's, and a give-back of its
+    # file makes way for protobuf's class there.
+    from google.protobuf.internal import decoder
+
+    deep = proto.Relation(range={"end": 1})
+    for _ in range(60):  # 120 levels of messages
+        outer = proto.Relation()
+        outer.limit.input.CopyFrom(deep)
+        deep = outer
+    data = deep.SerializeToString()
+    saved, saved_limit = _rust._PROTOBUF, decoder._recursion_limit
+    set_recursion_limit = decoder.SetRecursionLimit
+    _rust._PROTOBUF = types.SimpleNamespace(**dict(vars(saved), python=True))
+    try:
+        _rust._hook_depth_limit()
+        assert decoder.SetRecursionLimit._protobuf_function is set_recursion_limit
+        assert _rust._python_depth_limit() == saved_limit
+        assert _outcome(lambda: proto.Relation.FromString(data))[:2] == ("raise", "DecodeError")
+        decoder.SetRecursionLimit(200)
+        assert _rust._python_depth_limit() == 200 and proto.Relation.FromString(data) == deep
+
+        file = _add_plugin_file("tests/pymode/fresh.proto", [], [], package="tests.pymode")
+        _pyspark._proto_register_files([file.serialized_pb])
+        descriptor = file.message_types_by_name["M"]
+        cls = _rust.MessageMeta(
+            "M", (_rust._MESSAGE_BASE,), {"DESCRIPTOR": descriptor, "__qualname__": "M"}
+        )
+        assert cls.FromString(b"\x08\x01")._unknown_fields == [(b"\x08", b"\x01")]
+
+        class StandIn:
+            """A descriptor of the pure-Python implementation, of no class (_concrete_class)."""
+
+            nested_types = ()
+            _concrete_class = None
+
+        stand_in = StandIn()
+        reduce = _rust._reduce_as_protobufs
+        owned = type("Owned", (), {"DESCRIPTOR": stand_in, "__reduce__": reduce})
+        _rust._own(owned)
+        assert stand_in._concrete_class is owned and "__reduce__" not in vars(owned)
+        protobufs = type("Protobufs", (), {})
+        _rust._PROTOBUFS[stand_in] = protobufs
+        file = types.SimpleNamespace(
+            name="tests/pymode/stand_in.proto",
+            message_types_by_name={"Owned": stand_in},
+            dependencies=[],
+        )
+        _rust._HELD.add(file.name)
+        _rust._release(file)
+        assert stand_in._concrete_class is None and stand_in not in _rust._OWNED
+        assert saved.database._classes.pop(stand_in) is protobufs
+        assert vars(owned)["__reduce__"] is _rust._reduce_as_protobufs
+        assert file.name in _rust._UNHELD and file.name not in _rust._HELD
+    finally:
+        _rust._PROTOBUF = saved
+        decoder.SetRecursionLimit = set_recursion_limit
+        set_recursion_limit(saved_limit)
+        _rust._hook_depth_limit()
+    assert _outcome(lambda: proto.Relation.FromString(data))[:2] == ("raise", "DecodeError")
+
+
+def test_the_runtimes_hooks_pass_over_objects_and_entries_of_other_kinds(upb):
+    # The hooks pass over what is not theirs: an entry of protobuf's symbol database of no
+    # descriptor, a lookup of the class of an object of no file (of protobuf's error of it), an
+    # object of no full name or one of the name of a type of the runtime but not its descriptor, a
+    # module of sys.modules that is None, and a rebind of nothing. A batch of registrations in a
+    # batch is the outer one, and one of no class registers none. A generated module of a file of
+    # no messages is the file's; a file that another thread held as this one waited for the lock is
+    # held; upb's limit after SetAllowOversizeProtos(True) is 65535 levels; the runtime's own
+    # Timestamp methods assign of a datetime; and a class owns of no descriptors of protobuf.
+    from google.protobuf import descriptor_pb2, descriptor_pool, message_factory
+    from google.protobuf.internal import api_implementation
+
+    database = _rust._PROTOBUF.database._classes
+    entry = object()
+    database[entry] = type("Entry", (), {})
+    try:
+        assert all(file is not entry for file in _rust._built_importers())
+        _rust._hold_built_modules()
+    finally:
+        del database[entry]
+    stand_in = object()
+    get_message_class = message_factory.GetMessageClass
+    assert _outcome(lambda: get_message_class(stand_in))[:2] == _outcome(
+        lambda: get_message_class._protobuf_function(stand_in)
+    )[:2]
+    assert _rust._class_of_descriptor(stand_in) is None
+    of_the_name = types.SimpleNamespace(full_name="spark.connect.Relation")
+    assert _rust._class_of_descriptor(of_the_name) is None
+    sys.modules["tests_of_none"] = None  # type: ignore[assignment]
+    try:
+        assert _rust._modules_of_packages({"tests_of_none"}) == []
+    finally:
+        del sys.modules["tests_of_none"]
+    _rust._restore_bindings({}, "tests_of_none")
+    with _rust._registered_together():
+        with _rust._registered_together():
+            pass
+
+    name = "tests/noms/enums.proto"
+    try:
+        file = descriptor_pool.Default().FindFileByName(name)
+    except KeyError:
+        enums = descriptor_pb2.FileDescriptorProto(name=name, package="tests.noms", syntax="proto3")
+        enums.enum_type.add(name="E").value.add(name="E_ZERO", number=0)
+        file = descriptor_pool.Default().AddSerializedFile(enums.SerializeToString())
+    module = types.ModuleType("tests_noms_enums_pb2")
+    module.DESCRIPTOR = file
+    assert _rust._is_generated_module_of(module, file)
+
+    plugin_file = _add_plugin_file(
+        "tests/race/plugin.proto",
+        ["spark/connect/relations.proto"],
+        [("input", ".spark.connect.Relation")],
+        package="tests.race",
+    )
+
+    class HeldMeanwhile:
+        """The lock of the hooks, of another thread that holds the file meanwhile."""
+
+        def __enter__(self):
+            _rust._HELD.add(plugin_file.name)
+
+        def __exit__(self, *exc_info):
+            return False
+
+    saved_lock = _rust._HOOK_LOCK
+    _rust._HOOK_LOCK = HeldMeanwhile()
+    try:
+        assert _rust._hold_files(plugin_file, None)
+    finally:
+        _rust._HOOK_LOCK = saved_lock
+        _rust._HELD.discard(plugin_file.name)
+
+    set_allow_oversize_protos = api_implementation._c_module.SetAllowOversizeProtos
+    before = _rust._upb_depth_limit()
+    try:
+        set_allow_oversize_protos(True)
+        assert _rust._upb_depth_limit() == 65535
+    finally:
+        set_allow_oversize_protos(before == 65535)
+    assert _rust._upb_depth_limit() == before
+
+    stamp = proto.PipelineEvent().timestamp
+    _rust._TimestampMethods._internal_assign(stamp, datetime.datetime(2020, 1, 2))
+    assert stamp.seconds == 1577923200
+
+    saved = _rust._USE_PROTOBUF_DESCRIPTORS
+    _rust._USE_PROTOBUF_DESCRIPTORS = False
+    try:
+        _rust._own(type("Unowned", (), {}))
+    finally:
+        _rust._USE_PROTOBUF_DESCRIPTORS = saved
+
+
+def test_the_attributes_of_names_that_a_class_has_are_upbs(upb):
+    # The number of a field is the class's attribute of its name rather than a nested enum or a
+    # value of a nested enum of that name, as upb gives the numbers of a read of any name of their
+    # suffix, and a nested enum or a value of one of a name of the suffix of no field is no
+    # attribute; a nested message, the DESCRIPTOR and a method of the base keep their names.
+    from google.protobuf import descriptor_pb2, descriptor_pool
+
+    field = descriptor_pb2.FieldDescriptorProto
+    name = "tests/clash/clash.proto"
+    file_proto = descriptor_pb2.FileDescriptorProto(
+        name=name, package="tests.clash", dependency=["spark/connect/relations.proto"],
+        syntax="proto3",
+    )
+    message = file_proto.message_type.add(name="Clash")
+    enum = message.enum_type.add(name="DESCRIPTOR")
+    for number, value in enumerate(["Clear", "X_FIELD_NUMBER", "BAR_FIELD_NUMBER"]):
+        enum.value.add(name=value, number=number)
+    message.enum_type.add(name="Z_FIELD_NUMBER").value.add(name="Z_ZERO", number=0)
+    message.enum_type.add(name="W_FIELD_NUMBER").value.add(name="W_ZERO", number=0)
+    message.nested_type.add(name="Y_FIELD_NUMBER")
+    for field_name, number in (("x", 7), ("y", 8), ("z", 9)):
+        message.field.add(
+            name=field_name, number=number, type=field.TYPE_INT32, label=field.LABEL_OPTIONAL
+        )
+    message.field.add(
+        name="input", number=1, type=field.TYPE_MESSAGE, label=field.LABEL_OPTIONAL,
+        type_name=".spark.connect.Relation",
+    )
+    serialized = file_proto.SerializeToString()
+    try:
+        file = descriptor_pool.Default().FindFileByName(name)
+    except KeyError:
+        file = descriptor_pool.Default().AddSerializedFile(serialized)
+    ours = _build_generated_module(file)["Clash"]
+    assert issubclass(ours, _pyspark.ProtoMessage)
+
+    def theirs():
+        # A class of upb of no attribute read yet: upb binds the numbers of the fields once one
+        # of their names is read, in place of what the class had of the names.
+        return _upb_classes_of([(serialized, "tests.clash.clash_pb2")])["tests.clash.Clash"]
+
+    for attribute in ("X_FIELD_NUMBER", "Z_FIELD_NUMBER", "INPUT_FIELD_NUMBER", "Z_ZERO"):
+        assert getattr(ours, attribute) == getattr(theirs(), attribute)
+    # Nor is a name of the suffix of no field (a nested enum or a value of one) an attribute.
+    for attribute in ("BAR_FIELD_NUMBER", "W_FIELD_NUMBER"):
+        assert not hasattr(ours, attribute) and not hasattr(theirs(), attribute)
+    assert ours.X_FIELD_NUMBER == 7 and ours.Z_FIELD_NUMBER == 9
+    assert ours.Y_FIELD_NUMBER.DESCRIPTOR.full_name == theirs().Y_FIELD_NUMBER.DESCRIPTOR.full_name
+    assert ours.DESCRIPTOR is file.message_types_by_name["Clash"]
+    assert type(ours.Clear).__name__ == type(theirs().Clear).__name__ == "method_descriptor"
+
+
+def test_a_module_built_after_a_lookup_held_its_file_is_given_back(upb):
+    # A plugin's file that a lookup holds (message_factory.GetMessageClass of its type of the
+    # default pool) before the module of a file of its package that it imports builds gives that
+    # module the runtime's class, then of the module's name (as upb's class is), so that a give-back
+    # of the file (of a file that the runtime cannot hold that imports it) finds the module, which
+    # gets protobuf's class back.
+    from google.protobuf import message_factory
+
+    package = "tests.looked"
+    common = _add_plugin_file(
+        "tests/looked/common.proto", [], [], package=package, message="Common"
+    )
+    plugin_file = _add_plugin_file(
+        "tests/looked/plugin.proto",
+        ["spark/connect/relations.proto", common.name],
+        [("input", ".spark.connect.Relation"), ("c", f".{package}.Common")],
+        package=package,
+        message="Plug",
+    )
+    extendable = _add_plugin_file(
+        "tests/looked/extendable.proto", [common.name], [("c", f".{package}.Common")],
+        syntax="proto2", package=package, message="Extendable", extendable=True,
+    )
+    plugin = message_factory.GetMessageClass(plugin_file.message_types_by_name["Plug"])
+    assert issubclass(plugin, _pyspark.ProtoMessage)
+    modules = [_generated_module(common)]
+    try:
+        held = vars(modules[0])["Common"]
+        assert issubclass(held, _pyspark.ProtoMessage)
+        assert repr(held) == "<class 'tests.looked.common_pb2.Common'>"
+        modules.append(_generated_module(extendable))
+        given_back = vars(modules[0])["Common"]
+        assert not issubclass(given_back, _pyspark.ProtoMessage)
+        assert vars(modules[1])["Extendable"](c=given_back()).HasField("c")
+        assert plugin(c=given_back()).HasField("c")
+    finally:
+        for module in modules:
+            sys.modules.pop(module.__name__, None)
+
+
+def test_a_class_attribute_that_fails_raises_its_error_and_not_the_attribute():
+    # A message's read of an attribute of its class whose getter raises AttributeError (a property)
+    # raises the error of the name, rather than giving the property object, of the attribute of
+    # the class; an attribute of the metaclass (__name__) is the class's, and so is one that the
+    # read of the class makes (__annotations__, which a class makes on its first read), as upb's.
+    def failing(self):
+        raise AttributeError("failing")
+
+    def make():
+        return type(
+            "Failing",
+            (_pyspark.ProtoMessage,),
+            {
+                "DESCRIPTOR": _own("spark.connect.Relation"),
+                "__slots__": (),
+                "failing": property(failing),
+            },
+        )
+
+    message = make()()
+    assert _outcome(lambda: message.failing)[:3] == ("raise", "AttributeError", "failing")
+    assert not hasattr(message, "failing") and message.__name__ == "Failing"
+    # Of a class that has not made it yet, as the read of the class gives it ({} of Python 3.10).
+    instances = _outcome(lambda: make()().__annotations__)
+    assert instances[:2] == _outcome(lambda: make().__annotations__)[:2]
+
+
+def test_unknown_fields_of_protobufs_pure_python_messages_and_the_runtimes_compare(upb):
+    # Of protobuf's pure-Python implementation, a message of the runtime has the unknown fields of
+    # its messages (_unknown_fields, of the Rust runtime: the bytes of the tag and of the value of
+    # each), so that protobuf's == of its message and one of the runtime compares them.
+    out = _run_script(
+        """
+        import json
+        from google.protobuf import timestamp_pb2
+        import pyspark.sql.connect.proto as proto
+
+        stamp = proto.PipelineEvent().timestamp
+        stamp.MergeFromString(b"\\x18\\x01\\xfa\\x3e\\x01x")
+        theirs = timestamp_pb2.Timestamp()
+        theirs.MergeFromString(b"\\x18\\x01\\xfa\\x3e\\x01x")
+        print(json.dumps([
+            [[t.hex(), v.hex()] for t, v in stamp._unknown_fields],
+            theirs == stamp, stamp == theirs, timestamp_pb2.Timestamp() == stamp,
+        ]))
+        """,
+        PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION="python",
+    )
+    assert out == [[["18", "01"], ["fa3e", "0178"]], True, True, False]
+
+
+def test_messages_of_from_string_and_copies_are_tracked_as_upbs(upb):
+    # As upb's, the message of FromString and of copy.copy, as one of a call of the class, is
+    # tracked by the garbage collector; the messages within it are not (see docs/compatibility.md).
+    import gc
+
+    data = proto.Relation(sql={"query": "q"}).SerializeToString()
+    for cls in (proto.Relation, upb("spark.connect.Relation")):
+        parsed = cls.FromString(data)
+        assert gc.is_tracked(parsed) and gc.is_tracked(copy.copy(parsed)), cls
+    assert not gc.is_tracked(proto.Relation.FromString(data).sql)
+
+
+def test_the_class_of_a_type_of_another_package_pickles_as_protobufs(upb):
+    # The class of the runtime of a type of a file that keeps protobuf's classes (of another
+    # package) pickles as protobuf's class of the type, as its messages do; a class that protobuf's
+    # lookups give pickles of its name.
+    common = _add_plugin_file("tests/clsp/common.proto", [], [], package="tests.clsp", message="Common")
+    plugin_file = _add_plugin_file(
+        "tests/clsp/plugin.proto",
+        ["spark/connect/relations.proto", common.name],
+        [("input", ".spark.connect.Relation"), ("c", ".tests.clsp.Common")],
+        package="tests.clsp_plugin",
+    )
+    module = _generated_module(common)
+    try:
+        held = type(_build_generated_module(plugin_file)["M"]().c)
+        common_class = vars(module)["Common"]
+        assert held is not common_class
+        for protocol in (2, 4, 5):
+            assert pickle.loads(pickle.dumps(held, protocol)) is common_class
+        assert pickle.loads(pickle.dumps(proto.Relation)) is proto.Relation
+        assert pickle.loads(pickle.dumps(proto.Expression.Literal)) is proto.Expression.Literal
+    finally:
+        del sys.modules[module.__name__]
+
+
+def test_parses_follow_the_limit_of_protobufs_parsers_of_a_function_bound_before(upb):
+    # A parse that reaches its limit asks protobuf for its limit again, so that a call of upb's
+    # SetAllowOversizeProtos(True) of a reference to it taken before the package imports is seen;
+    # of protobuf's pure-Python implementation, the parses follow its decoder.SetRecursionLimit,
+    # of a reference taken before too.
+    script = """
+        import json
+        {bind}
+        import pyspark.sql.connect.proto as proto
+
+        deep = proto.Relation(range={{"end": 1}})
+        for _ in range(150):
+            outer = proto.Relation()
+            outer.limit.input.CopyFrom(deep)
+            deep = outer
+        data = deep.SerializeToString()
+
+        def parse():
+            try:
+                return len(proto.Relation.FromString(data).SerializeToString()) == len(data)
+            except Exception as e:
+                return type(e).__name__
+
+        out = [parse()]
+        early({argument})
+        out.append(parse())
+        print(json.dumps(out))
+        """
+    upb_bind = "from google._upb._message import SetAllowOversizeProtos as early"
+    assert _run_script(script.format(bind=upb_bind, argument="True")) == ["DecodeError", True]
+    python_bind = "from google.protobuf.internal.decoder import SetRecursionLimit as early"
+    assert _run_script(
+        script.format(bind=python_bind, argument="1000"),
+        PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION="python",
+    ) == ["DecodeError", True]
+    wrapped = script.replace("{bind}", "from google.protobuf.internal import decoder").replace(
+        "early({argument})", "decoder.SetRecursionLimit(1000)"
+    )
+    assert _run_script(
+        wrapped.replace("{{", "{").replace("}}", "}"), PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION="python"
+    ) == ["DecodeError", True]
+
+
+# The copies of the messages of a constructor (SPARK-62264): a message of the runtime given for a
+# message field, a repeated message field or the value of a map of messages is copied natively, and
+# its objects are made when Python reads them, of what upb's copy of its bytes would hold.
+
+
+def _copy_sources(cls):
+    """Messages of `cls` (the classes of a runtime, by full name), of every kind of field below
+    them: a message of a message, a repeated message, a map of messages, a repeated scalar and a
+    map of scalars field, and of a oneof."""
+    relation = cls("spark.connect.Relation")()
+    relation.read.data_source.format = "csv"
+    relation.read.data_source.paths.extend(["a", "b"])
+    relation.read.data_source.options["k"] = "v"
+    relation.common.plan_id = 7
+    expression = cls("spark.connect.Expression")()
+    function = expression.unresolved_function
+    function.function_name = "f"
+    function.arguments.add().unresolved_attribute.unparsed_identifier = "x"
+    function.arguments.add().literal.integer = 1
+    sql = cls("spark.connect.SQL")(query="select 1")
+    sql.named_arguments["n"].literal.string = "s"
+    return relation, expression, sql
+
+
+def _snapshot(*messages):
+    """What a test compares of messages: their bytes and their text."""
+    return [(m.SerializeToString(deterministic=True), str(m)) for m in messages]
+
+
+def _independence_cases(cls):
+    """The changes of constructor copies and of their sources, of each kind of field, and the
+    messages after each, which upb's and the runtime's agree on: a copy keeps the fields that its
+    source had when it was made, and its source keeps its own, whichever of them changes."""
+    out = []
+    relation, expression, sql = _copy_sources(cls)
+    plan = cls("spark.connect.Plan")(root=relation)
+    out.append(_snapshot(relation, plan))
+    relation.read.data_source.paths.append("c")
+    relation.read.data_source.options["k"] = "w"
+    relation.common.plan_id = 8
+    out.append(_snapshot(relation, plan))
+    plan.root.read.data_source.paths[0] = "z"
+    plan.root.read.data_source.options["j"] = "u"
+    plan.root.common.ClearField("plan_id")
+    plan.root.read.data_source.format = "json"
+    out.append(_snapshot(relation, plan))
+    # A repeated message field takes copies of its messages, each its own.
+    references = cls("spark.connect.WithRelations")(references=[relation, relation])
+    relation.read.data_source.paths.extend(["d"])
+    references.references[0].read.data_source.paths.append("e")
+    references.references[1].common.plan_id = 9
+    out.append(_snapshot(relation, references))
+    # The messages of a map of messages, and of a repeated field of a message held in a field.
+    held = cls("spark.connect.SQL")(named_arguments={"a": expression, "b": expression})
+    expression.unresolved_function.arguments[0].unresolved_attribute.unparsed_identifier = "y"
+    held.named_arguments["a"].unresolved_function.arguments.add().literal.integer = 2
+    held.named_arguments["b"].unresolved_function.function_name = "g"
+    out.append(_snapshot(expression, held))
+    # A member of a oneof: setting another member clears it, of the copy only.
+    alias = cls("spark.connect.Expression")(unresolved_function=expression.unresolved_function)
+    alias.literal.integer = 3
+    out.append(_snapshot(expression, alias) + [alias.WhichOneof("expr_type")])
+    expression.unresolved_function.ClearField("arguments")
+    out.append(_snapshot(expression, alias, sql, held))
+    # A copy of a copy is a copy of its own: the copies of the fields it shares with its source
+    # are its own too.
+    action = cls("spark.connect.MergeAction")(condition=expression, assignments=[
+        cls("spark.connect.MergeAction.Assignment")(key=expression, value=expression)
+    ])
+    first = cls("spark.connect.Expression")(merge_action=action)
+    second = cls("spark.connect.Expression")(merge_action=action)
+    first.merge_action.assignments[0].key.unresolved_function.function_name = "first"
+    action.condition.unresolved_function.function_name = "action"
+    second.merge_action.condition.unresolved_function.arguments.add().literal.integer = 4
+    out.append(_snapshot(action, first, second))
+    command = cls("spark.connect.Command")(sql_command={"sql": "s", "input": relation})
+    copied = cls("spark.connect.Command")(sql_command=command.sql_command)
+    command.sql_command.input.read.data_source.paths.append("f")
+    copied.sql_command.input.read.data_source.options.clear()
+    out.append(_snapshot(command, copied))
+    return out
+
+
+def test_constructor_copies_are_independent_of_their_sources_as_upbs(upb):
+    # A message given to a constructor is copied, as upb copies it by its bytes: a change of the
+    # copy, of a message field, a nested message, a repeated field of messages or of scalars, a
+    # map of messages or of scalars, or a oneof, is not one of its source, nor the other way, nor of
+    # another copy of the same message or of the copy.
+    assert _independence_cases(ours) == _independence_cases(upb)
+
+
+def _identity_cases(cls):
+    """Whether the objects that the fields of constructor copies give are the same object at each
+    read, and not the objects of their sources."""
+    relation, expression, sql = _copy_sources(cls)
+    plan = cls("spark.connect.Plan")(root=relation)
+    references = cls("spark.connect.WithRelations")(references=[relation])
+    held = cls("spark.connect.SQL")(named_arguments={"a": expression})
+    return {
+        "field": plan.root is plan.root,
+        "nested": plan.root.read.data_source is plan.root.read.data_source,
+        "not the source": plan.root is not relation,
+        "nested not the source": plan.root.read is not relation.read,
+        "repeated scalars": plan.root.read.data_source.paths is plan.root.read.data_source.paths,
+        "map of scalars": plan.root.read.data_source.options is plan.root.read.data_source.options,
+        "container": references.references is references.references,
+        "item": references.references[0] is references.references[0],
+        "item not the source": references.references[0] is not relation,
+        "map": held.named_arguments is held.named_arguments,
+        "map value": held.named_arguments["a"] is held.named_arguments["a"],
+        "map value not the source": held.named_arguments["a"] is not expression,
+        "listed": [v for _, v in plan.ListFields()][0] is plan.root,
+    }
+
+
+def test_constructor_copies_keep_their_identity_as_upbs(upb):
+    # The field of a constructor copy gives one object, at every read, as it does once it is set:
+    # of a message, of its messages, of its containers, of their items and of the values of its
+    # maps, and of ListFields. A weak reference of it lives as long as the message that holds it.
+    import weakref
+
+    mine = _identity_cases(ours)
+    assert mine == _identity_cases(upb)
+    assert all(mine.values()), mine
+    relation, expression, sql = _copy_sources(ours)
+    plan = ours("spark.connect.Plan")(root=relation)
+    read = weakref.ref(plan.root.read)
+    assert read() is plan.root.read
+    del plan
+    assert read() is None
+    # As the copies of the runtime were made before, the objects of a copy are not tracked by
+    # the garbage collector, and a message reports none of its own.
+    import gc
+
+    plan = ours("spark.connect.Plan")(root=relation)
+    assert not gc.is_tracked(plan.root) and not gc.is_tracked(plan.root.read)
+    assert gc.get_referents(plan) == [type(plan)]
+
+
+def _operation_cases(cls):
+    """The operations of upb's messages on messages of copies whose fields no object was made of
+    yet, each on a copy of its own: what each gives, and the messages after it."""
+    relation, expression, sql = _copy_sources(cls)
+    unknown = cls("spark.connect.Relation").FromString(relation.SerializeToString() + _UNKNOWN)
+
+    def plan():
+        return cls("spark.connect.Plan")(root=unknown)
+
+    def references():
+        return cls("spark.connect.WithRelations")(references=[relation, unknown])
+
+    def held():
+        return cls("spark.connect.SQL")(named_arguments={"a": expression}, pos_arguments=[expression])
+
+    import copy as copying
+
+    operations = {
+        "bytes": lambda m: m.SerializeToString(deterministic=True),
+        "ByteSize": lambda m: m.ByteSize(),
+        "str": str,
+        "repr": repr,
+        "==": lambda m: m == type(m).FromString(m.SerializeToString()),
+        "!= of a change": lambda m: m != type(m)(),
+        "ListFields": lambda m: [(f.name, _comparable(v)) for f, v in m.ListFields()],
+        "HasField": lambda m: [m.HasField(f.name) for f in m.DESCRIPTOR.fields if f.has_presence],
+        "deepcopy": lambda m: copying.deepcopy(m).SerializeToString(deterministic=True),
+        "copy": lambda m: copying.copy(m).SerializeToString(deterministic=True),
+        "CopyFrom": lambda m: _copied_from(m).SerializeToString(deterministic=True),
+        "MergeFrom": lambda m: (m.MergeFrom(type(m)(**{})), m.MergeFrom(m))[1],
+        "Clear": lambda m: m.Clear(),
+        "DiscardUnknownFields": lambda m: m.DiscardUnknownFields(),
+        "IsInitialized": lambda m: m.IsInitialized(),
+        "ParseFromString": lambda m: m.ParseFromString(m.SerializeToString()),
+        "MergeFromString": lambda m: m.MergeFromString(m.SerializeToString()),
+    }
+    out = {}
+    for name, make in {"plan": plan, "references": references, "held": held}.items():
+        for label, operation in operations.items():
+            message = make()
+            result = _outcome(lambda: operation(message))
+            out[f"{name} {label}"] = (result, message.SerializeToString(deterministic=True))
+    return out
+
+
+def _copied_from(message):
+    copied = type(message)()
+    copied.CopyFrom(message)
+    return copied
+
+
+def test_operations_on_constructor_copies_are_upbs(upb):
+    # The operations of a message read its constructor copies as they read their objects: its
+    # bytes, size, text, equality, fields, presence, pickle, copies, merges, clears and parses.
+    mine, theirs = _operation_cases(ours), _operation_cases(upb)
+    for label in theirs:
+        assert mine[label] == theirs[label], label
+    # (upb's classes of the tests are of the names of the package's, so do not pickle.)
+    relation, expression, sql = _copy_sources(ours)
+    for message in (
+        ours("spark.connect.Plan")(root=relation),
+        ours("spark.connect.SQL")(named_arguments={"a": expression}, pos_arguments=[expression]),
+    ):
+        assert pickle.loads(pickle.dumps(message)) == message
+
+
+def _chain(cls, additions):
+    """The Expression of `additions` additions of 1 to a column of an origin, as PySpark's
+    `c + 1 + 1 ...` of a Column of its origin builds it: of 2 * additions + 3 levels below it."""
+    expression = cls("spark.connect.Expression")
+    current = expression(unresolved_attribute={"unparsed_identifier": "id"})
+    current.common.origin.python_origin.fragment = "col"
+    for _ in range(additions):
+        outer = expression()
+        outer.unresolved_function.function_name = "+"
+        outer.unresolved_function.arguments.add().CopyFrom(current)
+        outer.unresolved_function.arguments.add().literal.integer = 1
+        current = outer
+    return current
+
+
+def _merge_of(cls, deep, where):
+    """Where PySpark's merge of `deep` at `where` (an assignment, the condition of a clause or the
+    condition of the merge) fails, of its constructors (`_build_merge_action` and `merge()`):
+    the constructor that raises, and its error, or None."""
+    expression = cls("spark.connect.Expression")
+    column = expression(unresolved_attribute={"unparsed_identifier": "c"})
+    steps = []
+    try:
+        steps.append("Assignment")
+        value = deep if where == "assignment" else column
+        assignment = cls("spark.connect.MergeAction.Assignment")(key=column, value=value)
+        steps.append("MergeAction")
+        condition = deep if where == "clause condition" else None
+        action = cls("spark.connect.MergeAction")(
+            action_type=1, condition=condition, assignments=[assignment]
+        )
+        steps.append("Expression")
+        clause = expression(merge_action=action)
+        steps.append("MergeIntoTableCommand")
+        merge_condition = deep if where == "merge condition" else column
+        merge = cls("spark.connect.MergeIntoTableCommand")(
+            target_table_name="t", merge_condition=merge_condition, match_actions=[clause]
+        )
+        steps.append("Command")
+        command = cls("spark.connect.Command")(merge_into_table_command=merge)
+        plan = cls("spark.connect.Plan")()
+        plan.command.CopyFrom(command)
+        return None, len(plan.SerializeToString())
+    except Exception as e:  # noqa: BLE001
+        return steps[-1], type(e).__name__, str(e)
+
+
+def test_constructor_copies_fail_from_the_depths_of_upbs(upb):
+    # As upb's copies of a constructor's message by its bytes: a copy of a message of more than
+    # 100 levels below it fails, of upb's DecodeError, from the same depths as PySpark's merge, of
+    # its constructors (of a chain of additions, of an origin): an assignment of 47 additions, a
+    # clause condition of 48, the condition of the merge of 49; and copy.copy, as upb's of its
+    # bytes. The copies that pass are of the same bytes.
+    for additions in (46, 47, 48, 49, 100, 120):
+        deep = {"ours": _chain(ours, additions), "upb": _chain(upb, additions)}
+        for where in ("assignment", "clause condition", "merge condition"):
+            mine = _merge_of(ours, deep["ours"], where)
+            assert mine == _merge_of(upb, deep["upb"], where), (additions, where)
+            fails = additions >= {"assignment": 47, "clause condition": 48, "merge condition": 49}[where]
+            assert (mine[0] is not None) == fails, (additions, where, mine)
+            if fails:
+                assert mine[1] == "DecodeError", (additions, where, mine)
+                assert mine[2].endswith(": Exceeded upb_DecodeOptions_MaxDepth"), mine
+            if additions >= 100:
+                # The first constructor fails, of the copy of the expression.
+                assert mine[0] == {
+                    "assignment": "Assignment",
+                    "clause condition": "MergeAction",
+                    "merge condition": "MergeIntoTableCommand",
+                }[where], mine
+        assert _outcome(lambda: copy.copy(deep["ours"])) == _outcome(
+            lambda: copy.copy(deep["upb"])
+        ), additions
+
+
+# For a message type of the lockstep, fields of other types that take a message of it: a message
+# field, a repeated message field, the value of a map of messages.
+_COPY_HOLDERS = {
+    "spark.connect.Relation": [
+        ("spark.connect.Plan", "root", "single"),
+        ("spark.connect.WithRelations", "references", "repeated"),
+    ],
+    "spark.connect.Expression": [
+        ("spark.connect.Expression.Alias", "expr", "single"),
+        ("spark.connect.Expression.UnresolvedFunction", "arguments", "repeated"),
+        ("spark.connect.SQL", "named_arguments", "map"),
+    ],
+    "spark.connect.Command": [("spark.connect.Plan", "command", "single")],
+    "spark.connect.Expression.Literal": [
+        ("spark.connect.Expression", "literal", "single"),
+        ("spark.connect.Expression.Literal.Array", "elements", "repeated"),
+        ("spark.connect.SQL", "args", "map"),
+    ],
+    "spark.connect.MlParams": [("spark.connect.MlCommand.Fit", "params", "single")],
+}
+
+
+@pytest.mark.parametrize("seed", range(6))
+def test_random_operations_on_constructor_copies_agree_with_upb(upb, seed):
+    # Random operations on messages, on the copies that constructors make of them (of a message
+    # field, a repeated field and a map of messages, of copies of the copies too), and then on
+    # each again, of upb's and of the runtime's in step: the messages agree after each, so a
+    # change of a copy or of its source is of that message only, as upb's.
+    lockstep = _Lockstep(upb, seed)
+    rng = lockstep.rng
+    for full_name, holders in _COPY_HOLDERS.items():
+        a, b = upb(full_name)(), ours(full_name)()
+        log = []
+        for _ in range(15):
+            lockstep.step(a, b, log)
+        for holder, field, shape in holders:
+
+            def hold(cls, message):
+                value = {"single": message, "repeated": [message, message]}.get(
+                    shape, {"k": message, "j": message}
+                )
+                return cls(holder)(**{field: value})
+
+            def held(m, at):
+                value = getattr(m, field)
+                if shape == "single":
+                    return value
+                return value[at] if shape == "repeated" else value["kj"[at]]
+
+            pairs = [(full_name, a, b)]
+            holders_of = [(hold(upb, a), hold(ours, b))]
+            log.append(f"{holder}({field}=...)")
+            for _ in range(24):
+                kind = rng.random()
+                at = rng.randrange(2)
+                if kind < 0.35:
+                    lockstep.step(a, b, log)
+                elif kind < 0.85:
+                    wa, wb = rng.choice(holders_of)
+                    log.append(f"in {holder}.{field}[{at}]")
+                    lockstep.step(held(wa, at), held(wb, at), log)
+                else:
+                    # A copy of a copy: of the message that a holder holds, which is copied again.
+                    wa, wb = rng.choice(holders_of)
+                    log.append(f"{holder}({field}={holder}.{field}[{at}])")
+                    holders_of.append((hold(upb, held(wa, at)), hold(ours, held(wb, at))))
+                for name, x, y in pairs:
+                    lockstep.compare(name, x, y, log)
+                for wa, wb in holders_of:
+                    lockstep.compare(holder, wa, wb, log)
+
+
+def _error_cases(cls):
+    """What constructors raise of values of message fields beside the messages that they copy, in
+    the order of their keyword arguments, and what they build of well-known types of values of
+    other types (a Timestamp of a datetime, of `_internal_assign`)."""
+    relation = cls("spark.connect.Relation")(range={"end": 1})
+    expression = cls("spark.connect.Expression")(literal={"integer": 1})
+    timestamp = cls("google.protobuf.Timestamp")(seconds=5, nanos=6)
+
+    def init_again():
+        plan = cls("spark.connect.Plan")(root=relation)
+        plan.__init__(root={"range": {"start": 2}})
+        return plan
+
+    cases = {
+        "a message of another type": lambda: cls("spark.connect.Plan")(root=expression),
+        "an int": lambda: cls("spark.connect.Plan")(root=5),
+        "a list of a message of another type": lambda: cls("spark.connect.WithRelations")(
+            references=[relation, expression]
+        ),
+        "a list of an int": lambda: cls("spark.connect.WithRelations")(references=[relation, 5]),
+        "a message for a list": lambda: cls("spark.connect.WithRelations")(references=relation),
+        "a map value of another type": lambda: cls("spark.connect.SQL")(
+            named_arguments={"a": relation}
+        ),
+        "a field of no name after a copy": lambda: cls("spark.connect.Plan")(root=relation, nope=1),
+        "a copy after a field of no name": lambda: cls("spark.connect.Plan")(nope=1, root=relation),
+        "a bad enum then a copy": lambda: cls("spark.connect.MergeAction")(
+            action_type="NOPE", condition=expression
+        ),
+        "a copy then a bad enum": lambda: cls("spark.connect.MergeAction")(
+            condition=expression, action_type="NOPE"
+        ),
+        "a copy then a bad copy": lambda: cls("spark.connect.MergeAction")(
+            condition=expression, assignments=[expression]
+        ),
+        "a copy of a mapping of a copy": lambda: cls("spark.connect.Plan")(
+            root={"limit": {"input": relation, "limit": 2}}
+        ),
+        "a Timestamp of a datetime": lambda: cls("spark.connect.PipelineEvent")(
+            timestamp=datetime.datetime(2020, 1, 2, 3, 4, 5, 678000)
+        ),
+        "a Timestamp of a str": lambda: cls("spark.connect.PipelineEvent")(timestamp="x"),
+        "a Timestamp of a Timestamp": lambda: cls("spark.connect.PipelineEvent")(
+            timestamp=timestamp
+        ),
+        "a copy and a Timestamp of a datetime": lambda: cls("spark.connect.PipelineEvent")(
+            timestamp=datetime.datetime(2021, 1, 1), message="m"
+        ),
+        "the constructor of a message of a field set": init_again,
+    }
+    return {label: _outcome(case) for label, case in cases.items()}
+
+
+def test_constructors_raise_the_errors_of_upbs_beside_the_copies(upb):
+    # The values of the message fields of a constructor that are not messages of the runtime of
+    # the type take the paths that they took, of upb's errors, in the order of the keyword
+    # arguments, and of the Timestamp of a datetime of `_internal_assign`.
+    # A second constructor merges a mapping into the message of a field that the message holds,
+    # as upb's (see test_merges_into_a_message_that_the_value_holds_are_upbs).
+    mine, theirs = _error_cases(ours), _error_cases(upb)
+    differ = {label for label in theirs if mine[label] != theirs[label]}
+    assert differ == set(), {label: (mine[label], theirs[label]) for label in differ}
+
+
+def _shared_cases(cls):
+    """Copies of copies, which the runtime shares the native values of, changed one at a time:
+    each change is of one message only, as upb's."""
+    data = _relation_bytes(4, lambda level: True)
+    source = cls("spark.connect.Relation").FromString(data)
+    first = cls("spark.connect.Plan")(root=source)
+    second = copy.deepcopy(first)
+    third = cls("spark.connect.Plan")()
+    third.CopyFrom(second)
+    fourth = cls("spark.connect.Plan")(root=third.root)
+    out = [_snapshot(source, first, second, third, fourth)]
+    first.DiscardUnknownFields()
+    out.append(_snapshot(source, first, second, third, fourth))
+    second.root.limit.input.limit.limit = 9
+    out.append(_snapshot(source, first, second, third, fourth))
+    third.root.limit.input.DiscardUnknownFields()
+    out.append(_snapshot(source, first, second, third, fourth))
+    fourth.root.limit.input.limit.input.ClearField("limit")
+    out.append(_snapshot(source, first, second, third, fourth))
+    second.MergeFrom(fourth)
+    out.append(_snapshot(source, first, second, third, fourth))
+    return out
+
+
+def test_copies_of_copies_change_alone_as_upbs(upb):
+    # The copies of copies (a constructor's, CopyFrom's and copy.deepcopy's of a copy) are each
+    # their own: discarding the unknown fields of one of them, or changing it, changes no other.
+    assert _shared_cases(ours) == _shared_cases(upb)
+
+
+def test_copies_are_of_the_classes_registered_when_they_were_made():
+    # The objects that a copy of a constructor makes when its fields are read are of the class that
+    # the copy would have made them of when it was made, the class registered of their type then,
+    # even if a class of the type is registered since; a copy made after is of the new class.
+    script = """
+        import json
+
+        import pyspark.sql.connect.proto as proto
+        from pyspark import _pyspark
+        from pyspark.sql.connect.proto import _rust
+
+        relation = proto.Relation(limit={"limit": 1, "input": {"range": {"end": 2}}})
+        before = proto.Plan(root=relation)
+        listed = proto.WithRelations(references=[relation])
+        held = proto.SQL(named_arguments={"a": {"literal": {"integer": 1}}})
+        held_before = proto.Command(sql_command={"named_arguments": held.named_arguments})
+        other = type(
+            "Relation",
+            (_pyspark.ProtoMessage, _rust._MessageBase),
+            {"__slots__": (), "DESCRIPTOR": proto.Relation.DESCRIPTOR},
+        )
+        _pyspark._proto_register_classes({"spark.connect.Relation": other})
+        try:
+            after = proto.Plan(root=relation)
+            out = [
+                type(before.root) is proto.Relation,
+                type(before.root.limit.input) is proto.Relation,
+                type(listed.references[0]) is proto.Relation,
+                type(after.root) is other,
+                type(after.root.limit.input) is other,
+            ]
+        finally:
+            _pyspark._proto_register_classes({"spark.connect.Relation": proto.Relation})
+        again = proto.Plan(root=relation)
+        out += [type(again.root) is proto.Relation, type(after.root) is other]
+        print(json.dumps(out))
+        """
+    assert _run_script(script) == [True] * 7
+
+
+def test_deep_copies_build_compare_and_drop_on_a_small_stack():
+    # The copies of a message of tens of thousands of levels (copy.deepcopy, CopyFrom, a
+    # constructor of a copy of it), their comparisons, encodings, discards of unknown fields,
+    # reads of their fields to the bottom and their drops finish on a thread of a small stack, as
+    # those of its objects do; a constructor's copy of it fails at upb's limit.
+    script = textwrap.dedent(
+        """
+        import copy
+        import json
+        import threading
+
+        import pyspark.sql.connect.proto as proto
+        from pyspark import _pyspark
+        from pyspark.sql.connect.proto._rust import DecodeError
+        from tests.test_proto_rust_offline import _relation_bytes
+
+        LEVELS = 30000
+        results = []
+
+
+        def run():
+            data = _relation_bytes(LEVELS, lambda level: level % 7 == 0)
+            deep = _pyspark._proto_parse_deep(proto.Relation, data)
+            copied = copy.deepcopy(deep)
+            results.append(copied == deep and copied.SerializeToString() == data)
+            again = proto.Relation()
+            again.CopyFrom(copied)
+            results.append(again == copied and again.ByteSize() == len(data))
+            try:
+                proto.Plan(root=again)
+            except DecodeError:
+                results.append(True)
+            copied.DiscardUnknownFields()
+            kept = _relation_bytes(LEVELS, lambda level: level % 7 == 0 and 2 * level >= 64)
+            results.append(copied.SerializeToString() == kept and again.SerializeToString() == data)
+            walk = again
+            for _ in range(LEVELS):
+                walk = walk.limit.input
+            # (The Relation at the bottom, of the level 30000, holds no unknown field.)
+            results.append(walk.ByteSize() == 0 and not walk.HasField("limit"))
+            del deep, copied, again, walk
+
+
+        threading.stack_size(512 * 1024)
+        thread = threading.Thread(target=run)
+        thread.start()
+        thread.join()
+        print(json.dumps(results))
+        """
+    )
+    assert _run_script(script) == [True] * 5
+
+
+def _materialization_cases(cls):
+    """Operations on constructor copies that make the objects of their fields as they change them
+    (an unset child that a copy fills, a merge into an unset child, a parse into a copy, a second
+    constructor of a copy, a cleared field, a oneof, the methods of their containers and maps, a
+    merge of copies, `ListFields`, a Timestamp), and what upb's give: the bytes of the messages and
+    the identity of the objects that they give."""
+    relation = cls("spark.connect.Relation")(
+        read={"data_source": {"format": "csv", "paths": ["a"], "options": {"k": "v"}}}
+    )
+    relation.limit.limit = 3
+
+    def b(m):
+        return m.SerializeToString(deterministic=True)
+
+    def unset_child_copied_into():
+        plan = cls("spark.connect.Plan")()
+        root = plan.root
+        plan.CopyFrom(cls("spark.connect.Plan")(root=relation))
+        return [plan.root is root, b(plan), b(root), root.HasField("limit")]
+
+    def merge_into_unset_child():
+        plan = cls("spark.connect.Plan")()
+        root = plan.root
+        root.MergeFrom(cls("spark.connect.Plan")(root=relation).root)
+        return [plan.root is root, b(plan)]
+
+    def parse_into_copy():
+        plan = cls("spark.connect.Plan")(root=relation)
+        other = cls("spark.connect.Plan")(root={"limit": {"limit": 7, "input": {"range": {"end": 2}}}})
+        plan.MergeFromString(other.SerializeToString())
+        return [b(plan), plan.root.limit.input.range.end]
+
+    def constructor_again():
+        references = cls("spark.connect.WithRelations")(references=[relation])
+        references.__init__(references=[relation, {"range": {"end": 1}}])
+        first = references.references[0]
+        references.__init__(references=[relation])
+        return [len(references.references), references.references[0] is first, b(references)]
+
+    def map_constructor_again():
+        expression = cls("spark.connect.Expression")
+        sql = cls("spark.connect.SQL")(named_arguments={"a": expression(literal={"integer": 1})})
+        sql.__init__(named_arguments={"b": expression(literal={"integer": 2})})
+        return [sorted(sql.named_arguments), b(sql)]
+
+    def cleared():
+        plan = cls("spark.connect.Plan")(root=relation)
+        root = plan.root
+        plan.ClearField("root")
+        return [plan.HasField("root"), root.HasField("limit"), b(root), plan.root is root]
+
+    def oneof():
+        expression = cls("spark.connect.Expression")
+        function = expression(unresolved_function={"function_name": "f"})
+        other = expression(unresolved_function=function.unresolved_function)
+        other.literal.integer = 1
+        return [other.WhichOneof("expr_type"), other.HasField("unresolved_function"), b(other)]
+
+    def repeated():
+        references = cls("spark.connect.WithRelations")(references=[relation, relation])
+        container = references.references
+        container[0].limit.limit = 1
+        del container[1]
+        container.add().range.end = 5
+        again = cls("spark.connect.WithRelations")(references=list(references.references))
+        container.sort(key=lambda m: m.ByteSize())
+        return [b(references), b(again), references.references is container]
+
+    def maps():
+        expression = cls("spark.connect.Expression")
+        sql = cls("spark.connect.SQL")(
+            named_arguments={"a": expression(literal={"integer": 1}), "b": expression(literal={})}
+        )
+        held = sql.named_arguments
+        held["a"].literal.integer = 5
+        del held["b"]
+        held["c"].literal.boolean = True
+        again = cls("spark.connect.SQL")(named_arguments=sql.named_arguments)
+        return [b(sql), b(again), sorted(held), held is sql.named_arguments]
+
+    def merges():
+        target = cls("spark.connect.Plan")(root={"limit": {"input": {"range": {"end": 1}}}})
+        target.MergeFrom(cls("spark.connect.Plan")(root=relation))
+        references = cls("spark.connect.WithRelations")(references=[relation])
+        references.MergeFrom(cls("spark.connect.WithRelations")(references=[relation, relation]))
+        expression = cls("spark.connect.Expression")
+        sql = cls("spark.connect.SQL")(named_arguments={"a": expression(literal={"integer": 1})})
+        sql.MergeFrom(cls("spark.connect.SQL")(named_arguments={"b": expression(literal={})}))
+        return [b(target), b(references), b(sql)]
+
+    def listed():
+        plan = cls("spark.connect.Plan")(root=relation)
+        fields = plan.ListFields()
+        return [[f.name for f, _ in fields], fields[0][1] is plan.root, b(fields[0][1])]
+
+    def timestamps():
+        event = cls("spark.connect.PipelineEvent")(
+            timestamp=datetime.datetime(2020, 1, 2, 3, 4, 5, 678000)
+        )
+        again = cls("spark.connect.PipelineEvent")(timestamp=event.timestamp)
+        event.timestamp.seconds = 1
+        return [b(event), b(again), again.timestamp.ToJsonString()]
+
+    cases = [
+        unset_child_copied_into,
+        merge_into_unset_child,
+        parse_into_copy,
+        constructor_again,
+        map_constructor_again,
+        cleared,
+        oneof,
+        repeated,
+        maps,
+        merges,
+        listed,
+        timestamps,
+    ]
+    return {case.__name__: _outcome(case) for case in cases}
+
+
+def test_fields_of_constructor_copies_change_as_upbs(upb):
+    # The operations that change a field of a constructor copy, or read it to change it, make its
+    # object first and change that: of an unset child that CopyFrom fills, MergeFrom, a parse, a
+    # second constructor of the message, ClearField, a member of a oneof, the methods of the
+    # containers and the maps of a copy, and ListFields, as upb's change them.
+    assert _materialization_cases(ours) == _materialization_cases(upb)
+
+
+def _kind_copy_cases(cls):
+    """Constructor copies, CopyFrom and copy.deepcopy of the messages of the plugin's files of
+    proto2 and editions, of required fields, groups, delimited messages, closed enums and maps of
+    messages, and what each reads of them: the required fields that they lack, their bytes, their
+    text and their JSON."""
+    from google.protobuf import json_format
+
+    legacy, required = cls("thirdparty.legacy.Legacy"), cls("thirdparty.legacy.Required")
+    featured, strict = cls("thirdparty.editions.Featured"), cls("thirdparty.editions.Strict")
+
+    def source():
+        message = legacy(id="x", colors=[1, 2], packed_colors=[3])
+        message.required.next.next.SetInParent()
+        message.many_required.add(a=1)
+        message.many_required.add()
+        message.item.x, message.item.label = 7, "l"
+        message.entry.add(key=1).value.sql.query = "q"
+        message.by_name["k"].count = 3
+        message.defaults.SetInParent()
+        message.tint = 2
+        return message
+
+    def copied():
+        s = source()
+        return legacy(
+            id="y",
+            required=s.required,
+            many_required=list(s.many_required),
+            item=s.item,
+            entry=list(s.entry),
+            by_name={"k": s.by_name["k"], "j": s.defaults},
+            defaults=s.defaults,
+        )
+
+    def deep():
+        return copy.deepcopy(source())
+
+    def copied_from():
+        target = legacy()
+        target.CopyFrom(source())
+        return target
+
+    def editions():
+        inner = featured(required="r", packed=[1, 2], expanded=[3, 4], implicit=0, explicit=0)
+        inner.delimited.value = 5
+        inner.delimited_values.add(value=6)
+        return featured(
+            required="s",
+            delimited=inner.delimited,
+            delimited_values=list(inner.delimited_values),
+        ), strict(inner=inner.delimited), strict(inner=featured.Inner())
+
+    out = []
+    for make in (copied, deep, copied_from):
+        out += [
+            make().IsInitialized(),
+            make().FindInitializationErrors(),
+            _outcome(lambda: make().SerializeToString(deterministic=True)),
+            make().SerializePartialToString(deterministic=True),
+            _outcome(lambda: make().ByteSize()),
+            str(make()),
+            # (Of the order of its keys, as a map iterates them in another order of upb's.)
+            json.loads(json_format.MessageToJson(make())),
+            make() == legacy.FromString(make().SerializePartialToString()),
+        ]
+    for message in editions():
+        out += [
+            message.FindInitializationErrors(),
+            message.SerializePartialToString(deterministic=True),
+            str(message),
+            json.loads(json_format.MessageToJson(message)),
+        ]
+    nested = required(a=1, next=required(next=required()))
+    out += [
+        nested.FindInitializationErrors(),
+        _outcome(lambda: nested.SerializeToString(deterministic=True)),
+    ]
+    return out
+
+
+def test_copies_of_messages_of_proto2_and_editions_are_upbs(kinds):
+    # The copies of messages of proto2 and editions are read as upb's: the required fields that
+    # they and their messages lack (also of LEGACY_REQUIRED), the EncodeError of their bytes, their
+    # groups and delimited messages, their closed enums and maps of messages, their text and JSON.
+    *_, upb = kinds
+    assert _kind_copy_cases(ours) == _kind_copy_cases(upb)
+
+
+# The merges and copies of a message into a message that the value holds (SPARK-62270): a message
+# below the value (an unset child of it too), the value itself, or one above it. upb serializes the
+# value first (`MergeFrom`), or reads it as it is when it reads it (a constructor, `add`, `append`,
+# `extend`), so the merge reads what the value was then; upb's `CopyFrom` into a message below the
+# value, and the copies into a map entry below it, end its process (of a recursion of its copy).
+
+_ALIAS_NODE_FILE = "tests/alias/node.proto"
+
+
+def _alias_node_file():
+    """The serialized file of `tests.alias.Node`, a message of a plugin's file (which imports Spark
+    Connect's relations.proto) that holds itself in each kind of field: a map, a repeated field, a
+    message field, a oneof member, and its repeated scalars."""
+    from google.protobuf import descriptor_pb2
+
+    field = descriptor_pb2.FieldDescriptorProto
+    file = descriptor_pb2.FileDescriptorProto(
+        name=_ALIAS_NODE_FILE, package="tests.alias", dependency=["spark/connect/relations.proto"], syntax="proto3"
+    )
+    node = file.message_type.add(name="Node")
+    entry = node.nested_type.add(name="ChildrenEntry")
+    entry.options.map_entry = True
+    entry.field.add(name="key", number=1, type=field.TYPE_STRING, label=field.LABEL_OPTIONAL)
+    entry.field.add(
+        name="value", number=2, type=field.TYPE_MESSAGE, label=field.LABEL_OPTIONAL, type_name=".tests.alias.Node"
+    )
+    message, repeated, optional = field.TYPE_MESSAGE, field.LABEL_REPEATED, field.LABEL_OPTIONAL
+    node.field.add(name="children", number=1, type=message, label=repeated, type_name=".tests.alias.Node.ChildrenEntry")
+    node.field.add(name="items", number=2, type=message, label=repeated, type_name=".tests.alias.Node")
+    node.field.add(name="next", number=3, type=message, label=optional, type_name=".tests.alias.Node")
+    node.field.add(name="v", number=4, type=field.TYPE_INT32, label=optional)
+    node.field.add(name="input", number=5, type=message, label=optional, type_name=".spark.connect.Relation")
+    node.oneof_decl.add(name="kind")
+    node.field.add(name="left", number=6, type=message, label=optional, type_name=".tests.alias.Node", oneof_index=0)
+    node.field.add(name="w", number=7, type=field.TYPE_INT32, label=optional, oneof_index=0)
+    node.field.add(name="vs", number=8, type=field.TYPE_INT32, label=repeated)
+    return file.SerializeToString()
+
+
+def _alias_classes(which):
+    """The lookup of the classes by full name of `which` ("ours" or "upb"), of `tests.alias.Node`
+    too: the runtime's class of the module that protoc generates of its file, upb's of a pool of its
+    own."""
+    from google.protobuf import descriptor_pool
+
+    serialized = _alias_node_file()
+    if which == "upb":
+        node = _upb_classes_of([(serialized, "tests.alias.node_pb2")])["tests.alias.Node"]
+        classes = _upb_classes()
+    else:
+        pool = descriptor_pool.Default()
+        try:
+            added = pool.FindFileByName(_ALIAS_NODE_FILE)
+        except KeyError:
+            added = pool.AddSerializedFile(serialized)
+        node = _build_generated_module(added)["Node"]
+        classes = ours
+    return lambda full_name: node if full_name == "tests.alias.Node" else classes(full_name)
+
+
+def _hex(message):
+    return message.SerializeToString(deterministic=True).hex()
+
+
+def _alias_cases():
+    """The cases of the merges and copies into a message that the value holds, each a function of
+    the lookup of the classes of a runtime, of what it gives of the messages after (their bytes and
+    the identity of the messages that Python holds)."""
+
+    def deep(R, levels):
+        r = R()
+        m = r
+        for _ in range(levels):
+            m = m.limit.input
+        m.range.end = 1
+        return r, m
+
+    def merge_into_stub_below(C):
+        r = C("spark.connect.Relation")()
+        r.limit.limit = 1
+        t = r.limit.input
+        t.MergeFrom(r)
+        return [_hex(r), r.limit.input is t, _hex(t)]
+
+    def merge_into_set_below(C):
+        r = C("spark.connect.Relation")(limit={"limit": 1, "input": {"range": {"end": 2}}})
+        t = r.limit.input
+        t.MergeFrom(r)
+        return [_hex(r), r.limit.input is t]
+
+    def merge_into_stub_of_oneof_sibling(C):
+        # Setting the unset child in its parent clears the member of the oneof that the value holds.
+        r = C("spark.connect.Relation")(limit={"limit": 1})
+        t = r.project.input
+        t.MergeFrom(r)
+        return [_hex(r), r.project.input is t, r.HasField("limit")]
+
+    def merge_into_stub_of_stub(C):
+        r = C("spark.connect.Relation")(limit={"limit": 1})
+        t = r.limit.input.limit.input
+        t.MergeFrom(r)
+        return [_hex(r), r.limit.input.limit.input is t]
+
+    def merge_into_below_repeated(C):
+        d = C("spark.connect.DataType")(struct={"fields": [{"name": "a", "data_type": {"string": {}}}]})
+        t = d.struct.fields[0].data_type
+        t.MergeFrom(d)
+        return [_hex(d), d.struct.fields[0].data_type is t]
+
+    def merge_into_below_map(C):
+        n = C("tests.alias.Node")(v=1)
+        n.children["a"].v = 2
+        child = n.children["a"]
+        t = child.next
+        t.MergeFrom(n)
+        return [_hex(n), n.children["a"] is child, child.next is t]
+
+    def merge_into_map_value_and_item(C):
+        n = C("tests.alias.Node")(v=1, items=[{"v": 2}])
+        child, item = n.children["a"], n.items[0]
+        child.MergeFrom(n)
+        item.MergeFrom(n)
+        return [_hex(n), n.children["a"] is child, n.items[0] is item]
+
+    def merge_into_oneof_member_of_value(C):
+        n = C("tests.alias.Node")(left={"v": 1})
+        t = n.left
+        t.MergeFrom(n)
+        return [_hex(n), n.left is t]
+
+    def merge_into_stub_below_at_the_limit(C):
+        # A value of the levels that a parse takes, whose unset child is one level below its
+        # deepest message: upb reads the value before the child is set, so it takes it.
+        out = []
+        for levels in (48, 49, 50):
+            r, m = deep(C("spark.connect.Relation"), levels)
+            t = m.limit.input
+            out.append([levels, _outcome(lambda: t.MergeFrom(r)), _hex(r)])
+        return out
+
+    def merge_from_below(C):
+        r = C("spark.connect.Relation")(
+            limit={"limit": 1, "input": {"limit": {"limit": 2, "input": {"range": {"end": 3}}}}}
+        )
+        r.MergeFrom(r.limit.input)
+        n = C("tests.alias.Node")(v=1, items=[{"v": 2, "items": [{"v": 3}]}], next={"vs": [4], "next": {"v": 5}})
+        n.children["k"].next.v = 6
+        n.MergeFrom(n.items[0])
+        n.MergeFrom(n.next)
+        n.MergeFrom(n.children["k"])
+        return [_hex(r), _hex(n)]
+
+    def merge_from_itself(C):
+        n = C("tests.alias.Node")(v=1, items=[{"v": 2}], vs=[3], next={"items": [{"v": 4}]})
+        n.children["a"].v = 5
+        n.MergeFrom(n)
+        return _hex(n)
+
+    def copy_from_below(C):
+        r = C("spark.connect.Relation")(
+            limit={"limit": 1, "input": {"limit": {"limit": 2, "input": {"range": {"end": 3}}}}}
+        )
+        inner = r.limit.input
+        r.CopyFrom(inner)
+        n = C("tests.alias.Node")(v=1, items=[{"v": 2, "items": [{"v": 3}]}])
+        item = n.items[0]
+        n.CopyFrom(item)
+        return [_hex(r), _hex(inner), _hex(n), _hex(item)]
+
+    def init_message_field_of_holder(C):
+        r = C("spark.connect.Relation")(limit={"limit": 1})
+        limit = r.limit
+        limit.__init__(input=r)
+        return [_hex(r), r.limit is limit]
+
+    def init_stub_of_holder(C):
+        # The unset child is set in its parent first, so the value holds it.
+        r = C("spark.connect.Relation")(limit={"limit": 1})
+        t = r.limit.input
+        t.__init__(limit=r.limit)
+        return [_hex(r), r.limit.input is t]
+
+    def init_merges_into_the_field(C):
+        R = C("spark.connect.Relation")
+        r = R(limit={"limit": 1})
+        r.__init__(limit={"input": {"range": {"end": 2}}})
+        s = R(limit={"limit": 1})
+        s.__init__(limit=R(limit={"input": {"range": {"end": 2}}}).limit)
+        p = R(project={"expressions": [{"literal": {"integer": 1}}]})
+        p.__init__(project=p.project)
+        return [_hex(r), _hex(s), _hex(p)]
+
+    def init_in_the_order_of_the_keywords(C):
+        N = C("tests.alias.Node")
+        n = N()
+        n.next.__init__(v=7, next=n)
+        m = N()
+        m.next.__init__(next=m, v=7)
+        o = N(v=1, items=[{"v": 2}])
+        o.next.__init__(next=o, v=3)
+        return [_hex(n), _hex(m), _hex(o)]
+
+    def init_sets_an_unset_child(C):
+        R = C("spark.connect.Relation")
+        out = []
+        for kwargs in ({"range": {"end": 1}}, {}, {"range": None}):
+            r = R()
+            t = r.limit.input
+            t.__init__(**kwargs)
+            out.append([_hex(r), r.limit.input is t, r.HasField("limit")])
+        r = R()
+        t = r.limit.input
+        t.__init__()
+        out.append([_hex(r), r.HasField("limit")])
+        return out
+
+    def init_mappings_of_holder(C):
+        N = C("tests.alias.Node")
+        n = N(v=1)
+        n.next.__init__(next={"next": n})
+        m = N(v=1)
+        m.next.__init__(children={"a": {"next": m}})
+        return [_hex(n), _hex(m)]
+
+    def init_repeated_of_holder(C):
+        N = C("tests.alias.Node")
+        n = N(v=1)
+        n.next.__init__(items=[n, n.next])
+        m = N(v=1)
+        m.__init__(items=[m, m])
+        o = N(v=1)
+        o.next.__init__(items=(x for x in (o, o.next)))
+        return [_hex(n), _hex(m), _hex(o)]
+
+    def add_of_holder(C):
+        N = C("tests.alias.Node")
+        n = N(v=1)
+        first = n.next.items.add(v=2, next=n)
+        m = N(v=1)
+        second = m.next.items.add(next=m, v=2)
+        return [_hex(n), n.next.items[0] is first, _hex(m), m.next.items[0] is second]
+
+    def append_extend_insert_of_holder(C):
+        N = C("tests.alias.Node")
+        n = N(v=1)
+        item = n.next.items.append(n)
+        m = N(v=1)
+        m.items.append(m)
+        o = N(v=1)
+        o.next.items.extend([o, o.next])
+        p = N(v=1, items=[{"v": 2}])
+        p.items.insert(0, p)
+        d = C("spark.connect.DataType")(struct={"fields": [{"name": "a"}]})
+        f = d.struct.fields[0]
+        f.data_type.struct.fields.append(f)
+        return [_hex(n), n.next.items[0] is item if item is not None else None, _hex(m), _hex(o), _hex(p), _hex(d)]
+
+    def extend_and_merge_between_containers(C):
+        N = C("tests.alias.Node")
+        n = N(items=[{"v": 1}, {"v": 2}])
+        n.items[0].items.extend(n.items)
+        m = N(items=[{"v": 1}, {"v": 2}])
+        m.items[0].items.MergeFrom(m.items)
+        o = N(vs=[1, 2])
+        o.vs.extend(o.vs)
+        o.vs.MergeFrom(o.vs)
+        return [_hex(n), _hex(m), list(o.vs)]
+
+    def maps_of_holder(C):
+        N = C("tests.alias.Node")
+        n = N()
+        n.children["a"].v = 1
+        n.children.MergeFrom(n.children)
+        m = N(v=1)
+        m.children.get_or_create("a").MergeFrom(m)
+        o = N(v=1)
+        p = N(children={"a": o, "b": o.next})
+        return [_hex(n), _hex(m), _hex(p), _hex(o)]
+
+    def parses_of_its_own_bytes(C):
+        r = C("spark.connect.Relation")(limit={"limit": 1})
+        t = r.limit.input
+        t.MergeFromString(r.SerializeToString())
+        n = C("tests.alias.Node")(v=1, items=[{"v": 2}])
+        n.MergeFromString(n.SerializeToString())
+        s = C("spark.connect.Relation")(limit={"limit": 1})
+        u = s.limit.input
+        u.ParseFromString(s.SerializeToString())
+        return [_hex(r), r.limit.input is t, _hex(n), _hex(s), s.limit.input is u]
+
+    def init_of_too_deep_values(C):
+        R = C("spark.connect.Relation")
+        r, _ = deep(R, 60)
+        plan = C("spark.connect.Plan")(root={"limit": {"limit": 9}})
+        out = [_outcome(lambda: plan.__init__(root=r)), _hex(plan)]
+        w = C("spark.connect.WithRelations")(references=[{"limit": {"limit": 9}}])
+        out += [_outcome(lambda: w.__init__(references=[R(limit={"limit": 1}), r])), _hex(w)]
+        return out
+
+    cases = [
+        merge_into_stub_below, merge_into_set_below, merge_into_stub_of_oneof_sibling, merge_into_stub_of_stub,
+        merge_into_below_repeated, merge_into_below_map, merge_into_map_value_and_item,
+        merge_into_oneof_member_of_value, merge_into_stub_below_at_the_limit, merge_from_below, merge_from_itself,
+        copy_from_below, init_message_field_of_holder, init_stub_of_holder, init_merges_into_the_field,
+        init_in_the_order_of_the_keywords, init_sets_an_unset_child, init_mappings_of_holder, init_repeated_of_holder,
+        add_of_holder, append_extend_insert_of_holder, extend_and_merge_between_containers, maps_of_holder,
+        parses_of_its_own_bytes, init_of_too_deep_values,
+    ]
+    return {case.__name__: case for case in cases}
+
+
+def _alias_crash_cases():
+    """The cases of which upb ends its process (of a recursion of its copy, or of a container that
+    grows as it is read), each a function of the lookup of the classes of a runtime, and the copy
+    that the runtime makes first (what a copy of the value taken before gives), of the same lookup."""
+
+    def copy_into_stub_below(C):
+        r = C("spark.connect.Relation")(limit={"limit": 1})
+        t = r.limit.input
+        t.CopyFrom(r)
+        return [_hex(r), r.limit.input is t]
+
+    def copy_into_set_below(C):
+        r = C("spark.connect.Relation")(limit={"limit": 1, "input": {"range": {"end": 2}}})
+        t = r.limit.input
+        t.CopyFrom(r)
+        return [_hex(r), r.limit.input is t]
+
+    def copy_into_stub_of_oneof_sibling(C):
+        r = C("spark.connect.Relation")(limit={"limit": 1})
+        t = r.to_df.input
+        t.CopyFrom(r)
+        return [_hex(r), r.to_df.input is t]
+
+    def copy_into_map_value(C):
+        # The map has the entry (empty) once it is read, so the copy holds it.
+        n = C("tests.alias.Node")(v=1)
+        t = n.children["a"]
+        t.CopyFrom(n)
+        return [_hex(n), n.children["a"] is t]
+
+    def copy_into_repeated_item(C):
+        n = C("tests.alias.Node")(v=1, items=[{"v": 2}])
+        t = n.items[0]
+        t.CopyFrom(n)
+        return [_hex(n), n.items[0] is t]
+
+    def map_value_copy_from_holder(C):
+        n = C("tests.alias.Node")(v=1)
+        n.children["a"].next.CopyFrom(n)
+        return _hex(n)
+
+    def init_map_of_holder(C):
+        # The value is copied before the map takes the entry.
+        n = C("tests.alias.Node")(v=1)
+        n.next.__init__(children={"a": n})
+        return _hex(n)
+
+    def map_merge_into_inner(C):
+        n = C("tests.alias.Node")()
+        n.children["a"].v = 1
+        inner = n.children["a"].children
+        inner.MergeFrom(n.children)
+        return _hex(n)
+
+    def extend_itself(C):
+        # As a list's extend of itself: the messages that it has first.
+        n = C("tests.alias.Node")(items=[{"v": 1}, {"v": 2}])
+        n.items.extend(n.items)
+        m = C("tests.alias.Node")(items=[{"v": 1}, {"v": 2}])
+        m.items.MergeFrom(m.items)
+        return [_hex(n), _hex(m)]
+
+    def expected(C):
+        R, N = C("spark.connect.Relation"), C("tests.alias.Node")
+        return {
+            "copy_into_stub_below": [_hex(R(limit={"limit": 1, "input": {"limit": {"limit": 1}}})), True],
+            "copy_into_set_below": [
+                _hex(R(limit={"limit": 1, "input": {"limit": {"limit": 1, "input": {"range": {"end": 2}}}}})),
+                True,
+            ],
+            "copy_into_stub_of_oneof_sibling": [_hex(R(to_df={"input": {"limit": {"limit": 1}}})), True],
+            "copy_into_map_value": [_hex(N(v=1, children={"a": {"v": 1, "children": {"a": {}}}})), True],
+            "copy_into_repeated_item": [_hex(N(v=1, items=[{"v": 1, "items": [{"v": 2}]}])), True],
+            "map_value_copy_from_holder": _hex(N(v=1, children={"a": {"next": {"v": 1, "children": {"a": {}}}}})),
+            "init_map_of_holder": _hex(N(v=1, next={"children": {"a": {"v": 1, "next": {}}}})),
+            "map_merge_into_inner": _hex(N(children={"a": {"v": 1, "children": {"a": {"v": 1}}}})),
+            "extend_itself": [_hex(N(items=[{"v": 1}, {"v": 2}, {"v": 1}, {"v": 2}]))] * 2,
+        }
+
+    cases = [
+        copy_into_stub_below, copy_into_set_below, copy_into_stub_of_oneof_sibling, copy_into_map_value,
+        copy_into_repeated_item, map_value_copy_from_holder, init_map_of_holder, map_merge_into_inner, extend_itself,
+    ]
+    return {case.__name__: case for case in cases}, expected
+
+
+def _run_alias_cases(which, names, crash=False):
+    """The outcomes of the cases `names` of the runtime `which`, of what each raises too (a panic of
+    the runtime as well)."""
+    C = _alias_classes(which)
+    cases = _alias_crash_cases()[0] if crash else _alias_cases()
+    out = {}
+    for name in names:
+        try:
+            out[name] = ("ok", cases[name](C))
+        except BaseException as e:  # noqa: BLE001 (a PanicException of the runtime too)
+            out[name] = ("raise", type(e).__name__, str(e)[:300])
+    return out
+
+
+def _capped_to_4_gb():
+    """The limits of a process of a case that may recurse without bound (the `preexec_fn` of its
+    `subprocess.run`): an address space of at most 4 GB, which it fails of, rather than the memory
+    of the machine, and no core dump."""
+    import resource
+
+    _, hard = resource.getrlimit(resource.RLIMIT_AS)
+    cap = 4_000_000 * 1024
+    resource.setrlimit(resource.RLIMIT_AS, (cap if hard == resource.RLIM_INFINITY else min(cap, hard), hard))
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+
+
+def _alias_process(which, names, crash=False):
+    """The return code and the outcomes of the cases `names` of the runtime `which` run in a process
+    of its own, of an address space of at most 4 GB and no core dump: a case that recursed without
+    bound fails there, of the memory that it runs out of, rather than in this process."""
+    script = textwrap.dedent(
+        f"""
+        import json
+        from tests.test_proto_rust_offline import _run_alias_cases
+        print(json.dumps(_run_alias_cases({which!r}, {list(names)!r}, crash={crash!r})))
+        """
+    )
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=600,
+        cwd=str(root),
+        preexec_fn=_capped_to_4_gb,
+    )
+    lines = [line for line in result.stdout.splitlines() if line.startswith("{")]
+    return result.returncode, (json.loads(lines[-1]) if lines else None), result.stderr[-2000:]
+
+
+def test_merges_into_a_message_that_the_value_holds_are_upbs(upb):
+    # A merge into a message below its value (an unset child of it too), into the value itself or
+    # from a message below it, and the constructors, `add`, `append`, `extend` and the maps of a
+    # value that holds the message, are upb's, of the same messages: upb serializes the value of a
+    # `MergeFrom` first, so the merge takes what the value was then, where the runtime's merge
+    # read the value as the merge changed it, of a recursion without bound of a message below it.
+    # A second `__init__` sets an unset child in its parent first and merges the values of its
+    # message fields into the messages that the fields have, in the order of the keywords; `add`
+    # appends the message first. Each runtime runs in a process of its own, of 4 GB.
+    names = list(_alias_cases())
+    code, mine, err = _alias_process("ours", names)
+    assert code == 0 and mine is not None, err
+    code, theirs, err = _alias_process("upb", names)
+    assert code == 0 and theirs is not None, err
+    assert {name for name in names if mine[name] != theirs[name]} == set(), {
+        name: (mine[name], theirs[name]) for name in names if mine[name] != theirs[name]
+    }
+    assert all(outcome[0] == "ok" for outcome in mine.values()), mine
+
+
+def test_copies_into_a_message_that_the_value_holds_copy_the_value_first(upb):
+    # Where upb ends its process (its CopyFrom into a message below the value, the copies of a map's
+    # constructor and MergeFrom into an entry below the value, and the extend of a repeated field
+    # by itself, which upb reads as it grows), the runtime copies the value first: the copy of the
+    # value as it was, as a CopyFrom of a copy taken before gives, and a repeated field extended by
+    # itself takes the messages that it has first, as a list. upb runs each case in a process of its
+    # own, which upb's crash ends (another result of upb's must be the runtime's).
+    cases, expected = _alias_crash_cases()
+    names = list(cases)
+    code, mine, err = _alias_process("ours", names, crash=True)
+    assert code == 0 and mine is not None, err
+    assert mine == {name: ["ok", value] for name, value in expected(_alias_classes("ours")).items()}
+    for name in names:
+        code, theirs, err = _alias_process("upb", [name], crash=True)
+        assert code < 0 or (theirs is not None and theirs[name] == mine[name]), (name, code, theirs, err)
+
+
+def _reaching_cases(C):
+    """Python code of a value of a constructor (an `__iter__`, a `__next__`, an `__index__`) that
+    reaches the message under construction through the garbage collector's `get_objects`, and reads
+    or changes it."""
+    N = C("tests.alias.Node")
+    marker = 424242
+
+    def under_construction(before):
+        # The new message of the marker, set first (upb's wrappers of its children are new too).
+        found = [
+            o
+            for o in gc.get_objects()
+            if type(o) is N and id(o) not in before and o.WhichOneof("kind") == "w" and o.w == marker
+        ]
+        assert len(found) == 1, len(found)
+        return found[0]
+
+    def existing():
+        return {id(o) for o in gc.get_objects() if type(o) is N}
+
+    def iter_changes_message():
+        before, seen = existing(), []
+
+        class It:
+            def __iter__(self):
+                m = under_construction(before)
+                seen.append(_hex(m))
+                m.items.add(v=8)
+                m.vs.append(7)
+                return iter([N(v=2)])
+
+        return [_hex(N(w=marker, v=1, items=It(), vs=[3])), seen]
+
+    def next_reads_message():
+        before, seen = existing(), []
+
+        def gen():
+            for v in (2, 3):
+                m = under_construction(before)
+                seen.append([_hex(m), len(m.items)])
+                yield N(v=v)
+
+        return [_hex(N(w=marker, v=1, items=gen())), seen]
+
+    def next_yields_message_itself():
+        before = existing()
+
+        def gen():
+            yield N(v=2)
+            yield under_construction(before)
+
+        return _hex(N(w=marker, v=1, items=gen()))
+
+    def index_changes_message():
+        before, seen = existing(), []
+
+        class Index:
+            def __index__(self):
+                m = under_construction(before)
+                seen.append(_hex(m))
+                m.vs.append(99)
+                m.v = 5
+                return 4
+
+        return [_hex(N(w=marker, v=1, vs=[1, Index(), 3])), seen]
+
+    def index_in_a_mapping():
+        before, seen = existing(), []
+
+        class Index:
+            def __index__(self):
+                m = under_construction(before)
+                seen.append(_hex(m))
+                m.next.next.v = 6
+                return 4
+
+        return [_hex(N(w=marker, v=1, next={"vs": [Index()], "v": 3})), seen]
+
+    def index_clears_message():
+        before = existing()
+
+        class Index:
+            def __index__(self):
+                under_construction(before).Clear()
+                return 4
+
+        return _hex(N(w=marker, v=1, items=[N(v=2)], next={"v": Index()}))
+
+    def index_after_a_list_of_messages():
+        before = existing()
+
+        class Index:
+            def __index__(self):
+                return len(under_construction(before).items)
+
+        return _hex(N(w=marker, items=[N(v=2), N(v=3)], v=Index()))
+
+    cases = [
+        iter_changes_message, next_reads_message, next_yields_message_itself, index_changes_message,
+        index_in_a_mapping, index_clears_message, index_after_a_list_of_messages,
+    ]
+    return {case.__name__: _outcome(case) for case in cases}
+
+
+def test_code_of_a_value_that_reaches_the_message_under_construction_finds_upbs(upb):
+    # The constructor holds no borrow of its message while the Python code of a value runs, and
+    # sets the fields in upb's order: code that reaches the message under construction (of the
+    # garbage collector, which tracks it, as upb's) finds the fields before it set and changes
+    # it as upb's, where it raised the runtime's PanicException ("Already mutably borrowed").
+    assert _reaching_cases(_alias_classes("ours")) == _reaching_cases(_alias_classes("upb"))
+
+
+def _partial_cases(C):
+    """What a second `__init__` (and `add`) leaves of a repeated field whose values fail midway, and
+    of an unset child, as upb's."""
+    N, R = C("tests.alias.Node"), C("spark.connect.Relation")
+
+    def after(make, change):
+        m = make()
+        outcome = _outcome(lambda: change(m))
+        return [outcome, _hex(m)]
+
+    def gen_failing(*values):
+        yield from values
+        raise RuntimeError("midway")
+
+    def unset_child(change):
+        r = R()
+        t = r.limit.input
+        return [_outcome(lambda: change(t)), r.HasField("limit"), _hex(r)]
+
+    return {
+        "scalars, a bad value": after(lambda: N(vs=[0]), lambda m: m.__init__(vs=[1, 2, "x"])),
+        "scalars, a failing iterator": after(lambda: N(vs=[0]), lambda m: m.__init__(vs=gen_failing(1, 2))),
+        "scalars, not iterable": _outcome(lambda: N(vs=5)),
+        "messages, a bad mapping": after(
+            lambda: N(items=[{"v": 0}]), lambda m: m.__init__(items=[{"v": 1}, {"nope": 1}])
+        ),
+        "messages, a bad value of a mapping": after(
+            lambda: N(items=[{"v": 0}]), lambda m: m.__init__(items=[{"v": 1}, {"v": 2, "w": "bad"}])
+        ),
+        "messages, an int": after(lambda: N(items=[{"v": 0}]), lambda m: m.__init__(items=[N(v=1), 5, N(v=3)])),
+        "messages, another type": after(lambda: N(items=[{"v": 0}]), lambda m: m.__init__(items=[N(v=1), R()])),
+        "messages, a failing iterator": after(
+            lambda: N(items=[{"v": 0}]), lambda m: m.__init__(items=gen_failing(N(v=1), {"v": 2}))
+        ),
+        "add, a bad name": after(N, lambda m: m.items.add(v=1, nope=2)),
+        "add, a bad value": after(lambda: N(items=[{"v": 7}]), lambda m: m.items.add(v=1, w="bad")),
+        "a name of no field, of None": _outcome(lambda: R(nope=None)),
+        "an unset child, of **{}": unset_child(lambda t: t.__init__(**{})),
+        "an unset child, of None": unset_child(lambda t: t.__init__(range=None)),
+        "an unset child, of no field": unset_child(lambda t: t.__init__(nope=1)),
+        "an unset child, of no arguments": unset_child(lambda t: t.__init__()),
+    }
+
+
+def test_a_second_init_keeps_what_upbs_keeps_of_a_failure(upb):
+    # A second `__init__` appends the values of a repeated message field in turn, so a failure
+    # midway keeps those before it (and, of a value that is not a mapping, the new message that it
+    # failed to merge into), and those of a repeated scalar field as the container's `extend`
+    # (none, of a failure); `add` removes its message of a failure. A name of no field is upb's
+    # ValueError of a value of None too, and keyword arguments (even none) set an unset child in its
+    # parent first, as upb's `__init__` does.
+    assert _partial_cases(_alias_classes("ours")) == _partial_cases(_alias_classes("upb"))
+
+
+
+def _plan_of_an_any(count):
+    """Plans of a relation of an `Any` of a known type (which protobuf's text format expands to its
+    message), each the copy of a constructor, whose `root` is native until it is read."""
+    inner = proto.Relation(range={"end": 1})
+    rel = proto.Relation()
+    rel.extension.Pack(inner)
+    rel.common.plan_id = 3
+    return rel, [proto.Plan(root=rel) for _ in range(count)]
+
+
+def test_a_first_read_of_a_collection_of_the_text_format_finds_the_message():
+    # The drop-in's writer of protobuf's text format (`_proto_message_to_string`, of the client's
+    # plan logging) writes a native copy of the message, so a collection that its expansion of an
+    # Any starts, whose callback reads the native field of the message for the first time, finds it
+    # free, as it does of protobuf's `text_format` and of `str()`: the writer held the message
+    # borrowed, of the runtime's PanicException ("Already borrowed"). (Without protobuf, of the
+    # drop-in's writer and of `str()` only.)
+    try:
+        from google.protobuf import text_format
+    except ImportError:
+        text_format = None
+    writers = [("_proto_message_to_string", _pyspark._proto_message_to_string), ("str", str)]
+    if text_format is not None:
+        writers.append(("text_format", text_format.MessageToString))
+    out = {}
+    for name, write in writers:
+        _, (plan,) = _plan_of_an_any(1)
+        state = {"ran": False}
+
+        def callback(phase, info, plan=plan, state=state):
+            if phase == "start" and not state["ran"]:
+                state["ran"] = True
+                try:
+                    root = plan.root
+                    state["same"] = root is plan.root
+                except BaseException as e:  # noqa: BLE001 (a PanicException too)
+                    state["error"] = f"{type(e).__name__}: {e}"
+
+        gc.collect()
+        gc.callbacks.append(callback)
+        threshold = gc.get_threshold()
+        gc.set_threshold(1)
+        try:
+            text = write(plan)
+        finally:
+            gc.set_threshold(*threshold)
+            gc.callbacks.remove(callback)
+        out[name] = [state.get("error"), state.get("same"), "plan_id: 3" in text, plan.root.common.plan_id]
+    assert out["_proto_message_to_string"] == [None, True, True, 3], out
+    assert out.get("text_format", out["_proto_message_to_string"]) == out["_proto_message_to_string"], out
+    assert out["str"][0] is None and out["str"][2:] == [True, 3], out
+
+
+def test_a_first_read_of_another_thread_during_the_text_format_finds_the_message():
+    # The cross-thread form: a callback of the collections of the writer gives the GIL to another
+    # thread, which reads the native field of each plan for the first time while the writer
+    # writes it. Each read is whole, and the field gives one object from then on.
+    rel, plans = _plan_of_an_any(100)
+    state = {"current": None, "done": False}
+    seen = {"ok": 0, "errors": {}}
+
+    def callback(phase, info):
+        if phase == "start":
+            time.sleep(0.0002)
+
+    def reader():
+        last = None
+        while not state["done"]:
+            i = state["current"]
+            if i is None or i == last:
+                time.sleep(0)
+                continue
+            last = i
+            try:
+                plans[i].root
+                seen["ok"] += 1
+            except BaseException as e:  # noqa: BLE001 (a PanicException too)
+                key = f"{type(e).__name__}: {e}"
+                seen["errors"][key] = seen["errors"].get(key, 0) + 1
+
+    thread = threading.Thread(target=reader)
+    thread.start()
+    gc.callbacks.append(callback)
+    threshold = gc.get_threshold()
+    gc.set_threshold(1)
+    try:
+        for i in range(len(plans)):
+            state["current"] = i
+            _pyspark._proto_message_to_string(plans[i], as_one_line=True)
+    finally:
+        gc.set_threshold(*threshold)
+        gc.callbacks.remove(callback)
+        state["done"] = True
+        thread.join()
+    assert seen["errors"] == {} and seen["ok"] > 0, seen
+    expected = proto.Plan(root=rel).SerializeToString()
+    assert all(p.root is p.root and p.root.common.plan_id == 3 for p in plans)
+    assert all(p.SerializeToString() == expected for p in plans)
+
+
+def test_unknown_field_pairs_of_a_collection_find_the_message():
+    # The unknown field pairs (protobuf's `_unknown_fields` of its pure-Python messages) are made of
+    # a copy of the bytes, so a collection that the list starts, whose callback reads the message,
+    # finds it free.
+    unknown = b"".join(_tag(900 + i, 0) + _varint(i) for i in range(200))
+    plan = proto.Plan.FromString(proto.Plan(root=proto.Relation(range={"end": 1})).SerializeToString() + unknown)
+    message = proto.Plan(root=plan.root)
+    message.MergeFromString(unknown)
+    state = {"errors": []}
+
+    def callback(phase, info):
+        if phase == "start":
+            try:
+                message.root
+                message.SerializeToString()
+            except BaseException as e:  # noqa: BLE001 (a PanicException too)
+                state["errors"].append(type(e).__name__)
+
+    gc.callbacks.append(callback)
+    threshold = gc.get_threshold()
+    gc.set_threshold(1)
+    try:
+        pairs = _pyspark._proto_unknown_field_pairs(message)
+    finally:
+        gc.set_threshold(*threshold)
+        gc.callbacks.remove(callback)
+    assert state["errors"] == [] and len(pairs) == 200
+    assert b"".join(tag + value for tag, value in pairs) == unknown
+
+
+
+def test_threads_that_read_change_and_copy_the_same_copies_at_once_see_them_whole():
+    # Threads that read, change, replace and copy the same native copies at once, of a switch
+    # interval of a microsecond, so that one takes the GIL at the checkpoints of the making of
+    # the objects of a container of more than 1,024 messages: one container of the field, of
+    # every message of it and of both additions, and each copy of its own.
+    count = 3000
+    element = proto.Expression.Literal(integer=1)
+    source = proto.Expression.Literal.Array(elements=[element] * count)
+    other = proto.Expression.Literal.Array(elements=[proto.Expression.Literal(string="o")] * 7)
+    problems = []
+
+    def holder():
+        return proto.Expression.Literal(array=source)
+
+    def run_threads(*targets):
+        threads = [threading.Thread(target=target) for target in targets]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+    interval = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+    try:
+        for round_ in range(30):
+            h = holder()
+            seen = [None, None]
+
+            def reader(i, h=h, seen=seen):
+                seen[i] = h.array.elements
+
+            run_threads(lambda: reader(0), lambda: reader(1))
+            if seen[0] is not seen[1] or len(seen[0]) != count or seen[0] is not h.array.elements:
+                problems.append(("two readers", round_))
+
+            h = holder()
+
+            def adder(value, h=h):
+                h.array.elements.add().integer = value
+
+            run_threads(lambda: adder(5), lambda: adder(6))
+            values = [e.integer for e in h.array.elements]
+            if len(values) != count + 2 or sorted(values[-2:]) != [5, 6] or len(source.elements) != count:
+                problems.append(("two adders", round_, len(values)))
+
+            h = holder()
+            got = {}
+
+            def counter(h=h, got=got):
+                got["n"] = len(h.array.elements)
+
+            run_threads(counter, lambda h=h: h.array.CopyFrom(other))
+            if got["n"] not in (count, 7) or h.array.SerializeToString() != other.SerializeToString():
+                problems.append(("a reader and a CopyFrom", round_, got["n"]))
+
+            h = holder()
+            made = {}
+
+            def changer(h=h):
+                h.array.elements[0].integer = 9
+
+            def copier(h=h, made=made):
+                made["copy"] = proto.Expression(literal=h)
+
+            run_threads(changer, copier)
+            first = made["copy"].literal.array.elements[0].integer
+            made["copy"].literal.array.elements[1].integer = 4
+            if first not in (1, 9) or h.array.elements[0].integer != 9 or h.array.elements[1].integer != 1:
+                problems.append(("a change and a copy", round_, first))
+    finally:
+        sys.setswitchinterval(interval)
+    assert problems == [] and len(source.elements) == count and source.elements[1].integer == 1, problems
+
+
+def test_a_signal_during_the_first_read_of_a_copy_leaves_it_whole():
+    # The first read of a repeated message field of a copy of many messages makes their objects
+    # of checkpoints, every 1,024 messages: a signal there raises the exception of its handler
+    # from the read, as from the other operations of many steps, and the message stays whole, its
+    # field read again in full, of one object from then on.
+    import signal
+
+    count = 200_000
+    source = proto.Expression.Literal.Array(elements=[proto.Expression.Literal(integer=1)] * count)
+    data = source.SerializeToString()
+
+    class Stop(Exception):
+        pass
+
+    def handler(signum, frame):
+        raise Stop()
+
+    previous = signal.signal(signal.SIGALRM, handler)
+    outcomes = []
+    try:
+        for attempt in range(10):
+            h = proto.Expression.Literal(array=source)
+            array = h.array  # of one level: its elements stay native
+            signal.setitimer(signal.ITIMER_REAL, 0.0005 + attempt * 0.0002)
+            try:
+                len(array.elements)
+                outcomes.append("completed")
+            except Stop:
+                outcomes.append("interrupted")
+            finally:
+                signal.setitimer(signal.ITIMER_REAL, 0)
+            again = array.elements
+            assert len(again) == count and again is array.elements, attempt
+            assert array.SerializeToString() == data and h == proto.Expression.Literal(array=source), attempt
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+    assert "interrupted" in outcomes, outcomes
+
+
+def test_copies_of_copies_across_a_registration_are_of_the_classes_of_their_copy():
+    # A copy of a copy made after another class of its type is registered clones the native values
+    # that it shares at the new generation, so its objects, of any level, are of the new class,
+    # where those of the first copy stay of the class registered when it was made; of a message of
+    # thousands of levels, on a thread of a small stack.
+    script = """
+        import copy
+        import json
+        import threading
+
+        import pyspark.sql.connect.proto as proto
+        from pyspark import _pyspark
+        from pyspark.sql.connect.proto import _rust
+        from tests.test_proto_rust_offline import _relation_bytes
+
+        LEVELS = 3000
+        results = {}
+
+
+        def run():
+            data = _relation_bytes(LEVELS, lambda level: level % 7 == 0)
+            deep = _pyspark._proto_parse_deep(proto.Relation, data)
+            first = copy.deepcopy(deep)
+            other = type(
+                "Relation",
+                (_pyspark.ProtoMessage, _rust._MessageBase),
+                {"__slots__": (), "DESCRIPTOR": proto.Relation.DESCRIPTOR},
+            )
+            _pyspark._proto_register_classes({"spark.connect.Relation": other})
+            try:
+                second = copy.deepcopy(first)
+                third = proto.Relation()
+                third.CopyFrom(first)
+                results["copies"] = second.SerializeToString() == data and third == first
+                walk = second
+                for _ in range(LEVELS):
+                    walk = walk.limit.input
+                results["the bottom of the copy of the copy"] = type(walk) is other
+                walk = first
+                for _ in range(100):
+                    walk = walk.limit.input
+                results["the objects of the first copy"] = type(walk) is proto.Relation
+            finally:
+                _pyspark._proto_register_classes({"spark.connect.Relation": proto.Relation})
+            results["after"] = first == deep and second == deep and first.ByteSize() == len(data)
+
+
+        threading.stack_size(512 * 1024)
+        thread = threading.Thread(target=run)
+        thread.start()
+        thread.join()
+        print(json.dumps(results))
+        """
+    assert _run_script(script) == {
+        "copies": True,
+        "the bottom of the copy of the copy": True,
+        "the objects of the first copy": True,
+        "after": True,
+    }
+
+
+def _clear_field_of_a_member_cases(C):
+    """ClearField of a member of a oneof that the message does not hold, of an unset child of it
+    that Python holds or not."""
+    R = C("spark.connect.Relation")
+
+    def run(hold, change):
+        a = R()
+        if hold:
+            held = a.crosstab
+        else:
+            a.crosstab  # noqa: B018 (read, and dropped at once)
+            held = None
+        change(a)
+        a.ClearField("crosstab")
+        return [_hex(a), a.WhichOneof("rel_type"), held is not None and held is a.crosstab]
+
+    def below(read, keep):
+        # The unset child of the member is held of what Python holds below it (`read` of it),
+        # or not (`keep` false: read, and dropped at once).
+        a = R()
+        held = read(a.crosstab) if keep else None
+        if not keep:
+            read(a.crosstab)
+        a.show_string.vertical = True
+        a.ClearField("crosstab")
+        return [_hex(a), a.WhichOneof("rel_type"), held is not None]
+
+    return {
+        "held, the other set by a read": _outcome(lambda: run(True, lambda a: setattr(a.show_string, "vertical", True))),
+        "held, the other of CopyFrom": _outcome(
+            lambda: run(True, lambda a: a.show_string.CopyFrom(C("spark.connect.ShowString")(num_rows=3)))
+        ),
+        "not held": _outcome(lambda: run(False, lambda a: setattr(a.show_string, "vertical", True))),
+        "held, none set": _outcome(lambda: run(True, lambda a: None)),
+        "held of its unset child": _outcome(lambda: below(lambda c: c.input, True)),
+        "held of an unset child two levels below": _outcome(lambda: below(lambda c: c.input.limit, True)),
+        "held of a container below": _outcome(lambda: below(lambda c: c.input.project.expressions, True)),
+        "held of a container of scalars below": _outcome(
+            lambda: below(lambda c: c.input.read.data_source.paths, True)
+        ),
+        "held of a map below": _outcome(lambda: below(lambda c: c.input.read.data_source.options, True)),
+        "a container below dropped": _outcome(lambda: below(lambda c: c.input.project.expressions, False)),
+        "an unset child below dropped": _outcome(lambda: below(lambda c: c.input.limit, False)),
+    }
+
+
+def test_clear_field_of_a_member_of_an_unset_child_held_clears_its_oneof_as_upbs(upb):
+    # As upb's, whose ClearField sets an unset child of the field that Python holds in its message
+    # first (its `EnsureReified`), so the member of the oneof that the message holds is cleared;
+    # of one that Python no longer holds (upb holds its unset children weakly), it is not. upb's
+    # unset children and their containers hold their parents, so Python holds the unset child of
+    # what it holds below it too: an unset child of it, of any level, or a container of one.
+    assert _clear_field_of_a_member_cases(ours) == _clear_field_of_a_member_cases(upb)
+
+
+
+def _copy_into_unset_children_cases(C):
+    """CopyFrom into a message whose unset children, of several levels, Python holds."""
+    P, R = C("spark.connect.Plan"), C("spark.connect.Relation")
+
+    def rel():
+        return R(
+            read={"data_source": {"format": "csv", "paths": ["a"], "options": {"k": "v"}}},
+            common={"plan_id": 1},
+        )
+
+    def nested():
+        p = P()
+        stub = p.root
+        deep = stub.read
+        deeper = deep.data_source
+        p.CopyFrom(P(root=rel()))
+        deeper.format = "json"
+        return [p.root is stub, p.root.read is deep, p.root.read.data_source is deeper, _hex(p)]
+
+    def nested_changed_at_the_middle():
+        p = P()
+        deep = p.root.read
+        p.CopyFrom(P(root=rel()))
+        deep.data_source.format = "json"
+        return [p.root.read is deep, _hex(p)]
+
+    def unset_by_the_copy():
+        # The copy sets `read`; the unset child of `limit` (of the same oneof) stays unset, and
+        # setting it sets the member.
+        p = P()
+        stub = p.root
+        other = stub.limit
+        p.CopyFrom(P(root=rel()))
+        before = _hex(p)
+        other.limit = 5
+        return [p.root is stub, before, _hex(p), p.root.HasField("read")]
+
+    def copied_twice():
+        p = P()
+        deep = p.root.read
+        p.CopyFrom(P(root=rel()))
+        p.CopyFrom(P(root=R(read={"named_table": {"unparsed_identifier": "t"}})))
+        deep.data_source.format = "json"
+        return [p.root.read is deep, _hex(p), _hex(deep)]
+
+    cases = [nested, nested_changed_at_the_middle, unset_by_the_copy, copied_twice]
+    return {case.__name__: _outcome(case) for case in cases}
+
+
+def test_copies_into_unset_children_of_many_levels_keep_what_they_copied_as_upbs(upb):
+    # The unset children that Python holds of a message that a CopyFrom sets, of any level, are
+    # the messages of the copy, as upb's are (of its `SyncSubobjs`): a change of one keeps what the
+    # copy set, where a change of an unset child below the first level replaced the copied
+    # message with the unset child, of the change only.
+    assert _copy_into_unset_children_cases(ours) == _copy_into_unset_children_cases(upb)
+
+
+
+def test_copies_of_many_levels_of_maps_grow_the_stack_at_their_entries():
+    # A native copy grows its stack every 16 levels, a map entry a level of its own: of a chain of
+    # maps whose entries are at the levels of a multiple of 16, the copy grows it at the entries,
+    # which it did not, so a copy of many such levels on a small stack (a thread of 256 KiB)
+    # overflowed it. Of a process of its own, of 4 GB. (The plugin's type of maps of itself needs
+    # protobuf's descriptor pool and builder.)
+    pytest.importorskip("google.protobuf")
+    script = textwrap.dedent(
+        """
+        import copy, json, threading
+        from tests.test_proto_rust_offline import _alias_classes
+        N = _alias_classes("ours")("tests.alias.Node")
+        out = {}
+        def run():
+            n = N()
+            m = n.next  # the entries at the even levels, the messages at the odd ones
+            for _ in range(20000):
+                m = m.children["k"]
+            m.v = 7
+            data = n.SerializeToString()
+            twin = copy.deepcopy(n)
+            out["deepcopy"] = twin.SerializeToString() == data
+            other = N()
+            other.CopyFrom(n)
+            out["CopyFrom"] = other.SerializeToString() == data
+            del twin, other, n, m
+        threading.stack_size(256 * 1024)
+        thread = threading.Thread(target=run)
+        thread.start()
+        thread.join()
+        print(json.dumps(out))
+        """
+    )
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    result = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, timeout=600, cwd=str(root), preexec_fn=_capped_to_4_gb
+    )
+    assert result.returncode == 0, result.stderr[-2000:]
+    assert json.loads(result.stdout.strip().splitlines()[-1]) == {"deepcopy": True, "CopyFrom": True}
+
+
+def _first_reads_of_containers():
+    """The first reads of a container of a message (a repeated message field, a map, a repeated
+    scalar field), each of the message and of the read."""
+    return {
+        "repeated": (lambda m: m.project, lambda t: t.expressions),
+        "map": (lambda m: m.read.data_source, lambda t: t.options),
+        "repeated scalar": (lambda m: m.read.data_source, lambda t: t.paths),
+    }
+
+
+def test_a_collection_during_the_first_read_of_a_container_finds_the_message():
+    # The first read of a container of a message makes the container, and the weak reference of
+    # its owner, with no borrow of the message held: a collection that their allocation starts,
+    # whose callback reads the message, finds it free, where it raised the runtime's
+    # PanicException ("Already mutably borrowed").
+    out = {}
+    for case, (target_of, read) in _first_reads_of_containers().items():
+        target = target_of(proto.Relation())
+        state = {"ran": False, "error": None}
+
+        def callback(phase, info, target=target, state=state):
+            if phase == "start" and not state["ran"]:
+                state["ran"] = True
+                try:
+                    target.ListFields()
+                except BaseException as e:  # noqa: BLE001 (a PanicException too)
+                    state["error"] = f"{type(e).__name__}: {e}"
+
+        gc.collect()
+        gc.callbacks.append(callback)
+        threshold = gc.get_threshold()
+        gc.set_threshold(1)
+        try:
+            container = read(target)
+        finally:
+            gc.set_threshold(*threshold)
+            gc.callbacks.remove(callback)
+        out[case] = [state["ran"], state["error"], container is read(target)]
+    assert out == {case: [True, None, True] for case in _first_reads_of_containers()}, out
+
+
+def test_another_thread_during_the_first_read_of_a_container_finds_the_message():
+    # The cross-thread form: a callback of the collections of the first read gives the GIL to
+    # another thread, which reads the message meanwhile, whole.
+    out = {}
+    for case, (target_of, read) in _first_reads_of_containers().items():
+        targets = [target_of(proto.Relation()) for _ in range(40)]
+        state = {"current": None, "done": False}
+        seen = {"ok": 0, "errors": {}}
+
+        def reader(targets=targets, state=state, seen=seen):
+            last = None
+            while not state["done"]:
+                i = state["current"]
+                if i is None or i == last:
+                    time.sleep(0)
+                    continue
+                last = i
+                try:
+                    targets[i].ListFields()
+                    seen["ok"] += 1
+                except BaseException as e:  # noqa: BLE001 (a PanicException too)
+                    key = f"{type(e).__name__}: {e}"
+                    seen["errors"][key] = seen["errors"].get(key, 0) + 1
+
+        def callback(phase, info):
+            if phase == "start":
+                time.sleep(0.0002)
+
+        thread = threading.Thread(target=reader)
+        thread.start()
+        gc.callbacks.append(callback)
+        threshold = gc.get_threshold()
+        gc.set_threshold(1)
+        try:
+            for i, target in enumerate(targets):
+                state["current"] = i
+                read(target)
+        finally:
+            gc.set_threshold(*threshold)
+            gc.callbacks.remove(callback)
+            state["done"] = True
+            thread.join()
+        out[case] = seen["errors"]
+        assert all(read(t) is read(t) for t in targets)
+    assert out == {case: {} for case in _first_reads_of_containers()}, out
