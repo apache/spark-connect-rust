@@ -25,20 +25,20 @@ use super::scalar::Scalar;
 
 #[pyclass(frozen, module = "pyspark.sql.connect.proto", name = "Descriptor")]
 pub struct PyDescriptor {
-    pub(crate) desc: Arc<MessageDesc>,
+    pub(crate) desc: &'static MessageDesc,
     options: PyOnceLock<Py<PyAny>>,
 }
 
 #[pyclass(frozen, module = "pyspark.sql.connect.proto", name = "FieldDescriptor")]
 pub struct PyFieldDescriptor {
-    message: Arc<MessageDesc>,
+    message: &'static MessageDesc,
     index: usize,
     options: PyOnceLock<Py<PyAny>>,
 }
 
 #[pyclass(frozen, module = "pyspark.sql.connect.proto", name = "OneofDescriptor")]
 pub struct PyOneofDescriptor {
-    message: Arc<MessageDesc>,
+    message: &'static MessageDesc,
     index: usize,
     options: PyOnceLock<Py<PyAny>>,
 }
@@ -115,8 +115,7 @@ pub(crate) fn descriptor_object(py: Python<'_>, full_name: &str) -> PyResult<Py<
     cached(py, &CACHE, full_name.to_string(), || {
         let desc = pool()
             .message(full_name)
-            .ok_or_else(|| PyKeyError::new_err(full_name.to_string()))?
-            .clone();
+            .ok_or_else(|| PyKeyError::new_err(full_name.to_string()))?;
         Py::new(
             py,
             PyDescriptor {
@@ -130,7 +129,7 @@ pub(crate) fn descriptor_object(py: Python<'_>, full_name: &str) -> PyResult<Py<
 /// The descriptor of the field `index` of `message`.
 pub(crate) fn field_descriptor_object(
     py: Python<'_>,
-    message: &Arc<MessageDesc>,
+    message: &'static MessageDesc,
     index: usize,
 ) -> PyResult<Py<PyAny>> {
     static CACHE: Cache<(String, usize), PyFieldDescriptor> = OnceLock::new();
@@ -138,7 +137,7 @@ pub(crate) fn field_descriptor_object(
         Py::new(
             py,
             PyFieldDescriptor {
-                message: message.clone(),
+                message,
                 index,
                 options: PyOnceLock::new(),
             },
@@ -149,7 +148,7 @@ pub(crate) fn field_descriptor_object(
 
 fn oneof_descriptor_object(
     py: Python<'_>,
-    message: &Arc<MessageDesc>,
+    message: &'static MessageDesc,
     index: usize,
 ) -> PyResult<Py<PyOneofDescriptor>> {
     static CACHE: Cache<(String, usize), PyOneofDescriptor> = OnceLock::new();
@@ -157,7 +156,7 @@ fn oneof_descriptor_object(
         Py::new(
             py,
             PyOneofDescriptor {
-                message: message.clone(),
+                message,
                 index,
                 options: PyOnceLock::new(),
             },
@@ -343,7 +342,7 @@ impl PyDescriptor {
     #[getter]
     fn fields<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
         let fields = (0..self.desc.fields.len())
-            .map(|i| field_descriptor_object(py, &self.desc, i))
+            .map(|i| field_descriptor_object(py, self.desc, i))
             .collect::<PyResult<Vec<_>>>()?;
         PyList::new(py, fields)
     }
@@ -352,7 +351,7 @@ impl PyDescriptor {
     fn fields_by_name<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let dict = PyDict::new(py);
         for (i, field) in self.desc.fields.iter().enumerate() {
-            dict.set_item(&field.name, field_descriptor_object(py, &self.desc, i)?)?;
+            dict.set_item(&field.name, field_descriptor_object(py, self.desc, i)?)?;
         }
         Ok(dict)
     }
@@ -361,7 +360,7 @@ impl PyDescriptor {
     fn fields_by_number<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let dict = PyDict::new(py);
         for (i, field) in self.desc.fields.iter().enumerate() {
-            dict.set_item(field.number, field_descriptor_object(py, &self.desc, i)?)?;
+            dict.set_item(field.number, field_descriptor_object(py, self.desc, i)?)?;
         }
         Ok(dict)
     }
@@ -369,7 +368,7 @@ impl PyDescriptor {
     #[getter]
     fn oneofs<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
         let oneofs = (0..self.desc.oneofs.len())
-            .map(|i| oneof_descriptor_object(py, &self.desc, i))
+            .map(|i| oneof_descriptor_object(py, self.desc, i))
             .collect::<PyResult<Vec<_>>>()?;
         PyList::new(py, oneofs)
     }
@@ -378,7 +377,7 @@ impl PyDescriptor {
     fn oneofs_by_name<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let dict = PyDict::new(py);
         for (i, oneof) in self.desc.oneofs.iter().enumerate() {
-            dict.set_item(&oneof.name, oneof_descriptor_object(py, &self.desc, i)?)?;
+            dict.set_item(&oneof.name, oneof_descriptor_object(py, self.desc, i)?)?;
         }
         Ok(dict)
     }
@@ -449,14 +448,14 @@ impl PyDescriptor {
     #[pyo3(name = "GetOptions")]
     fn get_options(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         options_of(py, &self.options, "MessageOptions", || {
-            encoded(pool().message_proto(&self.desc).and_then(|p| p.options))
+            encoded(pool().message_proto(self.desc).and_then(|p| p.options))
         })
     }
 
     /// Merge the `google.protobuf.DescriptorProto` of the message into `proto`.
     #[pyo3(name = "CopyToProto")]
     fn copy_to_proto(&self, py: Python<'_>, proto: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-        let bytes = pool().message_proto(&self.desc).map(|p| p.encode_to_vec());
+        let bytes = pool().message_proto(self.desc).map(|p| p.encode_to_vec());
         copy_to_proto(py, proto, "google.protobuf.DescriptorProto", bytes)
     }
 
@@ -469,10 +468,7 @@ impl PyDescriptor {
     fn fields_by_camelcase_name<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let dict = PyDict::new(py);
         for (i, field) in self.desc.fields.iter().enumerate() {
-            dict.set_item(
-                &field.json_name,
-                field_descriptor_object(py, &self.desc, i)?,
-            )?;
+            dict.set_item(&field.json_name, field_descriptor_object(py, self.desc, i)?)?;
         }
         Ok(dict)
     }
@@ -691,7 +687,7 @@ impl PyFieldDescriptor {
     fn containing_oneof(&self, py: Python<'_>) -> PyResult<Option<Py<PyOneofDescriptor>>> {
         self.message.fields[self.index]
             .oneof
-            .map(|o| oneof_descriptor_object(py, &self.message, o))
+            .map(|o| oneof_descriptor_object(py, self.message, o))
             .transpose()
     }
 
@@ -715,7 +711,7 @@ impl PyFieldDescriptor {
     fn has_default_value(&self) -> PyResult<bool> {
         let field = &self.message.fields[self.index];
         let proto = pool()
-            .message_proto(&self.message)
+            .message_proto(self.message)
             .and_then(|p| p.field.into_iter().nth(self.index));
         Ok(!field.repeated && proto.is_some_and(|p| p.default_value.is_some()))
     }
@@ -731,7 +727,7 @@ impl PyFieldDescriptor {
         options_of(py, &self.options, "FieldOptions", || {
             encoded(
                 pool()
-                    .message_proto(&self.message)
+                    .message_proto(self.message)
                     .and_then(|p| p.field.into_iter().nth(self.index))
                     .and_then(|f| f.options),
             )
@@ -793,7 +789,7 @@ impl PyOneofDescriptor {
         let fields = self.message.oneofs[self.index]
             .fields
             .iter()
-            .map(|&i| field_descriptor_object(py, &self.message, i))
+            .map(|&i| field_descriptor_object(py, self.message, i))
             .collect::<PyResult<Vec<_>>>()?;
         PyList::new(py, fields)
     }
@@ -814,7 +810,7 @@ impl PyOneofDescriptor {
         options_of(py, &self.options, "OneofOptions", || {
             encoded(
                 pool()
-                    .message_proto(&self.message)
+                    .message_proto(self.message)
                     .and_then(|p| p.oneof_decl.into_iter().nth(self.index))
                     .and_then(|o| o.options),
             )
@@ -1267,10 +1263,10 @@ fn file_of_symbol(symbol: &str) -> Option<&'static str> {
 fn member_of(
     full_name: &str,
     index_of: impl Fn(&MessageDesc, &str) -> Option<usize>,
-) -> Option<(Arc<MessageDesc>, usize)> {
+) -> Option<(&'static MessageDesc, usize)> {
     let (scope, name) = full_name.rsplit_once('.')?;
     let message = pool().message(scope)?;
-    Some((message.clone(), index_of(message, name)?))
+    Some((message, index_of(message, name)?))
 }
 
 #[pymethods]
@@ -1317,7 +1313,7 @@ impl PyDescriptorPool {
     fn find_field_by_name(&self, py: Python<'_>, full_name: &str) -> PyResult<Py<PyAny>> {
         let (message, index) = member_of(full_name, |m, name| m.by_name.get(name).copied())
             .ok_or_else(|| PyKeyError::new_err(format!("Couldn't find field {full_name}")))?;
-        field_descriptor_object(py, &message, index)
+        field_descriptor_object(py, message, index)
     }
 
     #[pyo3(name = "FindOneofByName")]
@@ -1329,7 +1325,7 @@ impl PyDescriptorPool {
         let (message, index) =
             member_of(full_name, |m, name| m.oneof_by_name.get(name).copied())
                 .ok_or_else(|| PyKeyError::new_err(format!("Couldn't find oneof {full_name}")))?;
-        oneof_descriptor_object(py, &message, index)
+        oneof_descriptor_object(py, message, index)
     }
 
     #[pyo3(name = "FindServiceByName")]

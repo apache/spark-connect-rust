@@ -159,18 +159,18 @@ pub(crate) struct MapDesc {
     pub(crate) value_presence: bool,
     /// The message type of a value of a message, once a parse looked it up (see
     /// [`MapDesc::value_message`]).
-    pub(crate) value_message: OnceLock<Arc<MessageDesc>>,
+    pub(crate) value_message: OnceLock<&'static MessageDesc>,
 }
 
 impl MapDesc {
     /// The message type of the values of a map of messages, of the pool, looked up once it is
     /// found (see [`FieldDesc::message_type`]).
-    pub(crate) fn value_message(&self) -> Option<&Arc<MessageDesc>> {
+    pub(crate) fn value_message(&self) -> Option<&'static MessageDesc> {
         if let Some(desc) = self.value_message.get() {
             return Some(desc);
         }
         let desc = pool().message(&self.value_type)?;
-        Some(self.value_message.get_or_init(|| desc.clone()))
+        Some(self.value_message.get_or_init(|| desc))
     }
 }
 
@@ -224,19 +224,19 @@ pub(crate) struct FieldDesc {
     pub(crate) closed_values: Option<Arc<[i32]>>,
     /// The message type of a message field, once a parse looked it up (see
     /// [`FieldDesc::message_type`]).
-    pub(crate) message_type: OnceLock<Arc<MessageDesc>>,
+    pub(crate) message_type: OnceLock<&'static MessageDesc>,
 }
 
 impl FieldDesc {
     /// The message type of the message field, of the pool, looked up once it is found (a type of
     /// a file that `register` adds later is looked up again until then), so that a parse of many
     /// messages of the field does not hash its full name for each.
-    pub(crate) fn message_type(&self) -> Option<&Arc<MessageDesc>> {
+    pub(crate) fn message_type(&self) -> Option<&'static MessageDesc> {
         if let Some(desc) = self.message_type.get() {
             return Some(desc);
         }
         let desc = pool().message(&self.type_name)?;
-        Some(self.message_type.get_or_init(|| desc.clone()))
+        Some(self.message_type.get_or_init(|| desc))
     }
 
     /// Whether the field tells being set apart from holding the default: a singular field of
@@ -628,10 +628,11 @@ impl Pool {
     }
 
     /// The message type `full_name`, of the descriptor set or of a file that [`register`] added.
-    pub(crate) fn message(&'static self, full_name: &str) -> Option<&'static Arc<MessageDesc>> {
+    pub(crate) fn message(&'static self, full_name: &str) -> Option<&'static MessageDesc> {
         self.messages
             .get(full_name)
             .or_else(|| registered().messages.get(full_name).copied())
+            .map(|desc| &**desc)
     }
 
     /// The enum type `full_name`, of the descriptor set or of a file that [`register`] added.

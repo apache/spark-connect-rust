@@ -35,11 +35,12 @@ use pyo3::types::{
 };
 use pyo3::IntoPyObjectExt;
 
+use super::arena::{NRef, Releases};
 use super::message::{
     content_eq, duplicate_with, mark_present, new_instance, registered_class, MessageClass,
     PyMessage,
 };
-use super::native::{self, CopyError, Native, NativeMap, NativeValue};
+use super::native::{self, CopyError, NativeMap, NativeMessages, NativeValue};
 use super::pool::{Kind, MapDesc};
 use super::scalar::Scalar;
 use crate::interrupt::ConversionBudget;
@@ -1168,9 +1169,25 @@ fn sort_kwargs<'py>(
 pub struct RepeatedComposite {
     /// The class of the messages of the container, which makes its new ones.
     pub(crate) class: MessageClass,
+    /// The messages of the container that have their objects; those of `pending` follow them.
     pub(crate) items: Vec<Py<PyMessage>>,
     owner: Owner,
+    /// The messages that follow `items`, of a native value of a repeated message field, whose
+    /// objects the container makes as they are read (see [`RepeatedComposite::of_native`]).
+    pending: Option<Pending>,
 }
+
+/// The messages of a container after those of its objects, as the native value of a repeated
+/// message field holds them: of the value, which other messages may hold too, from the message
+/// `next` on, or the messages themselves, of a value that the container alone held.
+enum Pending {
+    Shared(Arc<NativeMessages>, usize),
+    Owned(std::vec::IntoIter<NRef>),
+}
+
+/// The messages that a read of a message of a container that holds messages natively makes the
+/// objects of, at least: those that follow it too, as a read of one most often reads the next.
+const CHUNK: usize = 64;
 
 impl RepeatedComposite {
     pub(crate) fn new(class: MessageClass, items: Vec<Py<PyMessage>>, owner: Owner) -> Self {
@@ -1178,6 +1195,161 @@ impl RepeatedComposite {
             class,
             items,
             owner,
+            pending: None,
+        }
+    }
+
+    /// A container of the messages of `value`, the native value of a repeated message field, held
+    /// by no message, as the copies of the runtime were (see `native::made_of`): the container
+    /// makes the objects of the messages as they are read, a chunk at a time
+    /// ([`RepeatedComposite::make`]), so that a read of each message of a value of many takes its
+    /// object as it is made, rather than of a pass of their own, and a read of the first ones makes
+    /// theirs only. Every other operation of the container makes them all first.
+    pub(crate) fn of_native(class: MessageClass, value: Arc<NativeMessages>) -> Self {
+        RepeatedComposite {
+            class,
+            items: Vec::new(),
+            owner: None,
+            pending: Some(Pending::Shared(value, 0)),
+        }
+    }
+
+    /// The messages of the container, of their objects and those that it holds natively.
+    pub(crate) fn len(&self) -> usize {
+        self.items.len() + self.pending_natives().len()
+    }
+
+    /// The messages that the container holds natively, which follow those of `items`.
+    pub(crate) fn pending_natives(&self) -> &[NRef] {
+        match &self.pending {
+            None => &[],
+            Some(Pending::Shared(value, next)) => &value.items[*next..],
+            Some(Pending::Owned(items)) => items.as_slice(),
+        }
+    }
+
+    /// Take the messages that the container holds natively as its own, once the field no longer
+    /// holds their value (see `native::Made::fill`), if no other message holds the value: their
+    /// objects then take their fields, moved.
+    pub(crate) fn own_pending(&mut self) {
+        let Some(Pending::Shared(value, next)) = self.pending.take() else {
+            return;
+        };
+        self.pending = Some(match Arc::try_unwrap(value) {
+            Ok(value) => {
+                let mut items = value.items.into_iter();
+                for _ in 0..next {
+                    items.next();
+                }
+                Pending::Owned(items)
+            }
+            Err(value) => Pending::Shared(value, next),
+        });
+    }
+
+    /// The native messages that the container holds, to discard their unknown fields (see
+    /// `PyMessage::discard_unknown`): of its own, a value that other messages hold too cloned of
+    /// one level first.
+    pub(crate) fn pending_natives_mut(&mut self, py: Python<'_>) -> &mut [NRef] {
+        match &mut self.pending {
+            None => &mut [],
+            Some(Pending::Shared(value, next)) => {
+                let next = *next;
+                let value = native::unique_messages(py, value);
+                &mut value.items[next..]
+            }
+            Some(Pending::Owned(items)) => items.as_mut_slice(),
+        }
+    }
+
+    /// Make the objects of the messages that the container holds natively, up to the message
+    /// `upto` (all of them, of `usize::MAX`), a chunk of [`CHUNK`] at least at a time: the objects
+    /// are made with no borrow of the container held, as making them may run Python code (a
+    /// collection of the garbage collector, a checkpoint of its budget, which another thread may
+    /// take the GIL at), and set only if the container is as it was then, else read again; then
+    /// they take the fields of their messages (moved, of messages that the container alone holds,
+    /// else copies of one level), running no Python code. A container that Rust code borrows
+    /// meanwhile is Python's `RuntimeError`, never a panic.
+    pub(crate) fn make(slf: &Bound<'_, Self>, upto: usize) -> PyResult<()> {
+        let py = slf.py();
+        loop {
+            let (class, made, count, first) = {
+                let c = slf.try_borrow()?;
+                let pending = c.pending_natives();
+                if pending.is_empty() || c.items.len() >= upto {
+                    return Ok(());
+                }
+                let count = (upto - c.items.len()).max(CHUNK).min(pending.len());
+                (
+                    c.class.clone_ref(py),
+                    c.items.len(),
+                    count,
+                    pending.as_ptr(),
+                )
+            };
+            let budget = ConversionBudget::full();
+            let mut objects = Vec::with_capacity(count);
+            for _ in 0..count {
+                budget.step(py)?;
+                objects.push(class.new_message(py)?);
+            }
+            let mut c = slf.try_borrow_mut()?;
+            if c.items.len() != made
+                || c.pending_natives().len() < count
+                || c.pending_natives().as_ptr() != first
+            {
+                // Made or changed meanwhile: these objects are dropped once the container is no
+                // longer borrowed, and the container is read again.
+                drop(c);
+                continue;
+            }
+            let mut releases = Releases::default();
+            for object in &objects {
+                let (slots, unknown) = c.take_next(py, &mut releases);
+                object.borrow_mut().take_parts(slots, unknown);
+            }
+            drop(releases);
+            c.items.extend(objects.into_iter().map(Bound::unbind));
+            if c.pending_natives().is_empty() {
+                // The value is released once the container is no longer borrowed.
+                let pending = c.pending.take();
+                drop(c);
+                drop(pending);
+            }
+        }
+    }
+
+    /// Make the objects of all the messages that the container holds natively (see
+    /// [`RepeatedComposite::make`]).
+    pub(crate) fn make_all(slf: &Bound<'_, Self>) -> PyResult<()> {
+        Self::make(slf, usize::MAX)
+    }
+
+    /// The set fields and the unknown fields of the next message that the container holds
+    /// natively, which it no longer holds: moved, of a message that the container alone holds (its
+    /// node released of `releases`), else copied, of one level.
+    fn take_next(
+        &mut self,
+        py: Python<'_>,
+        releases: &mut Releases,
+    ) -> (super::message::Slots, Vec<u8>) {
+        let copy = |m: &NRef| {
+            let fields = m.fields.clone_native_at(py, m.generation);
+            (fields.slots, fields.unknown)
+        };
+        match self.pending.as_mut().expect("a message held natively") {
+            Pending::Shared(value, next) => {
+                let at = *next;
+                *next += 1;
+                copy(&value.items[at])
+            }
+            Pending::Owned(items) => {
+                let message = items.next().expect("a message held natively");
+                match NRef::into_parts_releasing(message, releases) {
+                    Ok(parts) => parts,
+                    Err(message) => copy(&message),
+                }
+            }
         }
     }
 
@@ -1186,6 +1358,7 @@ impl RepeatedComposite {
     }
 
     fn reify(slf: &Bound<'_, Self>) -> PyResult<()> {
+        Self::make_all(slf)?;
         let owner = owner_of(slf.py(), &slf.borrow().owner);
         touch(slf.py(), &owner)
     }
@@ -1370,6 +1543,7 @@ impl RepeatedComposite {
     ) -> PyResult<()> {
         // As upb's: no change of an unset container (an empty one), so no change of its message.
         let py = slf.py();
+        Self::make_all(slf)?;
         let list = slf.borrow().to_list(py)?;
         let kwargs = sort_kwargs(py, kwargs)?;
         list.call_method("sort", args, Some(&kwargs))?;
@@ -1386,7 +1560,11 @@ impl RepeatedComposite {
 
     /// As upb's: no change of an unset container (an empty one), so no change of its message.
     fn clear(slf: &Bound<'_, Self>) -> PyResult<()> {
-        let _items = std::mem::take(&mut slf.borrow_mut().items);
+        // Released once the container is no longer borrowed.
+        let _held = {
+            let mut c = slf.borrow_mut();
+            (std::mem::take(&mut c.items), c.pending.take())
+        };
         Ok(())
     }
 
@@ -1412,6 +1590,7 @@ impl RepeatedComposite {
         let _ = args;
         no_keywords_of_positional(slf.py(), Self::UPB_CLASS, "__deepcopy__", kwargs)?;
         let py = slf.py();
+        Self::make_all(slf)?;
         let (class, items) = {
             let me = slf.borrow();
             let items: Vec<Py<PyMessage>> = me.items.iter().map(|m| m.clone_ref(py)).collect();
@@ -1426,17 +1605,28 @@ impl RepeatedComposite {
     }
 
     fn __len__(&self) -> usize {
-        self.items.len()
+        self.len()
     }
 
     fn __getitem__(slf: &Bound<'_, Self>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         let py = slf.py();
         let item = |m: &Py<PyMessage>| Ok(m.clone_ref(py).into_any());
-        // The index of an int runs no Python code, so the length and the item are read at once.
+        // The index of an int runs no Python code, so the length and the item are read at once,
+        // once the container made the objects up to it.
         if key.is_exact_instance_of::<PyInt>() {
+            let at = {
+                let me = slf.borrow();
+                match Subscript::of(key, me.len())? {
+                    Subscript::Index(at) if at < me.items.len() => return item(&me.items[at]),
+                    Subscript::Index(at) => at,
+                    _ => unreachable!("an int is an index"),
+                }
+            };
+            Self::make(slf, at + 1)?;
             let me = slf.borrow();
-            return Subscript::of(key, me.items.len())?.get(py, &me.items, item);
+            return Subscript::of(key, me.len())?.get(py, &me.items, item);
         }
+        Self::make_all(slf)?;
         let len = slf.borrow().items.len();
         let subscript = Subscript::of(key, len)?;
         subscript.get(py, &slf.borrow().items, item)
@@ -1474,9 +1664,13 @@ impl RepeatedComposite {
         if !matches!(op, CompareOp::Eq | CompareOp::Ne) {
             return Ok(py.NotImplemented());
         }
+        Self::make_all(slf)?;
         let mine = slf.borrow().to_list(py)?;
         let other = match other.cast::<RepeatedComposite>() {
-            Ok(other) => other.borrow().to_list(py)?.into_any(),
+            Ok(other) => {
+                Self::make_all(other)?;
+                other.borrow().to_list(py)?.into_any()
+            }
             Err(_) => other.clone(),
         };
         Ok(mine.as_any().rich_compare(&other, op)?.unbind())
@@ -1485,8 +1679,9 @@ impl RepeatedComposite {
     #[classattr]
     const __hash__: Option<Py<PyAny>> = None;
 
-    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
-        Ok(self.to_list(py)?.repr()?.to_string())
+    fn __repr__(slf: &Bound<'_, Self>) -> PyResult<String> {
+        Self::make_all(slf)?;
+        Ok(slf.borrow().to_list(slf.py())?.repr()?.to_string())
     }
 }
 
@@ -1720,7 +1915,7 @@ fn value_of(map: &MapDesc, value: &Bound<'_, PyAny>) -> PyResult<Scalar> {
 pub(crate) enum EntryValue {
     Scalar(Scalar),
     Object(Py<PyMessage>),
-    Native(Arc<Native>),
+    Native(NRef),
 }
 
 /// The entries of a map read for a copy or a merge, of the messages of the map, which the copy
@@ -1796,7 +1991,7 @@ impl MapEntries {
             let value = entry.grown(|| -> Result<NativeValue, CopyError> {
                 Ok(match value {
                     EntryValue::Scalar(v) => NativeValue::Scalar(v),
-                    EntryValue::Object(m) => NativeValue::Message(Arc::new(native::copy_message(
+                    EntryValue::Object(m) => NativeValue::Message(NRef::new(native::copy_message(
                         py,
                         m.bind(py),
                         entry.below()?,
@@ -1807,7 +2002,7 @@ impl MapEntries {
                         if entry_levels.is_some_and(|levels| m.depth >= levels) {
                             return Err(CopyError::TooDeep);
                         }
-                        NativeValue::Message(m.at(py, generation))
+                        NativeValue::Message(native::Native::at(&m, py, generation))
                     }
                 })
             })?;

@@ -165,8 +165,12 @@ impl Writer<'_> {
                         self.scalars(field, items, indent, out)?
                     }
                     Slot::Composite(container) => {
-                        for child in &container.bind(py).borrow().items {
+                        let container = container.bind(py).borrow();
+                        for child in &container.items {
                             self.message_field(&field.name, &child.bind(py).borrow(), indent, out)?;
+                        }
+                        for child in container.pending_natives() {
+                            self.message_field(&field.name, &child.fields, indent, out)?;
                         }
                     }
                     Slot::Native(Value::Messages(items)) => {
