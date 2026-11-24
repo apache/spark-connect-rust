@@ -2618,16 +2618,12 @@ impl ModelCore {
             return Err(error);
         }
         if session.session_id() != model_session {
-            let placeholder =
-                DataFrame::from_sent_relation(session.clone(), df.placeholder_relation());
-            let relation = spark_connect_proto::Relation {
-                rel_type: Some(spark_connect_proto::relation::RelType::MlRelation(
-                    Box::new(model.build_ml_relation(&placeholder).to_pyerr()?),
-                )),
-                ..Default::default()
-            };
+            let placeholder = DataFrame::from_sent_relation(session, df.placeholder_relation());
             Ok(TransformJob::Done(
-                DataFrame::from_relation(session, relation, None).to_pyerr()?,
+                spark_connect::ml::transform_without_owner(
+                    df,
+                    model.build_ml_relation(&placeholder).to_pyerr()?,
+                ),
             ))
         } else {
             Ok(TransformJob::Run(model, self.summary.clone()))

@@ -36,6 +36,25 @@ pub struct TransformWithStateInfo {
 /// plan.
 pub struct RelationOwner(pub Arc<dyn std::any::Any + Send + Sync>);
 
+/// Where a request puts the relation of the input of a [`LogicalPlan::MlTransform`] in the
+/// relation of the node, which it builds then, with the plan IDs, pickles, warnings and errors of
+/// that request, as PySpark's ML plans build the plan of their child each time that their own is
+/// built (`TransformerRelation` and `AttributeRelation` of `pyspark.ml.connect.proto`). Not a
+/// stable API.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MlInputAt {
+    /// Nowhere: the relation holds what it reads of the input, as the arguments of a method,
+    /// which PySpark's `serialize` builds when the method is called.
+    #[default]
+    Nowhere,
+    /// The `input` of its `MlRelation`'s `Transform`, as a transform of a model or a transformer.
+    TransformInput,
+    /// The `model_summary_dataset` of its `MlRelation`, as the DataFrame of a method of a
+    /// training summary.
+    SummaryDataset,
+}
+
 /// A handle of the same owner, of which the check of the clones of a binding is told (see
 /// [`crate::gc::check_clones_with`]).
 impl Clone for RelationOwner {
@@ -516,13 +535,17 @@ pub enum LogicalPlan {
     },
     /// Zip: `df.zip(other)` - combine two DataFrames column-wise.
     Zip { left: SharedPlan, right: SharedPlan },
-    /// ML Transformation: wraps an MlRelation proto directly. The proto carries the input
-    /// inline, so `input` keeps the input plan, and the owners in it, alive; `owner` keeps
-    /// the cached model that the relation refers to alive, if any.
+    /// ML Transformation: wraps an MlRelation proto directly. `input` keeps the input plan, and
+    /// the owners in it, alive; `owner` keeps the cached model that the relation refers to alive,
+    /// if any. A request puts the relation of `input`, which it builds then, where `input_at`
+    /// says (see [`MlInputAt`]): the proto carries the input inline of [`MlInputAt::Nowhere`].
     MlTransform {
         ml_relation: Box<proto::Relation>,
         input: Arc<LogicalPlan>,
         owner: Option<RelationOwner>,
+        /// Where a request puts the relation of `input` in `ml_relation`. Not a stable API.
+        #[doc(hidden)]
+        input_at: MlInputAt,
     },
     /// A catalog operation exposed as a relation (e.g. `listTables`, `listColumns`),
     /// evaluated lazily so `.collect()` returns the server's rows - including zero
@@ -4135,8 +4158,27 @@ impl LogicalPlan {
                 relation.rel_type = Some(proto::relation::RelType::Zip(Box::new(zip)));
             }
 
-            LogicalPlan::MlTransform { ml_relation, .. } => {
-                return (**ml_relation).clone();
+            LogicalPlan::MlTransform {
+                ml_relation,
+                input,
+                input_at,
+                ..
+            } => {
+                // As PySpark's ML plans, which build the plan of their child now.
+                let mut built = (**ml_relation).clone();
+                if let Some(proto::relation::RelType::MlRelation(ml)) = &mut built.rel_type {
+                    match (input_at, &mut ml.ml_type) {
+                        (
+                            MlInputAt::TransformInput,
+                            Some(proto::ml_relation::MlType::Transform(transform)),
+                        ) => transform.input = Some(Box::new(relation_of(input, plan_ids))),
+                        (MlInputAt::SummaryDataset, _) => {
+                            ml.model_summary_dataset = Some(Box::new(relation_of(input, plan_ids)))
+                        }
+                        _ => {}
+                    }
+                }
+                return built;
             }
             LogicalPlan::Catalog { catalog } => {
                 relation.rel_type = Some(proto::relation::RelType::Catalog((**catalog).clone()));

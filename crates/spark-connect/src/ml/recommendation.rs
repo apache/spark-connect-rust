@@ -142,6 +142,7 @@ impl ALSModel {
                     ml_relation: Box::new(relation),
                     input: df.plan.clone(),
                     owner: Some(RelationOwner(self.cached.0.clone())),
+                    input_at: crate::plan::MlInputAt::Nowhere,
                 },
             ))
         } else {

@@ -214,6 +214,7 @@ impl PrefixSpan {
                 ml_relation: Box::new(relation),
                 input: dataset.plan.clone(),
                 owner: None,
+                input_at: crate::plan::MlInputAt::Nowhere,
             },
         ))
     }
