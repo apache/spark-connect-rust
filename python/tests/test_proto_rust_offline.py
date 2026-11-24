@@ -9346,3 +9346,125 @@ def test_threads_that_read_the_same_large_repeated_field_see_it_whole():
             assert [e.integer for e in container] == list(range(count))
     finally:
         sys.setswitchinterval(interval)
+
+
+def test_messages_kept_of_released_containers_keep_no_slab_of_their_parse():
+    # A parse holds the messages that Python has not read in slabs of up to 64 messages, each
+    # released with the last of its messages. A message kept of a large parse, whose container
+    # (or map) is released, or that its container no longer holds (`pop`, `remove`, `del`,
+    # `clear`), moves the part of the parse that it holds unread out of the slabs, so that it
+    # keeps none of them alive for the other messages of the parse, which are released
+    # (`_proto_slab_messages` counts the messages of slabs that a message holds); it reads as it
+    # did. Of either way of making the objects of a read (`_proto_whole_limit`).
+    R, P = proto.Relation, proto.MlParams
+    count = 600
+    data = R(
+        project={
+            "expressions": [
+                {"unresolved_function": {"function_name": "f", "arguments": [{"literal": {"integer": i}}]}}
+                for i in range(count)
+            ]
+        }
+    ).SerializeToString()
+    params = P(params={f"k{i}": {"array": {"elements": [{"integer": i}]}} for i in range(300)}).SerializeToString()
+
+    def kept_of_list(how):
+        r = R.FromString(data)
+        c = r.project.expressions
+        held = None
+        if how == "released":
+            kept = c[7]
+            held = _pyspark._proto_slab_messages(kept)
+        elif how == "pop":
+            kept = c.pop(7)
+        elif how == "remove":
+            kept = c[7]
+            c.remove(kept)
+        elif how == "del":
+            kept = c[7]
+            del c[7]
+        else:
+            kept = c[7]
+            c.clear()
+        del r, c
+        gc.collect()
+        return kept, held
+
+    def kept_of_map(how):
+        p = P.FromString(params)
+        m = p.params
+        kept = m["k7"]
+        held = _pyspark._proto_slab_messages(kept) if how == "released" else None
+        if how == "del":
+            del m["k7"]
+        elif how == "clear":
+            m.clear()
+        del p, m
+        gc.collect()
+        return kept, held
+
+    previous = _pyspark._proto_whole_limit()
+    try:
+        for limit in (previous, 0):
+            _pyspark._proto_whole_limit(limit)
+            for how in ("released", "pop", "remove", "del", "clear"):
+                kept, held = kept_of_list(how)
+                assert _pyspark._proto_slab_messages(kept) == 0, (limit, how)
+                assert kept.unresolved_function.arguments[0].literal.integer == 7, (limit, how)
+                if held is not None:
+                    assert held > 0, limit
+            for how in ("released", "del", "clear"):
+                kept, held = kept_of_map(how)
+                assert _pyspark._proto_slab_messages(kept) == 0, (limit, how)
+                assert kept.array.elements[0].integer == 7, (limit, how)
+                if held is not None:
+                    assert held > 0, limit
+    finally:
+        _pyspark._proto_whole_limit(previous)
+
+
+def test_parses_are_of_the_classes_registered_when_they_were_read():
+    # The objects of a parse are of the class registered of their type when the parse was made,
+    # also when they are read after a registration that gave the type another class, and those of
+    # a parse made after it are of the new class, of every read after the registration too, a
+    # level at a time or of a value at once; the registration back makes them of the class
+    # before again. (The type keeps the class of the first read after a registration that changed
+    # it, so that the objects are made of no lookup of the registry.)
+    script = """
+        import json
+
+        import pyspark.sql.connect.proto as proto
+        from pyspark import _pyspark
+        from pyspark.sql.connect.proto import _rust
+
+        def plan(n):
+            limit = {"limit": {"limit": 1, "input": {"range": {"end": 1}}}}
+            return proto.Plan(
+                root={"with_relations": {"root": limit, "references": [limit] * n}}
+            ).SerializeToString()
+
+        def inner(p):
+            # A relation of the second level below the root, of a read a level at a time of a
+            # parse of more than 256 messages, else of the read of the value at once.
+            return p.root.with_relations.references[-1].limit.input
+
+        small, large = plan(2), plan(300)
+        before = [proto.Plan.FromString(small), proto.Plan.FromString(large)]
+        other = type(
+            "Relation",
+            (_pyspark.ProtoMessage, _rust._MessageBase),
+            {"__slots__": (), "DESCRIPTOR": proto.Relation.DESCRIPTOR},
+        )
+        _pyspark._proto_register_classes({"spark.connect.Relation": other})
+        try:
+            after = [proto.Plan.FromString(small), proto.Plan.FromString(large)]
+            out = [type(inner(p)) is proto.Relation for p in before]
+            out += [type(inner(p)) is other for _ in range(3) for p in after]
+            out += [type(inner(proto.Plan.FromString(large))) is other for _ in range(3)]
+        finally:
+            _pyspark._proto_register_classes({"spark.connect.Relation": proto.Relation})
+        out += [type(inner(proto.Plan.FromString(large))) is proto.Relation for _ in range(3)]
+        out += [type(p.root.with_relations.root.limit.input) is other for p in after]
+        print(json.dumps(out))
+        """
+    assert _run_script(script) == [True] * 16

@@ -34,7 +34,7 @@ use super::containers::{
 };
 use super::descriptors::{field_descriptor_object, PyDescriptor};
 use super::native::{self, CopyError, Native, NativeMessages, NativeValue, Value};
-use super::pool::{pool, FieldDesc, Kind, MapDesc, MessageDesc};
+use super::pool::{pool, FieldDesc, KeptClass, Kind, MapDesc, MessageDesc};
 use super::scalar::Scalar;
 use super::{codec, grow, text};
 use crate::interrupt::ConversionBudget;
@@ -337,6 +337,10 @@ fn classes() -> &'static Mutex<Registry> {
     CLASSES.get_or_init(|| Mutex::new(Registry::default()))
 }
 
+/// The objects and the native messages of a message that outlives its container, up to which
+/// [`PyMessage::unpin`] moves its native values out of their slabs.
+const UNPIN_STEPS: usize = 1024;
+
 /// The generation of the classes of the messages: one more for each `_proto_register_classes`
 /// that gives a full name another class (or a class, of one that had none). A native copy of a
 /// message keeps the generation that it was made at, so that the objects that it makes when Python
@@ -490,12 +494,13 @@ impl MessageClass {
     }
 
     pub(crate) fn of(py: Python<'_>, full_name: &str) -> PyResult<MessageClass> {
-        if let Some(r) = classes()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .by_name
-            .get(full_name)
-        {
+        let registry = classes().lock().unwrap_or_else(|e| e.into_inner());
+        MessageClass::of_locked(py, full_name, &registry)
+    }
+
+    /// [`MessageClass::of`] of `registry`, held locked.
+    fn of_locked(py: Python<'_>, full_name: &str, registry: &Registry) -> PyResult<MessageClass> {
+        if let Some(r) = registry.by_name.get(full_name) {
             return Ok(MessageClass {
                 class: Some(r.class.clone_ref(py)),
                 desc: r.desc,
@@ -520,27 +525,16 @@ impl MessageClass {
         }
         // A type that is not the pool's type of its name, which no message has, is made as `of`
         // makes it, kept by no type.
-        if !pool()
-            .message(&desc.full_name)
-            .is_some_and(|d| std::ptr::eq(d, desc))
-        {
+        if !is_pool_type(desc) {
             return MessageClass::of(py, &desc.full_name);
         }
         // The class and the generation of one read of the registry, which a registration changes
         // under its lock (and registers the pool's type of the name with the class).
-        let (at, class) = {
-            let registry = classes().lock().unwrap_or_else(|e| e.into_inner());
-            let class = registry
-                .by_name
-                .get(&desc.full_name)
-                .map(|r| r.class.clone_ref(py));
-            (generation(), class)
-        };
-        // The type keeps the class of its first read (see `MessageDesc::class`).
-        let _ = desc
-            .class
-            .set((at, class.as_ref().map(|c| c.clone_ref(py))));
-        Ok(MessageClass { class, desc })
+        let registry = classes().lock().unwrap_or_else(|e| e.into_inner());
+        Ok(MessageClass {
+            class: class_now(py, desc, &registry),
+            desc,
+        })
     }
 
     /// The maker of the messages of the type `desc` of the [`generation`] `at`: as
@@ -551,10 +545,26 @@ impl MessageClass {
         desc: &'static MessageDesc,
         at: u64,
     ) -> PyResult<MessageClass> {
-        if at == generation() {
-            return MessageClass::now(py, desc);
+        if let Some(class) = kept_class(desc, at) {
+            return Ok(MessageClass {
+                class: class.map(|c| c.clone_ref(py)),
+                desc,
+            });
         }
+        // The generation is read under the lock of the registry, which a registration holds
+        // while it changes the classes and begins the next generation, so that the class read is
+        // that of the generation `at`, also of threads that run at once (of no GIL).
         let registry = classes().lock().unwrap_or_else(|e| e.into_inner());
+        if at == generation() {
+            // As `now` makes it.
+            if !is_pool_type(desc) {
+                return MessageClass::of_locked(py, &desc.full_name, &registry);
+            }
+            return Ok(MessageClass {
+                class: class_now(py, desc, &registry),
+                desc,
+            });
+        }
         let replaced = registry.replaced.get(&desc.full_name).and_then(|changes| {
             changes
                 .iter()
@@ -592,12 +602,65 @@ impl MessageClass {
 /// The class of the message type `desc` of the [`generation`] `at` (none, of no class), if it is
 /// the one that `desc` keeps (see `MessageDesc::class`): of no registration that gave the type
 /// another class since the earlier of the generation that it was kept of and `at`.
-fn kept_class(desc: &MessageDesc, at: u64) -> Option<Option<&Py<PyType>>> {
-    let (kept, class) = desc.class.get()?;
+fn kept_class(desc: &MessageDesc, at: u64) -> Option<Option<&'static Py<PyType>>> {
+    // SAFETY: a class that a type kept is never released (see `MessageDesc::class`).
+    let kept = unsafe {
+        desc.class
+            .load(std::sync::atomic::Ordering::Acquire)
+            .as_ref()
+    }?;
     let changed = desc
         .class_changed
         .load(std::sync::atomic::Ordering::Acquire);
-    (changed <= *kept && changed <= at).then_some(class.as_ref())
+    (changed <= kept.at && changed <= at).then_some(kept.class.as_ref())
+}
+
+/// Whether `desc` is the pool's type of its name, which the messages of the runtime are of.
+fn is_pool_type(desc: &'static MessageDesc) -> bool {
+    pool()
+        .message(&desc.full_name)
+        .is_some_and(|d| std::ptr::eq(d, desc))
+}
+
+/// The class registered now of `desc`, a type of the pool, of `registry` (held locked), which the
+/// type keeps of the generation now (see [`keep_class`]).
+fn class_now(
+    py: Python<'_>,
+    desc: &'static MessageDesc,
+    registry: &Registry,
+) -> Option<Py<PyType>> {
+    let class = registry
+        .by_name
+        .get(&desc.full_name)
+        .map(|r| r.class.clone_ref(py));
+    keep_class(py, desc, generation(), class.as_ref());
+    class
+}
+
+/// Keep `class` as the class of the type `desc` of the generation `at` (see
+/// `MessageDesc::class`), unless the type keeps one of that generation or a later one already: a
+/// type keeps the class of its first read, and of the first read after a registration that gave
+/// it another class, so that the messages of the type are made of no lookup of the registry.
+fn keep_class(py: Python<'_>, desc: &'static MessageDesc, at: u64, class: Option<&Py<PyType>>) {
+    use std::sync::atomic::Ordering;
+    let current = desc.class.load(Ordering::Acquire);
+    // SAFETY: a class that a type kept is never released.
+    if unsafe { current.as_ref() }.is_some_and(|kept| kept.at >= at) {
+        return;
+    }
+    let record = Box::into_raw(Box::new(KeptClass {
+        at,
+        class: class.map(|c| c.clone_ref(py)),
+    }));
+    if desc
+        .class
+        .compare_exchange(current, record, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        // Another thread kept a class meanwhile; this record, which no one saw, is released.
+        // SAFETY: of `Box::into_raw` above, and never shared.
+        drop(unsafe { Box::from_raw(record) });
+    }
 }
 
 /// A new, empty message of the type `desc` of the [`generation`] `at`, as
@@ -1623,6 +1686,108 @@ impl PyMessage {
         drop(m);
         let full = ConversionBudget::full();
         merge_native(py, message, NRef::new(parsed), budget.unwrap_or(&full))
+    }
+
+    /// Move the native values of `message`, and of the messages below it (of its objects and of
+    /// those of its containers too), out of the slabs of their parse (see `Value::unpin`): of a
+    /// message that outlives the container or the map that held it (see
+    /// `containers::release_held`), so that the native values of a part of a parse that it
+    /// holds, unread, keep alive no slab of the messages released with the container, where a slab
+    /// holds up to 64 messages. Of up to [`UNPIN_STEPS`] objects and native messages, as a
+    /// message that holds more holds most of the nodes of its slabs itself; a message that another
+    /// borrows meanwhile is left as it is.
+    pub(crate) fn unpin(message: &Bound<'_, Self>) {
+        let mut steps = UNPIN_STEPS;
+        Self::unpin_within(message, &mut steps);
+    }
+
+    /// [`PyMessage::unpin`] of the steps `steps` left.
+    pub(crate) fn unpin_within(message: &Bound<'_, Self>, steps: &mut usize) {
+        let py = message.py();
+        if *steps == 0 {
+            return;
+        }
+        *steps -= 1;
+        let mut objects = Vec::new();
+        {
+            let Ok(mut m) = message.try_borrow_mut() else {
+                return;
+            };
+            for (_, slot) in m.slots.iter_mut() {
+                match slot {
+                    Slot::Native(value) => {
+                        let count = value.count() as usize;
+                        if count > *steps {
+                            *steps = 0;
+                            return;
+                        }
+                        *steps -= count;
+                        value.unpin();
+                    }
+                    Slot::Message(child) => objects.push(child.clone_ref(py)),
+                    Slot::Composite(c) => {
+                        if let Ok(c) = c.bind(py).try_borrow() {
+                            objects.extend(c.items.iter().map(|m| m.clone_ref(py)));
+                        }
+                    }
+                    Slot::Map(c) => {
+                        if let Ok(c) = c.bind(py).try_borrow() {
+                            objects.extend(c.entries.iter().filter_map(|(_, value)| match value {
+                                MapValue::Message(m) => Some(m.clone_ref(py)),
+                                MapValue::Scalar(_) => None,
+                            }));
+                        }
+                    }
+                    Slot::Scalar(_) | Slot::Repeated(_) => {}
+                }
+            }
+        }
+        grow(|| {
+            for child in objects {
+                Self::unpin_within(child.bind(py), steps);
+            }
+        })
+    }
+
+    /// The native messages that `message` holds, of all its levels, of its objects and of its
+    /// containers too, that are nodes of a slab of a parse (see `PyMessage::unpin`).
+    pub(crate) fn slab_messages(message: &Bound<'_, Self>) -> usize {
+        let py = message.py();
+        let m = message.borrow();
+        grow(|| {
+            m.slots
+                .iter()
+                .map(|(_, slot)| match slot {
+                    Slot::Native(value) => native::slab_messages(value),
+                    Slot::Message(child) => Self::slab_messages(child.bind(py)),
+                    Slot::Composite(c) => {
+                        let c = c.bind(py).borrow();
+                        let made: usize = c
+                            .items
+                            .iter()
+                            .map(|item| Self::slab_messages(item.bind(py)))
+                            .sum();
+                        let pending: usize = c
+                            .pending_natives()
+                            .iter()
+                            .map(|n| native::slab_messages(&Value::Message(n.clone())))
+                            .sum();
+                        made + pending
+                    }
+                    Slot::Map(c) => c
+                        .bind(py)
+                        .borrow()
+                        .entries
+                        .iter()
+                        .map(|(_, value)| match value {
+                            MapValue::Message(m) => Self::slab_messages(m.bind(py)),
+                            MapValue::Scalar(_) => 0,
+                        })
+                        .sum(),
+                    Slot::Scalar(_) | Slot::Repeated(_) => 0,
+                })
+                .sum()
+        })
     }
 
     pub(crate) fn empty(desc: &'static MessageDesc) -> Self {

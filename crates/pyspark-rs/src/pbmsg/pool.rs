@@ -9,7 +9,7 @@
 //! a name that the embedded set does not declare finds it in those.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicPtr, AtomicU64};
 use std::sync::{Arc, OnceLock, RwLock, RwLockReadGuard};
 
 use pyo3::types::PyType;
@@ -272,6 +272,15 @@ pub(crate) struct OneofDesc {
     pub(crate) has_options: bool,
 }
 
+/// The class that a message type keeps of a read of the registry of the classes (see
+/// [`MessageDesc::class`]): the generation of the classes of the read, and the class registered of
+/// the type then (none, of a type that has none).
+#[derive(Debug)]
+pub(crate) struct KeptClass {
+    pub(crate) at: u64,
+    pub(crate) class: Option<Py<PyType>>,
+}
+
 /// A message type.
 #[derive(Debug)]
 pub(crate) struct MessageDesc {
@@ -300,11 +309,14 @@ pub(crate) struct MessageDesc {
     /// too, which the first check of a message of the type finds (see `may_lack_required` of
     /// `message.rs`).
     pub(crate) may_lack_required: OnceLock<bool>,
-    /// The class registered of the type (none, of a type that has none) at the first read of it
-    /// of the classes of the runtime, and the generation of the classes then, which the messages
-    /// of the type are made of, of any generation that the class of the type is the same at (see
-    /// `kept_class` of `message.rs`).
-    pub(crate) class: OnceLock<(u64, Option<Py<PyType>>)>,
+    /// The class registered of the type (none, of a type that has none) at the last read of it of
+    /// the registry of the classes of the runtime, and the generation of the classes then, which
+    /// the messages of the type are made of, of any generation that the class of the type is the
+    /// same at (see `kept_class` of `message.rs`); null before the first read. A read of the
+    /// registry after a registration that gave the type another class keeps a new one (see
+    /// `keep_class`), and the one before stays, never released, as the registry keeps the classes
+    /// that it replaced.
+    pub(crate) class: AtomicPtr<KeptClass>,
     /// The generation of the classes that the last registration that gave the type another class
     /// began (none, of a type of the class it had at first), which a registration sets before it
     /// begins the generation.
@@ -1434,7 +1446,7 @@ fn add_message(
         nested_enums,
         required,
         may_lack_required: OnceLock::new(),
-        class: OnceLock::new(),
+        class: AtomicPtr::new(std::ptr::null_mut()),
         class_changed: AtomicU64::new(0),
     });
 
