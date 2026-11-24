@@ -1571,6 +1571,74 @@ requests of the unpickled object pickle as it is then. This case still differs:
     (it kept none), and a value of a repeated scalar field that is not iterable raises upb's
     `TypeError: must assign iterable` (`Argument for field ... is not iterable`).
 
+- **The unset children that upb's `Clear` and merges skip** (inherent; upb's choice is of the
+  addresses of its definitions of the fields). A message keeps the unset children that Python reads
+  of it (`r.limit` of an empty `Relation`) until a write sets one in it. `Clear`, and the clear of
+  `ParseFromString`, detach each child from the message, and a merge (`MergeFromString`, and the
+  merge of `ParseFromString`) makes each child of a field that the bytes set the parsed message of
+  its field. The drop-in does so of every child. upb keeps them in a hash table (its
+  `unset_subobj_map`, an `upb_inttable` of 8 slots up to 6 children, keyed by the address of each
+  field's `upb_FieldDef` shifted right by 3 bits), which puts a child whose slot another holds at
+  the next free slot, after the first child of the slot. Its `Clear` and the `SyncSubobjs` of its
+  merges walk the slots in their order and remove each child that they visit, and the removal of the
+  first child of a slot moves the next child of the slot into it, which the walk has passed: so upb
+  skips that child. The user sees it of the skipped child:
+  - after `Clear` (also before a merge), it is still a child of the message, and a write to it sets
+    it in the message again: `r = Relation(); s, s2 = r.limit, r.sql; r.Clear(); s2.query = "x"`
+    gives upb's `r` of `sql`, where the drop-in's is empty, and so does `ParseFromString` of the
+    bytes of a `limit`, whose `sql` replaces the parsed `limit` in the oneof, which the drop-in's
+    `r` keeps (a `MergeFromString` alone, which detaches no child, sets `sql` in both);
+  - after a merge, it is not the parsed message of its field, and a write to it replaces that
+    message: of a `Join` whose `left`, `right` and `join_condition` Python read, a `MergeFromString`
+    of the bytes of all three leaves upb's `join_condition` child not `j.join_condition`, and
+    `unresolved_attribute.plan_id = 1` through it makes the field
+    `unresolved_attribute { plan_id: 1 }`, where the drop-in's child is the parsed message and
+    keeps its `unparsed_identifier` too. A `ParseFromString` makes upb's `join_condition` child the
+    parsed message, as its clear skipped it, and `left` and `right` not, where the drop-in's clear
+    detaches all three.
+
+  Which children upb skips is of the slots of the fields' definitions. Of protobuf 7.36.2 (of 64
+  bits), the definitions of the fields of a message are 96 bytes apart, of an alignment of 16 bytes,
+  so two fields share a slot when their places in the message differ by an even number, and where
+  the slots fall is of the address of the message's definitions modulo 64 bytes. That moves with
+  what the process allocated before upb built the files of the protos: of the environment and the
+  modules that it imported before (`numpy`, `pandas` or `pyarrow` changed it), and from one run to
+  another of the randomization of the addresses of the process, through what it does of them (with
+  `setarch -R`, the runs of a program are the same, whatever Python's hash seed). So the same
+  program skips other children in other runs: of 40 runs, the `Clear` of an `AsOfJoin` whose 5
+  message fields Python read kept 2 sets of them attached (`left_as_of` and `right_as_of`, or
+  `right_as_of` and `join_expr`), and of its 6, 3 sets; and of its `left`, `left_as_of` and
+  `join_expr`, which share a slot, it kept `join_expr` or `left_as_of`. Of at most two children of
+  each slot, as of the cases above, every address of this build gives the same: upb skips, of each
+  two children of a slot, the one that Python read second. The drop-in does not match that either:
+  the rule is of the layout of one build of upb (another version, or 32 bits, puts other fields in a
+  slot), and matching it would keep upb's stale children, which its walk means to detach or to make
+  the parsed messages, and their loss of the parsed message after a merge. A model of upb's table,
+  of the addresses of the definitions of each run (of upb's descriptors), gives upb's choice in each
+  of the 40 runs and each case above. The lockstep fuzzer of the review of SPARK-62264
+  (`fuzz_copies.py --aliasing`, not in the tree; seeds 0 to 599, of 1,000 steps) differed from upb
+  on 14 seeds: 9 of the bytes of a message after a write through such a child, after a `Clear`, a
+  parse or a merge of its parent (55, 105, 142, 166, 298, 328, 370, 373 and 459; of 328, the
+  `ml_command` and `sql_command` children of a `Command`, and of 370, the `with_columns` and
+  `with_columns_renamed` children of a `Relation`), and 5 of a pickle of an `Any` (175, 394, 408,
+  410 and 475; see "A pickle of the runtime's `Any` or `Timestamp`" above).
+
+- **A parse cut short in a string of a oneof that held a message** (intentional; upb reads the
+  memory of the message as the string, and can end its process). A `MergeFromString` whose bytes of
+  a string or bytes member of a oneof end before the string does fails (`DecodeError`), and leaves
+  the oneof holding that member, as upb's parse leaves it. Into a message whose oneof held a message
+  member, upb's string is then the memory of that message, of the length of the string that the
+  oneof held before the message. Of `literal = Expression.Literal(string="x" * n)` and
+  `literal.decimal.value = "1"`, a `MergeFromString` of the bytes of
+  `Expression.Literal(string="y" * 50)` less their last 10 bytes leaves upb's `literal.string` the
+  n bytes of the memory of the `Decimal` and of what follows it, which `SerializeToString()` writes
+  (102 bytes of n of 100, 10,003 of 10,000 and 1,000,004 of 1,000,000): a disclosure of the memory
+  of the process, which a request may send, until a string longer than the memory that follows ends
+  the process (SIGSEGV in `SerializeToString`, of n of 100,000,000). The drop-in's string is empty
+  (`SerializeToString()` is 2 bytes), and no program can rely on upb's. The parse lockstep of
+  SPARK-62266's tests ended upb's process so (of its seed 55, of merges of data cut short at random,
+  which the test no longer cuts).
+
 ## Type checking (the stubs of `scripts/gen_type_stubs.py`)
 
 mypy and pyright type an application as with `pyspark-client` (see `docs/compatibility.md`), but:

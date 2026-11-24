@@ -2292,7 +2292,11 @@ field of a message type of no fields (`google.protobuf.Empty`), and an unknown g
 is corrupt (`Wire format was corrupt`), as upb's. A string or bytes member of a oneof whose bytes
 fail to parse after a member that holds a message is empty, where upb reads the memory of that
 message as the string, of the length of a string that the oneof held before, which no program can
-rely on. `protobuf`'s `json_format` and `text_format` print and parse its messages, and
+rely on: upb's `SerializeToString` writes that memory, a disclosure of the memory of the process,
+or ends the process (SIGSEGV) where the string is longer than the memory that follows the message
+(see "A parse cut short in a string of a oneof that held a message" of
+`dev/parity/known-differences.md`). `protobuf`'s `json_format` and `text_format` print and parse
+its messages, and
 `unknown_fields.UnknownFieldSet` reads their unknown fields, which `text_format` prints with
 `print_unknown_fields=True` (see below). Without `protobuf` (which PySpark does not run without),
 the classes are of the runtime's own descriptors and pool, which Python code adds no file to, of the
@@ -2353,6 +2357,16 @@ errors are the runtime's `DecodeError` and `EncodeError`. The differences:
   them in upb's order of the keys of its text, and `text_format` in its own, as of upb's messages.
   upb's orders take the keys of a signed integer type as unsigned numbers, so that a negative key
   comes after the others;
+- the unset children of a message that Python read (`r.limit` of an empty `Relation`) are each
+  detached by `Clear` (and the clear of `ParseFromString`), and each made the parsed message of its
+  field by a merge that sets the field, where upb's skip some, of the slots of the addresses of its
+  definitions of their fields in a hash table that its walks change as they go, which differ from
+  one run of the same program to another, and with the modules imported before (see "The unset
+  children that upb's `Clear` and merges skip" of `dev/parity/known-differences.md`). So no program
+  can rely on upb's: after its `Clear`, a skipped child stays a child of the message, and a write
+  to it sets it in the message again (of `r = Relation(); s, s2 = r.limit, r.sql`, `r.Clear()` and
+  `s2.query = "x"` set upb's `sql`); after its merge, a skipped child is not the parsed message,
+  and a write to it replaces that message;
 - it makes a Python object of each message that it merges into a message that holds fields, where
   upb makes one when the message is read. A parse into a message that holds no field (of
   `FromString`, `ParseFromString`, a `MergeFromString` of an empty message, and the drop-in's own
