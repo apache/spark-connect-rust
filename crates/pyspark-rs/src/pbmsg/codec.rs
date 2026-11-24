@@ -10,12 +10,12 @@ use std::sync::{Arc, Mutex};
 
 use pyo3::prelude::*;
 
-use super::arena::Arena;
+use super::arena::{Arena, NRef};
 use super::containers::{Entries, MapValue, RepeatedComposite, RepeatedScalar};
 use super::message::{generation, new_instance, EntryRef, Fields, MessageClass, PyMessage, Slot};
 use super::native::{unique_native, Native, NativeMap, NativeMessages, NativeValue, Value};
-use super::pool::{FieldDesc, Kind, MapDesc, MessageDesc};
-use super::scalar::Scalar;
+use super::pool::{FieldDesc, Kind, MapDesc, MessageDesc, SEARCH_NUMBER};
+use super::scalar::{Scalar, Str};
 use super::text::upb_wire_key_order;
 use super::{decode_error_of, grow, DecodeError};
 use crate::interrupt::ConversionBudget;
@@ -840,7 +840,7 @@ fn string_of(kind: Kind, bytes: &[u8], validate: bool) -> PyResult<Scalar> {
         return Ok(Scalar::Bytes(bytes.to_vec()));
     }
     match std::str::from_utf8(bytes) {
-        Ok(text) => Ok(Scalar::Str(text.to_string())),
+        Ok(text) => Ok(Scalar::Str(Str::new(text))),
         Err(_) if !validate => Ok(Scalar::Bytes(bytes.to_vec())),
         Err(_) => Err(decode_error("invalid UTF-8 in a string field")),
     }
@@ -1148,10 +1148,16 @@ impl Repeated {
     }
 }
 
-/// The field of the number `number` of `desc`, of a binary search of the fields in the order of
-/// their numbers, which takes less time than the hash of the number in `by_number`, as the parse
-/// of a message looks up each of its fields.
+/// The field of the number `number` of `desc`, as the parse of a message looks up each of its
+/// fields: of the table of the small numbers of the type (`MessageDesc::small_numbers`), else of
+/// a binary search of the fields in the order of their numbers, which take less time than the
+/// hash of the number in `by_number`.
 fn field_of_number(desc: &MessageDesc, number: u32) -> Option<&FieldDesc> {
+    match desc.small_numbers.get(number as usize) {
+        Some(0) => return None,
+        Some(&entry) if entry != SEARCH_NUMBER => return Some(&desc.fields[entry as usize - 1]),
+        _ => {}
+    }
     desc.order
         .binary_search_by_key(&number, |&i| desc.fields[i].number)
         .ok()
@@ -1664,9 +1670,11 @@ impl NativeParse<'_, '_> {
                 let messages = native_messages(self.py, fields, field, self.generation)?;
                 let mut len = len;
                 loop {
-                    let mut child = Native::empty(desc, self.generation);
-                    let parsed = self.child(desc, &mut child, field, len, reader, depth);
-                    messages.push(self.arena.alloc(child));
+                    // The message is read in its node, of no move of it once it is read.
+                    let mut child = self.arena.alloc(Native::empty(desc, self.generation));
+                    let native = NRef::get_mut(&mut child).expect("a new message of its own");
+                    let parsed = self.child(desc, native, field, len, reader, depth);
+                    messages.push(child);
                     parsed?;
                     reader.check_end()?;
                     if field.delimited || reader.done() {

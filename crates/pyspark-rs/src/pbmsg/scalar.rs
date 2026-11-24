@@ -27,9 +27,119 @@ pub(crate) enum Scalar {
     I32(i32),
     U32(u32),
     Bool(bool),
-    Str(String),
+    Str(Str),
     Bytes(Vec<u8>),
     Enum(i32),
+}
+
+/// The bytes that a [`Str`] holds in place, at most.
+const INLINE: usize = 22;
+
+/// The value of a string field: its bytes in place, of a string of up to [`INLINE`] bytes, else
+/// of an allocation of its own. The strings of the messages of Spark Connect are most often a few
+/// bytes (names, identifiers, the names of functions), which a parse and a set read of no
+/// allocation for each, and their release frees none. Of the size of a `String`.
+#[derive(Clone)]
+pub(crate) enum Str {
+    Inline { len: u8, bytes: [u8; INLINE] },
+    Heap(Box<str>),
+}
+
+impl Str {
+    pub(crate) fn new(text: &str) -> Str {
+        if text.len() <= INLINE {
+            let mut bytes = [0u8; INLINE];
+            bytes[..text.len()].copy_from_slice(text.as_bytes());
+            return Str::Inline {
+                len: text.len() as u8,
+                bytes,
+            };
+        }
+        Str::Heap(text.into())
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        match self {
+            // SAFETY: the bytes in place are those of a `str` (see `Str::new`).
+            Str::Inline { len, bytes } => unsafe {
+                std::str::from_utf8_unchecked(&bytes[..*len as usize])
+            },
+            Str::Heap(text) => text,
+        }
+    }
+}
+
+impl Default for Str {
+    fn default() -> Str {
+        Str::Inline {
+            len: 0,
+            bytes: [0u8; INLINE],
+        }
+    }
+}
+
+impl std::ops::Deref for Str {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl From<String> for Str {
+    fn from(text: String) -> Str {
+        if text.len() <= INLINE {
+            return Str::new(&text);
+        }
+        Str::Heap(text.into_boxed_str())
+    }
+}
+
+impl From<std::borrow::Cow<'_, str>> for Str {
+    fn from(text: std::borrow::Cow<'_, str>) -> Str {
+        match text {
+            std::borrow::Cow::Borrowed(text) => Str::new(text),
+            std::borrow::Cow::Owned(text) => Str::from(text),
+        }
+    }
+}
+
+impl PartialEq for Str {
+    fn eq(&self, other: &Str) -> bool {
+        self.as_str() == other.as_str()
+    }
+}
+
+impl Eq for Str {}
+
+impl PartialOrd for Str {
+    fn partial_cmp(&self, other: &Str) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Str {
+    fn cmp(&self, other: &Str) -> std::cmp::Ordering {
+        self.as_str().cmp(other.as_str())
+    }
+}
+
+impl std::hash::Hash for Str {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.as_str().hash(state)
+    }
+}
+
+impl std::fmt::Display for Str {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::fmt::Debug for Str {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(self.as_str(), f)
+    }
 }
 
 impl Scalar {
@@ -42,7 +152,7 @@ impl Scalar {
             Kind::Int32 | Kind::SInt32 | Kind::SFixed32 => Scalar::I32(0),
             Kind::UInt32 | Kind::Fixed32 => Scalar::U32(0),
             Kind::Bool => Scalar::Bool(false),
-            Kind::String => Scalar::Str(String::new()),
+            Kind::String => Scalar::Str(Str::default()),
             Kind::Bytes => Scalar::Bytes(Vec::new()),
             Kind::Enum => Scalar::Enum(0),
             Kind::Message => unreachable!("a message field holds no scalar"),
@@ -87,7 +197,7 @@ impl Scalar {
             Scalar::I32(v) => v.into_py_any(py),
             Scalar::U32(v) => v.into_py_any(py),
             Scalar::Bool(v) => v.into_py_any(py),
-            Scalar::Str(v) => v.into_py_any(py),
+            Scalar::Str(v) => v.as_str().into_py_any(py),
             Scalar::Bytes(v) => PyBytes::new(py, v).into_py_any(py),
             Scalar::Enum(v) => v.into_py_any(py),
         }
@@ -149,11 +259,11 @@ impl Scalar {
             }
             Kind::String => {
                 if let Ok(s) = value.cast::<PyString>() {
-                    return Ok(Scalar::Str(s.to_cow()?.into_owned()));
+                    return Ok(Scalar::Str(Str::from(s.to_cow()?)));
                 }
                 if let Ok(b) = value.cast::<PyBytes>() {
                     return match std::str::from_utf8(b.as_bytes()) {
-                        Ok(s) => Ok(Scalar::Str(s.to_string())),
+                        Ok(s) => Ok(Scalar::Str(Str::new(s))),
                         // The UnicodeDecodeError of decoding the bytes, as protobuf raises it.
                         Err(_) => Err(value
                             .call_method1("decode", ("utf-8",))
@@ -278,5 +388,44 @@ pub(crate) fn key_order(a: &Scalar, b: &Scalar) -> std::cmp::Ordering {
         (Scalar::U32(x), Scalar::U32(y)) => x.cmp(y),
         (Scalar::Bool(x), Scalar::Bool(y)) => x.cmp(y),
         _ => std::cmp::Ordering::Equal,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A string of up to 22 bytes is held in place, a longer one of an allocation, and either
+    /// reads, compares, orders and hashes as its `str`, of any UTF-8.
+    #[test]
+    fn strings_read_as_their_str_of_either_place() {
+        use std::hash::{BuildHasher, RandomState};
+        let hasher = RandomState::new();
+        for text in [
+            "",
+            "a",
+            "s.v",
+            "é😀",
+            "abcdefghijklmnopqrstuv",
+            "abcdefghijklmnopqrstuvw",
+            &"ü".repeat(40),
+        ] {
+            let string = Str::new(text);
+            assert_eq!(
+                matches!(string, Str::Inline { .. }),
+                text.len() <= 22,
+                "{text}"
+            );
+            assert_eq!(string.as_str(), text);
+            assert_eq!(&*Str::from(text.to_string()), text);
+            assert_eq!(&*Str::from(std::borrow::Cow::Borrowed(text)), text);
+            assert_eq!(string, Str::from(text.to_string()));
+            assert_eq!(hasher.hash_one(&string), hasher.hash_one(text));
+            assert_eq!(format!("{string}"), text);
+            assert_eq!(format!("{string:?}"), format!("{text:?}"));
+        }
+        assert!(Str::new("abc") < Str::new("abd"));
+        assert!(Str::new("abcdefghijklmnopqrstuvwxyz") > Str::new("abc"));
+        assert_eq!(Str::default().as_str(), "");
     }
 }

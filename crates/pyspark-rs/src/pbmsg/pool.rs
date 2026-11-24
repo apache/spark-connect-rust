@@ -17,7 +17,7 @@ use pyo3::Py;
 
 use prost::Message as _;
 
-use super::scalar::Scalar;
+use super::scalar::{Scalar, Str};
 use prost_types::{
     DescriptorProto, EnumDescriptorProto, FileDescriptorProto, FileDescriptorSet,
     ServiceDescriptorProto,
@@ -296,6 +296,10 @@ pub(crate) struct MessageDesc {
     pub(crate) by_number: HashMap<u32, usize>,
     /// The indices of the fields in the order of their numbers, the order of serialization.
     pub(crate) order: Vec<usize>,
+    /// The field of each number below [`SMALL_NUMBERS`], as the index of the field plus one (0 of
+    /// none, [`SEARCH_NUMBER`] of an index of 254 or more), which a parse looks up of no search
+    /// (see `codec::field_of_number`): the fields of most messages have such numbers.
+    pub(crate) small_numbers: [u8; SMALL_NUMBERS],
     pub(crate) oneofs: Vec<OneofDesc>,
     pub(crate) oneof_by_name: HashMap<String, usize>,
     pub(crate) map_entry: bool,
@@ -321,6 +325,27 @@ pub(crate) struct MessageDesc {
     /// began (none, of a type of the class it had at first), which a registration sets before it
     /// begins the generation.
     pub(crate) class_changed: AtomicU64,
+}
+
+/// The field numbers below which a message type looks its fields up of a table
+/// ([`MessageDesc::small_numbers`]).
+pub(crate) const SMALL_NUMBERS: usize = 64;
+
+/// The entry of [`MessageDesc::small_numbers`] of a field whose index the table does not hold.
+pub(crate) const SEARCH_NUMBER: u8 = u8::MAX;
+
+/// The table of [`MessageDesc::small_numbers`] of `fields`.
+fn small_numbers_of(fields: &[FieldDesc]) -> [u8; SMALL_NUMBERS] {
+    let mut table = [0u8; SMALL_NUMBERS];
+    for (index, field) in fields.iter().enumerate() {
+        if let Some(entry) = table.get_mut(field.number as usize) {
+            *entry = u8::try_from(index + 1)
+                .ok()
+                .filter(|&i| i != SEARCH_NUMBER)
+                .unwrap_or(SEARCH_NUMBER);
+        }
+    }
+    table
 }
 
 /// An enum type.
@@ -615,7 +640,7 @@ impl Pool {
                     Some(Scalar::Str(name)) => {
                         let number = values
                             .iter()
-                            .find(|(n, _)| *n == name)
+                            .find(|(n, _)| n.as_str() == name.as_str())
                             .map(|(_, number)| *number)
                             .ok_or_else(|| {
                                 format!("the default {name} of {} is no value", field.full_name)
@@ -1186,7 +1211,7 @@ fn default_of(kind: Kind, text: &str) -> Option<Scalar> {
         Kind::Int32 | Kind::SInt32 | Kind::SFixed32 => Scalar::I32(text.parse().ok()?),
         Kind::UInt32 | Kind::Fixed32 => Scalar::U32(text.parse().ok()?),
         Kind::Bool => Scalar::Bool(text == "true"),
-        Kind::String | Kind::Enum => Scalar::Str(text.to_string()),
+        Kind::String | Kind::Enum => Scalar::Str(Str::new(text)),
         Kind::Bytes => Scalar::Bytes(c_unescape(text)),
         Kind::Message => return None,
     })
@@ -1429,6 +1454,7 @@ fn add_message(
             .map(|(i, f)| (f.number, i))
             .collect(),
         order,
+        small_numbers: small_numbers_of(&fields),
         oneof_by_name: oneofs
             .iter()
             .enumerate()
@@ -1551,6 +1577,47 @@ mod tests {
             ..Default::default()
         }
         .encode_to_vec()
+    }
+
+    /// A field of a number below `SMALL_NUMBERS` is of the table of its type, of the index of
+    /// the field; one of a larger number, of none: the parse finds each of either (and none of a
+    /// number of no field) as of a search of the fields.
+    #[test]
+    fn the_fields_of_small_numbers_are_of_a_table() {
+        let file = file(
+            "tests/pool/numbers.proto",
+            "proto3",
+            &[],
+            vec![message(
+                "Numbers",
+                vec![
+                    field("sixty_three", 63, Type::Int32, ""),
+                    field("one", 1, Type::String, ""),
+                    field("sixty_four", 64, Type::Int32, ""),
+                    field("thousand", 1000, Type::Bool, ""),
+                ],
+            )],
+        );
+        register(&[file]).expect("the file is added");
+        let desc = pool().message("tests.pool.Numbers").expect("Numbers");
+        assert_eq!(desc.small_numbers[1], 2);
+        assert_eq!(desc.small_numbers[63], 1);
+        assert_eq!(desc.small_numbers.iter().filter(|&&i| i != 0).count(), 2);
+        for (number, index) in [
+            (1, Some(1)),
+            (63, Some(0)),
+            (64, Some(2)),
+            (1000, Some(3)),
+            (2, None),
+            (65, None),
+        ] {
+            let found = desc
+                .order
+                .iter()
+                .position(|&i| desc.fields[i].number == number)
+                .map(|at| desc.order[at]);
+            assert_eq!(found, index, "{number}");
+        }
     }
 
     #[test]
@@ -1898,7 +1965,7 @@ mod tests {
         assert_eq!(default_of(Kind::Bool, "true"), Some(Scalar::Bool(true)));
         assert_eq!(
             default_of(Kind::String, "a\"b"),
-            Some(Scalar::Str("a\"b".to_string()))
+            Some(Scalar::Str(Str::new("a\"b")))
         );
         assert_eq!(
             c_unescape("\\001\\377x\\n\\\\\\x41\\'"),

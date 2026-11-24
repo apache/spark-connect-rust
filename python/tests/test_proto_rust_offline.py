@@ -9468,3 +9468,63 @@ def test_parses_are_of_the_classes_registered_when_they_were_read():
         print(json.dumps(out))
         """
     assert _run_script(script) == [True] * 16
+
+
+def _short_value_scenarios(cls):
+    """Strings of the lengths about the 22 bytes that the runtime holds in place (of any UTF-8),
+    and repeated message fields of 0 to 4 messages, which it holds in place up to two: parsed,
+    read, set, copied, extended and serialized, of either way of reading a parse."""
+    L = cls("spark.connect.Expression.Literal")
+    E = cls("spark.connect.Expression")
+    texts = ["", "a", "s.v", "é😀", "x" * 21, "x" * 22, "x" * 23, "ü" * 11, "ü" * 12, "😀" * 6, "y" * 64]
+    out = {}
+    for text in texts:
+        data = L(string=text).SerializeToString()
+
+        def strings():
+            m = L.FromString(data)
+            got = [m.string, len(m.string)]
+            m.string = m.string + "z"
+            c = L()
+            c.CopyFrom(m)
+            return got + [m.SerializeToString(), c.string, L(string=text).string == text]
+
+        out[f"string {len(text)} {text[:2]!r}"] = _outcome(strings)
+    for count in range(5):
+        args = [{"literal": {"integer": i}} for i in range(count)]
+        data = E(unresolved_function={"function_name": "f", "arguments": args}).SerializeToString()
+
+        def repeated():
+            m = E.FromString(data)
+            a = m.unresolved_function.arguments
+            got = [len(a), [e.literal.integer for e in a]]
+            copy_ = E()
+            copy_.CopyFrom(m)
+            a.add(literal={"integer": 9})
+            a.extend([E(literal={"integer": 8})])
+            if len(a) > 1:
+                a.pop(0)
+            return got + [
+                m.SerializeToString(),
+                copy_.SerializeToString(),
+                copy_ == E.FromString(data),
+                [e.literal.integer for e in copy_.unresolved_function.arguments],
+                str(copy_),
+            ]
+
+        out[f"arguments {count}"] = _outcome(repeated)
+    return out
+
+
+def test_strings_and_short_repeated_fields_of_parses_are_upbs(upb):
+    # The runtime holds a string of up to 22 bytes in its value and the messages of a repeated
+    # message field of a parse or a copy in place up to two, of no allocation of their own:
+    # what Python reads, sets and copies of either is upb's, about those sizes, of either way of
+    # reading a parse.
+    previous = _pyspark._proto_whole_limit()
+    try:
+        for limit in (previous, 0):
+            _pyspark._proto_whole_limit(limit)
+            assert _short_value_scenarios(ours) == _short_value_scenarios(upb), limit
+    finally:
+        _pyspark._proto_whole_limit(previous)

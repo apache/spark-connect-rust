@@ -14,6 +14,7 @@
 //! calling the class that `_proto_register_classes` gave it for the full name of the message.
 
 use std::collections::HashMap;
+use std::hash::BuildHasherDefault;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use pyo3::basic::CompareOp;
@@ -173,7 +174,29 @@ impl Slots {
     }
 
     /// Set the slot of the field `index` of `desc`, and give back the slot that it replaces.
+    #[inline]
     pub(crate) fn set(&mut self, desc: &MessageDesc, index: usize, slot: Slot) -> Option<Slot> {
+        // The first field of a message, as a parse most often sets it: the slot is written in
+        // its place where `set` is inlined, of no copy of it.
+        if let Slots::Empty = self {
+            *self = Slots::One((index, slot));
+            return None;
+        }
+        self.set_more(desc, index, slot)
+    }
+
+    /// [`Slots::set`] of slots that are not empty.
+    fn set_more(&mut self, desc: &MessageDesc, index: usize, slot: Slot) -> Option<Slot> {
+        // Of a field of a number after those of the set fields, as a parse most often sets its
+        // fields, appended, of no search: no set field is of its number.
+        if let Slots::Many(entries) = self {
+            if let Some(&(last, _)) = entries.last() {
+                if desc.fields[last].number < desc.fields[index].number {
+                    entries.push((index, slot));
+                    return None;
+                }
+            }
+        }
         if let Some(old) = self.get_mut(index) {
             return Some(std::mem::replace(old, slot));
         }
@@ -321,11 +344,34 @@ type ProtobufFields = Option<Arc<Vec<Py<PyAny>>>>;
 #[derive(Default)]
 struct Registry {
     by_name: HashMap<String, Registered>,
-    by_type: HashMap<usize, &'static MessageDesc>,
+    /// The type of each class, by the address of the class, of a hash of a multiplication, which a
+    /// parse looks up for each `FromString`, rather than SipHash.
+    by_type: HashMap<usize, &'static MessageDesc, BuildHasherDefault<AddressHasher>>,
     /// The classes that each full name had before a registration gave it another (or none, of a
     /// name that had none), each with the [`generation`] that the registration began, in their
     /// order: the class of a name at a generation, which [`MessageClass::at`] gives.
     replaced: HashMap<String, Vec<Replaced>>,
+}
+
+/// The hasher of the addresses of the classes of [`Registry::by_type`]: a multiplication by an odd
+/// constant of the high bits of its product, as the addresses of objects differ in their middle bits.
+#[derive(Default)]
+struct AddressHasher(u64);
+
+impl std::hash::Hasher for AddressHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.0 = (self.0.rotate_left(8) ^ u64::from(byte)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        }
+    }
+
+    fn write_usize(&mut self, address: usize) {
+        self.0 = (address as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    }
 }
 
 /// A class that a registration replaced (none, of a name that had none), with the [`generation`]
@@ -1346,7 +1392,7 @@ fn share_into_absent(
     }
     let value = match (value, class) {
         (Value::Messages(m), Some(class)) if !class.is_same(&m.class) => Value::Messages(Arc::new(
-            NativeMessages::new(class, m.items.clone(), m.generation),
+            NativeMessages::new(class, m.items.to_vec(), m.generation),
         )),
         (value, _) => value,
     };

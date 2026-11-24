@@ -262,7 +262,10 @@ pub(crate) fn parse_deep<'py>(
 /// The attribute `name` of the module `pyspark.sql.connect.proto`, of the module imported once,
 /// as PySpark's modules hold the module that they imported (`from pyspark.sql.connect import
 /// proto`), so that a class of it that a test patches is the one given.
-pub(crate) fn proto_attr<'py>(py: Python<'py>, name: &str) -> PyResult<Bound<'py, PyAny>> {
+pub(crate) fn proto_attr<'py>(
+    py: Python<'py>,
+    name: &Bound<'py, pyo3::types::PyString>,
+) -> PyResult<Bound<'py, PyAny>> {
     static PROTO: pyo3::sync::PyOnceLock<Py<PyModule>> = pyo3::sync::PyOnceLock::new();
     let module = PROTO.get_or_try_init(py, || -> PyResult<_> {
         Ok(py.import("pyspark.sql.connect.proto")?.unbind())
