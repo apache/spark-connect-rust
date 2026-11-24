@@ -1682,6 +1682,21 @@ requests of the unpickled object pickle as it is then. This case still differs:
   references. Parsing in upb's time would take one block of memory of the parse, freed at once, of
   which the objects of a read, the copies that share a parse and the messages kept of it could not
   each hold a part, as they do (SPARK-62266, SPARK-62312, SPARK-62318).
+- **The release of a message that Python keeps of a parse** (inherent; a message of the runtime
+  holds its part of the parse, which upb's messages share in its arena). A message, a repeated
+  field or a map that its container, its map or its message no longer holds while Python keeps it
+  (a `pop`, a `remove`, the release of the container or of the message, a `ClearField`) moves the
+  part of the parse that it holds unread out of the slabs of the parse, so that it keeps no slab of
+  the messages released alive (SPARK-62318, SPARK-62325), of a walk of its objects that passes by
+  those that hold no part of a parse below them, marked so when they were made (of a value read
+  whole, or by Python) until a merge or a copy of native values. Of a parse of 400 functions of
+  1,022 messages each, read whole, the `pop` of each, kept by a list, takes 2.6 µs, of a walk of
+  its 10 objects of the levels read one at a time (each of more than 256 messages below it), upb's
+  0.17 µs, and the release of the parse with the functions kept 1.1 ms, upb's 0.85 µs: upb's
+  messages share the arena of the parse, which a message kept keeps whole, of no release. The
+  release of each message checks its mark, of 3% to 8% of the release of that parse read whole (57
+  ms, 53 ms before), which upb defers to the release of the last of its messages, of the whole
+  arena at once.
 
 ## Type checking (the stubs of `scripts/gen_type_stubs.py`)
 

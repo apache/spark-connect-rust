@@ -415,6 +415,8 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(message::_proto_register_classes, m)?)?;
     m.add_function(wrap_pyfunction!(native::_proto_whole_limit, m)?)?;
     m.add_function(wrap_pyfunction!(native::_proto_slab_messages, m)?)?;
+    m.add_function(wrap_pyfunction!(message::_proto_unpin_counts, m)?)?;
+    m.add_function(wrap_pyfunction!(message::_proto_kept_classes, m)?)?;
     m.add_function(wrap_pyfunction!(_proto_message_to_string, m)?)?;
     m.add_function(wrap_pyfunction!(_proto_parse_deep, m)?)?;
     m.add_function(wrap_pyfunction!(_proto_check_response_depth, m)?)?;

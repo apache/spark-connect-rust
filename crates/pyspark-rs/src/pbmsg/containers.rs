@@ -37,7 +37,7 @@ use pyo3::IntoPyObjectExt;
 
 use super::arena::{NRef, Releases};
 use super::message::{
-    content_eq, duplicate_with, mark_present, new_instance, registered_class, MessageClass,
+    self, content_eq, duplicate_with, mark_present, new_instance, registered_class, MessageClass,
     PyMessage,
 };
 use super::native::{self, CopyError, NativeMap, NativeMessages, NativeValue};
@@ -1208,9 +1208,16 @@ pub(crate) fn release_held(py: Python<'_>, message: Py<PyMessage>) {
 /// which are released with the entries.
 fn release_held_entries(py: Python<'_>, released: Entries) {
     for (_, value) in released.into_entries() {
-        if let MapValue::Message(message) = value {
-            release_held(py, message);
-        }
+        release_replaced(py, Some(value));
+    }
+}
+
+/// [`release_held`] of the message of `replaced`, the value of an entry that a map replaced or
+/// removed, if it is a message: once the map is no longer borrowed, as releasing it may run
+/// Python code.
+pub(crate) fn release_replaced(py: Python<'_>, replaced: Option<MapValue>) {
+    if let Some(MapValue::Message(message)) = replaced {
+        release_held(py, message);
     }
 }
 
@@ -1225,12 +1232,13 @@ impl Drop for RepeatedComposite {
         if self.items.is_empty() {
             return;
         }
-        // SAFETY: a container is released with the thread attached: of the deallocation of its
-        // object, or of a value that was never one, of the code that made it.
-        let py = unsafe { Python::assume_attached() };
-        for message in std::mem::take(&mut self.items) {
-            release_held(py, message);
-        }
+        // Of the deallocation of the object, of the thread attached (see `message::if_attached`).
+        let items = &mut self.items;
+        message::if_attached(|py| {
+            for message in std::mem::take(items) {
+                release_held(py, message);
+            }
+        });
     }
 }
 
@@ -1565,7 +1573,10 @@ impl RepeatedComposite {
         for at in 0..len {
             let item = item_at(&slf.borrow().items, at, |m| Ok(m.clone_ref(py).into_any()))?;
             if compares_equal(item.bind(py), elem)? {
-                // A message removed is dropped once the container is no longer borrowed.
+                // This reference released first, so that the message removed is unpinned only of
+                // another that holds it (see `release_held`).
+                drop(item.into_bound(py));
+                // A message removed is released once the container is no longer borrowed.
                 let removed = {
                     let mut me = slf.borrow_mut();
                     (at < me.items.len()).then(|| me.items.remove(at))
@@ -2096,9 +2107,9 @@ impl Drop for MapContainer {
         if self.map.value != Kind::Message || self.entries.is_empty() {
             return;
         }
-        // SAFETY: as of a repeated message container (see its `Drop`).
-        let py = unsafe { Python::assume_attached() };
-        release_held_entries(py, std::mem::take(&mut self.entries));
+        // As of a repeated message container (see its `Drop`).
+        let entries = &mut self.entries;
+        message::if_attached(|py| release_held_entries(py, std::mem::take(entries)));
     }
 }
 
@@ -2236,8 +2247,9 @@ impl MapContainer {
         target.borrow_mut().entries.reserve(copies.len());
         for (key, value) in copies {
             budget.step(py)?;
-            // The value that the entry replaces is dropped once the map is no longer borrowed.
-            let _replaced = target.borrow_mut().insert(key, value);
+            // The value that the entry replaces is released once the map is no longer borrowed.
+            let replaced = target.borrow_mut().insert(key, value);
+            release_replaced(py, replaced);
         }
         Ok(())
     }
@@ -2402,10 +2414,12 @@ impl MapContainer {
                     return Ok(());
                 }
                 let copy = duplicate_with(py, message, budget)?;
-                // The value that the copy replaces is dropped once the map is no longer borrowed.
-                let _replaced = target
+                // The value that the copy replaces (of Python code that the copy ran) is released
+                // once the map is no longer borrowed.
+                let replaced = target
                     .borrow_mut()
                     .insert(key, MapValue::Message(copy.unbind()));
+                release_replaced(py, replaced);
                 return Ok(());
             }
         }
@@ -2426,9 +2440,12 @@ impl MapContainer {
             return Ok(message.bind(py).clone());
         }
         let message = new_instance(py, &Self::map_of(target).value_type)?;
-        let _replaced = target
+        // The value that the message replaces (of Python code that making it ran) is released once
+        // the map is no longer borrowed.
+        let replaced = target
             .borrow_mut()
             .insert(key, MapValue::Message(message.clone().unbind()));
+        release_replaced(py, replaced);
         Ok(message)
     }
 
@@ -2539,13 +2556,11 @@ impl MapContainer {
         Self::reify(slf)?;
         slf.borrow_mut().new_version();
         let key = key_of(&Self::map_of(slf), key)?;
-        // The entry removed is dropped once the map is no longer borrowed.
+        // The entry removed is released once the map is no longer borrowed.
         let removed = slf.borrow_mut().entries.remove(&key);
         match removed {
             Some((_, value)) => {
-                if let MapValue::Message(m) = value {
-                    release_held(slf.py(), m);
-                }
+                release_replaced(slf.py(), Some(value));
                 Ok(())
             }
             None => Err(PyKeyError::new_err("Key not present in map")),

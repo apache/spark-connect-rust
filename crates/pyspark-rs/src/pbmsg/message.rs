@@ -306,8 +306,18 @@ pub struct PyMessage {
     pub(crate) fields: Fields,
     /// The unset children that `__getattr__` gave, each with the index of its field.
     lazy: Vec<(usize, Py<PyMessage>)>,
-    /// The parent of an unset child.
-    parent: Option<Parent>,
+    /// The parent of an unset child, held weakly, and the index of its field (`parent_field`),
+    /// which [`PyMessage::take_parent`] gives as a [`Parent`]: apart, so that the two and `clean`
+    /// take the room of a `Parent`, and the object of a message that of 144 bytes.
+    parent: Option<Py<PyWeakrefReference>>,
+    parent_field: u32,
+    /// The [`clean_epoch`] at which the message was made, of a message that held no native value
+    /// at any level below it then (0 of none): a message made empty, which a read made of no
+    /// native value (one of a value made whole, see `native::Whole`), as most of a read of a parse
+    /// are, or that Python code made. A native value set in the message unmarks it, and a value
+    /// set below it otherwise begins another epoch (see [`clean_epoch`]): so a message of the
+    /// epoch now holds none of a slab of a parse, and [`PyMessage::unpin`] passes it by.
+    clean: u32,
 }
 
 impl std::ops::Deref for PyMessage {
@@ -321,6 +331,87 @@ impl std::ops::Deref for PyMessage {
 impl std::ops::DerefMut for PyMessage {
     fn deref_mut(&mut self) -> &mut Fields {
         &mut self.fields
+    }
+}
+
+/// A message released releases the objects of its fields as [`unpin_held`] does: a message, a
+/// container or a map of a field that Python holds still keeps no slab of a parse alive, as a
+/// message of a container released does (see `containers::release_held`): of a read of the mark
+/// of the message only, inlined, of a message marked (see `PyMessage::clean`), as most of a read
+/// are. (A `Drop` of its own makes the drop of a message call the drop of its fields apart, rather
+/// than inline it: about 4 ns of each message released, 3% to 4% of the release of a parse of
+/// 400,000 messages read whole.)
+impl Drop for PyMessage {
+    #[inline(always)]
+    fn drop(&mut self) {
+        // A message marked of the epoch now holds no native value of a slab below it, as most of
+        // the messages of a read do, and so none that an object of its fields holds.
+        if !self.is_clean(clean_epoch()) {
+            unpin_fields_held(&self.fields.slots);
+        }
+    }
+}
+
+/// [`unpin_held`] of the objects of `slots`, the fields of a message released (see its `Drop`).
+#[inline(never)]
+fn unpin_fields_held(slots: &Slots) {
+    for (_, slot) in slots.iter() {
+        if let Some(object) = object_of(slot) {
+            // SAFETY: of a live object, which the slot holds; a message holds objects only as an
+            // object (its fields are set of the methods of the object), whose deallocation, which
+            // drops it, is of the thread attached.
+            if unsafe { pyo3::ffi::Py_REFCNT(object) } > 1 {
+                debug_assert!(is_attached());
+                unpin_below(unsafe { Python::assume_attached() }, slot);
+            }
+        }
+    }
+}
+
+#[cfg(not(windows))]
+extern "C" {
+    /// Whether this thread holds the GIL: of the C API of CPython, not of its limited API, of
+    /// which the extension is built; the interpreter that loads the extension has it (as
+    /// `gc.rs` reads it). Not on Windows, where an extension of the limited API links against the
+    /// DLL of that API only.
+    fn PyGILState_Check() -> std::os::raw::c_int;
+}
+
+/// Whether the thread is attached to the interpreter, of CPython's check (see [`if_attached`]).
+#[cfg(not(windows))]
+fn is_attached() -> bool {
+    // SAFETY: `PyGILState_Check` may be called of any thread at any time.
+    unsafe { PyGILState_Check() != 0 }
+}
+
+/// Whether the thread is attached to the interpreter: of no check on Windows (see
+/// [`if_attached`]).
+#[cfg(windows)]
+fn is_attached() -> bool {
+    true
+}
+
+/// Run `release` of the token of the thread, if the thread is attached to the interpreter: of the
+/// drop of a value that holds objects, which, of the deallocation of an object (whose thread is
+/// attached), releases them as `Bound`s, of no read of PyO3's thread local, and of a value dropped
+/// by a thread that is not attached leaves them as they are, whose release PyO3 defers until a
+/// thread attaches. Of CPython's check (`PyGILState_Check`), which takes no lock, where
+/// `Python::try_attach` locks PyO3's pool of the references to release later at each call (of
+/// about 50 ns of each message released); on Windows, which has no such check of the limited API,
+/// of `Python::try_attach`, which attaches the thread if it can. (CPython's check says yes of any
+/// thread once a subinterpreter is made, which no thread that drops such a value runs.)
+pub(crate) fn if_attached(release: impl FnOnce(Python<'_>)) {
+    #[cfg(not(windows))]
+    {
+        // SAFETY: `PyGILState_Check` may be called of any thread at any time, and the token is of
+        // a thread that is attached.
+        if unsafe { PyGILState_Check() } != 0 {
+            release(unsafe { Python::assume_attached() });
+        }
+    }
+    #[cfg(windows)]
+    {
+        let _ = Python::try_attach(release);
     }
 }
 
@@ -351,10 +442,17 @@ struct Registry {
     /// name that had none), each with the [`generation`] that the registration began, in their
     /// order: the class of a name at a generation, which [`MessageClass::at`] gives.
     replaced: HashMap<String, Vec<Replaced>>,
+    /// The records of the classes that each message type kept (see `MessageDesc::class`), by the
+    /// address of the type: one of each class (and of none) that the type had at a read, which a
+    /// later read of the type of the same class keeps again (see [`keep_class`]), so that the
+    /// records are as many as the classes that a type had, not as the registrations.
+    kept: HashMap<usize, Vec<&'static KeptClass>, BuildHasherDefault<AddressHasher>>,
 }
 
-/// The hasher of the addresses of the classes of [`Registry::by_type`]: a multiplication by an odd
-/// constant of the high bits of its product, as the addresses of objects differ in their middle bits.
+/// The hasher of the addresses of [`Registry::by_type`] and [`Registry::kept`]: a multiplication
+/// by an odd constant of the address without its low 4 bits, which the alignment of objects makes
+/// 0, so that the low bits of the product, which pick the bucket of an address, differ as the
+/// addresses do.
 #[derive(Default)]
 struct AddressHasher(u64);
 
@@ -370,7 +468,7 @@ impl std::hash::Hasher for AddressHasher {
     }
 
     fn write_usize(&mut self, address: usize) {
-        self.0 = (address as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        self.0 = ((address >> 4) as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
     }
 }
 
@@ -386,6 +484,179 @@ fn classes() -> &'static Mutex<Registry> {
 /// The objects and the native messages of a message that outlives its container, up to which
 /// [`PyMessage::unpin`] moves its native values out of their slabs.
 const UNPIN_STEPS: usize = 1024;
+
+/// The epoch of the marks of the messages that hold no native value below them (see
+/// `PyMessage::clean`), from 1: one more at the end of each operation that sets native values
+/// below a message other than in the message itself, which a mark of the message would not see,
+/// so that it unmarks every message made before. Those are a merge into a message
+/// (`merge_native`, and a parse into a message that holds fields, see `codec::merge_with`) and a
+/// copy that shares the native values of a message, which the message that takes the copy then
+/// holds (see `native::copy_parts`). A parse into an empty message begins none: the native
+/// values that it sets are those of a parse of its own, all below the message, whose slabs no
+/// message apart from it holds, which a mark of a message above it may pass by.
+static CLEAN_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// The epoch of the marks of the messages now (see [`CLEAN_EPOCH`]).
+#[inline]
+pub(crate) fn clean_epoch() -> u64 {
+    CLEAN_EPOCH.load(std::sync::atomic::Ordering::Acquire)
+}
+
+/// Begin the next epoch of the marks of the messages (see [`CLEAN_EPOCH`]), once native values
+/// are set below a message.
+pub(crate) fn unmark_all() {
+    CLEAN_EPOCH.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+}
+
+/// The mark of a message made at the epoch `epoch` (see `PyMessage::clean`), of 32 bits: past the
+/// last epoch of 32 bits, that of no epoch, so that a mark is never of an epoch after its own.
+fn mark_of(epoch: u64) -> u32 {
+    u32::try_from(epoch).unwrap_or(u32::MAX)
+}
+
+/// The walks of [`PyMessage::unpin`] and the objects that they visited, which
+/// `_proto_unpin_counts` of the tests gives.
+static UNPIN_COUNTS: [std::sync::atomic::AtomicUsize; 2] = [
+    std::sync::atomic::AtomicUsize::new(0),
+    std::sync::atomic::AtomicUsize::new(0),
+];
+
+/// The walks of [`PyMessage::unpin`] so far and the objects that they visited, of the tests.
+#[pyfunction]
+pub(crate) fn _proto_unpin_counts() -> (usize, usize) {
+    use std::sync::atomic::Ordering::Relaxed;
+    (UNPIN_COUNTS[0].load(Relaxed), UNPIN_COUNTS[1].load(Relaxed))
+}
+
+/// A walk of [`PyMessage::unpin`]: the steps that it has left of [`UNPIN_STEPS`], the epoch of the
+/// marks of the messages that it passes by (see `PyMessage::clean`), the objects that it visited,
+/// and the messages left to visit, of one loop, of no recursion.
+struct Unpin {
+    steps: usize,
+    epoch: u64,
+    visited: usize,
+    left: Vec<Py<PyMessage>>,
+}
+
+impl Unpin {
+    fn new() -> Self {
+        Unpin {
+            steps: UNPIN_STEPS,
+            epoch: clean_epoch(),
+            visited: 0,
+            left: Vec::new(),
+        }
+    }
+
+    /// Add the objects below `slot` to the messages left to visit: the message of a message
+    /// field, the messages of a container or the messages of the values of a map.
+    fn add_below(&mut self, py: Python<'_>, slot: &Slot) {
+        match slot {
+            Slot::Message(child) => self.left.push(child.clone_ref(py)),
+            Slot::Composite(c) => {
+                if let Ok(c) = c.bind(py).try_borrow() {
+                    self.left.extend(c.items.iter().map(|m| m.clone_ref(py)));
+                }
+            }
+            Slot::Map(c) => {
+                if let Ok(c) = c.bind(py).try_borrow() {
+                    for (_, value) in c.entries.iter() {
+                        if let MapValue::Message(m) = value {
+                            self.left.push(m.clone_ref(py));
+                        }
+                    }
+                }
+            }
+            Slot::Scalar(_) | Slot::Repeated(_) | Slot::Native(_) => {}
+        }
+    }
+
+    /// Visit the messages left, and those below them (see [`PyMessage::unpin`]): a message marked
+    /// of the epoch of the walk, which holds no native value below it, of no step.
+    fn run(&mut self, py: Python<'_>) {
+        while let Some(message) = self.left.pop() {
+            // Released as a `Bound`, which knows that the thread is attached, with no read of a
+            // thread local.
+            let message = message.into_bound(py);
+            if self.steps == 0 {
+                break;
+            }
+            let Ok(mut m) = message.try_borrow_mut() else {
+                continue;
+            };
+            if m.is_clean(self.epoch) {
+                continue;
+            }
+            self.steps -= 1;
+            self.visited += 1;
+            for (_, slot) in m.slots.iter_mut() {
+                if let Slot::Native(value) = slot {
+                    let count = value.count() as usize;
+                    if count > self.steps {
+                        self.steps = 0;
+                        break;
+                    }
+                    self.steps -= count;
+                    value.unpin();
+                } else {
+                    self.add_below(py, slot);
+                }
+            }
+        }
+        for message in self.left.drain(..) {
+            drop(message.into_bound(py));
+        }
+        use std::sync::atomic::Ordering::Relaxed;
+        UNPIN_COUNTS[0].fetch_add(1, Relaxed);
+        UNPIN_COUNTS[1].fetch_add(self.visited, Relaxed);
+    }
+}
+
+/// Move the native values below the object of `slot` (a message, or the messages of a container
+/// or of a map), which a message clears, replaces or releases, out of the slabs of their parse, if
+/// Python holds the object still (see [`PyMessage::unpin`]): so that a child kept of a message
+/// released, or of a field cleared (`ClearField`, `Clear`, `CopyFrom`, a member of a oneof that
+/// another replaces), keeps no slab of the parse alive, as a message kept of a container does
+/// (see `containers::release_held`).
+#[inline]
+pub(crate) fn unpin_held(py: Python<'_>, slot: &Slot) {
+    if let Some(object) = object_of(slot) {
+        // SAFETY: of a live object, which `slot` holds.
+        if unsafe { pyo3::ffi::Py_REFCNT(object) } > 1 {
+            unpin_below(py, slot);
+        }
+    }
+}
+
+/// [`unpin_held`] of the object of `slot`, which Python holds.
+#[cold]
+#[inline(never)]
+fn unpin_below(py: Python<'_>, slot: &Slot) {
+    let mut walk = Unpin::new();
+    walk.add_below(py, slot);
+    walk.run(py);
+}
+
+/// The object of `slot`, of a message, a container of messages or a map (whose messages
+/// [`unpin_held`] walks).
+#[inline]
+fn object_of(slot: &Slot) -> Option<*mut pyo3::ffi::PyObject> {
+    match slot {
+        Slot::Message(m) => Some(m.as_ptr()),
+        Slot::Composite(c) => Some(c.as_ptr()),
+        Slot::Map(c) => Some(c.as_ptr()),
+        Slot::Scalar(_) | Slot::Repeated(_) | Slot::Native(_) => None,
+    }
+}
+
+/// Whether a slot holds a native value of messages (of a slab of a parse, it may be), which a
+/// message that holds it is not marked of (see `PyMessage::clean`).
+fn holds_native_messages(slot: &Slot) -> bool {
+    matches!(
+        slot,
+        Slot::Native(Value::Message(_) | Value::Messages(_) | Value::Map(_))
+    )
+}
 
 /// The generation of the classes of the messages: one more for each `_proto_register_classes`
 /// that gives a full name another class (or a class, of one that had none). A native copy of a
@@ -582,9 +853,9 @@ impl MessageClass {
         }
         // The class and the generation of one read of the registry, which a registration changes
         // under its lock (and registers the pool's type of the name with the class).
-        let registry = classes().lock().unwrap_or_else(|e| e.into_inner());
+        let mut registry = classes().lock().unwrap_or_else(|e| e.into_inner());
         Ok(MessageClass {
-            class: class_now(py, desc, &registry),
+            class: class_now(py, desc, &mut registry),
             desc,
         })
     }
@@ -606,14 +877,14 @@ impl MessageClass {
         // The generation is read under the lock of the registry, which a registration holds
         // while it changes the classes and begins the next generation, so that the class read is
         // that of the generation `at`, also of threads that run at once (of no GIL).
-        let registry = classes().lock().unwrap_or_else(|e| e.into_inner());
+        let mut registry = classes().lock().unwrap_or_else(|e| e.into_inner());
         if at == generation() {
             // As `now` makes it.
             if !is_pool_type(desc) {
                 return MessageClass::of_locked(py, &desc.full_name, &registry);
             }
             return Ok(MessageClass {
-                class: class_now(py, desc, &registry),
+                class: class_now(py, desc, &mut registry),
                 desc,
             });
         }
@@ -655,16 +926,17 @@ impl MessageClass {
 /// the one that `desc` keeps (see `MessageDesc::class`): of no registration that gave the type
 /// another class since the earlier of the generation that it was kept of and `at`.
 fn kept_class(desc: &MessageDesc, at: u64) -> Option<Option<&'static Py<PyType>>> {
-    // SAFETY: a class that a type kept is never released (see `MessageDesc::class`).
-    let kept = unsafe {
-        desc.class
-            .load(std::sync::atomic::Ordering::Acquire)
-            .as_ref()
-    }?;
-    let changed = desc
-        .class_changed
-        .load(std::sync::atomic::Ordering::Acquire);
-    (changed <= kept.at && changed <= at).then_some(kept.class.as_ref())
+    use std::sync::atomic::Ordering::Acquire;
+    // SAFETY: a record of a class that a type kept is never released (see `MessageDesc::class`).
+    let kept = unsafe { desc.class.load(Acquire).as_ref() }?;
+    // The generation of the record is read before the change of the class. The record holds the
+    // class of the type of each generation that it was kept of, the last of which, read here, a
+    // read of the registry kept under its lock after the registrations up to it (see
+    // `keep_class`), whose changes the change read next sees: so of a change not after that
+    // generation, nor after `at`, the class of the type is the same from the change on, at both.
+    let kept_at = kept.at.load(Acquire);
+    let changed = desc.class_changed.load(Acquire);
+    (changed <= kept_at && changed <= at).then_some(kept.class.as_ref())
 }
 
 /// Whether `desc` is the pool's type of its name, which the messages of the runtime are of.
@@ -679,40 +951,79 @@ fn is_pool_type(desc: &'static MessageDesc) -> bool {
 fn class_now(
     py: Python<'_>,
     desc: &'static MessageDesc,
-    registry: &Registry,
+    registry: &mut Registry,
 ) -> Option<Py<PyType>> {
     let class = registry
         .by_name
         .get(&desc.full_name)
         .map(|r| r.class.clone_ref(py));
-    keep_class(py, desc, generation(), class.as_ref());
+    keep_class(py, registry, desc, generation(), class.as_ref());
     class
 }
 
-/// Keep `class` as the class of the type `desc` of the generation `at` (see
-/// `MessageDesc::class`), unless the type keeps one of that generation or a later one already: a
-/// type keeps the class of its first read, and of the first read after a registration that gave
-/// it another class, so that the messages of the type are made of no lookup of the registry.
-fn keep_class(py: Python<'_>, desc: &'static MessageDesc, at: u64, class: Option<&Py<PyType>>) {
+/// Keep `class` as the class of the type `desc` of the generation `at`, the generation now (see
+/// `MessageDesc::class`), unless the type keeps one of that generation already: a type keeps the
+/// class of its first read, and of the first read after a registration that gave it another
+/// class, so that the messages of the type are made of no lookup of the registry. Of `registry`,
+/// held locked, which keeps a record of each class of each type (see `Registry::kept`): a class
+/// that the type had before is kept again of its record, of the later generation, so that the
+/// records, which are never released, are as many as the classes of the type, not as the
+/// registrations that changed it.
+fn keep_class(
+    py: Python<'_>,
+    registry: &mut Registry,
+    desc: &'static MessageDesc,
+    at: u64,
+    class: Option<&Py<PyType>>,
+) {
     use std::sync::atomic::Ordering;
     let current = desc.class.load(Ordering::Acquire);
-    // SAFETY: a class that a type kept is never released.
-    if unsafe { current.as_ref() }.is_some_and(|kept| kept.at >= at) {
+    // SAFETY: a record of a class that a type kept is never released.
+    if unsafe { current.as_ref() }.is_some_and(|kept| kept.at.load(Ordering::Acquire) >= at) {
         return;
     }
-    let record = Box::into_raw(Box::new(KeptClass {
-        at,
-        class: class.map(|c| c.clone_ref(py)),
-    }));
-    if desc
-        .class
-        .compare_exchange(current, record, Ordering::AcqRel, Ordering::Acquire)
-        .is_err()
-    {
-        // Another thread kept a class meanwhile; this record, which no one saw, is released.
-        // SAFETY: of `Box::into_raw` above, and never shared.
-        drop(unsafe { Box::from_raw(record) });
-    }
+    let records = registry
+        .kept
+        .entry(std::ptr::from_ref(desc) as usize)
+        .or_default();
+    let of_class = |kept: &KeptClass| match (&kept.class, class) {
+        (Some(a), Some(b)) => a.as_ptr() == b.as_ptr(),
+        (None, None) => true,
+        _ => false,
+    };
+    let record = match records.iter().find(|kept| of_class(kept)) {
+        Some(&kept) => {
+            // Of the later generation before the type keeps it again, which a read of the record
+            // (see `kept_class`) sees then.
+            kept.at.fetch_max(at, Ordering::AcqRel);
+            kept
+        }
+        None => {
+            let kept: &'static KeptClass = Box::leak(Box::new(KeptClass {
+                at: std::sync::atomic::AtomicU64::new(at),
+                class: class.map(|c| c.clone_ref(py)),
+            }));
+            records.push(kept);
+            kept
+        }
+    };
+    // Of the lock of the registry, which every keep of a class holds.
+    desc.class
+        .store(std::ptr::from_ref(record).cast_mut(), Ordering::Release);
+}
+
+/// The records of the classes that the message type `full_name` kept (see `Registry::kept`), of
+/// the tests.
+#[pyfunction]
+pub(crate) fn _proto_kept_classes(full_name: &str) -> PyResult<usize> {
+    let desc = pool()
+        .message(full_name)
+        .ok_or_else(|| PyKeyError::new_err(full_name.to_owned()))?;
+    let registry = classes().lock().unwrap_or_else(|e| e.into_inner());
+    Ok(registry
+        .kept
+        .get(&(std::ptr::from_ref(desc) as usize))
+        .map_or(0, Vec::len))
 }
 
 /// A new, empty message of the type `desc` of the [`generation`] `at`, as
@@ -1271,7 +1582,7 @@ pub(crate) fn mark_present(message: &Bound<'_, PyMessage>) -> PyResult<()> {
     let py = message.py();
     let mut current = message.clone();
     loop {
-        let parent = current.borrow_mut().parent.take();
+        let parent = current.borrow_mut().take_parent();
         let Some(parent) = parent else {
             return Ok(());
         };
@@ -1303,6 +1614,20 @@ pub(crate) fn mark_present(message: &Bound<'_, PyMessage>) -> PyResult<()> {
 /// `budget`, with no borrow of the target held but while a field is set; the source is immutable,
 /// so what the target becomes meanwhile changes nothing of what is merged.
 fn merge_native(
+    py: Python<'_>,
+    target: &Bound<'_, PyMessage>,
+    source: NRef,
+    budget: &ConversionBudget,
+) -> PyResult<()> {
+    let merged = merge_native_fields(py, target, source, budget);
+    // The native values that the merge set below the target, of a merge that failed too, which
+    // the marks of the messages above them do not see (see `CLEAN_EPOCH`).
+    unmark_all();
+    merged
+}
+
+/// [`merge_native`] of the fields of `source`.
+fn merge_native_fields(
     py: Python<'_>,
     target: &Bound<'_, PyMessage>,
     source: NRef,
@@ -1744,63 +2069,18 @@ impl PyMessage {
 
     /// Move the native values of `message`, and of the messages below it (of its objects and of
     /// those of its containers too), out of the slabs of their parse (see `Value::unpin`): of a
-    /// message that outlives the container or the map that held it (see
-    /// `containers::release_held`), so that the native values of a part of a parse that it
-    /// holds, unread, keep alive no slab of the messages released with the container, where a slab
-    /// holds up to 64 messages. Of up to [`UNPIN_STEPS`] objects and native messages, as a
-    /// message that holds more holds most of the nodes of its slabs itself; a message that another
-    /// borrows meanwhile is left as it is.
+    /// message that outlives the message, the container or the map that held it (see
+    /// [`unpin_held`]), so that the native values of a part of a parse that it holds, unread, keep
+    /// alive no slab of the messages released with the container, where a slab holds up to 64
+    /// messages. Of up to [`UNPIN_STEPS`] objects and native messages, as a message that holds
+    /// more holds most of the nodes of its slabs itself; a message that another borrows meanwhile
+    /// is left as it is, and so is one that holds no native value below it (see
+    /// `PyMessage::clean`), of no walk of its objects: as most of the objects of a read of a parse
+    /// are, so that a message read whole is released of no walk of it.
     pub(crate) fn unpin(message: &Bound<'_, Self>) {
-        let mut steps = UNPIN_STEPS;
-        Self::unpin_within(message, &mut steps);
-    }
-
-    /// [`PyMessage::unpin`] of the steps `steps` left.
-    pub(crate) fn unpin_within(message: &Bound<'_, Self>, steps: &mut usize) {
-        let py = message.py();
-        if *steps == 0 {
-            return;
-        }
-        *steps -= 1;
-        let mut objects = Vec::new();
-        {
-            let Ok(mut m) = message.try_borrow_mut() else {
-                return;
-            };
-            for (_, slot) in m.slots.iter_mut() {
-                match slot {
-                    Slot::Native(value) => {
-                        let count = value.count() as usize;
-                        if count > *steps {
-                            *steps = 0;
-                            return;
-                        }
-                        *steps -= count;
-                        value.unpin();
-                    }
-                    Slot::Message(child) => objects.push(child.clone_ref(py)),
-                    Slot::Composite(c) => {
-                        if let Ok(c) = c.bind(py).try_borrow() {
-                            objects.extend(c.items.iter().map(|m| m.clone_ref(py)));
-                        }
-                    }
-                    Slot::Map(c) => {
-                        if let Ok(c) = c.bind(py).try_borrow() {
-                            objects.extend(c.entries.iter().filter_map(|(_, value)| match value {
-                                MapValue::Message(m) => Some(m.clone_ref(py)),
-                                MapValue::Scalar(_) => None,
-                            }));
-                        }
-                    }
-                    Slot::Scalar(_) | Slot::Repeated(_) => {}
-                }
-            }
-        }
-        grow(|| {
-            for child in objects {
-                Self::unpin_within(child.bind(py), steps);
-            }
-        })
+        let mut walk = Unpin::new();
+        walk.left.push(message.clone().unbind());
+        walk.run(message.py());
     }
 
     /// The native messages that `message` holds, of all its levels, of its objects and of its
@@ -1853,7 +2133,39 @@ impl PyMessage {
             },
             lazy: Vec::new(),
             parent: None,
+            parent_field: 0,
+            clean: mark_of(clean_epoch()),
         }
+    }
+
+    /// Whether the message holds no native value of a slab at any level below it, as of its mark
+    /// of the epoch `epoch` (see `PyMessage::clean`).
+    #[inline]
+    fn is_clean(&self, epoch: u64) -> bool {
+        self.clean != 0 && u64::from(self.clean) == epoch
+    }
+
+    /// Unmark the message, once it holds the native value of `slot` (see `PyMessage::clean`).
+    fn unmark_of(&mut self, slot: &Slot) {
+        if holds_native_messages(slot) {
+            self.clean = 0;
+        }
+    }
+
+    /// Unmark the message, once it holds the native values of `slots` (see `PyMessage::clean`).
+    fn unmark_of_slots(&mut self, slots: &Slots) {
+        if slots.iter().any(|(_, slot)| holds_native_messages(slot)) {
+            self.clean = 0;
+        }
+    }
+
+    /// The parent of an unset child, which it no longer holds (see `PyMessage::parent`).
+    fn take_parent(&mut self) -> Option<Parent> {
+        let message = self.parent.take()?;
+        Some(Parent {
+            message,
+            field: self.parent_field as usize,
+        })
     }
 
     /// Take the set fields and the unknown fields of `fields`, the copy of a message of the type
@@ -1866,12 +2178,14 @@ impl PyMessage {
     /// Take the set fields `slots` and the unknown fields `unknown` of a copy of a message of the
     /// type of this one (a new message) as its own.
     pub(crate) fn take_parts(&mut self, slots: Slots, unknown: Vec<u8>) {
+        self.unmark_of_slots(&slots);
         self.fields.slots = slots;
         self.fields.unknown = unknown;
     }
 
     /// Set the slot of the field `index`, giving back the one that it replaces.
     pub(crate) fn set_slot(&mut self, index: usize, slot: Slot) -> Option<Slot> {
+        self.unmark_of(&slot);
         let Fields { desc, slots, .. } = &mut self.fields;
         slots.set(desc, index, slot)
     }
@@ -1898,14 +2212,20 @@ impl PyMessage {
 
     /// Clear the other members of the oneof of the field `index`. An unset child that a member
     /// gave out stays the member's, as upb's does: setting a field of it later sets the member.
+    /// The object of a member that Python holds keeps no slab of a parse (see [`unpin_held`]).
     pub(crate) fn clear_oneof_siblings(&mut self, py: Python<'_>, index: usize) {
-        let _ = py;
         let Some(oneof) = self.desc.fields[index].oneof else {
             return;
         };
         // Of the set fields, which are few, not of the members, which may be many.
         let Fields { desc, slots, .. } = &mut self.fields;
-        slots.retain(|member| member == index || desc.fields[member].oneof != Some(oneof));
+        let cleared = |member: usize| member != index && desc.fields[member].oneof == Some(oneof);
+        for (member, slot) in slots.iter() {
+            if cleared(member) {
+                unpin_held(py, slot);
+            }
+        }
+        slots.retain(|member| !cleared(member));
     }
 
     pub(crate) fn set_scalar(&mut self, py: Python<'_>, index: usize, value: Scalar) {
@@ -1921,12 +2241,21 @@ impl PyMessage {
         self.set_slot(index, child);
     }
 
+    /// Clear the field `index`: the object of its value that Python holds keeps no slab of a parse
+    /// (see [`unpin_held`]).
     fn clear_index(&mut self, py: Python<'_>, index: usize) {
-        self.slots.remove(index);
+        if let Some(slot) = self.slots.remove(index) {
+            unpin_held(py, &slot);
+        }
         self.sever(py, index);
     }
 
+    /// Clear the fields: the objects of their values that Python holds keep no slab of a parse
+    /// (see [`unpin_held`]).
     fn clear_all(&mut self, py: Python<'_>) {
+        for (_, slot) in self.slots.iter() {
+            unpin_held(py, slot);
+        }
         self.slots = Slots::default();
         for (_, child) in std::mem::take(&mut self.lazy) {
             if let Ok(mut c) = child.bind(py).try_borrow_mut() {
@@ -1941,6 +2270,12 @@ impl PyMessage {
     /// when the copy sets that field (see [`PyMessage::adopt`]), and stays unset (and the field's)
     /// when it does not.
     fn replace_slots(&mut self, py: Python<'_>, slots: Slots, unknown: Vec<u8>) -> PyResult<()> {
+        // The objects of the fields replaced that Python holds keep no slab of a parse (see
+        // `unpin_held`).
+        for (_, slot) in self.fields.slots.iter() {
+            unpin_held(py, slot);
+        }
+        self.unmark_of_slots(&slots);
         if self.lazy.is_empty() {
             self.fields.slots = slots;
             self.fields.unknown = unknown;
@@ -1992,6 +2327,7 @@ impl PyMessage {
             let lazy = {
                 let mut child = stub.try_borrow_mut()?;
                 child.parent = None;
+                child.unmark_of_slots(&slots);
                 child.fields.slots = slots;
                 child.fields.unknown = unknown;
                 std::mem::take(&mut child.lazy)
@@ -2654,10 +2990,11 @@ impl PyMessage {
         // field has none by then.
         let parent = weak(slf)?;
         let child = new_instance(py, &field.type_name)?;
-        child.try_borrow_mut()?.parent = Some(Parent {
-            message: parent,
-            field: index,
-        });
+        {
+            let mut c = child.try_borrow_mut()?;
+            c.parent = Some(parent);
+            c.parent_field = u32::try_from(index).expect("the index of a field of a message");
+        }
         let mut me = slf.try_borrow_mut()?;
         if let Some(given) = given(&me) {
             drop(me);
@@ -3493,5 +3830,28 @@ impl PyMessage {
             serialized = serialized.call_method1("encode", ("latin1",))?;
         }
         Self::parse_from_string(slf, &serialized).map(|_| ())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::hash::Hasher;
+
+    use super::AddressHasher;
+
+    #[test]
+    fn the_hashes_of_addresses_of_objects_differ_in_their_low_bits() {
+        // Addresses of objects, 16 bytes apart, as the allocator aligns them: the low bits of
+        // their hashes, which pick their buckets, take all their values, not a sixteenth of them.
+        let hash = |address: usize| {
+            let mut hasher = AddressHasher::default();
+            hasher.write_usize(address);
+            hasher.finish()
+        };
+        let low: std::collections::HashSet<u64> = (0..256)
+            .map(|i| hash(0x7f3a_1c00_0000 + i * 16) & 0xff)
+            .collect();
+        assert!(low.len() > 128, "{}", low.len());
+        assert!((0..256).any(|i| hash(0x7f3a_1c00_0000 + i * 16) & 0xf != 0));
     }
 }

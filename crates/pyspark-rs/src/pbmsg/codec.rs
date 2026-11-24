@@ -11,8 +11,10 @@ use std::sync::{Arc, Mutex};
 use pyo3::prelude::*;
 
 use super::arena::{Arena, NRef};
-use super::containers::{Entries, MapValue, RepeatedComposite, RepeatedScalar};
-use super::message::{generation, new_instance, EntryRef, Fields, MessageClass, PyMessage, Slot};
+use super::containers::{self, Entries, MapValue, RepeatedComposite, RepeatedScalar};
+use super::message::{
+    generation, new_instance, unmark_all, EntryRef, Fields, MessageClass, PyMessage, Slot,
+};
 use super::native::{unique_native, Native, NativeMap, NativeMessages, NativeValue, Value};
 use super::pool::{FieldDesc, Kind, MapDesc, MessageDesc, SEARCH_NUMBER};
 use super::scalar::{Scalar, Str};
@@ -1064,7 +1066,12 @@ fn merge_with(
         PyMessage::take_parsed(message, native, budget)?;
         parsed
     } else {
-        merge_message(py, message, &mut reader, budget, depth)
+        let parsed = merge_message(py, message, &mut reader, budget, depth);
+        // The native values that the parse set below the message, which holds fields, of a parse
+        // that failed too: values of fields of messages of its own, which the marks of the
+        // messages above them do not see (see `message::CLEAN_EPOCH`).
+        unmark_all();
+        parsed
     };
     parsed.map_err(|err| {
         if !err.is_instance_of::<DecodeError>(py) {
@@ -1528,8 +1535,9 @@ fn merge_map_entry(
         MapValue::Scalar(scalar.unwrap_or_else(|| Scalar::default_of(map.value)))
     };
     let container = PyMessage::map_of_field(message, field.index)?;
-    // The value that the entry replaces is dropped once the map is no longer borrowed.
-    let _replaced = container.bind(py).borrow_mut().insert(key, value);
+    // The value that the entry replaces is released once the map is no longer borrowed.
+    let replaced = container.bind(py).borrow_mut().insert(key, value);
+    containers::release_replaced(py, replaced);
     Ok(())
 }
 

@@ -9513,6 +9513,215 @@ def test_messages_kept_of_released_containers_keep_no_slab_of_their_parse():
         _pyspark._proto_whole_limit(previous)
 
 
+def _function(depth, i):
+    """An expression of nested functions of ``depth`` levels, of two arguments each."""
+    if depth == 0:
+        return {"literal": {"integer": i}}
+    args = [_function(depth - 1, i), _function(depth - 1, i)]
+    return {"unresolved_function": {"function_name": "f", "arguments": args}}
+
+
+def _read_all(expression):
+    """Read every message of ``expression`` (of nested functions), making all their objects."""
+    if expression.HasField("unresolved_function"):
+        for argument in expression.unresolved_function.arguments:
+            _read_all(argument)
+    else:
+        expression.literal.integer
+
+
+def test_map_values_replaced_by_a_merge_keep_no_slab_of_their_parse():
+    # A message of a map of a parse that Python keeps, which a merge of the message that holds the
+    # map replaces (`MergeFrom`, `MergeFromString`, as upb's do), moves the part of the parse that
+    # it holds unread out of the slabs once the map no longer holds it, so that it keeps none of
+    # them alive for the other messages of the parse, which are released; it reads as it did. (The
+    # `MergeFrom` of the map merges into the message that the map has, as upb's, which takes the
+    # value merged.) Of either way of making the objects of a read (`_proto_whole_limit`).
+    P = proto.MlParams
+    data = P(params={f"k{i}": {"array": {"elements": [{"integer": i}] * 2}} for i in range(300)}).SerializeToString()
+    other = P(params={"k7": {"integer": 99}})
+
+    def kept(how):
+        p = P.FromString(data)
+        kept = p.params["k7"]
+        held = _pyspark._proto_slab_messages(kept)
+        if how == "MergeFrom":
+            p.MergeFrom(other)
+        elif how == "MergeFromString":
+            p.MergeFromString(other.SerializeToString())
+        else:
+            p.params.MergeFrom(other.params)
+        assert p.params["k7"].integer == 99
+        del p
+        gc.collect()
+        return kept, held
+
+    previous = _pyspark._proto_whole_limit()
+    try:
+        for limit in (previous, 0):
+            _pyspark._proto_whole_limit(limit)
+            for how in ("MergeFrom", "MergeFromString", "map MergeFrom"):
+                kept_, held = kept(how)
+                assert held > 0, (limit, how)
+                assert _pyspark._proto_slab_messages(kept_) == 0, (limit, how)
+                if how == "map MergeFrom":
+                    assert kept_ == other.params["k7"], limit
+                else:
+                    assert [e.integer for e in kept_.array.elements] == [7, 7], (limit, how)
+    finally:
+        _pyspark._proto_whole_limit(previous)
+
+
+def test_children_kept_of_released_or_cleared_messages_keep_no_slab_of_their_parse():
+    # A child of a message of a parse that Python keeps, of a message field, moves the part of the
+    # parse that it holds unread out of the slabs once the message no longer holds it: of the
+    # release of the message, of `ClearField`, of `Clear`, of `CopyFrom` and of the member of its
+    # oneof that another replaces; and so does a child of a message of a container, of the release
+    # of the container. So it keeps no slab alive for the other messages of the parse, which are
+    # released (`_proto_slab_messages`), and reads as it did. Of either way of making the objects of
+    # a read: a join of two relations of 184 messages each is read a level at a time, so its object
+    # holds them natively.
+    R = proto.Relation
+
+    def relation(n):
+        return {"project": {"expressions": [_function(2, i) for i in range(n)]}}
+
+    data = R(join={"left": relation(13), "right": relation(13)}).SerializeToString()
+    expected = R.FromString(data).join
+    functions = R(project={"expressions": [_function(3, i) for i in range(600)]}).SerializeToString()
+
+    def kept_of(how):
+        r = R.FromString(data)
+        kept = r.join
+        held = _pyspark._proto_slab_messages(kept)
+        if how == "ClearField":
+            r.ClearField("join")
+        elif how == "oneof":
+            r.range.end = 1
+        elif how == "Clear":
+            r.Clear()
+        elif how == "CopyFrom":
+            r.CopyFrom(R(range={"end": 2}))
+        del r
+        gc.collect()
+        return kept, held
+
+    previous = _pyspark._proto_whole_limit()
+    try:
+        for limit in (previous, 0):
+            _pyspark._proto_whole_limit(limit)
+            for how in ("released", "ClearField", "oneof", "Clear", "CopyFrom"):
+                kept, held = kept_of(how)
+                assert held > 0, (limit, how)
+                assert _pyspark._proto_slab_messages(kept) == 0, (limit, how)
+                assert kept == expected, (limit, how)
+            # A grandchild of a message of a container, of the release of the container.
+            r = R.FromString(functions)
+            kept = r.project.expressions[7].unresolved_function
+            del r
+            gc.collect()
+            assert _pyspark._proto_slab_messages(kept) == 0, limit
+            assert kept.arguments[1].unresolved_function.arguments[0].unresolved_function.function_name == "f"
+    finally:
+        _pyspark._proto_whole_limit(previous)
+
+
+def test_messages_kept_of_a_read_are_released_of_no_walk_of_what_was_read_whole():
+    # A message that a container no longer holds, which Python keeps, moves the part of a parse
+    # that it holds unread out of the slabs of the parse (see the test above), of a walk of its
+    # objects that passes by those that hold no native value below them (their mark, of an epoch
+    # that a merge or a copy of native values ends): those of a value read whole, as the read of
+    # a value of up to 256 messages makes them, and those that Python made. So the pop of a message
+    # of 1,022 messages read whole visits the 10 that were read a level at a time (each of more
+    # than 256 messages below it), not its 1,022, and that of a message that Python made none.
+    R = proto.Relation
+    data = R(project={"expressions": [_function(8, i) for i in range(20)]}).SerializeToString()
+
+    def popped(r):
+        c = r.project.expressions
+        walks, visited = _pyspark._proto_unpin_counts()
+        out = [c.pop() for _ in range(len(c))]
+        after = _pyspark._proto_unpin_counts()
+        return out, after[0] - walks, after[1] - visited
+
+    # Of the whole-value limit of the runtime, of which values of up to 256 messages are read whole.
+    previous = _pyspark._proto_whole_limit()
+    try:
+        r = R.FromString(data)
+        for e in r.project.expressions:
+            _read_all(e)
+        del e
+        out, walks, visited = popped(r)
+    finally:
+        _pyspark._proto_whole_limit(previous)
+    assert walks == 20
+    assert visited == 20 * 10, visited
+    assert all(_pyspark._proto_slab_messages(m) == 0 for m in out)
+    assert out[::-1] == list(R.FromString(data).project.expressions)
+
+    built = R(project={"expressions": [_function(6, i) for i in range(20)]})
+    out, walks, visited = popped(built)
+    assert (walks, visited) == (20, 0)
+    assert out[0].unresolved_function.arguments[0].unresolved_function.function_name == "f"
+
+
+def test_a_message_removed_of_a_container_is_walked_only_if_python_holds_it():
+    # `remove` of a message that only the container holds releases it of no walk of its objects;
+    # one that Python keeps moves the part of the parse that it holds unread out of the slabs of
+    # the parse, as `pop` does.
+    E = proto.Expression
+    data = proto.Relation(project={"expressions": [_function(3, i) for i in range(600)]}).SerializeToString()
+    previous = _pyspark._proto_whole_limit()
+    try:
+        for limit in (previous, 0):
+            _pyspark._proto_whole_limit(limit)
+            r = proto.Relation.FromString(data)
+            c = r.project.expressions
+            equal = E.FromString(c[3].SerializeToString())
+            walks = _pyspark._proto_unpin_counts()[0]
+            c.remove(equal)
+            assert _pyspark._proto_unpin_counts()[0] == walks, limit
+            kept = c[3]
+            c.remove(kept)
+            assert _pyspark._proto_unpin_counts()[0] == walks + 1, limit
+            assert _pyspark._proto_slab_messages(kept) == 0, limit
+            assert kept == E.FromString(E(**_function(3, 4)).SerializeToString()), limit
+            assert len(c) == 598, limit
+    finally:
+        _pyspark._proto_whole_limit(previous)
+
+
+def test_a_type_keeps_one_record_of_each_of_its_classes():
+    # A type keeps the class registered of it of a read after a registration that gave it another
+    # class, of a record of the class that it reads its messages of: a registration that gives it
+    # back a class that it had takes that record again, so that the records of a type are as many
+    # as its classes, however many registrations alternate them, and the classes of its messages
+    # are those registered when they were read.
+    script = """
+        import json
+
+        import pyspark.sql.connect.proto as proto
+        from pyspark import _pyspark
+        from pyspark.sql.connect.proto import _rust
+
+        data = proto.Plan(root={"limit": {"limit": 1, "input": {"range": {"end": 1}}}}).SerializeToString()
+        other = type(
+            "Relation",
+            (_pyspark.ProtoMessage, _rust._MessageBase),
+            {"__slots__": (), "DESCRIPTOR": proto.Relation.DESCRIPTOR},
+        )
+        right = 0
+        for i in range(2000):
+            cls = other if i % 2 == 0 else proto.Relation
+            _pyspark._proto_register_classes({"spark.connect.Relation": cls})
+            right += type(proto.Plan.FromString(data).root.limit.input) is cls
+        _pyspark._proto_register_classes({"spark.connect.Relation": proto.Relation})
+        right += type(proto.Plan.FromString(data).root.limit.input) is proto.Relation
+        print(json.dumps([right, _pyspark._proto_kept_classes("spark.connect.Relation")]))
+        """
+    assert _run_script(script) == [2001, 2]
+
+
 def test_parses_are_of_the_classes_registered_when_they_were_read():
     # The objects of a parse are of the class registered of their type when the parse was made,
     # also when they are read after a registration that gave the type another class, and those of

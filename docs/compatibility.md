@@ -2392,9 +2392,13 @@ errors are the runtime's `DecodeError` and `EncodeError`. The differences:
   into a message that has the repeated field already, whose objects it makes of the copy, upb's
   0.09 s; see "The time of a parse" of `dev/parity/known-differences.md`). A parse holds the messages that Python has not read in slabs of up to 64 messages (of 4,
   8, 16 and 32 first), each released once none of its messages is held any longer (the object of a
-  message takes its fields); a message that outlives the container or the map that held it (one
-  kept of a large parse whose other messages are released) moves the part of the parse that it
-  holds unread, of up to 256 messages, out of the slabs, so that it keeps none of them alive. The
+  message takes its fields); a message, a repeated field or a map that outlives the container,
+  the map or the message that held it (one kept of a large parse whose other messages are
+  released, or of a field cleared, replaced or merged into) moves the part of the parse that it
+  holds unread, of up to 256 messages, out of the slabs, so that it keeps none of them alive, of a
+  walk of its objects that passes by those that hold no part of a parse below them (those of a
+  value read whole, and those that Python made): 2.6 µs for the `pop` of a message of 1,022
+  messages read whole, upb's 0.17 µs, whose messages share the arena of the parse. The
   runtime keeps up to 64 MiB of the slabs released for the parses that follow, as an allocator
   keeps memory that it was given back. The parse, the
   constructor (of lists and mappings too),
