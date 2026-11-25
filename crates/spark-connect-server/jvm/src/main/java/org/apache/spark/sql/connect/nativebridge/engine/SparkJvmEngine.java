@@ -127,6 +127,8 @@ public final class SparkJvmEngine implements AutoCloseable {
   private final SparkEnv sparkEnv;
   private final ClassLoader classLoader;
   private final AtomicBoolean closed = new AtomicBoolean();
+  // NativeCleanupIsolationTest reflectively gates session removal here.
+  // Keep its field lookup in sync with renames.
   private final Set<Session> sessions = ConcurrentHashMap.newKeySet();
   private final Set<Task> tasks = ConcurrentHashMap.newKeySet();
   private boolean closeComplete;
@@ -391,6 +393,8 @@ public final class SparkJvmEngine implements AutoCloseable {
     private final SessionHolder holder;
     private final ReentrantReadWriteLock catalog = new ReentrantReadWriteLock(true);
     private final AtomicBoolean released = new AtomicBoolean();
+    // NativeCleanupIsolationTest reflectively gates query removal here.
+    // Keep its field lookup in sync with renames.
     private final Set<Query> queries = ConcurrentHashMap.newKeySet();
     private final Set<Task> activeTasks = ConcurrentHashMap.newKeySet();
     private boolean closeComplete;

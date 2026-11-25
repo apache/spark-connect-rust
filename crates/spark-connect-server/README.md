@@ -495,28 +495,45 @@ JNI cancellation and deferred cleanup can continue even after a successful
 `ReleaseAll`. Their resource owners and capacity remain retained until cleanup
 actually finishes; a timeout does not release that capacity early.
 
-A cleanup failure while serving keeps its admission permits reserved and is not
-retried automatically. Failed cancellation delivery retains its task handle and
-task admission even if the query later closes successfully. That capacity stays
-unavailable until an explicit `NativeEngineServer.close()` retries the failure
-while stopping the server, or the hosting JVM restarts. A transient JNI
-attachment failure can recover during that close. A persistent worker
-detach failure or a partial Java cleanup failure remains retained until the
-hosting JVM restarts.
+If a JNI cancellation or cleanup call returns an error, its handles and admission
+permits stay reserved. These failures are retried only by explicit
+`NativeEngineServer.close()` while stopping the server. Failed cancellation
+retains its task handle and task admission even if the query later closes
+successfully. A temporary per-call JNI attachment failure can recover during that
+close. A Java cleanup failure can follow partial teardown; it stays recorded and
+is rethrown without replaying those side effects. A persistent worker detach
+failure or a partial Java cleanup failure remains retained until the hosting JVM
+restarts.
 
-Deferred session closes run serially on one process-wide cleanup lane shared by
-all embedded engines using the native library. A slow or blocked session close
-therefore delays later session cleanup and session-capacity recovery in other
-engines too. Session permits remain reserved until the corresponding Java close
-completes successfully. Task cancellation has a separate process-wide lane;
-a slow cancellation delays other cancellations on that lane. Query cleanup has
-its own lane, so session teardown does not directly block task-capacity recovery
-from task cancellation or query cleanup. These lanes do not isolate engines from
-other shared Spark resources or from a query's own slow cleanup.
+Each deferred query or session close runs on its own cleanup thread. A slow or
+blocked close retains that owner's resources and admission without serializing
+unrelated query and session closes, including those in other embedded engines.
+Permits remain reserved until the corresponding Java close completes successfully.
+A running closer uses one OS thread and may retain a daemon JVM attachment.
+
+Blocked closes that hold admission are limited to 64 query and 64 session owners
+per engine. Permits are released before detachment and thread exit, so cleanup
+threads and attachments from completed closes can overlap newly admitted work;
+these admission limits are not a strict global thread or attachment bound.
+Releasing many owners during shutdown can create a burst of closer threads and
+JNI attachments.
+
+If a cleanup thread cannot start or its channel rejects an item before execution,
+the engine retains that item's handles and permits. A per-engine asynchronous loop
+retries these dispatch failures with bounded exponential backoff on the existing
+runtime, including while native resources drain. Retry does not require new
+admission, so capacity can recover even when all permits are retained.
+
+Task cancellation and task frees still share one process-wide cleanup lane; a
+slow cancellation or task free can delay other task cleanup and admission recovery.
+Independent cleanup threads do not isolate engines from shared Spark resources or
+from a query's own slow cleanup.
 
 Native server close waits up to ten seconds for shutdown. If work still owns
 JNI resources, close reports an incomplete shutdown and retains its handle for
-a later retry. A serving error is also reported on the first close; once drain
+a later retry. Close waits for pending dispatch retries within that deadline;
+a failure from an executed JNI cleanup attempt is reported immediately.
+A serving error is also reported on the first close; once drain
 is confirmed, another close can finalize that retained handle.
 
 The frontend limits each decoded gRPC request to 128 MiB. Relation inputs for
@@ -728,10 +745,13 @@ library. The smoke test checks a range query's schema and Arrow values,
 negotiated 1 KiB byte chunks with reassembly, a whole row larger than 3 MiB without
 chunking opt-in, `ResultComplete`, session release, native close, listener rebind
 and shared SparkContext survival under `-Xcheck:jni`. It does not exercise Arrow
-IPC input or establish compatibility with other Spark revisions. The broader acceptance
-suite still requires a selected, compatible assembly and local validation. Its
-recorded full run used the separate Arrow input lifecycle repair described under
-build requirements; the CI smoke does not apply that repair.
+IPC input or establish compatibility with other Spark revisions. The job also runs
+`jvm/test-jni-smoke.sh "$NATIVE_LIBRARY" --cleanup-isolation`. That check
+blocks real Java query and session closes, completes 70 peers per scenario, and
+verifies retained shutdown ownership and successful retry after release.
+The broader acceptance suite still requires a selected, compatible assembly and
+local validation. Its recorded full run used the separate Arrow input lifecycle
+repair described under build requirements; the CI smoke does not apply that repair.
 
 Local validation on macOS ARM64 used Rust 1.100 and covered the frontend and
 JNI tests, client release tests and integration-test compilation, acceptance-runner guards,

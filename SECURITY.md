@@ -74,15 +74,28 @@ recover capacity, or restart the server. Abandoned sessions whose identifiers
 are lost remain until a restart. These admission bounds do not prevent one
 admitted query from consuming the hosting process's available resources.
 
-Failed JNI cleanup retains its handles and admission permits and
-prevents a successful native shutdown. Retrying server close can recover from a
-temporary JNI attachment failure. A Java cleanup exception may follow partial
-Spark or Arrow teardown; it remains recorded and is rethrown without repeating
-those side effects. Worker detach runs only on its owning OS thread; failure
-after the bounded same-thread retry retains the attachment and cannot be retried
-by a later server close on another thread. Such retained failures require
-restarting the hosting JVM.
+Each deferred query or session close uses its own OS thread and may retain a
+daemon JVM attachment. Blocked closes can hold admission for at most 64 query and
+64 session owners per engine. Admission is released before detachment and thread
+exit, so these limits do not strictly bound threads or attachments.
 
-See the [server guide](crates/spark-connect-server/README.md) for its supported
-operations, platform requirements and lifecycle limits. Apache Spark's security
-configuration does not automatically apply to this experimental Rust listener.
+Dispatch failures before JNI execution retain handles and permits and retry
+automatically with bounded exponential backoff on the existing runtime, including
+during native drain and without new admission. Task cancellation and frees share
+a process-wide cleanup lane; slow work there can delay cleanup and admission
+recovery.
+
+If a JNI cancellation or cleanup call returns an error, its handles and admission
+permits stay retained and prevent successful native shutdown. These failures are
+retried only by explicit server close. A temporary per-call JNI attachment failure
+can recover during that close. A Java cleanup exception may follow partial Spark
+or Arrow teardown; it remains recorded and is rethrown without repeating those
+side effects. Worker detach runs only on its owning OS thread; failure after the
+bounded same-thread retry retains the attachment and cannot be retried by a later
+server close on another thread. Such retained failures require restarting the
+hosting JVM.
+
+See the [server guide](crates/spark-connect-server/README.md) for supported
+operations, platform requirements and the detailed cleanup lifecycle and limits.
+Apache Spark's security configuration does not automatically apply to this
+experimental Rust listener.

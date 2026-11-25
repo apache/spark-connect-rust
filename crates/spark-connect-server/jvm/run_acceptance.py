@@ -216,6 +216,11 @@ def main():
             str(tests_jar), str(library)])
         if "CLEANUP_FAILURE_OK" not in cleanup_failure.stdout:
             raise RuntimeError("cleanup failure retention success marker missing")
+        cleanup_isolation = run("cleanup-isolation", common + ["--class",
+            "org.apache.spark.sql.connect.nativebridge.engine.NativeCleanupIsolationTest",
+            str(tests_jar), str(library)], timeout=240)
+        if "NATIVE_CLEANUP_ISOLATION_OK" not in cleanup_isolation.stdout:
+            raise RuntimeError("native cleanup isolation success marker missing")
         # A private JVM temp root lets the check prove extracted library cleanup at exit.
         native_temp = build / "native-temp"
         native_temp.mkdir()

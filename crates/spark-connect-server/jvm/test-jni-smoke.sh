@@ -18,14 +18,15 @@
 
 set -euo pipefail
 
-if [[ $# -ne 1 || "$1" != /* || ! -f "$1" ]]; then
-  echo "usage: $0 /absolute/path/to/libspark_connect_jni.{so,dylib}" >&2
+if [[ $# -lt 1 || $# -gt 2 || "${1:-}" != /* || ! -f "${1:-}" ||
+      ( $# -eq 2 && "${2:-}" != "--cleanup-isolation" ) ]]; then
+  echo "usage: $0 /absolute/path/to/libspark_connect_jni.{so,dylib} [--cleanup-isolation]" >&2
   exit 1
 fi
 : "${SPARK_HOME:?Set SPARK_HOME to the pinned Spark assembly checkout}"
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 "$PROJECT_DIR/jvm/build.sh" --tests
-"${NATIVE_TEST_PYTHON:-python3}" -B - "$PROJECT_DIR" "$SPARK_HOME" "$1" <<'PY'
+"${NATIVE_TEST_PYTHON:-python3}" -B - "$PROJECT_DIR" "$SPARK_HOME" "$1" "${2:-}" <<'PY'
 import json
 import os
 import re
@@ -35,7 +36,11 @@ import tempfile
 import time
 from pathlib import Path
 
-root, spark_home, library = (Path(value).resolve(strict=True) for value in sys.argv[1:])
+root, spark_home, library = (Path(value).resolve(strict=True) for value in sys.argv[1:4])
+isolation = sys.argv[4] == "--cleanup-isolation"
+class_name = "NativeCleanupIsolationTest" if isolation else "NativeJniSmokeTest"
+success_marker = "NATIVE_CLEANUP_ISOLATION_OK:" if isolation else "NATIVE_JNI_SMOKE_OK:"
+timeout = 240 if isolation else 180
 reports = root / ".build" / "jvm-native"
 reports.mkdir(parents=True, exist_ok=True)
 build = Path(tempfile.mkdtemp(prefix="jni-smoke-", dir=reports))
@@ -47,7 +52,7 @@ command = [str(spark_home / "bin" / "spark-submit"), "--master", "local[2]",
            "--conf", "spark.driver.bindAddress=127.0.0.1",
            "--conf", "spark.sql.classic.shuffleDependency.fileCleanup.enabled=false",
            "--conf", "spark.sql.warehouse.dir=" + str(build / "warehouse"),
-           "--class", "org.apache.spark.sql.connect.nativebridge.engine.NativeJniSmokeTest",
+           "--class", "org.apache.spark.sql.connect.nativebridge.engine." + class_name,
            str(root / ".build" / "jvm" / "bridge-test.jar"), str(library)]
 env = os.environ.copy()
 env.update(SPARK_HOME=str(spark_home), SPARK_LOCAL_IP="127.0.0.1", SPARK_CONNECT_MODE="0")
@@ -58,21 +63,22 @@ report = {"command": command, "log": str(log_path), "passed": False}
 try:
     with log_path.open("w") as log:
         result = subprocess.run(command, cwd=build, env=env, stdout=log,
-                                stderr=subprocess.STDOUT, timeout=180)
+                                stderr=subprocess.STDOUT, timeout=timeout)
     report["exit_code"] = result.returncode
     content = log_path.read_text(errors="replace")
     print(content, end="", flush=True)
     if result.returncode != 0:
-        raise RuntimeError("real JNI smoke failed; see " + str(log_path))
+        raise RuntimeError("real JNI check failed; see " + str(log_path))
     if re.search(r"WARNING in native method|FATAL ERROR in native method", content):
-        raise RuntimeError("real JNI smoke triggered a JNI diagnostic; see " + str(log_path))
-    if "NATIVE_JNI_SMOKE_OK:" not in content:
-        raise RuntimeError("real JNI smoke success marker missing; see " + str(log_path))
+        raise RuntimeError("real JNI check triggered a JNI diagnostic; see " + str(log_path))
+    if success_marker not in content:
+        raise RuntimeError("real JNI check success marker missing; see " + str(log_path))
     report["passed"] = True
 except subprocess.TimeoutExpired as error:
     report["timed_out"] = True
     print(log_path.read_text(errors="replace"), end="", flush=True)
-    raise RuntimeError("real JNI smoke exceeded 180 seconds; see " + str(log_path)) from error
+    raise RuntimeError("real JNI check exceeded " + str(timeout)
+                       + " seconds; see " + str(log_path)) from error
 finally:
     report["seconds"] = round(time.monotonic() - started, 3)
     (build / "result.json").write_text(json.dumps(report, indent=2) + "\n")
