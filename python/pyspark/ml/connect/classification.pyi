@@ -23,6 +23,10 @@ from pyspark.ml.classification import BinaryLogisticRegressionSummary as BinaryL
 from pyspark.ml.classification import BinaryLogisticRegressionTrainingSummary as BinaryLogisticRegressionTrainingSummary
 from pyspark.ml.classification import ClassificationModel as ClassificationModel
 from pyspark.ml.classification import Classifier as Classifier
+from pyspark.ml.classification import LinearSVC as LinearSVC
+from pyspark.ml.classification import LinearSVCModel as LinearSVCModel
+from pyspark.ml.classification import LinearSVCSummary as LinearSVCSummary
+from pyspark.ml.classification import LinearSVCTrainingSummary as LinearSVCTrainingSummary
 from pyspark.ml.classification import LogisticRegression as LogisticRegression
 from pyspark.ml.classification import LogisticRegressionModel as LogisticRegressionModel
 from pyspark.ml.classification import LogisticRegressionSummary as LogisticRegressionSummary
@@ -322,95 +326,6 @@ class GBTClassifier(_pysparks.GBTClassifier):
     'validationIndicator'
     >>> gbt.getValidationTol()
     0.01
-    """
-class LinearSVC(_pysparks.LinearSVC):
-    """This binary classifier optimizes the Hinge Loss using the OWLQN optimizer.
-    Only supports L2 regularization currently.
-
-    .. versionadded:: 2.2.0
-
-    Notes
-    -----
-    `Linear SVM Classifier <https://en.wikipedia.org/wiki/Support_vector_machine#Linear_SVM>`_
-
-    Examples
-    --------
-    >>> from pyspark.sql import Row
-    >>> from pyspark.ml.linalg import Vectors
-    >>> df = sc.parallelize([
-    ...     Row(label=1.0, features=Vectors.dense(1.0, 1.0, 1.0)),
-    ...     Row(label=0.0, features=Vectors.dense(1.0, 2.0, 3.0))]).toDF()
-    >>> svm = LinearSVC()
-    >>> svm.getMaxIter()
-    100
-    >>> svm.setMaxIter(5)
-    LinearSVC...
-    >>> svm.getMaxIter()
-    5
-    >>> svm.getRegParam()
-    0.0
-    >>> svm.setRegParam(0.01)
-    LinearSVC...
-    >>> svm.getRegParam()
-    0.01
-    >>> model = svm.fit(df)
-    >>> model.setPredictionCol("newPrediction")
-    LinearSVCModel...
-    >>> model.getPredictionCol()
-    'newPrediction'
-    >>> model.setThreshold(0.5)
-    LinearSVCModel...
-    >>> model.getThreshold()
-    0.5
-    >>> model.getMaxBlockSizeInMB()
-    0.0
-    >>> model.coefficients
-    DenseVector([0.0, -1.0319, -0.5159])
-    >>> model.intercept
-    2.579645978780695
-    >>> model.numClasses
-    2
-    >>> model.numFeatures
-    3
-    >>> test0 = sc.parallelize([Row(features=Vectors.dense(-1.0, -1.0, -1.0))]).toDF()
-    >>> model.predict(test0.head().features)
-    1.0
-    >>> model.predictRaw(test0.head().features)
-    DenseVector([-4.1274, 4.1274])
-    >>> result = model.transform(test0).head()
-    >>> result.newPrediction
-    1.0
-    >>> result.rawPrediction
-    DenseVector([-4.1274, 4.1274])
-    >>> svm_path = temp_path + "/svm"
-    >>> svm.save(svm_path)
-    >>> svm2 = LinearSVC.load(svm_path)
-    >>> svm2.getMaxIter()
-    5
-    >>> model_path = temp_path + "/svm_model"
-    >>> model.save(model_path)
-    >>> model2 = LinearSVCModel.load(model_path)
-    >>> bool(model.coefficients[0] == model2.coefficients[0])
-    True
-    >>> model.intercept == model2.intercept
-    True
-    >>> model.transform(test0).take(1) == model2.transform(test0).take(1)
-    True
-    """
-class LinearSVCModel(_pysparks.LinearSVCModel):
-    """Model fitted by LinearSVC.
-
-    .. versionadded:: 2.2.0
-    """
-class LinearSVCSummary(_pysparks.LinearSVCSummary):
-    """Abstraction for LinearSVC Results for a given model.
-
-    .. versionadded:: 3.1.0
-    """
-class LinearSVCTrainingSummary(LinearSVCSummary, _pysparks.LinearSVCTrainingSummary):
-    """Abstraction for LinearSVC Training results.
-
-    .. versionadded:: 3.1.0
     """
 class MultilayerPerceptronClassificationModel(_pysparks.MultilayerPerceptronClassificationModel):
     """Model fitted by MultilayerPerceptronClassifier.

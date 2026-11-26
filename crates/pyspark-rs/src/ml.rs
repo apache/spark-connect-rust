@@ -1184,6 +1184,9 @@ impl params_api::NativeInstance for PyLogisticRegression {
 pub struct PyLinearSVC {
     inner: LinearSVC,
     unsendable: Vec<&'static str>,
+    own_defaults: params_api::OwnDefaults,
+    // Guard traversal until PyO3 has initialized the Rust payload.
+    gc_ready: crate::gc::GcReady,
 }
 
 const LINEAR_SVC_PARAMS: &[(&str, Kind)] = &[
@@ -1238,10 +1241,26 @@ native_pymethods! {
         let mut this = Self {
             inner: LinearSVC::new(),
             unsendable: Vec::new(),
+            own_defaults: Vec::new(),
+            gc_ready: crate::gc::GcReady::new(),
         };
         init_params(&mut this, "LinearSVC", &[], LINEAR_SVC_PARAMS, args, kwargs)?;
         Ok(this)
     }
+
+    fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
+        if !self.gc_ready.get() {
+            return Ok(());
+        }
+        params_api::visit_values(&self.own_defaults, &visit)
+    }
+
+    fn __clear__(&mut self) {
+        if self.gc_ready.get() {
+            self.own_defaults.clear();
+        }
+    }
+
     #[pyo3(
         name = "setParams",
         signature = (*args, **kwargs),
@@ -1397,6 +1416,8 @@ impl params_api::NativeInstance for PyLinearSVC {
             Self {
                 inner: self.inner.clone(),
                 unsendable: self.unsendable.clone(),
+                own_defaults: params_api::clone_own_defaults(py, &self.own_defaults),
+                gc_ready: crate::gc::GcReady::new(),
             },
         )
     }
@@ -6985,7 +7006,7 @@ impl params_api::NativeInstance for PyBisectingKMeans {
 
 native!(
     PyLogisticRegression => LogisticRegression { defaults: own_defaults },
-    PyLinearSVC => LinearSVC,
+    PyLinearSVC => LinearSVC { defaults: own_defaults },
     PyFMClassifier => FMClassifier,
     PyMultilayerPerceptronClassifier => MultilayerPerceptronClassifier,
     PyLinearRegression => LinearRegression,

@@ -264,6 +264,8 @@ def user_mypy(tmp_path_factory):
         "import pyspark.ml.classification as standard",
         "import pyspark.ml.connect.classification as native",
         "from pyspark.sql import DataFrame",
+        "def fit_svc(df: DataFrame) -> standard.LinearSVCModel:",
+        "    return standard.LinearSVC(maxIter=3).setRegParam(0.1).fit(df)",
         "def fit_logistic(df: DataFrame) -> standard.LogisticRegressionModel:",
         "    return standard.LogisticRegression(maxIter=3).setRegParam(0.1).fit(df)",
     ]
@@ -271,6 +273,7 @@ def user_mypy(tmp_path_factory):
         "LogisticRegression", "LogisticRegressionModel", "LogisticRegressionSummary",
         "LogisticRegressionTrainingSummary", "BinaryLogisticRegressionSummary",
         "BinaryLogisticRegressionTrainingSummary",
+        "LinearSVC", "LinearSVCModel", "LinearSVCSummary", "LinearSVCTrainingSummary",
     ):
         ml_aliases += [
             f"def to_native_{name}(value: standard.{name}) -> native.{name}:",
@@ -371,11 +374,11 @@ def test_user_application_has_only_its_deliberate_error(user_mypy):
     assert len(revealed) == 4
 
 
-def test_standard_logistic_aliases_are_typed(user_mypy):
+def test_standard_classification_aliases_are_typed(user_mypy):
     assert _of(user_mypy, "probe_ml_aliases.py") == []
 
 
-def test_pyright_types_standard_logistic_aliases(user_pyright):
+def test_pyright_types_standard_classification_aliases(user_pyright):
     assert _of(user_pyright, "probe_ml_aliases.py") == []
 
 
@@ -863,8 +866,8 @@ def test_the_stubs_have_the_docstrings_of_pysparks_objects():
                     samples[key] = doc
         digests[module] = capture.digest(pairs)
     assert samples == golden["samples"]
-    assert samples["pyspark.ml.connect.classification:LinearSVC"].startswith(
-        "This binary classifier optimizes the Hinge Loss"
+    assert samples["pyspark.ml.connect.classification:NaiveBayes"].startswith(
+        "Naive Bayes Classifiers."
     )
     # A stub of other docstrings than PySpark's, or of other declarations: regenerate the golden
     # with pyspark-client (see the capture script) once its docstrings are checked.

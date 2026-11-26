@@ -268,7 +268,7 @@ jobs:
             tests/test_ml_api_e2e.py \
             tests/test_ml_subclasses_e2e.py \
             tests/test_logistic_api_e2e.py \
-            tests/test_standard_logistic_e2e.py \
+            tests/test_standard_classification_e2e.py \
             tests/test_misc_api_e2e.py \
             tests/test_regression_api_e2e.py \
             tests/test_ml_regression_clustering_classes_e2e.py \

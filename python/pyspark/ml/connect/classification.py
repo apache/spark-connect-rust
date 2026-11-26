@@ -11,10 +11,6 @@ from pyspark._pyspark import (
     FMClassifier,
     GBTClassificationModel,
     GBTClassifier,
-    LinearSVC,
-    LinearSVCModel,
-    LinearSVCSummary,
-    LinearSVCTrainingSummary,
     MultilayerPerceptronClassificationModel,
     MultilayerPerceptronClassificationSummary,
     MultilayerPerceptronClassificationTrainingSummary,
@@ -36,6 +32,10 @@ from pyspark.ml.classification import (
     BinaryLogisticRegressionTrainingSummary,
     ClassificationModel,  # noqa: F401
     Classifier,  # noqa: F401
+    LinearSVC,
+    LinearSVCModel,
+    LinearSVCSummary,
+    LinearSVCTrainingSummary,
     LogisticRegression,
     LogisticRegressionModel,
     LogisticRegressionSummary,

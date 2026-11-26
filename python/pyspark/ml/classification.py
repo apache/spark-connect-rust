@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Standard classification APIs, with LogisticRegression operations delegated to Rust."""
+"""Standard classification APIs, with LogisticRegression and LinearSVC delegated to Rust."""
 
 
 from typing import TYPE_CHECKING
@@ -48,6 +48,10 @@ def _load_classification():
     SourceFileLoader(__name__, str(source)).exec_module(module)
     reference = SimpleNamespace(**vars(module))
     names = (
+        "LinearSVC",
+        "LinearSVCModel",
+        "LinearSVCSummary",
+        "LinearSVCTrainingSummary",
         "LogisticRegression",
         "LogisticRegressionModel",
         "LogisticRegressionSummary",
@@ -58,7 +62,9 @@ def _load_classification():
     native = {name: getattr(_pyspark, name) for name in names}
     publish(
         native, reference, public_module=__name__,
-        eager_params=("LogisticRegression", "LogisticRegressionModel"),
+        eager_params=(
+            "LogisticRegression", "LogisticRegressionModel", "LinearSVC", "LinearSVCModel",
+        ),
     )
     vars(module).update(native)
 
