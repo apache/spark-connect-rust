@@ -1,8 +1,6 @@
 """Classification estimators (pyspark.ml.connect.classification)."""
 
 from pyspark._pyspark import (
-    BinaryLogisticRegressionSummary,
-    BinaryLogisticRegressionTrainingSummary,
     BinaryRandomForestClassificationSummary,
     BinaryRandomForestClassificationTrainingSummary,
     DecisionTreeClassificationModel,
@@ -17,10 +15,6 @@ from pyspark._pyspark import (
     LinearSVCModel,
     LinearSVCSummary,
     LinearSVCTrainingSummary,
-    LogisticRegression,
-    LogisticRegressionModel,
-    LogisticRegressionSummary,
-    LogisticRegressionTrainingSummary,
     MultilayerPerceptronClassificationModel,
     MultilayerPerceptronClassificationSummary,
     MultilayerPerceptronClassificationTrainingSummary,
@@ -38,8 +32,14 @@ from pyspark._pyspark import (
 # PySpark's own abstract base classes of the native classes, so that the module has the
 # names of pyspark.ml.classification.
 from pyspark.ml.classification import (
+    BinaryLogisticRegressionSummary,
+    BinaryLogisticRegressionTrainingSummary,
     ClassificationModel,  # noqa: F401
     Classifier,  # noqa: F401
+    LogisticRegression,
+    LogisticRegressionModel,
+    LogisticRegressionSummary,
+    LogisticRegressionTrainingSummary,
     ProbabilisticClassificationModel,  # noqa: F401
     ProbabilisticClassifier,  # noqa: F401
 )

@@ -245,13 +245,14 @@ def test_public_members_and_dunders_are_the_native_classes(spec):
     # GeneralizedLinearRegressionTrainingSummary and the `__str__` of an RFormulaModel did, and
     # raised. Each such member is the native class's own, or PySpark's code of its own members.
     cls = native_class(*spec)
-    if cls.__module__ == spec[2]:
+    if native_module() is None:
         pytest.skip("of this client's native classes")
     pysparks = {
         k
         for k in cls.__mro__
         if k.__module__.startswith("pyspark.ml.")
         and not k.__module__.startswith("pyspark.ml.connect")
+        and not issubclass(k, getattr(native_module(), k.__name__, type(None)))
     }
     descriptors = (property, classmethod, staticmethod, functools.cached_property)
     of_pyspark = []

@@ -413,6 +413,21 @@ def _native_member(native, name):
     return _NativeMember(getattr(_native, native), name)
 
 
+def _ensure_readwrite_classes():
+    """Initialize the shared native reader/writer adapters before a standard-import operation.
+
+    Their registration currently lives in the native package initializer. Import it lazily,
+    after the standard ML modules have loaded, to avoid a classification import cycle.
+    """
+    importlib.import_module("pyspark.ml.connect.readwrite")
+
+
+def _restore_readwrite(factory):
+    """Rebuild a pickled native reader/writer after registering its public Python class."""
+    _ensure_readwrite_classes()
+    return factory()
+
+
 def _synced(member, name, official, sync=True, prepare=None):
     """The member `name` of the public class of PySpark's class `official`, which runs the native
     method `member` of the native object's params synced first: a function of the parameters of
@@ -448,7 +463,13 @@ def _synced(member, name, official, sync=True, prepare=None):
         # `_sync` of the scope, or `prepare` in its place.
         body = f"_sync({parameters[0].name})\n{body}"
     qualname = getattr(pysparks, "__qualname__", None) or f"{official.__name__}.{name}"
-    scope = {"_sync": prepare or _sync, "__member": member}
+    if name in ("write", "read"):
+        body = f"_ensure_readwrite_classes()\n{body}"
+    scope = {
+        "_sync": prepare or _sync,
+        "__member": member,
+        "_ensure_readwrite_classes": _ensure_readwrite_classes,
+    }
     return _function(pysparks, name, qualname, body, scope, binding=binding)
 
 
@@ -813,7 +834,7 @@ def _has_training_summary(official):
     return issubclass(official, HasTrainingSummary)
 
 
-def _public_class(native, official, parents):
+def _public_class(native, official, parents, public_module=None, eager_types=()):
     """The public class of `native`, of PySpark's class `official` and of the public classes
     `parents` of its bases of the module (see `publish`)."""
     bases = (native,) + parents + (official,)
@@ -826,7 +847,7 @@ def _public_class(native, official, parents):
     holder = [None]
     __new__, __init__ = _constructors(native, official, holder)
     namespace = {
-        "__module__": native.__module__,
+        "__module__": public_module or native.__module__,
         "__qualname__": native.__qualname__,
         "__doc__": official.__doc__ or native.__doc__,
         "__new__": __new__,
@@ -841,6 +862,8 @@ def _public_class(native, official, parents):
     _sign_constructor(__new__, official)
     if _has_params(native):
         _params_api(native, official, namespace)
+        if native in eager_types:
+            _eager_params_api(native, official, namespace, eager_types)
     elif _is_summary(official):
         _summary_api(native, official, namespace)
     public = meta(native.__name__, bases, namespace)
@@ -916,6 +939,43 @@ def _params_api(native, official, namespace):
     _text_api(native, official, namespace)
 
 
+
+def _eager_params_api(native, official, namespace, eager_types):
+    """Sync opted-in classes after Python Params mutations, including copies and restoration.
+
+    Keep Python's method signatures, conversions and return values. The operation-time sync
+    remains necessary for direct dictionary writes and overrides that bypass these methods.
+    """
+    def sync(instance):
+        if isinstance(instance, eager_types):
+            attributes = vars(instance)
+            # Constructors and custom pickle states can have incomplete Python Params state.
+            if "_paramMap" in attributes and "_defaultParamMap" in attributes:
+                _sync(instance)
+
+    for name in ("set", "_set", "_setDefault", "clear", "_resetUid", "_copyValues", "copy",
+                 "__setstate__"):
+        if name == "__setstate__":
+            member = _NativeMember(native, name)
+            reference = member.member
+        else:
+            reference = _member_of(official, name)[1]
+            member = namespace.get(name, reference)
+        binding = _binding_of(reference)
+        parameters = list(binding.parameters.values())
+        call = f"__member({_forwarded(parameters)})"
+        if name == "copy":
+            body = f"result = {call}\n__sync(result)\nreturn result"
+        else:
+            target = "to" if name == "_copyValues" else parameters[0].name
+            # A multi-parameter mutation can update earlier values before conversion fails.
+            body = f"try:\n    return {call}\nfinally:\n    __sync({target})"
+        namespace[name] = _function(
+            reference, name, reference.__qualname__, body,
+            {"__member": member, "__sync": sync}, binding=binding,
+        )
+
+
 def _text_api(native, official, namespace):
     """The `__repr__` and `__str__` of the public class of the native class `native` and PySpark's
     class `official`, in `namespace`: the native class's own (the uid, `Identifiable.__repr__`, or
@@ -958,6 +1018,15 @@ def _readwrite_api(native, official):
     for name in ("save", "load"):
         if hasattr(native, name):
             namespace[name] = _synced(_NativeMember(native, name), name, official, sync=False)
+
+    def __reduce__(self):
+        reduced = native.__reduce__(self)
+        if reduced[0] in (_native._new_remote_ml_writer, _native._new_remote_ml_reader):
+            # A fresh interpreter may not have imported any native ML namespace yet.
+            return (_restore_readwrite, (reduced[0],), *reduced[2:])
+        return reduced
+
+    namespace["__reduce__"] = __reduce__
     return namespace
 
 
@@ -987,10 +1056,17 @@ def _method_of(member, name, official):
     return _synced(member, name, official, sync=False)
 
 
-def publish(namespace, official_module):
+def publish(namespace, official_module, *, public_module=None, eager_params=()):
     """Replace each native class of the module of the globals `namespace` by its public class, of
-    PySpark's class of the same name of `official_module`."""
-    official = importlib.import_module(official_module)
+    PySpark's class of the same name of `official_module`. A reference namespace also works,
+    so a public adapter can retain upstream definitions before publishing native classes under
+    `public_module` without importing itself recursively. Names in `eager_params` also sync
+    after Python parameter mutations; other classes keep operation-time synchronization."""
+    official = (
+        importlib.import_module(official_module)
+        if isinstance(official_module, str)
+        else official_module
+    )
     natives = [
         (name, value)
         for name, value in list(namespace.items())
@@ -998,6 +1074,7 @@ def publish(namespace, official_module):
     ]
     # A native base class (LDA's `LDAModel`) before its subclasses.
     natives.sort(key=lambda item: len(item[1].__mro__))
+    eager_types = tuple(native for name, native in natives if name in eager_params)
     published = {}
     for name, native in natives:
         official_class = getattr(official, name, None)
@@ -1021,7 +1098,9 @@ def publish(namespace, official_module):
                 ours = published[base.__name__][1]
                 if not any(issubclass(parent, ours) for parent in parents):
                     parents.append(ours)
-        public = _public_class(native, official_class, tuple(parents))
+        public = _public_class(
+            native, official_class, tuple(parents), public_module, eager_types
+        )
         published[name] = (official_class, public)
         namespace[name] = public
     return {name: public for name, (_, public) in published.items()}

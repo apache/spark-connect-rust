@@ -559,11 +559,17 @@ def test_a_native_member_takes_the_params_of_the_maps_of_the_objects_that_its_ob
     def native_set(obj):
         return native_module()._ml_params(obj)[0]
 
-    lr = LR(maxIter=3)
+    def unsynced_lr(**params):
+        # Direct dictionary writes bypass eager setters; holders must still sync them.
+        instance = LR()
+        instance._paramMap.update({getattr(instance, name): value for name, value in params.items()})
+        return instance
+
+    lr = unsynced_lr(maxIter=3)
     assert native_set(lr) == {}
     lr.write()
     assert native_set(lr) == {"maxIter": 3}
-    classifier = LR(regParam=0.25)
+    classifier = unsynced_lr(regParam=0.25)
     OneVsRest(classifier=classifier).write()
     assert native_set(classifier) == {"regParam": 0.25}
     stage = Binarizer(threshold=0.5)
@@ -574,7 +580,7 @@ def test_a_native_member_takes_the_params_of_the_maps_of_the_objects_that_its_ob
     held.setThreshold(0.75)
     model.write()
     assert native_set(held) == {"inputCol": "x", "threshold": 0.75}
-    estimator, evaluator, grid = LR(tol=0.5), Evaluator(metricName="areaUnderPR"), LR(maxIter=9)
+    estimator, evaluator, grid = unsynced_lr(tol=0.5), Evaluator(metricName="areaUnderPR"), unsynced_lr(maxIter=9)
     ovr = OneVsRest(classifier=estimator)
     CrossValidator(
         estimator=ovr, evaluator=evaluator, estimatorParamMaps=[{ovr.classifier: grid}]
