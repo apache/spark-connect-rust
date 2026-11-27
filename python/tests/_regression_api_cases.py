@@ -56,8 +56,8 @@ CLASSES = {
         ("pyspark.ml.connect.regression", "IsotonicRegressionModel", "pyspark.ml.regression"),
     ],
     "FMRegressor": [
-        ("pyspark.ml.connect.regression", "FMRegressor", "pyspark.ml.regression"),
-        ("pyspark.ml.connect.regression", "FMRegressionModel", "pyspark.ml.regression"),
+        ("pyspark.ml.regression", "FMRegressor", "pyspark.ml.regression"),
+        ("pyspark.ml.regression", "FMRegressionModel", "pyspark.ml.regression"),
     ],
     "DecisionTreeRegressor": [
         ("pyspark.ml.connect.regression", "DecisionTreeRegressor", "pyspark.ml.regression"),

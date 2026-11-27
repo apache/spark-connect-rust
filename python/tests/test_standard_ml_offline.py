@@ -19,6 +19,8 @@ from pyspark.ml.classification import (
 from pyspark.ml.regression import (
     AFTSurvivalRegression,
     AFTSurvivalRegressionModel,
+    FMRegressionModel,
+    FMRegressor,
     GeneralizedLinearRegression,
     GeneralizedLinearRegressionModel,
     LinearRegression,
@@ -26,8 +28,15 @@ from pyspark.ml.regression import (
 )
 
 
+def _model_name(estimator_cls):
+    return estimator_cls.__name__.replace("Regressor", "Regression") + "Model"
+
+
 @pytest.fixture(
-    params=[LogisticRegression, LinearSVC, LinearRegression, GeneralizedLinearRegression, AFTSurvivalRegression],
+    params=[
+        LogisticRegression, LinearSVC, LinearRegression,
+        GeneralizedLinearRegression, AFTSurvivalRegression, FMRegressor,
+    ],
     ids=lambda cls: cls.__name__,
 )
 def estimator_cls(request):
@@ -73,10 +82,11 @@ assert not issubclass(public.NaiveBayes, _pyspark.NaiveBayes)
         code = code.replace('"BinaryLogisticRegressionSummary",', "").replace(
             '"BinaryLogisticRegressionTrainingSummary",', "",
         )
-    if estimator_cls is AFTSurvivalRegression:
+    if estimator_cls in (AFTSurvivalRegression, FMRegressor):
         code = code.replace('"LogisticRegressionSummary",', "").replace(
             '"LogisticRegressionTrainingSummary",', "",
         )
+    code = code.replace("LogisticRegressionModel", _model_name(estimator_cls))
     code = code.replace("LogisticRegression", estimator_cls.__name__)
     module = estimator_cls.__module__
     code = code.replace("classification", module.rsplit(".", 1)[1])
@@ -106,7 +116,7 @@ def test_params_copy_and_pickle_keep_the_standard_api(estimator_cls):
         assert type(restored) is estimator_cls
         assert restored.uid == estimator.uid and restored.getMaxIter() == 5
     assert type(copy.deepcopy(estimator)) is estimator_cls
-    model_cls = getattr(sys.modules[estimator_cls.__module__], estimator_cls.__name__ + "Model")
+    model_cls = getattr(sys.modules[estimator_cls.__module__], _model_name(estimator_cls))
     assert type(model_cls().copy()) is model_cls
 
 
@@ -251,6 +261,7 @@ def test_partial_mutation_keeps_native_state_and_original_conversion_error(estim
         LinearRegression, LinearRegressionModel,
         GeneralizedLinearRegression, GeneralizedLinearRegressionModel,
         AFTSurvivalRegression, AFTSurvivalRegressionModel,
+        FMRegressor, FMRegressionModel,
     ],
 )
 def test_copies_and_restored_state_have_current_native_params(cls):
@@ -271,7 +282,7 @@ def test_copies_and_restored_state_have_current_native_params(cls):
 def test_default_only_copy_values_updates_native_target(estimator_cls):
     source = estimator_cls()._setDefault(maxIter=41)
     assert not source._paramMap
-    model_cls = getattr(sys.modules[estimator_cls.__module__], estimator_cls.__name__ + "Model")
+    model_cls = getattr(sys.modules[estimator_cls.__module__], _model_name(estimator_cls))
     for target in (estimator_cls(), model_cls()):
         assert source._copyValues(target) is target
         assert target.getMaxIter() == 41
@@ -363,3 +374,26 @@ def test_survival_setters_update_native_quantiles_and_columns(cls):
         _assert_native_params_match(instance)
         instance.setCensorCol("censor").setMaxBlockSizeInMB(1.0)
         _assert_native_params_match(instance)
+
+
+def test_factorization_regression_setters_and_seed_update_native_params():
+    estimator = FMRegressor(factorSize=2, seed=7)
+    _assert_native_params_match(estimator)
+    estimator.setFactorSize(3).setFitLinear(False).setFitIntercept(False)
+    _assert_native_params_match(estimator)
+    estimator.setParams(stepSize=0.1, initStd=0.03, regParam=0.01, solver="gd")
+    _assert_native_params_match(estimator)
+    estimator.setMiniBatchFraction(0.5).setSeed(13)
+    _assert_native_params_match(estimator)
+    estimator._setDefault(seed=17)
+    # JavaParams.clear is intercepted as a no-op by official PySpark Connect.
+    assert estimator.clear(estimator.seed) is None
+    assert estimator.getSeed() == 13 and estimator.isSet(estimator.seed)
+    _assert_native_params_match(estimator)
+    default_only = FMRegressor()._setDefault(seed=17)
+    assert default_only.getSeed() == 17 and not default_only.isSet(default_only.seed)
+    _assert_native_params_match(default_only)
+    _assert_native_params_match(default_only.copy())
+    estimator.set(estimator.weightCol, "weight")
+    _assert_native_params_match(estimator)
+    _assert_native_params_match(estimator.copy())
