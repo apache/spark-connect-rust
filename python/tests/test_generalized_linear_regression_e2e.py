@@ -41,7 +41,7 @@ def session():
 
 
 def _estimator():
-    return native_class("pyspark.ml.connect.regression", "GeneralizedLinearRegression", "pyspark.ml.regression")
+    return native_class("pyspark.ml.regression", "GeneralizedLinearRegression", "pyspark.ml.regression")
 
 
 def _vectors(session, sql):

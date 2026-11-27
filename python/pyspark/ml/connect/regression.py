@@ -9,10 +9,6 @@ from pyspark._pyspark import (
     FMRegressor,
     GBTRegressionModel,
     GBTRegressor,
-    GeneralizedLinearRegression,
-    GeneralizedLinearRegressionModel,
-    GeneralizedLinearRegressionSummary,
-    GeneralizedLinearRegressionTrainingSummary,
     IsotonicRegression,
     IsotonicRegressionModel,
     RandomForestRegressionModel,
@@ -22,6 +18,10 @@ from pyspark._pyspark import (
 # PySpark's own abstract base classes of the native classes, so that the module has the
 # names of pyspark.ml.regression.
 from pyspark.ml.regression import (
+    GeneralizedLinearRegression,
+    GeneralizedLinearRegressionModel,
+    GeneralizedLinearRegressionSummary,
+    GeneralizedLinearRegressionTrainingSummary,
     LinearRegression,
     LinearRegressionModel,
     LinearRegressionSummary,

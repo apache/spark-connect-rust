@@ -9,11 +9,16 @@ import sys
 import pytest
 from pyspark.ml.classification import LinearSVC, LogisticRegression
 from pyspark.ml.linalg import Vectors
-from pyspark.ml.regression import LinearRegression
+from pyspark.ml.regression import GeneralizedLinearRegression, LinearRegression
 from pyspark.sql import SparkSession
 
+_REGRESSORS = (LinearRegression, GeneralizedLinearRegression)
 
-@pytest.fixture(params=[LogisticRegression, LinearSVC, LinearRegression], ids=lambda cls: cls.__name__)
+
+@pytest.fixture(
+    params=[LogisticRegression, LinearSVC, LinearRegression, GeneralizedLinearRegression],
+    ids=lambda cls: cls.__name__,
+)
 def estimator_cls(request):
     return request.param
 
@@ -30,7 +35,7 @@ def session():
 
 @pytest.fixture
 def frame(session, estimator_cls):
-    if estimator_cls is LinearRegression:
+    if estimator_cls in _REGRESSORS:
         return session.createDataFrame(
             [(2.0 * i + 1.0, Vectors.dense([float(i)])) for i in range(8)],
             ["label", "features"],
@@ -58,12 +63,12 @@ def native_operations_only(monkeypatch):
 
 
 def test_fit_transform_fetch_and_persistence(frame, tmp_path, native_operations_only, estimator_cls):
-    estimator = estimator_cls(maxIter=20, regParam=0.0 if estimator_cls is LinearRegression else 0.1)
+    estimator = estimator_cls(maxIter=20, regParam=0.0 if estimator_cls in _REGRESSORS else 0.1)
     model = estimator.fit(frame)
     assert type(model) is getattr(sys.modules[estimator_cls.__module__], estimator_cls.__name__ + "Model")
     assert model.uid == estimator.uid and model.getMaxIter() == 20
     assert model.numFeatures == 1
-    if estimator_cls is not LinearRegression:
+    if estimator_cls not in _REGRESSORS:
         assert model.numClasses == 2
     from pyspark import _pyspark
 
@@ -78,13 +83,21 @@ def test_fit_transform_fetch_and_persistence(frame, tmp_path, native_operations_
     assert type(summary) is getattr(public, prefix + "TrainingSummary")
     evaluation = model.evaluate(frame)
     assert type(evaluation) is getattr(public, prefix + "Summary")
-    if estimator_cls is LinearRegression:
+    if estimator_cls in _REGRESSORS:
         assert list(model.coefficients) == pytest.approx([2.0])
         assert model.intercept == pytest.approx(1.0)
-        assert summary.rootMeanSquaredError == pytest.approx(0.0, abs=1e-10)
-        assert evaluation.r2 == pytest.approx(1.0)
+        if estimator_cls is GeneralizedLinearRegression:
+            assert summary.deviance == pytest.approx(0.0, abs=1e-10)
+            assert evaluation.deviance == pytest.approx(0.0, abs=1e-10)
+            assert summary.nullDeviance > 0
+            assert summary.solver == "irls" and summary.numIterations >= 0
+            residuals = summary.residuals("response")
+        else:
+            assert summary.rootMeanSquaredError == pytest.approx(0.0, abs=1e-10)
+            assert evaluation.r2 == pytest.approx(1.0)
+            residuals = summary.residuals
         assert summary.predictions.count() == frame.count()
-        assert summary.residuals.count() == frame.count()
+        assert residuals.count() == frame.count()
         assert len(summary.coefficientStandardErrors) == len(summary.tValues) == len(summary.pValues) == 2
         assert model.predict(Vectors.dense([3.0])) == pytest.approx(7.0)
     else:
@@ -93,7 +106,7 @@ def test_fit_transform_fetch_and_persistence(frame, tmp_path, native_operations_
         assert model.predict(Vectors.dense([3.0])) == 1.0
 
     rows = model.transform(frame).orderBy("label").select("prediction").collect()
-    expected = [2.0 * i + 1.0 for i in range(8)] if estimator_cls is LinearRegression else [0.0, 0.0, 1.0, 1.0]
+    expected = [2.0 * i + 1.0 for i in range(8)] if estimator_cls in _REGRESSORS else [0.0, 0.0, 1.0, 1.0]
     assert [row.prediction for row in rows] == pytest.approx(expected)
 
     # A call-local override fits a copy, preserving the estimator and its Python parameter map.
@@ -121,11 +134,11 @@ def test_fit_transform_fetch_and_persistence(frame, tmp_path, native_operations_
 def test_lazy_transform_retains_model_after_python_reference_is_dropped(
     frame, native_operations_only, estimator_cls,
 ):
-    model = estimator_cls(maxIter=20, regParam=0.0 if estimator_cls is LinearRegression else 0.1).fit(frame)
+    model = estimator_cls(maxIter=20, regParam=0.0 if estimator_cls in _REGRESSORS else 0.1).fit(frame)
     predictions = model.transform(frame).select("prediction")
     del model
     gc.collect()
-    expected = [2.0 * i + 1.0 for i in range(8)] if estimator_cls is LinearRegression else [0.0, 0.0, 1.0, 1.0]
+    expected = [2.0 * i + 1.0 for i in range(8)] if estimator_cls in _REGRESSORS else [0.0, 0.0, 1.0, 1.0]
     assert sorted(row.prediction for row in predictions.collect()) == pytest.approx(expected)
 
 
@@ -188,9 +201,9 @@ def test_standard_pipeline_and_tuning_use_native_estimator(session, tmp_path, es
     validator = CrossValidator(
         estimator=pipeline,
         estimatorParamMaps=ParamGridBuilder().addGrid(
-            estimator.regParam, [0.0, 0.1] if estimator_cls is LinearRegression else [0.1, 0.2],
+            estimator.regParam, [0.0, 0.1] if estimator_cls in _REGRESSORS else [0.1, 0.2],
         ).build(),
-        evaluator=RegressionEvaluator() if estimator_cls is LinearRegression else BinaryClassificationEvaluator(),
+        evaluator=RegressionEvaluator() if estimator_cls in _REGRESSORS else BinaryClassificationEvaluator(),
         numFolds=2,
         foldCol="fold",
         parallelism=1,
@@ -210,7 +223,8 @@ def test_standard_pipeline_and_tuning_use_native_estimator(session, tmp_path, es
 def test_live_standard_estimator_without_optional_python_dependencies(session, tmp_path, estimator_cls):
     from _standard_ml_cases import without_optional_dependencies
 
-    regression = estimator_cls is LinearRegression
+    regression = estimator_cls in _REGRESSORS
+    generalized = estimator_cls is GeneralizedLinearRegression
     name = estimator_cls.__name__
     without_optional_dependencies(f"""
 import gc
@@ -233,7 +247,10 @@ try:
     summary = model.summary
     summary = summary() if callable(summary) else summary
     evaluation = model.evaluate(data)
-    if regression:
+    if {generalized!r}:
+        assert summary.deviance < 1e-10
+        assert evaluation.deviance < 1e-10
+    elif regression:
         assert summary.rootMeanSquaredError < 1e-10
         assert evaluation.rootMeanSquaredError < 1e-10
     else:

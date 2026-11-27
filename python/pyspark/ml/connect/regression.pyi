@@ -19,6 +19,10 @@
 # do not edit. Type checkers read this stub instead of the module of the drop-in.
 
 import pyspark.ml.regression as _pysparks
+from pyspark.ml.regression import GeneralizedLinearRegression as GeneralizedLinearRegression
+from pyspark.ml.regression import GeneralizedLinearRegressionModel as GeneralizedLinearRegressionModel
+from pyspark.ml.regression import GeneralizedLinearRegressionSummary as GeneralizedLinearRegressionSummary
+from pyspark.ml.regression import GeneralizedLinearRegressionTrainingSummary as GeneralizedLinearRegressionTrainingSummary
 from pyspark.ml.regression import LinearRegression as LinearRegression
 from pyspark.ml.regression import LinearRegressionModel as LinearRegressionModel
 from pyspark.ml.regression import LinearRegressionSummary as LinearRegressionSummary
@@ -303,98 +307,6 @@ class GBTRegressor(_pysparks.GBTRegressor):
     'validationIndicator'
     >>> gbt.getValidationTol()
     0.01
-    """
-class GeneralizedLinearRegression(_pysparks.GeneralizedLinearRegression):
-    """Generalized Linear Regression.
-
-    Fit a Generalized Linear Model specified by giving a symbolic description of the linear
-    predictor (link function) and a description of the error distribution (family). It supports
-    "gaussian", "binomial", "poisson", "gamma" and "tweedie" as family. Valid link functions for
-    each family is listed below. The first link function of each family is the default one.
-
-    * "gaussian" -> "identity", "log", "inverse"
-
-    * "binomial" -> "logit", "probit", "cloglog"
-
-    * "poisson"  -> "log", "identity", "sqrt"
-
-    * "gamma"    -> "inverse", "identity", "log"
-
-    * "tweedie"  -> power link function specified through "linkPower".                     The default link power in the tweedie family is 1 - variancePower.
-
-    .. versionadded:: 2.0.0
-
-    Notes
-    -----
-    For more information see Wikipedia page on
-    `GLM <https://en.wikipedia.org/wiki/Generalized_linear_model>`_
-
-    Examples
-    --------
-    >>> from pyspark.ml.linalg import Vectors
-    >>> df = spark.createDataFrame([
-    ...     (1.0, Vectors.dense(0.0, 0.0)),
-    ...     (1.0, Vectors.dense(1.0, 2.0)),
-    ...     (2.0, Vectors.dense(0.0, 0.0)),
-    ...     (2.0, Vectors.dense(1.0, 1.0)),], ["label", "features"])
-    >>> glr = GeneralizedLinearRegression(family="gaussian", link="identity", linkPredictionCol="p")
-    >>> glr.setRegParam(0.1)
-    GeneralizedLinearRegression...
-    >>> glr.getRegParam()
-    0.1
-    >>> glr.clear(glr.regParam)
-    >>> glr.setMaxIter(10)
-    GeneralizedLinearRegression...
-    >>> glr.getMaxIter()
-    10
-    >>> glr.clear(glr.maxIter)
-    >>> model = glr.fit(df)
-    >>> model.setFeaturesCol("features")
-    GeneralizedLinearRegressionModel...
-    >>> model.getMaxIter()
-    25
-    >>> model.getAggregationDepth()
-    2
-    >>> transformed = model.transform(df)
-    >>> abs(transformed.head().prediction - 1.5) < 0.001
-    True
-    >>> abs(transformed.head().p - 1.5) < 0.001
-    True
-    >>> model.coefficients
-    DenseVector([1.5..., -1.0...])
-    >>> model.numFeatures
-    2
-    >>> abs(model.intercept - 1.5) < 0.001
-    True
-    >>> glr_path = temp_path + "/glr"
-    >>> glr.save(glr_path)
-    >>> glr2 = GeneralizedLinearRegression.load(glr_path)
-    >>> glr.getFamily() == glr2.getFamily()
-    True
-    >>> model_path = temp_path + "/glr_model"
-    >>> model.save(model_path)
-    >>> model2 = GeneralizedLinearRegressionModel.load(model_path)
-    >>> model.intercept == model2.intercept
-    True
-    >>> bool(model.coefficients[0] == model2.coefficients[0])
-    True
-    >>> model.transform(df).take(1) == model2.transform(df).take(1)
-    True
-    """
-class GeneralizedLinearRegressionModel(_pysparks.GeneralizedLinearRegressionModel):
-    """Model fitted by :class:`GeneralizedLinearRegression`.
-
-    .. versionadded:: 2.0.0
-    """
-class GeneralizedLinearRegressionSummary(_pysparks.GeneralizedLinearRegressionSummary):
-    """Generalized linear regression results evaluated on a dataset.
-
-    .. versionadded:: 2.0.0
-    """
-class GeneralizedLinearRegressionTrainingSummary(GeneralizedLinearRegressionSummary, _pysparks.GeneralizedLinearRegressionTrainingSummary):
-    """Generalized linear regression training results.
-
-    .. versionadded:: 2.0.0
     """
 class IsotonicRegression(_pysparks.IsotonicRegression):
     """Currently implemented using parallelized pool adjacent violators algorithm.

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Standard regression APIs, with LinearRegression delegated to Rust."""
+"""Standard regression APIs, with linear and generalized linear regression delegated to Rust."""
 
 from typing import TYPE_CHECKING
 
@@ -24,6 +24,10 @@ def _load_regression():
     SourceFileLoader(__name__, str(source)).exec_module(module)
     reference = SimpleNamespace(**vars(module))
     names = (
+        "GeneralizedLinearRegression",
+        "GeneralizedLinearRegressionModel",
+        "GeneralizedLinearRegressionSummary",
+        "GeneralizedLinearRegressionTrainingSummary",
         "LinearRegression",
         "LinearRegressionModel",
         "LinearRegressionSummary",
@@ -32,7 +36,10 @@ def _load_regression():
     native = {name: getattr(_pyspark, name) for name in names}
     publish(
         native, reference, public_module=__name__,
-        eager_params=("LinearRegression", "LinearRegressionModel"),
+        eager_params=(
+            "LinearRegression", "LinearRegressionModel",
+            "GeneralizedLinearRegression", "GeneralizedLinearRegressionModel",
+        ),
     )
     vars(module).update(native)
 
