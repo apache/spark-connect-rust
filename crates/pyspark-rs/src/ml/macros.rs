@@ -812,7 +812,13 @@ macro_rules! native_model {
                 let py = obj.py();
                 let model = obj.cast::<Self>()?;
                 <Self as $crate::ml::params_api::NativeInstance>::apply_attributes(model)?;
-                let reference = model.try_borrow()?.core.finalize(py)?;
+                let (reference, owned) = {
+                    let model = model.try_borrow()?;
+                    (model.core.finalize(py)?, model.core.finalize_owned(py))
+                };
+                if let Some((finalized, reference)) = owned {
+                    finalized.run(py, reference.map(|reference| reference.into_bound(py)))?;
+                }
                 if let Some(reference) = reference {
                     reference.call_method0(pyo3::intern!(py, "release_ref"))?;
                 }
@@ -1185,10 +1191,10 @@ macro_rules! native_summary {
             fn __ml_finalize(obj: &Bound<'_, PyAny>) -> PyResult<()> {
                 // A summary that is borrowed mutably (never, as only `__clear__` borrows it so)
                 // releases nothing, of no error of the `__del__`.
-                if let Ok(summary) = obj.cast::<Self>()?.try_borrow() {
-                    if let Some(holding) = summary.holding.get() {
-                        holding.finalize();
-                    }
+                let finalized = obj.cast::<Self>()?.try_borrow().ok()
+                    .and_then(|summary| summary.holding.get().and_then(|holding| holding.finalize()));
+                if let Some(finalized) = finalized {
+                    finalized.run(obj.py(), obj.getattr("_remote_model_obj").ok())?;
                 }
                 Ok(())
             }

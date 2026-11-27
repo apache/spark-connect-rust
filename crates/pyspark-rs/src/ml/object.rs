@@ -1111,8 +1111,8 @@ fn object_block(
 
 /// PySpark's `RemoteModelRef` of the server-side object of the id `id`, as PySpark's fit makes the
 /// `_java_obj` of its model, which the `_remote_model_obj` of its training summary is too (see
-/// [`ModelCore::java_obj`]): a holder of the id, which this client never releases through it, as
-/// the native objects release the server-side object themselves (see [`Holders`]).
+/// [`ModelCore::java_obj`]): its count follows Python wrapper ownership. Native objects decide
+/// when to delete the server-side object, including owners in lazy plans (see [`Holders`]).
 pub(crate) fn remote_model_ref<'py>(py: Python<'py>, id: &str) -> PyResult<Bound<'py, PyAny>> {
     py.import("pyspark.ml.util")?
         .getattr("RemoteModelRef")?
@@ -1676,6 +1676,9 @@ pub(super) struct ModelCore {
     pub(super) model: Box<dyn Model>,
     pub(super) session_id: String,
     pub(super) summary: Option<MlTarget>,
+    /// Remove this model's owner count after its model/summary targets have dropped, before
+    /// dropping the Python summary object. Its finalizer must see an accurate remaining count.
+    holding: Option<Holding>,
     /// The object of the training summary, PySpark's `_summary`, which the fit makes (see
     /// [`ModelCore::summary_object`]).
     summary_object: std::sync::OnceLock<Py<PyAny>>,
@@ -1701,9 +1704,6 @@ pub(super) struct ModelCore {
     /// Whether the object's attributes had the `_java_obj` attribute (see
     /// [`ModelCore::java_obj_change`]): an attribute of none then was deleted.
     java_obj_made: std::sync::atomic::AtomicBool,
-    /// The model as a holder of its object of the ML cache of this client (of a fit, a load or a
-    /// fetch), which its `__del__` releases (see [`Holders`]); None of another model.
-    holding: Option<Holding>,
     /// Whether the value is written, which `__traverse__` checks first (see `crate::gc::GcReady`).
     pub(super) gc_ready: crate::gc::GcReady,
 }
@@ -1842,8 +1842,8 @@ impl Drop for HeldReference {
 /// fields, see [`ModelCore::held_of`]), which change with the GIL held only, and the object is
 /// deleted when every owner of it is one of theirs: its owners that other code holds, which may
 /// drop without the GIL, only make that less likely, and none is made without the GIL of a value
-/// that no holder holds. The deletion is the one of the drop, without waiting (see
-/// `MlRef::release`), once: the drop of its last owner deletes nothing more.
+/// that no holder holds. A Python finalizer waits for the deletion without the GIL or a model
+/// borrow; a Rust drop remains nonblocking. The deletion happens once.
 pub(crate) struct Holders {
     /// The object, of one owner of it, which [`Holders::held`] counts.
     object: MlRef,
@@ -1908,17 +1908,42 @@ impl Holding {
     /// What the `__del__` of the holder does, as PySpark's releases its reference of the
     /// `RemoteModelRef` (see [`Holders`]): the holder is finalized, once, and the last of them
     /// deletes the object if every owner of it is one that the holders hold.
-    pub(crate) fn finalize(&self) {
+    pub(crate) fn finalize(&self) -> Option<OwnedFinalization> {
         use std::sync::atomic::Ordering;
         if self.finalized.swap(true, Ordering::SeqCst) {
-            return;
+            return None;
         }
         let holders = &self.holders;
-        if holders.open.fetch_sub(1, Ordering::SeqCst) == 1
-            && holders.object.owners() == holders.held.load(Ordering::SeqCst)
-        {
-            holders.object.release();
+        let remaining = holders.open.fetch_sub(1, Ordering::SeqCst) - 1;
+        let last = remaining == 0 && holders.object.owners() == holders.held.load(Ordering::SeqCst);
+        Some(OwnedFinalization {
+            object: last.then(|| holders.object.clone()),
+            remaining,
+        })
+    }
+}
+
+/// A native owner's finalizer, run after releasing its PyO3 borrow. The Python reference
+/// count mirrors the owners of the wrapper, while Rust also keeps lazy plans and writers alive.
+pub(crate) struct OwnedFinalization {
+    object: Option<MlRef>,
+    remaining: usize,
+}
+
+impl OwnedFinalization {
+    pub(crate) fn run(self, py: Python<'_>, reference: Option<Bound<'_, PyAny>>) -> PyResult<()> {
+        let counted = match reference {
+            Some(reference) => py
+                .import("pyspark.ml._native_classes")?
+                .getattr("_release_native_reference")?
+                .call1((reference, self.remaining))
+                .map(drop),
+            None => Ok(()),
+        };
+        if let Some(object) = self.object {
+            crate::gc::detach(py, || object.release_and_wait());
         }
+        counted
     }
 }
 
@@ -2406,9 +2431,6 @@ impl ModelCore {
         if let Some(class) = &self.deleted_java_obj {
             return Err(deleted_java_obj_error(class));
         }
-        if let Some(holding) = &self.holding {
-            holding.finalize();
-        }
         let Some(held) = self.exclusive_reference() else {
             return Ok(None);
         };
@@ -2418,6 +2440,17 @@ impl ModelCore {
                 .store(true, std::sync::atomic::Ordering::Relaxed);
         }
         Ok(reference)
+    }
+
+    pub(super) fn finalize_owned(
+        &self,
+        py: Python<'_>,
+    ) -> Option<(OwnedFinalization, Option<Py<PyAny>>)> {
+        let finalized = self.holding.as_ref()?.finalize()?;
+        Some((
+            finalized,
+            self.java_obj.get().map(|reference| reference.clone_ref(py)),
+        ))
     }
 
     /// Visit the Python objects that the model holds alone, of Python's garbage collector, as

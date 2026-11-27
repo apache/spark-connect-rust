@@ -26,6 +26,8 @@ The classification module already preserves the upstream definitions in a privat
 - R4: Fit, transform, model access, summaries, evaluation, and persistence use Rust ML operations.
 - R5: Retain Python references in native defaults safely, including cyclic references.
 - R6: Add no runtime dependencies and preserve unchanged upstream classification source.
+- R7: Preserve immediate Python model-reference counts and server-cache cleanup when the last
+  native wrapper is deleted, while keeping objects owned by lazy plans and writers alive.
 
 ## Clarifications
 
@@ -48,6 +50,10 @@ algorithms are excluded; existing fork-specific native imports remain compatibil
   operations succeed without importing them; upstream standard classification parity tests pass.
 - AC7: GIVEN a default containing a reference cycle WHEN its estimator becomes unreachable
   THEN garbage collection releases it; non-migrated classifiers keep existing synchronization.
+
+- AC8: GIVEN fitted models, copies, and training summaries WHEN their last Python owner is deleted
+  THEN reference counts and the next server-cache query reflect the deletion without polling
+  or forced collection, while a retained lazy transform remains executable.
 
 ## Constraints
 
@@ -75,6 +81,8 @@ algorithm's summary and threshold semantics. Refresh generated aliases and typin
 - [x] T3: Run offline suites, live tests, upstream parity, generated-stub checks, and Rust gates.
 - [x] T4: Create the tracking JIRA and prepare the PR description.
 
+- [x] T5: Resolve CI stub-alias coverage and native model finalization regressions.
+
 ### Validation
 
 - Tracking issue: [SPARK-62385](https://issues.apache.org/jira/browse/SPARK-62385), with
@@ -97,3 +105,15 @@ algorithm's summary and threshold semantics. Refresh generated aliases and typin
   and with wasm-udf. Formatting and workspace Clippy across all targets passed, with Clippy
   run using `-D warnings`.
 - Full-project parity and coverage are deferred to CI.
+
+### CI follow-up (November 27)
+
+The first CI run exposed two failures: the stub coverage check counted class declarations but
+not the four new LinearSVC aliases, and upstream cache tests exposed native model cleanup
+that lagged behind Python reference counts and the next cache query. The alias check now
+verifies re-export identity. Native finalizers mirror wrapper reference counts, release their
+model borrow and the GIL before waiting for deletion, and retain the nonblocking Rust drop path.
+Model fields drop their ownership bookkeeping before the Python summary, so its finalizer
+sees the correct count. Regression cases cover model copies and retained training summaries.
+
+Follow-up validation used Python 3.11, matching CI: 2,060 ML offline and type-stub tests passed (73 skipped), 80 live ML lifecycle tests passed, and all 24 upstream cache, classification, and OneVsRest tests passed with no skips. The live regression cases cover ordinary copies, uncounted shallow copies, retained summaries, and immediate cache cleanup. The API comparison found no public-name, member-kind, or signature differences across the 10 migrated classes. Rust validation passed: 864 library tests, all integration-test compilation with and without wasm-udf, cargo fmt, and workspace Clippy with warnings denied. Ruff and whitespace checks passed.

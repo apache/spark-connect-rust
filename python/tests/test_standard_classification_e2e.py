@@ -2,6 +2,7 @@
 """Migrated standard classifiers must execute the Rust ML implementation."""
 
 import gc
+import json
 import os
 
 import pyspark.ml.classification as classification
@@ -107,6 +108,34 @@ def test_lazy_transform_retains_model_after_python_reference_is_dropped(
     del model
     gc.collect()
     assert sorted(row.prediction for row in predictions.collect()) == [0.0, 0.0, 1.0, 1.0]
+
+
+@pytest.mark.parametrize("holder", ["copy", "shallow", "summary"])
+def test_deleting_native_model_wrappers_updates_counts_and_cache(frame, classifier, holder):
+    model = classifier(maxIter=3, regParam=0.1).fit(frame)
+    reference = model._java_obj
+    assert reference._ref_count == 2
+    if holder == "copy":
+        kept = model.copy()
+        assert kept._java_obj is reference and reference._ref_count == 3
+        remaining = 2
+    elif holder == "shallow":
+        import copy
+
+        kept = copy.copy(model)
+        assert kept._java_obj is reference and reference._ref_count == 2
+        remaining = 2
+    else:
+        kept = model.summary if classifier is LogisticRegression else model.summary()
+        remaining = 1
+    del model
+    assert reference._ref_count == remaining
+    client = frame.sparkSession.client
+    assert reference.ref_id in {json.loads(item)["id"] for item in client._get_ml_cache_info()}
+    del kept
+    assert reference._ref_count == 0
+    # No polling or forced collection: the next query must observe the finalizer's deletion.
+    assert reference.ref_id not in {json.loads(item)["id"] for item in client._get_ml_cache_info()}
 
 
 def test_python_fit_override_can_delegate_to_rust(frame, native_operations_only, classifier):

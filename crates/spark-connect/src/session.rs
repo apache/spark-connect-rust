@@ -1652,18 +1652,21 @@ impl SparkSession {
     /// `SparkConnectClient::spawn_execute_plan_reattachable`), and its errors (a closed channel)
     /// are ignored. As `release_cached_remote_relation`, a stopped session is not released:
     /// stopping it released its server state, ML cache included. Safe to call from `Drop`.
-    pub(crate) fn release_ml_objects(&self, refs: Vec<proto::ObjectRef>) {
+    pub(crate) fn release_ml_objects(
+        &self,
+        refs: Vec<proto::ObjectRef>,
+    ) -> Option<tokio::task::JoinHandle<()>> {
         if self.is_stopped() {
-            return;
+            return None;
         }
         let (_request, send) = self.finalizer_request();
         if !send {
-            return;
+            return None;
         }
         // A tag that UTF-8 cannot encode fails PySpark's request before it is sent, and
         // `_delete_ml_cache` ignores the error.
         let Ok(tags) = self.tags() else {
-            return;
+            return None;
         };
         let command = proto::Command {
             command_type: Some(proto::command::CommandType::MlCommand(proto::MlCommand {
@@ -1686,7 +1689,7 @@ impl SparkSession {
             }),
             ..Default::default()
         };
-        self.client().spawn_execute_plan_reattachable(request);
+        Some(self.client().spawn_execute_plan_reattachable(request))
     }
 
     /// Remove the cached remote relation `relation_id` on the server, as PySpark's

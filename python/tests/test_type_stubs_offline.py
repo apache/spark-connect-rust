@@ -602,7 +602,8 @@ def test_the_ml_connect_stubs_declare_the_public_classes_of_the_native_ones():
     # none of their names (mypy `Any`, pyright `reportPrivateImportUsage` of Pipeline), where
     # PySpark's modules of these paths, its own ML API on torch, are typed. Their stubs declare
     # each class of the bases that it has at run time, of the native stages of pyspark.ml.feature
-    # that the package sets in pyspark.ml.connect.feature too.
+    # that the package sets in pyspark.ml.connect.feature too. Migrated standard classes are
+    # explicit re-exports instead of declarations; check their runtime identity as well.
     from pyspark import _pyspark as native
 
     checked = []
@@ -616,6 +617,20 @@ def test_the_ml_connect_stubs_declare_the_public_classes_of_the_native_ones():
             for s in tree.body
             if isinstance(s, ast.Import) and s.names[0].asname == "_pysparks"
         ]
+        for statement in (s for s in tree.body if isinstance(s, ast.ImportFrom)):
+            if not statement.module or not statement.module.startswith("pyspark.ml."):
+                continue
+            for alias in statement.names:
+                public = getattr(module, alias.asname or alias.name, None)
+                native_class = getattr(native, alias.name, None)
+                if (
+                    isinstance(public, type)
+                    and isinstance(native_class, type)
+                    and issubclass(public, native_class)
+                ):
+                    source = importlib.import_module(statement.module)
+                    assert public is getattr(source, alias.name)
+                    checked.append(f"{name}.{alias.asname or alias.name}")
         for cls in (s for s in tree.body if isinstance(s, ast.ClassDef)):
             bases = [ast.unparse(b) for b in cls.bases]
             if not bases or not bases[-1].startswith("_pysparks."):

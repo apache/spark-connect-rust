@@ -119,6 +119,34 @@ impl MlRef {
     /// Returns whether it deleted the object. Not a stable API.
     #[doc(hidden)]
     pub fn release(&self) -> bool {
+        if !self.claim_release() {
+            return false;
+        }
+        drop(
+            self.0
+                .session
+                .release_ml_objects(vec![self.0.model_ref.clone()]),
+        );
+        true
+    }
+
+    /// Release an owned object and wait for its deletion, for Python finalizers that must
+    /// finish before the next cache query. Call without the GIL and without a model borrow.
+    /// Rust drops continue to use the nonblocking release path. Not a stable API.
+    #[doc(hidden)]
+    pub fn release_and_wait(&self) {
+        if self.claim_release() {
+            if let Some(task) = self
+                .0
+                .session
+                .release_ml_objects(vec![self.0.model_ref.clone()])
+            {
+                let _ = spark_connect_core::runtime::block_on(task);
+            }
+        }
+    }
+
+    fn claim_release(&self) -> bool {
         use std::sync::atomic::Ordering;
         if !self.is_owned() || self.0.kept.load(Ordering::SeqCst) {
             return false;
@@ -126,9 +154,6 @@ impl MlRef {
         if self.0.released.swap(true, Ordering::SeqCst) {
             return false;
         }
-        self.0
-            .session
-            .release_ml_objects(vec![self.0.model_ref.clone()]);
         true
     }
 
