@@ -2421,8 +2421,8 @@ def test_the_functions_of_the_udfs_and_the_plan_of_a_model_are_pickled_in_pyspar
 
 
 def test_the_dataframes_of_the_models_of_pysparks_own_classes_are_not_pickled_as_pysparks(ml_mock):
-    # The plans of PySpark's own classes of `pyspark.ml` (`pyspark.ml.regression.GeneralizedLinearRegression`,
-    # which has not migrated to the native standard API yet) keep their models and
+    # Keep coverage of Python-built plans using the retained upstream definitions, as the
+    # standard regression classes now delegate to Rust. These plans keep their models and
     # summaries (`__source_transformer__`, `__source_instance__`), which PySpark's pickle of a
     # DataFrame of such a plan (`DataFrame(plan, session)`) reaches before its session: the lock of
     # the model's RemoteModelRef, of a transform, of a DataFrame over one and of a DataFrame of the
@@ -2433,13 +2433,13 @@ def test_the_dataframes_of_the_models_of_pysparks_own_classes_are_not_pickled_as
     import pickle
 
     from pyspark import cloudpickle
-    from pyspark.ml.clustering import KMeansModel, KMeansSummary
-    from pyspark.ml.linalg import Vectors
-    from pyspark.ml.regression import (
+    from pyspark.ml._upstream.regression import (
         GeneralizedLinearRegressionModel,
         GeneralizedLinearRegressionSummary,
         GeneralizedLinearRegressionTrainingSummary,
     )
+    from pyspark.ml.clustering import KMeansModel, KMeansSummary
+    from pyspark.ml.linalg import Vectors
     from pyspark.ml.util import RemoteModelRef
 
     spark, service = ml_mock

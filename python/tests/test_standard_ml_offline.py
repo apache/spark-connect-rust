@@ -16,10 +16,18 @@ from pyspark.ml.classification import (
     LogisticRegression,
     LogisticRegressionModel,
 )
-from pyspark.ml.regression import LinearRegression, LinearRegressionModel
+from pyspark.ml.regression import (
+    GeneralizedLinearRegression,
+    GeneralizedLinearRegressionModel,
+    LinearRegression,
+    LinearRegressionModel,
+)
 
 
-@pytest.fixture(params=[LogisticRegression, LinearSVC, LinearRegression], ids=lambda cls: cls.__name__)
+@pytest.fixture(
+    params=[LogisticRegression, LinearSVC, LinearRegression, GeneralizedLinearRegression],
+    ids=lambda cls: cls.__name__,
+)
 def estimator_cls(request):
     return request.param
 
@@ -66,7 +74,7 @@ assert not issubclass(public.NaiveBayes, _pyspark.NaiveBayes)
     code = code.replace("LogisticRegression", estimator_cls.__name__)
     module = estimator_cls.__module__
     code = code.replace("classification", module.rsplit(".", 1)[1])
-    if estimator_cls is LinearRegression:
+    if estimator_cls.__module__ == "pyspark.ml.regression":
         code = code.replace("NaiveBayes", "AFTSurvivalRegression")
     first_module = module if first == "standard" else module.replace("pyspark.ml.", "pyspark.ml.connect.")
     code = code.replace("PERSISTENCE_FIRST", repr(persistence_first)).replace("FIRST", repr(first_module))
@@ -235,6 +243,7 @@ def test_partial_mutation_keeps_native_state_and_original_conversion_error(estim
     "cls", [
         LogisticRegression, LogisticRegressionModel, LinearSVC, LinearSVCModel,
         LinearRegression, LinearRegressionModel,
+        GeneralizedLinearRegression, GeneralizedLinearRegressionModel,
     ],
 )
 def test_copies_and_restored_state_have_current_native_params(cls):
@@ -315,3 +324,18 @@ def test_eager_native_defaults_do_not_leak_reference_cycles(estimator_cls):
     del estimator
     gc.collect()
     assert reference() is None
+
+
+def test_generalized_regression_setters_update_native_family_link_and_columns():
+    estimator = GeneralizedLinearRegression(
+        family="poisson", link="log", weightCol="weight", offsetCol="offset",
+    )
+    _assert_native_params_match(estimator)
+    estimator.setFamily("tweedie").setVariancePower(1.5).setLinkPower(0.0)
+    _assert_native_params_match(estimator)
+    estimator.setParams(family="gamma", link="inverse", linkPredictionCol="eta")
+    _assert_native_params_match(estimator)
+    estimator.setParams(link=None)
+    _assert_native_params_match(estimator)
+    model = GeneralizedLinearRegressionModel().setLinkPredictionCol("eta")
+    _assert_native_params_match(model)

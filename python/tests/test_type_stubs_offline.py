@@ -286,10 +286,14 @@ def user_mypy(tmp_path_factory):
         "import pyspark.ml.connect.regression as native_regression",
         "def fit_linear(df: DataFrame) -> regression.LinearRegressionModel:",
         "    return regression.LinearRegression(maxIter=3).setRegParam(0.1).fit(df)",
+        "def fit_glr(df: DataFrame) -> regression.GeneralizedLinearRegressionModel:",
+        "    return regression.GeneralizedLinearRegression(family=\"poisson\").setLink(\"log\").fit(df)",
     ]
     for name in (
         "LinearRegression", "LinearRegressionModel", "LinearRegressionSummary",
         "LinearRegressionTrainingSummary",
+        "GeneralizedLinearRegression", "GeneralizedLinearRegressionModel",
+        "GeneralizedLinearRegressionSummary", "GeneralizedLinearRegressionTrainingSummary",
     ):
         ml_aliases += [
             f"def to_native_{name}(value: regression.{name}) -> native_regression.{name}:",
