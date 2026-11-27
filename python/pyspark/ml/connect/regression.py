@@ -1,8 +1,6 @@
 """Native regression estimators backed by Spark Connect's JVM ML API."""
 
 from pyspark._pyspark import (
-    AFTSurvivalRegression,
-    AFTSurvivalRegressionModel,
     DecisionTreeRegressionModel,
     DecisionTreeRegressor,
     FMRegressionModel,
@@ -18,6 +16,8 @@ from pyspark._pyspark import (
 # PySpark's own abstract base classes of the native classes, so that the module has the
 # names of pyspark.ml.regression.
 from pyspark.ml.regression import (
+    AFTSurvivalRegression,
+    AFTSurvivalRegressionModel,
     GeneralizedLinearRegression,
     GeneralizedLinearRegressionModel,
     GeneralizedLinearRegressionSummary,

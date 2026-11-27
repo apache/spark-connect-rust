@@ -19,6 +19,8 @@
 # do not edit. Type checkers read this stub instead of the module of the drop-in.
 
 import pyspark.ml.regression as _pysparks
+from pyspark.ml.regression import AFTSurvivalRegression as AFTSurvivalRegression
+from pyspark.ml.regression import AFTSurvivalRegressionModel as AFTSurvivalRegressionModel
 from pyspark.ml.regression import GeneralizedLinearRegression as GeneralizedLinearRegression
 from pyspark.ml.regression import GeneralizedLinearRegressionModel as GeneralizedLinearRegressionModel
 from pyspark.ml.regression import GeneralizedLinearRegressionSummary as GeneralizedLinearRegressionSummary
@@ -32,71 +34,6 @@ from pyspark.ml.regression import Regressor as Regressor
 
 __all__ = ['AFTSurvivalRegression', 'AFTSurvivalRegressionModel', 'DecisionTreeRegressor', 'DecisionTreeRegressionModel', 'GBTRegressor', 'GBTRegressionModel', 'GeneralizedLinearRegression', 'GeneralizedLinearRegressionModel', 'GeneralizedLinearRegressionSummary', 'GeneralizedLinearRegressionTrainingSummary', 'IsotonicRegression', 'IsotonicRegressionModel', 'LinearRegression', 'LinearRegressionModel', 'LinearRegressionSummary', 'LinearRegressionTrainingSummary', 'RandomForestRegressor', 'RandomForestRegressionModel', 'FMRegressor', 'FMRegressionModel']
 
-class AFTSurvivalRegression(_pysparks.AFTSurvivalRegression):
-    """Accelerated Failure Time (AFT) Model Survival Regression
-
-    Fit a parametric AFT survival regression model based on the Weibull distribution
-    of the survival time.
-
-    Notes
-    -----
-    For more information see Wikipedia page on
-    `AFT Model <https://en.wikipedia.org/wiki/Accelerated_failure_time_model>`_
-
-
-    Examples
-    --------
-    >>> from pyspark.ml.linalg import Vectors
-    >>> df = spark.createDataFrame([
-    ...     (1.0, Vectors.dense(1.0), 1.0),
-    ...     (1e-40, Vectors.sparse(1, [], []), 0.0)], ["label", "features", "censor"])
-    >>> aftsr = AFTSurvivalRegression()
-    >>> aftsr.setMaxIter(10)
-    AFTSurvivalRegression...
-    >>> aftsr.getMaxIter()
-    10
-    >>> aftsr.clear(aftsr.maxIter)
-    >>> model = aftsr.fit(df)
-    >>> model.getMaxBlockSizeInMB()
-    0.0
-    >>> model.setFeaturesCol("features")
-    AFTSurvivalRegressionModel...
-    >>> model.predict(Vectors.dense(6.3))
-    1.0
-    >>> model.predictQuantiles(Vectors.dense(6.3))
-    DenseVector([0.0101, 0.0513, 0.1054, 0.2877, 0.6931, 1.3863, 2.3026, 2.9957, 4.6052])
-    >>> model.transform(df).show()
-    +-------+---------+------+----------+
-    |  label| features|censor|prediction|
-    +-------+---------+------+----------+
-    |    1.0|    [1.0]|   1.0|       1.0|
-    |1.0E-40|(1,[],[])|   0.0|       1.0|
-    +-------+---------+------+----------+
-    ...
-    >>> aftsr_path = temp_path + "/aftsr"
-    >>> aftsr.save(aftsr_path)
-    >>> aftsr2 = AFTSurvivalRegression.load(aftsr_path)
-    >>> aftsr2.getMaxIter()
-    100
-    >>> model_path = temp_path + "/aftsr_model"
-    >>> model.save(model_path)
-    >>> model2 = AFTSurvivalRegressionModel.load(model_path)
-    >>> model.coefficients == model2.coefficients
-    True
-    >>> model.intercept == model2.intercept
-    True
-    >>> model.scale == model2.scale
-    True
-    >>> model.transform(df).take(1) == model2.transform(df).take(1)
-    True
-
-    .. versionadded:: 1.6.0
-    """
-class AFTSurvivalRegressionModel(_pysparks.AFTSurvivalRegressionModel):
-    """Model fitted by :class:`AFTSurvivalRegression`.
-
-    .. versionadded:: 1.6.0
-    """
 class DecisionTreeRegressionModel(_pysparks.DecisionTreeRegressionModel):
     """Model fitted by :class:`DecisionTreeRegressor`.
 

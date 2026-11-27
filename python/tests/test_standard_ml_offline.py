@@ -17,6 +17,8 @@ from pyspark.ml.classification import (
     LogisticRegressionModel,
 )
 from pyspark.ml.regression import (
+    AFTSurvivalRegression,
+    AFTSurvivalRegressionModel,
     GeneralizedLinearRegression,
     GeneralizedLinearRegressionModel,
     LinearRegression,
@@ -25,7 +27,7 @@ from pyspark.ml.regression import (
 
 
 @pytest.fixture(
-    params=[LogisticRegression, LinearSVC, LinearRegression, GeneralizedLinearRegression],
+    params=[LogisticRegression, LinearSVC, LinearRegression, GeneralizedLinearRegression, AFTSurvivalRegression],
     ids=lambda cls: cls.__name__,
 )
 def estimator_cls(request):
@@ -71,11 +73,15 @@ assert not issubclass(public.NaiveBayes, _pyspark.NaiveBayes)
         code = code.replace('"BinaryLogisticRegressionSummary",', "").replace(
             '"BinaryLogisticRegressionTrainingSummary",', "",
         )
+    if estimator_cls is AFTSurvivalRegression:
+        code = code.replace('"LogisticRegressionSummary",', "").replace(
+            '"LogisticRegressionTrainingSummary",', "",
+        )
     code = code.replace("LogisticRegression", estimator_cls.__name__)
     module = estimator_cls.__module__
     code = code.replace("classification", module.rsplit(".", 1)[1])
     if estimator_cls.__module__ == "pyspark.ml.regression":
-        code = code.replace("NaiveBayes", "AFTSurvivalRegression")
+        code = code.replace("NaiveBayes", "IsotonicRegression")
     first_module = module if first == "standard" else module.replace("pyspark.ml.", "pyspark.ml.connect.")
     code = code.replace("PERSISTENCE_FIRST", repr(persistence_first)).replace("FIRST", repr(first_module))
     subprocess.run(
@@ -85,11 +91,11 @@ assert not issubclass(public.NaiveBayes, _pyspark.NaiveBayes)
 
 
 def test_params_copy_and_pickle_keep_the_standard_api(estimator_cls):
-    estimator = estimator_cls(maxIter=3, regParam=0.1)
+    estimator = estimator_cls(maxIter=3, tol=0.1)
     assert isinstance(estimator, getattr(_pyspark, estimator_cls.__name__))
     assert estimator.fit.__func__ is Estimator.fit
     assert estimator.setParams(maxIter=5) is estimator
-    assert estimator.getMaxIter() == 5 and estimator.getRegParam() == 0.1
+    assert estimator.getMaxIter() == 5 and estimator.getTol() == 0.1
     assert estimator.isSet(estimator.maxIter) and not estimator.isSet(estimator.featuresCol)
     assert estimator.getFeaturesCol() == "features"
     copied = estimator.copy({estimator.maxIter: 2})
@@ -173,8 +179,8 @@ from pyspark import _pyspark
 from pyspark.ml.classification import LogisticRegression
 estimator = LogisticRegression(maxIter=3)
 assert isinstance(estimator, _pyspark.LogisticRegression)
-estimator.setRegParam(0.1)
-assert copy.deepcopy(estimator).getRegParam() == 0.1
+estimator.setTol(0.1)
+assert copy.deepcopy(estimator).getTol() == 0.1
 assert pickle.loads(pickle.dumps(estimator)).getMaxIter() == 3
 assert estimator.write().overwrite().shouldOverwrite
 assert LogisticRegression.read()._clazz is LogisticRegression
@@ -192,11 +198,11 @@ def _assert_native_params_match(instance):
 
 
 def test_constructor_and_parameter_mutations_update_native_estimator_immediately(estimator_cls):
-    estimator = estimator_cls(maxIter=3, regParam=0.1)
+    estimator = estimator_cls(maxIter=3, tol=0.1)
     _assert_native_params_match(estimator)
     assert estimator.setMaxIter(20) is estimator
     _assert_native_params_match(estimator)
-    assert estimator.setParams(maxIter=21, regParam=0.2) is estimator
+    assert estimator.setParams(maxIter=21, tol=0.2) is estimator
     _assert_native_params_match(estimator)
     assert estimator.set(estimator.maxIter, 22) is None
     _assert_native_params_match(estimator)
@@ -229,13 +235,13 @@ def test_model_and_estimator_threshold_setters_update_native_params(cls):
 
 
 def test_partial_mutation_keeps_native_state_and_original_conversion_error(estimator_cls):
-    estimator = estimator_cls(maxIter=3, regParam=0.1)
-    with pytest.raises(TypeError, match='Invalid param value given for param "regParam"'):
-        estimator._set(maxIter=9, regParam=object())
-    assert estimator.getMaxIter() == 9 and estimator.getRegParam() == 0.1
+    estimator = estimator_cls(maxIter=3, tol=0.1)
+    with pytest.raises(TypeError, match='Invalid param value given for param "tol"'):
+        estimator._set(maxIter=9, tol=object())
+    assert estimator.getMaxIter() == 9 and estimator.getTol() == 0.1
     _assert_native_params_match(estimator)
-    with pytest.raises(TypeError, match='Invalid default param value given for param "regParam"'):
-        estimator._setDefault(maxIter=8, regParam=object())
+    with pytest.raises(TypeError, match='Invalid default param value given for param "tol"'):
+        estimator._setDefault(maxIter=8, tol=object())
     _assert_native_params_match(estimator)
 
 
@@ -244,6 +250,7 @@ def test_partial_mutation_keeps_native_state_and_original_conversion_error(estim
         LogisticRegression, LogisticRegressionModel, LinearSVC, LinearSVCModel,
         LinearRegression, LinearRegressionModel,
         GeneralizedLinearRegression, GeneralizedLinearRegressionModel,
+        AFTSurvivalRegression, AFTSurvivalRegressionModel,
     ],
 )
 def test_copies_and_restored_state_have_current_native_params(cls):
@@ -339,3 +346,20 @@ def test_generalized_regression_setters_update_native_family_link_and_columns():
     _assert_native_params_match(estimator)
     model = GeneralizedLinearRegressionModel().setLinkPredictionCol("eta")
     _assert_native_params_match(model)
+
+
+@pytest.mark.parametrize("cls", [AFTSurvivalRegression, AFTSurvivalRegressionModel])
+def test_survival_setters_update_native_quantiles_and_columns(cls):
+    instance = cls()
+    _assert_native_params_match(instance)
+    instance.setQuantileProbabilities([0.25, 0.5, 0.75]).setQuantilesCol("quantiles")
+    _assert_native_params_match(instance)
+    instance.clear(instance.quantileProbabilities)
+    _assert_native_params_match(instance)
+    instance.setQuantilesCol(None)
+    _assert_native_params_match(instance)
+    if cls is AFTSurvivalRegression:
+        instance.setParams(censorCol="observed", quantileProbabilities=[0.1, 0.9])
+        _assert_native_params_match(instance)
+        instance.setCensorCol("censor").setMaxBlockSizeInMB(1.0)
+        _assert_native_params_match(instance)

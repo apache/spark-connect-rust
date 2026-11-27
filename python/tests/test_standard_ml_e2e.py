@@ -269,3 +269,164 @@ try:
 finally:
     spark.stop()
 """)
+
+
+@pytest.fixture
+def survival_frame(session):
+    from _regression_api_cases import _regression_frame
+
+    # Positive durations with both observed events and right-censored rows.
+    return _regression_frame(session)
+
+
+def test_survival_fit_quantiles_and_persistence(
+    survival_frame, tmp_path, native_operations_only,
+):
+    import math
+
+    from pyspark import _pyspark
+    from pyspark.ml.regression import AFTSurvivalRegression, AFTSurvivalRegressionModel
+
+    frame = survival_frame.withColumnRenamed("censor", "observed")
+    probabilities = [0.25, 0.5, 0.75]
+    estimator = AFTSurvivalRegression(
+        maxIter=10, censorCol="observed", quantileProbabilities=probabilities,
+        quantilesCol="quantiles",
+    )
+    model = estimator.fit(frame)
+    assert type(model) is AFTSurvivalRegressionModel
+    assert isinstance(model, _pyspark.AFTSurvivalRegressionModel)
+    assert model.uid == estimator.uid and model.numFeatures == 2
+    assert math.isfinite(model.intercept) and model.scale > 0
+    assert len(model.coefficients) == 2
+    assert not hasattr(model, "summary") and not hasattr(model, "evaluate")
+    feature = Vectors.dense([3.0, 1.0])
+    prediction = math.exp(model.intercept + sum(a * b for a, b in zip(model.coefficients, feature)))
+    assert model.predict(feature) == pytest.approx(prediction)
+    expected = [prediction * (-math.log1p(-p)) ** model.scale for p in probabilities]
+    assert list(model.predictQuantiles(feature)) == pytest.approx(expected)
+
+    model.setQuantileProbabilities([0.1, 0.9]).setQuantilesCol("bounds")
+    assert _pyspark._ml_params(model)[0]["quantileProbabilities"] == [0.1, 0.9]
+    # Like official PySpark Connect, fetches read the fitted remote model; transform
+    # and persistence apply the current client parameters to a copy of that model.
+    assert list(model.predictQuantiles(feature)) == pytest.approx(expected)
+    current_expected = [prediction * (-math.log1p(-p)) ** model.scale for p in [0.1, 0.9]]
+    rows = model.transform(frame).select("features", "prediction", "bounds").collect()
+    assert len(rows) == 40
+    for row in rows:
+        assert row.prediction > 0
+        assert list(row.bounds) == pytest.approx([
+            row.prediction * (-math.log1p(-p)) ** model.scale for p in [0.1, 0.9]
+        ])
+    overridden = model.transform(frame, {model.quantileProbabilities: [0.5]})
+    assert len(overridden.select("bounds").first().bounds) == 1
+    assert model.getQuantileProbabilities() == [0.1, 0.9]
+    assert estimator.fit(frame, {estimator.maxIter: 2}).getMaxIter() == 2
+    assert estimator.getMaxIter() == 10
+
+    path = str(tmp_path / "survival-model")
+    model.write().overwrite().save(path)
+    restored = AFTSurvivalRegressionModel.load(path)
+    assert type(restored) is AFTSurvivalRegressionModel and restored.uid == model.uid
+    assert restored.scale == pytest.approx(model.scale)
+    assert list(restored.predictQuantiles(feature)) == pytest.approx(current_expected)
+    predictions = restored.transform(frame).select("prediction")
+    del restored
+    gc.collect()
+    assert [row.prediction for row in predictions.collect()] == pytest.approx([
+        row.prediction for row in rows
+    ])
+    path = str(tmp_path / "survival-estimator")
+    writer = estimator.write()
+    estimator.setMaxIter(7)
+    writer.save(path)
+    loaded = AFTSurvivalRegression.load(path)
+    assert loaded.getMaxIter() == 7 and loaded.getCensorCol() == "observed"
+    assert loaded.getQuantileProbabilities() == probabilities
+
+
+@pytest.mark.parametrize("shallow", [False, True])
+def test_survival_model_copy_releases_native_cache(survival_frame, shallow):
+    import copy
+
+    from pyspark.ml.regression import AFTSurvivalRegression
+
+    model = AFTSurvivalRegression(maxIter=2).fit(survival_frame)
+    reference = model._java_obj
+    assert reference._ref_count == 1
+    kept = copy.copy(model) if shallow else model.copy()
+    assert kept._java_obj is reference
+    del model
+    assert reference._ref_count == 1
+    client = survival_frame.sparkSession.client
+    assert reference.ref_id in {json.loads(item)["id"] for item in client._get_ml_cache_info()}
+    del kept
+    assert reference._ref_count == 0
+    assert reference.ref_id not in {json.loads(item)["id"] for item in client._get_ml_cache_info()}
+
+
+def test_survival_pipeline_tuning_and_subclass(survival_frame, tmp_path):
+    from pyspark import _pyspark
+    from pyspark.ml import Pipeline, PipelineModel
+    from pyspark.ml.evaluation import RegressionEvaluator
+    from pyspark.ml.regression import AFTSurvivalRegression
+    from pyspark.ml.tuning import CrossValidator, ParamGridBuilder
+
+    calls = []
+
+    class RecordingEstimator(AFTSurvivalRegression):
+        def _fit(self, dataset):
+            calls.append(self.getMaxIter())
+            return super()._fit(dataset)
+
+    estimator = RecordingEstimator(maxIter=10)
+    model = estimator.fit(survival_frame, {estimator.maxIter: 2})
+    assert calls == [2] and estimator.getMaxIter() == 10
+    assert isinstance(model, _pyspark.AFTSurvivalRegressionModel)
+    estimator = AFTSurvivalRegression(maxIter=2)
+    validator = CrossValidator(
+        estimator=Pipeline(stages=[estimator]),
+        estimatorParamMaps=ParamGridBuilder().addGrid(estimator.maxIter, [2, 3]).build(),
+        evaluator=RegressionEvaluator(), numFolds=2, seed=1, parallelism=1,
+    )
+    model = validator.fit(survival_frame)
+    assert isinstance(model.bestModel.stages[-1], _pyspark.AFTSurvivalRegressionModel)
+    predictions = model.transform(survival_frame).select("prediction").collect()
+    assert len(predictions) == 40 and all(row.prediction > 0 for row in predictions)
+    path = str(tmp_path / "survival-pipeline")
+    model.bestModel.save(path)
+    restored = PipelineModel.load(path)
+    assert isinstance(restored.stages[-1], _pyspark.AFTSurvivalRegressionModel)
+    assert restored.transform(survival_frame).select("prediction").collect() == predictions
+
+
+def test_live_survival_without_optional_python_dependencies(session, tmp_path):
+    from _standard_ml_cases import without_optional_dependencies
+
+    without_optional_dependencies(f"""
+import os
+from pyspark import _pyspark
+from pyspark.sql import SparkSession
+from pyspark.ml.regression import AFTSurvivalRegression, AFTSurvivalRegressionModel
+from pyspark.ml.linalg import Vectors
+
+spark = SparkSession.builder.remote(os.environ["SPARK_REMOTE"]).getOrCreate()
+try:
+    data = spark.createDataFrame([
+        (1.0, Vectors.dense([1.0]), 1.0),
+        (1e-40, Vectors.sparse(1, [], []), 0.0),
+    ], ["label", "features", "censor"])
+    model = AFTSurvivalRegression(maxIter=10, quantilesCol="quantiles").fit(data)
+    assert isinstance(model, _pyspark.AFTSurvivalRegressionModel)
+    assert abs(model.predict(Vectors.dense([6.3])) - 1.0) < 1e-10
+    assert len(model.predictQuantiles(Vectors.dense([6.3]))) == 9
+    path = {str(tmp_path / "dependency-free-survival")!r}
+    model.save(path)
+    restored = AFTSurvivalRegressionModel.load(path)
+    rows = restored.transform(data).select("prediction", "quantiles").collect()
+    assert len(rows) == 2
+    assert all(abs(row.prediction - 1.0) < 1e-10 and len(row.quantiles) == 9 for row in rows)
+finally:
+    spark.stop()
+""")

@@ -48,8 +48,8 @@ CLASSES = {
         ),
     ],
     "AFTSurvivalRegression": [
-        ("pyspark.ml.connect.regression", "AFTSurvivalRegression", "pyspark.ml.regression"),
-        ("pyspark.ml.connect.regression", "AFTSurvivalRegressionModel", "pyspark.ml.regression"),
+        ("pyspark.ml.regression", "AFTSurvivalRegression", "pyspark.ml.regression"),
+        ("pyspark.ml.regression", "AFTSurvivalRegressionModel", "pyspark.ml.regression"),
     ],
     "IsotonicRegression": [
         ("pyspark.ml.connect.regression", "IsotonicRegression", "pyspark.ml.regression"),
