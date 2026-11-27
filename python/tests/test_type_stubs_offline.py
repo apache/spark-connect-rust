@@ -286,6 +286,8 @@ def user_mypy(tmp_path_factory):
         "import pyspark.ml.connect.regression as native_regression",
         "def fit_linear(df: DataFrame) -> regression.LinearRegressionModel:",
         "    return regression.LinearRegression(maxIter=3).setRegParam(0.1).fit(df)",
+        "def fit_fm(df: DataFrame) -> regression.FMRegressionModel:",
+        "    return regression.FMRegressor(maxIter=3).setFactorSize(2).setSeed(7).fit(df)",
         "def fit_aft(df: DataFrame) -> regression.AFTSurvivalRegressionModel:",
         "    return regression.AFTSurvivalRegression(maxIter=3).setQuantileProbabilities([0.5]).fit(df)",
         "def fit_glr(df: DataFrame) -> regression.GeneralizedLinearRegressionModel:",
@@ -297,6 +299,7 @@ def user_mypy(tmp_path_factory):
         "GeneralizedLinearRegression", "GeneralizedLinearRegressionModel",
         "GeneralizedLinearRegressionSummary", "GeneralizedLinearRegressionTrainingSummary",
         "AFTSurvivalRegression", "AFTSurvivalRegressionModel",
+        "FMRegressor", "FMRegressionModel",
     ):
         ml_aliases += [
             f"def to_native_{name}(value: regression.{name}) -> native_regression.{name}:",

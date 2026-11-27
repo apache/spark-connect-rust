@@ -430,3 +430,161 @@ try:
 finally:
     spark.stop()
 """)
+
+
+@pytest.fixture
+def factorization_frame(session):
+    return session.createDataFrame([
+        (1.0 + 2.0 * x - 0.5 * y + 3.0 * x * y, Vectors.dense([x, y]), 1.0 + i % 2)
+        for i in range(25)
+        for x, y in [(float(i % 5) / 4.0, float(i // 5) / 4.0)]
+    ], ["label", "features", "weight"]).coalesce(1)
+
+
+def test_factorization_fit_predict_and_persistence(
+    factorization_frame, tmp_path, native_operations_only,
+):
+    import math
+
+    from pyspark import _pyspark
+    from pyspark.ml.regression import FMRegressionModel, FMRegressor
+
+    frame = factorization_frame
+    estimator = FMRegressor(factorSize=3, maxIter=10, stepSize=0.1, seed=7)
+    estimator.set(estimator.weightCol, "weight")
+    model = estimator.fit(frame)
+    assert type(model) is FMRegressionModel and isinstance(model, _pyspark.FMRegressionModel)
+    assert model.uid == estimator.uid and model.getSeed() == 7 and model.numFeatures == 2
+    assert not hasattr(model, "summary") and not hasattr(model, "evaluate")
+    intercept, linear, factors = model.intercept, model.linear, model.factors
+    assert math.isfinite(intercept) and len(linear) == 2
+    assert factors.numRows == 2 and factors.numCols == 3
+    assert all(math.isfinite(value) for value in factors.values)
+
+    def expected(features):
+        interaction = sum(factors[0, j] * factors[1, j] for j in range(3))
+        return intercept + sum(a * b for a, b in zip(linear, features)) + (
+            interaction * features[0] * features[1]
+        )
+
+    for features in (Vectors.dense([0.25, 0.75]), Vectors.sparse(2, [1], [0.75])):
+        assert model.predict(features) == pytest.approx(expected(features))
+    model.setPredictionCol("fm_prediction")
+    assert _pyspark._ml_params(model)[0]["predictionCol"] == "fm_prediction"
+    rows = model.transform(frame).select("features", "fm_prediction").collect()
+    assert len(rows) == 25
+    for row in rows:
+        assert row.fm_prediction == pytest.approx(expected(row.features))
+    assert model.transform(frame, {model.predictionCol: "override"}).select("override").count() == 25
+    assert model.getPredictionCol() == "fm_prediction"
+    fitted_copy = estimator.fit(frame, {estimator.factorSize: 4, estimator.maxIter: 2})
+    assert fitted_copy.getFactorSize() == 4 and fitted_copy.factors.numCols == 4
+    assert estimator.getFactorSize() == 3 and estimator.getMaxIter() == 10
+
+    path = str(tmp_path / "factorization-model")
+    model.write().overwrite().save(path)
+    restored = FMRegressionModel.load(path)
+    assert type(restored) is FMRegressionModel and restored.uid == model.uid
+    assert list(restored.linear) == pytest.approx(list(linear))
+    assert list(restored.factors.values) == pytest.approx(list(factors.values))
+    predictions = restored.transform(frame).select("fm_prediction")
+    del restored
+    gc.collect()
+    assert [row.fm_prediction for row in predictions.collect()] == pytest.approx([
+        row.fm_prediction for row in rows
+    ])
+    path = str(tmp_path / "factorization-estimator")
+    writer = estimator.write()
+    estimator.setSeed(11)
+    writer.save(path)
+    loaded = FMRegressor.load(path)
+    assert loaded.getSeed() == 11 and loaded.getFactorSize() == 3 and loaded.getWeightCol() == "weight"
+
+
+@pytest.mark.parametrize("shallow", [False, True])
+def test_factorization_model_copy_releases_native_cache(factorization_frame, shallow):
+    import copy
+
+    from pyspark.ml.regression import FMRegressor
+
+    model = FMRegressor(factorSize=2, maxIter=2, stepSize=0.1, seed=7).fit(factorization_frame)
+    reference = model._java_obj
+    assert reference._ref_count == 1
+    kept = copy.copy(model) if shallow else model.copy()
+    assert kept._java_obj is reference
+    del model
+    assert reference._ref_count == 1
+    client = factorization_frame.sparkSession.client
+    assert reference.ref_id in {json.loads(item)["id"] for item in client._get_ml_cache_info()}
+    del kept
+    assert reference._ref_count == 0
+    assert reference.ref_id not in {json.loads(item)["id"] for item in client._get_ml_cache_info()}
+
+
+def test_factorization_pipeline_tuning_and_subclass(factorization_frame, tmp_path):
+    import math
+
+    from pyspark import _pyspark
+    from pyspark.ml import Pipeline, PipelineModel
+    from pyspark.ml.evaluation import RegressionEvaluator
+    from pyspark.ml.regression import FMRegressor
+    from pyspark.ml.tuning import CrossValidator, ParamGridBuilder
+
+    calls = []
+
+    class RecordingEstimator(FMRegressor):
+        def _fit(self, dataset):
+            calls.append(self.getFactorSize())
+            return super()._fit(dataset)
+
+    estimator = RecordingEstimator(factorSize=2, maxIter=2, stepSize=0.1, seed=7)
+    model = estimator.fit(factorization_frame, {estimator.factorSize: 3})
+    assert calls == [3] and estimator.getFactorSize() == 2
+    assert isinstance(model, _pyspark.FMRegressionModel)
+    estimator = FMRegressor(maxIter=2, stepSize=0.1, seed=7)
+    validator = CrossValidator(
+        estimator=Pipeline(stages=[estimator]),
+        estimatorParamMaps=ParamGridBuilder().addGrid(estimator.factorSize, [2, 3]).build(),
+        evaluator=RegressionEvaluator(), numFolds=2, seed=1, parallelism=1,
+    )
+    model = validator.fit(factorization_frame)
+    assert isinstance(model.bestModel.stages[-1], _pyspark.FMRegressionModel)
+    assert len(model.avgMetrics) == 2 and all(math.isfinite(value) for value in model.avgMetrics)
+    predictions = model.transform(factorization_frame).select("prediction").collect()
+    assert len(predictions) == 25 and all(math.isfinite(row.prediction) for row in predictions)
+    path = str(tmp_path / "factorization-pipeline")
+    model.bestModel.save(path)
+    restored = PipelineModel.load(path)
+    assert isinstance(restored.stages[-1], _pyspark.FMRegressionModel)
+    assert restored.transform(factorization_frame).select("prediction").collect() == predictions
+
+
+def test_live_factorization_without_optional_python_dependencies(session, tmp_path):
+    from _standard_ml_cases import without_optional_dependencies
+
+    without_optional_dependencies(f"""
+import math
+import os
+from pyspark import _pyspark
+from pyspark.sql import SparkSession
+from pyspark.ml.regression import FMRegressor, FMRegressionModel
+from pyspark.ml.linalg import Vectors
+
+spark = SparkSession.builder.remote(os.environ["SPARK_REMOTE"]).getOrCreate()
+try:
+    data = spark.createDataFrame([
+        (1.0 + x + x * y, Vectors.dense([x, y]))
+        for x in [0.0, 0.5, 1.0] for y in [0.0, 1.0]
+    ], ["label", "features"])
+    model = FMRegressor(factorSize=2, maxIter=3, stepSize=0.1, seed=7).fit(data)
+    assert isinstance(model, _pyspark.FMRegressionModel)
+    assert model.factors.numRows == 2 and model.factors.numCols == 2
+    assert len(model.linear) == 2 and math.isfinite(model.predict(Vectors.dense([0.5, 1.0])))
+    expected = model.transform(data).select("prediction").collect()
+    path = {str(tmp_path / "dependency-free-factorization")!r}
+    model.save(path)
+    restored = FMRegressionModel.load(path)
+    assert restored.transform(data).select("prediction").collect() == expected
+finally:
+    spark.stop()
+""")

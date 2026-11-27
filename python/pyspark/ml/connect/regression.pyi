@@ -21,6 +21,8 @@
 import pyspark.ml.regression as _pysparks
 from pyspark.ml.regression import AFTSurvivalRegression as AFTSurvivalRegression
 from pyspark.ml.regression import AFTSurvivalRegressionModel as AFTSurvivalRegressionModel
+from pyspark.ml.regression import FMRegressionModel as FMRegressionModel
+from pyspark.ml.regression import FMRegressor as FMRegressor
 from pyspark.ml.regression import GeneralizedLinearRegression as GeneralizedLinearRegression
 from pyspark.ml.regression import GeneralizedLinearRegressionModel as GeneralizedLinearRegressionModel
 from pyspark.ml.regression import GeneralizedLinearRegressionSummary as GeneralizedLinearRegressionSummary
@@ -105,69 +107,6 @@ class DecisionTreeRegressor(_pysparks.DecisionTreeRegressor):
     >>> model3 = dt3.fit(df3)
     >>> print(model3.toDebugString)
     DecisionTreeRegressionModel...depth=1, numNodes=3...
-    """
-class FMRegressionModel(_pysparks.FMRegressionModel):
-    """Model fitted by :class:`FMRegressor`.
-
-    .. versionadded:: 3.0.0
-    """
-class FMRegressor(_pysparks.FMRegressor):
-    """Factorization Machines learning algorithm for regression.
-
-    solver Supports:
-
-    * gd (normal mini-batch gradient descent)
-    * adamW (default)
-
-    .. versionadded:: 3.0.0
-
-    Examples
-    --------
-    >>> from pyspark.ml.linalg import Vectors
-    >>> from pyspark.ml.regression import FMRegressor
-    >>> df = spark.createDataFrame([
-    ...     (2.0, Vectors.dense(2.0)),
-    ...     (1.0, Vectors.dense(1.0)),
-    ...     (0.0, Vectors.sparse(1, [], []))], ["label", "features"])
-    >>>
-    >>> fm = FMRegressor(factorSize=2)
-    >>> fm.setSeed(16)
-    FMRegressor...
-    >>> model = fm.fit(df)
-    >>> model.getMaxIter()
-    100
-    >>> test0 = spark.createDataFrame([
-    ...     (Vectors.dense(-2.0),),
-    ...     (Vectors.dense(0.5),),
-    ...     (Vectors.dense(1.0),),
-    ...     (Vectors.dense(4.0),)], ["features"])
-    >>> model.transform(test0).show(10, False)
-    +--------+-------------------+
-    |features|prediction         |
-    +--------+-------------------+
-    |[-2.0]  |-1.9989237712341565|
-    |[0.5]   |0.4956682219523814 |
-    |[1.0]   |0.994586620589689  |
-    |[4.0]   |3.9880970124135344 |
-    +--------+-------------------+
-    ...
-    >>> model.intercept
-    -0.0032501766849261557
-    >>> model.linear
-    DenseVector([0.9978])
-    >>> model.factors
-    DenseMatrix(1, 2, [0.0173, 0.0021], 1)
-    >>> model_path = temp_path + "/fm_model"
-    >>> model.save(model_path)
-    >>> model2 = FMRegressionModel.load(model_path)
-    >>> model2.intercept
-    -0.0032501766849261557
-    >>> model2.linear
-    DenseVector([0.9978])
-    >>> model2.factors
-    DenseMatrix(1, 2, [0.0173, 0.0021], 1)
-    >>> model.transform(test0).take(1) == model2.transform(test0).take(1)
-    True
     """
 class GBTRegressionModel(_pysparks.GBTRegressionModel):
     """Model fitted by :class:`GBTRegressor`.

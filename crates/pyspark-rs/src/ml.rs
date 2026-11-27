@@ -3551,6 +3551,8 @@ impl params_api::NativeInstance for PyIsotonicRegression {
 pub struct PyFMRegressor {
     inner: FMRegressor,
     unsendable: Vec<&'static str>,
+    own_defaults: params_api::OwnDefaults,
+    gc_ready: crate::gc::GcReady,
 }
 
 const FMREGRESSOR_PARAMS: &[(&str, Kind)] = &[
@@ -3600,6 +3602,8 @@ native_pymethods! {
         let mut this = Self {
             inner: FMRegressor::new(),
             unsendable: Vec::new(),
+            own_defaults: params_api::OwnDefaults::new(),
+            gc_ready: crate::gc::GcReady::new(),
         };
         init_params(
             &mut this,
@@ -3611,6 +3615,19 @@ native_pymethods! {
         )?;
         Ok(this)
     }
+    fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
+        if !self.gc_ready.get() {
+            return Ok(());
+        }
+        params_api::visit_values(&self.own_defaults, &visit)
+    }
+
+    fn __clear__(&mut self) {
+        if self.gc_ready.get() {
+            self.own_defaults.clear();
+        }
+    }
+
 
     #[pyo3(
         name = "setParams",
@@ -3775,6 +3792,8 @@ impl params_api::NativeInstance for PyFMRegressor {
             Self {
                 inner: self.inner.clone(),
                 unsendable: self.unsendable.clone(),
+                own_defaults: params_api::clone_own_defaults(py, &self.own_defaults),
+                gc_ready: crate::gc::GcReady::new(),
             },
         )
     }
@@ -7069,7 +7088,7 @@ native!(
     PyLinearRegression => LinearRegression { defaults: own_defaults },
     PyAFTSurvivalRegression => AFTSurvivalRegression { defaults: own_defaults },
     PyIsotonicRegression => IsotonicRegression,
-    PyFMRegressor => FMRegressor,
+    PyFMRegressor => FMRegressor { defaults: own_defaults },
     PyGeneralizedLinearRegression => GeneralizedLinearRegression { defaults: own_defaults },
     PyDecisionTreeClassifier => DecisionTreeClassifier,
     PyNaiveBayes => NaiveBayes,

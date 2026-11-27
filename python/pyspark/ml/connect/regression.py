@@ -3,8 +3,6 @@
 from pyspark._pyspark import (
     DecisionTreeRegressionModel,
     DecisionTreeRegressor,
-    FMRegressionModel,
-    FMRegressor,
     GBTRegressionModel,
     GBTRegressor,
     IsotonicRegression,
@@ -18,6 +16,8 @@ from pyspark._pyspark import (
 from pyspark.ml.regression import (
     AFTSurvivalRegression,
     AFTSurvivalRegressionModel,
+    FMRegressionModel,
+    FMRegressor,
     GeneralizedLinearRegression,
     GeneralizedLinearRegressionModel,
     GeneralizedLinearRegressionSummary,
