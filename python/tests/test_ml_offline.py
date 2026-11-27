@@ -2421,8 +2421,8 @@ def test_the_functions_of_the_udfs_and_the_plan_of_a_model_are_pickled_in_pyspar
 
 
 def test_the_dataframes_of_the_models_of_pysparks_own_classes_are_not_pickled_as_pysparks(ml_mock):
-    # The plans of PySpark's own classes of `pyspark.ml` (`pyspark.ml.regression.LinearRegression`,
-    # where the drop-in's own classes are those of `pyspark.ml.connect`) keep their models and
+    # The plans of PySpark's own classes of `pyspark.ml` (`pyspark.ml.regression.GeneralizedLinearRegression`,
+    # which has not migrated to the native standard API yet) keep their models and
     # summaries (`__source_transformer__`, `__source_instance__`), which PySpark's pickle of a
     # DataFrame of such a plan (`DataFrame(plan, session)`) reaches before its session: the lock of
     # the model's RemoteModelRef, of a transform, of a DataFrame over one and of a DataFrame of the
@@ -2436,9 +2436,9 @@ def test_the_dataframes_of_the_models_of_pysparks_own_classes_are_not_pickled_as
     from pyspark.ml.clustering import KMeansModel, KMeansSummary
     from pyspark.ml.linalg import Vectors
     from pyspark.ml.regression import (
-        LinearRegressionModel,
-        LinearRegressionSummary,
-        LinearRegressionTrainingSummary,
+        GeneralizedLinearRegressionModel,
+        GeneralizedLinearRegressionSummary,
+        GeneralizedLinearRegressionTrainingSummary,
     )
     from pyspark.ml.util import RemoteModelRef
 
@@ -2446,12 +2446,12 @@ def test_the_dataframes_of_the_models_of_pysparks_own_classes_are_not_pickled_as
     frame = spark.createDataFrame([(1.0, Vectors.dense(0.0, 1.0))], ["label", "features"])
     lock = "^cannot pickle '_thread.lock' object$"
     # The models and the summaries of PySpark's `try_remote_fit` and `evaluate`.
-    model = LinearRegressionModel(RemoteModelRef("pysparks-model"))
-    trained = LinearRegressionTrainingSummary("pysparks-model.summary")
+    model = GeneralizedLinearRegressionModel(RemoteModelRef("pysparks-model"))
+    trained = GeneralizedLinearRegressionTrainingSummary("pysparks-model.summary")
     trained._summary_dataset = frame
     trained._remote_model_obj = model._java_obj
     trained._remote_model_obj.add_ref()
-    evaluated = LinearRegressionSummary("pysparks-evaluated")
+    evaluated = GeneralizedLinearRegressionSummary("pysparks-evaluated")
     evaluated.__source_transformer__ = model
     kmeans = KMeansModel(RemoteModelRef("pysparks-kmeans"))
     clustered = KMeansSummary("pysparks-kmeans.summary")

@@ -19,6 +19,10 @@
 # do not edit. Type checkers read this stub instead of the module of the drop-in.
 
 import pyspark.ml.regression as _pysparks
+from pyspark.ml.regression import LinearRegression as LinearRegression
+from pyspark.ml.regression import LinearRegressionModel as LinearRegressionModel
+from pyspark.ml.regression import LinearRegressionSummary as LinearRegressionSummary
+from pyspark.ml.regression import LinearRegressionTrainingSummary as LinearRegressionTrainingSummary
 from pyspark.ml.regression import RegressionModel as RegressionModel
 from pyspark.ml.regression import Regressor as Regressor
 
@@ -436,102 +440,6 @@ class IsotonicRegressionModel(_pysparks.IsotonicRegressionModel):
     """Model fitted by :class:`IsotonicRegression`.
 
     .. versionadded:: 1.6.0
-    """
-class LinearRegression(_pysparks.LinearRegression):
-    """Linear regression.
-
-    The learning objective is to minimize the specified loss function, with regularization.
-    This supports two kinds of loss:
-
-    * squaredError (a.k.a squared loss)
-    * huber (a hybrid of squared error for relatively small errors and absolute error for     relatively large ones, and we estimate the scale parameter from training data)
-
-    This supports multiple types of regularization:
-
-    * none (a.k.a. ordinary least squares)
-    * L2 (ridge regression)
-    * L1 (Lasso)
-    * L2 + L1 (elastic net)
-
-    .. versionadded:: 1.4.0
-
-    Notes
-    -----
-    Fitting with huber loss only supports none and L2 regularization.
-
-    Examples
-    --------
-    >>> from pyspark.ml.linalg import Vectors
-    >>> df = spark.createDataFrame([
-    ...     (1.0, 2.0, Vectors.dense(1.0)),
-    ...     (0.0, 2.0, Vectors.sparse(1, [], []))], ["label", "weight", "features"])
-    >>> lr = LinearRegression(regParam=0.0, solver="normal", weightCol="weight")
-    >>> lr.setMaxIter(5)
-    LinearRegression...
-    >>> lr.getMaxIter()
-    5
-    >>> lr.setRegParam(0.1)
-    LinearRegression...
-    >>> lr.getRegParam()
-    0.1
-    >>> lr.setRegParam(0.0)
-    LinearRegression...
-    >>> model = lr.fit(df)
-    >>> model.setFeaturesCol("features")
-    LinearRegressionModel...
-    >>> model.setPredictionCol("newPrediction")
-    LinearRegressionModel...
-    >>> model.getMaxIter()
-    5
-    >>> model.getMaxBlockSizeInMB()
-    0.0
-    >>> test0 = spark.createDataFrame([(Vectors.dense(-1.0),)], ["features"])
-    >>> abs(model.predict(test0.head().features) - (-1.0)) < 0.001
-    True
-    >>> abs(model.transform(test0).head().newPrediction - (-1.0)) < 0.001
-    True
-    >>> bool(abs(model.coefficients[0] - 1.0) < 0.001)
-    True
-    >>> abs(model.intercept - 0.0) < 0.001
-    True
-    >>> test1 = spark.createDataFrame([(Vectors.sparse(1, [0], [1.0]),)], ["features"])
-    >>> abs(model.transform(test1).head().newPrediction - 1.0) < 0.001
-    True
-    >>> lr.setParams(featuresCol="vector")
-    LinearRegression...
-    >>> lr_path = temp_path + "/lr"
-    >>> lr.save(lr_path)
-    >>> lr2 = LinearRegression.load(lr_path)
-    >>> lr2.getMaxIter()
-    5
-    >>> model_path = temp_path + "/lr_model"
-    >>> model.save(model_path)
-    >>> model2 = LinearRegressionModel.load(model_path)
-    >>> bool(model.coefficients[0] == model2.coefficients[0])
-    True
-    >>> bool(model.intercept == model2.intercept)
-    True
-    >>> bool(model.transform(test0).take(1) == model2.transform(test0).take(1))
-    True
-    >>> model.numFeatures
-    1
-    >>> model.write().format("pmml").save(model_path + "_2")
-    """
-class LinearRegressionModel(_pysparks.LinearRegressionModel):
-    """Model fitted by :class:`LinearRegression`.
-
-    .. versionadded:: 1.4.0
-    """
-class LinearRegressionSummary(_pysparks.LinearRegressionSummary):
-    """Linear regression results evaluated on a dataset.
-
-    .. versionadded:: 2.0.0
-    """
-class LinearRegressionTrainingSummary(LinearRegressionSummary, _pysparks.LinearRegressionTrainingSummary):
-    """Linear regression training results. Currently, the training summary ignores the
-    training weights except for the objective trace.
-
-    .. versionadded:: 2.0.0
     """
 class RandomForestRegressionModel(_pysparks.RandomForestRegressionModel):
     """Model fitted by :class:`RandomForestRegressor`.
