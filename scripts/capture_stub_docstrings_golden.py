@@ -42,7 +42,7 @@ SAMPLES = [
     "pyspark.sql.dataframe:DataFrame.select",
     "pyspark.sql.connect.session:SparkSession.builder",
     "pyspark.sql.connect.column:Column.cast",
-    "pyspark.ml.connect.classification:LinearSVC",
+    "pyspark.ml.connect.classification:NaiveBayes",
     "pyspark.sql.connect.functions.builtin:col",
     "pyspark.ml.stat:Summarizer.mean",
     "pyspark.sql.connect.tvf:TableValuedFunction",

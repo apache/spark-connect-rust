@@ -2091,8 +2091,10 @@ impl Drop for CachedModelRef {
         }
         // Sent without waiting, and its errors (a stopped session, a closed channel) are
         // ignored, as PySpark ignores them when it releases a model.
-        self.session
-            .release_ml_objects(vec![self.model_ref.clone()]);
+        drop(
+            self.session
+                .release_ml_objects(vec![self.model_ref.clone()]),
+        );
     }
 }
 

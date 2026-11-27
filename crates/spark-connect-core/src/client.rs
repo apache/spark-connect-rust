@@ -3999,13 +3999,17 @@ impl SparkConnectClient {
     /// The request takes the user context extensions of the calling thread now, as PySpark's
     /// request is of the thread of its finalizer; the caller gives it the tags of that thread. It
     /// is then sent on the shared runtime, so that a drop never blocks on it, and its errors are
-    /// ignored, as PySpark's `_delete_ml_cache` ignores them. Not a stable API.
+    /// ignored, as PySpark's `_delete_ml_cache` ignores them. The returned handle lets a Python
+    /// finalizer wait for deletion after releasing the GIL. Not a stable API.
     #[doc(hidden)]
-    pub fn spawn_execute_plan_reattachable(&self, mut request: ExecutePlanRequest) {
+    pub fn spawn_execute_plan_reattachable(
+        &self,
+        mut request: ExecutePlanRequest,
+    ) -> tokio::task::JoinHandle<()> {
         self.extend_user_context(&mut request.user_context);
         self.add_call_stack(&mut request.user_context);
         let client = self.of_call_settings();
-        drop(crate::runtime::get_runtime().spawn(async move {
+        crate::runtime::get_runtime().spawn(async move {
             if let Ok(mut stream) = client
                 .execute_plan_reattachable_in_context(
                     request,
@@ -4016,7 +4020,7 @@ impl SparkConnectClient {
             {
                 while let Ok(Some(_)) = stream.message().await {}
             }
-        }));
+        })
     }
 
     /// [`SparkConnectClient::execute_plan_reattachable`] of a request whose user context has the

@@ -264,6 +264,8 @@ def user_mypy(tmp_path_factory):
         "import pyspark.ml.classification as standard",
         "import pyspark.ml.connect.classification as native",
         "from pyspark.sql import DataFrame",
+        "def fit_svc(df: DataFrame) -> standard.LinearSVCModel:",
+        "    return standard.LinearSVC(maxIter=3).setRegParam(0.1).fit(df)",
         "def fit_logistic(df: DataFrame) -> standard.LogisticRegressionModel:",
         "    return standard.LogisticRegression(maxIter=3).setRegParam(0.1).fit(df)",
     ]
@@ -271,6 +273,7 @@ def user_mypy(tmp_path_factory):
         "LogisticRegression", "LogisticRegressionModel", "LogisticRegressionSummary",
         "LogisticRegressionTrainingSummary", "BinaryLogisticRegressionSummary",
         "BinaryLogisticRegressionTrainingSummary",
+        "LinearSVC", "LinearSVCModel", "LinearSVCSummary", "LinearSVCTrainingSummary",
     ):
         ml_aliases += [
             f"def to_native_{name}(value: standard.{name}) -> native.{name}:",
@@ -371,11 +374,11 @@ def test_user_application_has_only_its_deliberate_error(user_mypy):
     assert len(revealed) == 4
 
 
-def test_standard_logistic_aliases_are_typed(user_mypy):
+def test_standard_classification_aliases_are_typed(user_mypy):
     assert _of(user_mypy, "probe_ml_aliases.py") == []
 
 
-def test_pyright_types_standard_logistic_aliases(user_pyright):
+def test_pyright_types_standard_classification_aliases(user_pyright):
     assert _of(user_pyright, "probe_ml_aliases.py") == []
 
 
@@ -599,7 +602,8 @@ def test_the_ml_connect_stubs_declare_the_public_classes_of_the_native_ones():
     # none of their names (mypy `Any`, pyright `reportPrivateImportUsage` of Pipeline), where
     # PySpark's modules of these paths, its own ML API on torch, are typed. Their stubs declare
     # each class of the bases that it has at run time, of the native stages of pyspark.ml.feature
-    # that the package sets in pyspark.ml.connect.feature too.
+    # that the package sets in pyspark.ml.connect.feature too. Migrated standard classes are
+    # explicit re-exports instead of declarations; check their runtime identity as well.
     from pyspark import _pyspark as native
 
     checked = []
@@ -613,6 +617,20 @@ def test_the_ml_connect_stubs_declare_the_public_classes_of_the_native_ones():
             for s in tree.body
             if isinstance(s, ast.Import) and s.names[0].asname == "_pysparks"
         ]
+        for statement in (s for s in tree.body if isinstance(s, ast.ImportFrom)):
+            if not statement.module or not statement.module.startswith("pyspark.ml."):
+                continue
+            for alias in statement.names:
+                public = getattr(module, alias.asname or alias.name, None)
+                native_class = getattr(native, alias.name, None)
+                if (
+                    isinstance(public, type)
+                    and isinstance(native_class, type)
+                    and issubclass(public, native_class)
+                ):
+                    source = importlib.import_module(statement.module)
+                    assert public is getattr(source, alias.name)
+                    checked.append(f"{name}.{alias.asname or alias.name}")
         for cls in (s for s in tree.body if isinstance(s, ast.ClassDef)):
             bases = [ast.unparse(b) for b in cls.bases]
             if not bases or not bases[-1].startswith("_pysparks."):
@@ -863,8 +881,8 @@ def test_the_stubs_have_the_docstrings_of_pysparks_objects():
                     samples[key] = doc
         digests[module] = capture.digest(pairs)
     assert samples == golden["samples"]
-    assert samples["pyspark.ml.connect.classification:LinearSVC"].startswith(
-        "This binary classifier optimizes the Hinge Loss"
+    assert samples["pyspark.ml.connect.classification:NaiveBayes"].startswith(
+        "Naive Bayes Classifiers."
     )
     # A stub of other docstrings than PySpark's, or of other declarations: regenerate the golden
     # with pyspark-client (see the capture script) once its docstrings are checked.

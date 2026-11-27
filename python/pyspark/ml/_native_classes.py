@@ -632,6 +632,16 @@ def _is_java_wrapper(official):
     return issubclass(official, JavaWrapper)
 
 
+def _release_native_reference(reference, remaining):
+    """Mirror the Python owner count; native owners decide when to delete the remote object."""
+    with reference._lock:
+        assert reference._ref_count > 0
+        # copy.copy shares the reference without add_ref. Do not consume a surviving
+        # native wrapper's count when such a shallow copy is finalized.
+        if reference._ref_count > remaining:
+            reference._ref_count -= 1
+
+
 def _del_of(official):
     """The `__del__` of the public class of PySpark's Java wrapper `official`, as PySpark's
     `JavaWrapper.__del__` (of `try_remote_del`), which releases a reference of the `RemoteModelRef`
@@ -641,9 +651,9 @@ def _del_of(official):
     and the AttributeError of a deleted `_java_obj`; of a model of a fit or a load, of its copies
     and of its training summary, the release of their hold of the model's server-side object, the
     last of which deletes it, as the last release of PySpark's `RemoteModelRef` does (see `Holders`
-    of the native module), where the training summary's `_remote_model_obj`, which this client does
-    not count (see `remote_model_ref` of the native module), is not released. A function of the name, qualified name, module, docstring, signature and annotations
-    of PySpark's (see `_function`)."""
+    of the native module). Python reference counts track model and summary wrappers; native
+    owners also keep lazy plans alive. A function of PySpark's name, qualified name, module,
+    docstring, signature and annotations (see `_function`)."""
     _, pysparks = _member_of(official, "__del__")
     return _function(
         pysparks,

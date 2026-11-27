@@ -784,13 +784,14 @@ def test_dir_of_the_objects_of_the_native_classes_is_pysparks_and_the_native_mem
     # Of an estimator, a model of no server-side object, a summary of PySpark's constructor, a
     # Pipeline, a PipelineModel and a validator, against PySpark's objects of the vendored
     # `pyspark.ml` classes: the names of `_NATIVE_ONLY_MEMBERS` that each has, and no other.
-    import pyspark.ml.classification as classification
+    if native_module() is None:
+        pytest.skip("of this client's native classes")
+
     import pyspark.ml.feature as feature
     import pyspark.ml.pipeline as pipeline
     import pyspark.ml.tuning as tuning
+    from pyspark.ml._upstream import classification
 
-    if native_module() is None:
-        pytest.skip("of this client's native classes")
     of_params = {"__setstate__"}
     cases = [
         (_cls("classification", "LinearSVC")(), classification.LinearSVC(), of_params),
@@ -1025,7 +1026,7 @@ def test_the_summaries_of_the_models_are_the_native_ones():
     # object (`super().summary` of LinearSVCModel's own): the native model fetches its own.
     if native_module() is None:
         pytest.skip("of this client's native classes")
-    import pyspark.ml.classification as reference
+    from pyspark.ml._upstream import classification as reference
 
     for name in ["LinearSVCModel", "MultilayerPerceptronClassificationModel", "FMClassificationModel"]:
         public = _cls("classification", name)
