@@ -7,7 +7,6 @@ import pickle
 import subprocess
 import sys
 
-import pyspark.ml.classification as classification
 import pytest
 from pyspark import _pyspark
 from pyspark.ml import Estimator
@@ -17,18 +16,19 @@ from pyspark.ml.classification import (
     LogisticRegression,
     LogisticRegressionModel,
 )
+from pyspark.ml.regression import LinearRegression, LinearRegressionModel
 
 
-@pytest.fixture(params=[LogisticRegression, LinearSVC], ids=lambda cls: cls.__name__)
-def classifier(request):
+@pytest.fixture(params=[LogisticRegression, LinearSVC, LinearRegression], ids=lambda cls: cls.__name__)
+def estimator_cls(request):
     return request.param
 
 
 @pytest.mark.parametrize(
-    "first", ["pyspark.ml.classification", "pyspark.ml.connect.classification"],
+    "first", ["standard", "compatibility"],
 )
 @pytest.mark.parametrize("persistence_first", ["read", "write"])
-def test_public_classes_are_identical_in_either_import_order(first, persistence_first, classifier):
+def test_public_classes_are_identical_in_either_import_order(first, persistence_first, estimator_cls):
     code = """
 import importlib
 import pickle
@@ -59,65 +59,70 @@ for name in names:
     assert pickle.loads(pickle.dumps(cls)) is cls
 assert not issubclass(public.NaiveBayes, _pyspark.NaiveBayes)
 """
-    if classifier is LinearSVC:
+    if estimator_cls is not LogisticRegression:
         code = code.replace('"BinaryLogisticRegressionSummary",', "").replace(
             '"BinaryLogisticRegressionTrainingSummary",', "",
         )
-    code = code.replace("LogisticRegression", classifier.__name__)
-    code = code.replace("PERSISTENCE_FIRST", repr(persistence_first)).replace("FIRST", repr(first))
+    code = code.replace("LogisticRegression", estimator_cls.__name__)
+    module = estimator_cls.__module__
+    code = code.replace("classification", module.rsplit(".", 1)[1])
+    if estimator_cls is LinearRegression:
+        code = code.replace("NaiveBayes", "AFTSurvivalRegression")
+    first_module = module if first == "standard" else module.replace("pyspark.ml.", "pyspark.ml.connect.")
+    code = code.replace("PERSISTENCE_FIRST", repr(persistence_first)).replace("FIRST", repr(first_module))
     subprocess.run(
         [sys.executable, "-c", code],
         env=dict(os.environ), check=True, capture_output=True, text=True,
     )
 
 
-def test_params_copy_and_pickle_keep_the_standard_api(classifier):
-    estimator = classifier(maxIter=3, regParam=0.1)
-    assert isinstance(estimator, getattr(_pyspark, classifier.__name__))
+def test_params_copy_and_pickle_keep_the_standard_api(estimator_cls):
+    estimator = estimator_cls(maxIter=3, regParam=0.1)
+    assert isinstance(estimator, getattr(_pyspark, estimator_cls.__name__))
     assert estimator.fit.__func__ is Estimator.fit
     assert estimator.setParams(maxIter=5) is estimator
     assert estimator.getMaxIter() == 5 and estimator.getRegParam() == 0.1
     assert estimator.isSet(estimator.maxIter) and not estimator.isSet(estimator.featuresCol)
     assert estimator.getFeaturesCol() == "features"
     copied = estimator.copy({estimator.maxIter: 2})
-    assert type(copied) is classifier and copied.uid == estimator.uid
+    assert type(copied) is estimator_cls and copied.uid == estimator.uid
     assert copied.getMaxIter() == 2 and estimator.getMaxIter() == 5
     for protocol in range(pickle.HIGHEST_PROTOCOL + 1):
         restored = pickle.loads(pickle.dumps(estimator, protocol=protocol))
-        assert type(restored) is classifier
+        assert type(restored) is estimator_cls
         assert restored.uid == estimator.uid and restored.getMaxIter() == 5
-    assert type(copy.deepcopy(estimator)) is classifier
-    model_cls = getattr(classification, classifier.__name__ + "Model")
+    assert type(copy.deepcopy(estimator)) is estimator_cls
+    model_cls = getattr(sys.modules[estimator_cls.__module__], estimator_cls.__name__ + "Model")
     assert type(model_cls().copy()) is model_cls
 
 
-def test_fit_dispatches_to_python_subclass_with_parameter_overrides(classifier):
+def test_fit_dispatches_to_python_subclass_with_parameter_overrides(estimator_cls):
     calls = []
     dataset = object()
 
-    class RecordingClassifier(classifier):
+    class RecordingEstimator(estimator_cls):
         def _fit(self, frame):
             assert frame is dataset
             calls.append((type(self), self.uid, self.getMaxIter()))
             return self.getMaxIter()
 
-    estimator = RecordingClassifier(maxIter=5)
+    estimator = RecordingEstimator(maxIter=5)
     assert estimator.fit(dataset, {estimator.maxIter: 2}) == 2
-    assert calls == [(RecordingClassifier, estimator.uid, 2)]
+    assert calls == [(RecordingEstimator, estimator.uid, 2)]
     assert estimator.getMaxIter() == 5
     assert estimator.fit(dataset, [{estimator.maxIter: 1}, {estimator.maxIter: 3}]) == [1, 3]
-    assert type(estimator.copy()) is RecordingClassifier
+    assert type(estimator.copy()) is RecordingEstimator
 
 
 @pytest.mark.parametrize("kind", ["read", "write"])
 @pytest.mark.parametrize("standard_import_first", [False, True])
 def test_pickled_readers_and_writers_initialize_in_a_fresh_process(
-    kind, standard_import_first, classifier,
+    kind, standard_import_first, estimator_cls,
 ):
     import base64
     import json
 
-    estimator = classifier(maxIter=5)
+    estimator = estimator_cls(maxIter=5)
     value = getattr(estimator, kind)()
     payloads = [
         base64.b64encode(pickle.dumps(value, protocol)).decode("ascii")
@@ -142,15 +147,16 @@ for payload in json.loads(sys.argv[1]):
         from pyspark.ml.classification import LogisticRegression
         assert restored._clazz is LogisticRegression
 """
-    code = code.replace("LogisticRegression", classifier.__name__)
+    code = code.replace("LogisticRegression", estimator_cls.__name__)
+    code = code.replace("classification", estimator_cls.__module__.rsplit(".", 1)[1])
     code = code.replace("STANDARD_IMPORT_FIRST", repr(standard_import_first)).replace(
         "KIND", repr(kind)
     )
     subprocess.run([sys.executable, "-c", code, json.dumps(payloads)], check=True)
 
 
-def test_standard_classifier_needs_no_optional_python_dependencies(classifier):
-    from _standard_classification_cases import without_optional_dependencies
+def test_standard_estimator_needs_no_optional_python_dependencies(estimator_cls):
+    from _standard_ml_cases import without_optional_dependencies
 
     without_optional_dependencies("""
 import copy
@@ -164,7 +170,9 @@ assert copy.deepcopy(estimator).getRegParam() == 0.1
 assert pickle.loads(pickle.dumps(estimator)).getMaxIter() == 3
 assert estimator.write().overwrite().shouldOverwrite
 assert LogisticRegression.read()._clazz is LogisticRegression
-""".replace("LogisticRegression", classifier.__name__))
+""".replace("LogisticRegression", estimator_cls.__name__).replace(
+        "classification", estimator_cls.__module__.rsplit(".", 1)[1],
+    ))
 
 
 def _assert_native_params_match(instance):
@@ -175,8 +183,8 @@ def _assert_native_params_match(instance):
     assert _pyspark._ml_uid(instance) == instance.uid
 
 
-def test_constructor_and_parameter_mutations_update_native_estimator_immediately(classifier):
-    estimator = classifier(maxIter=3, regParam=0.1)
+def test_constructor_and_parameter_mutations_update_native_estimator_immediately(estimator_cls):
+    estimator = estimator_cls(maxIter=3, regParam=0.1)
     _assert_native_params_match(estimator)
     assert estimator.setMaxIter(20) is estimator
     _assert_native_params_match(estimator)
@@ -212,8 +220,8 @@ def test_model_and_estimator_threshold_setters_update_native_params(cls):
     _assert_native_params_match(instance)
 
 
-def test_partial_mutation_keeps_native_state_and_original_conversion_error(classifier):
-    estimator = classifier(maxIter=3, regParam=0.1)
+def test_partial_mutation_keeps_native_state_and_original_conversion_error(estimator_cls):
+    estimator = estimator_cls(maxIter=3, regParam=0.1)
     with pytest.raises(TypeError, match='Invalid param value given for param "regParam"'):
         estimator._set(maxIter=9, regParam=object())
     assert estimator.getMaxIter() == 9 and estimator.getRegParam() == 0.1
@@ -224,7 +232,10 @@ def test_partial_mutation_keeps_native_state_and_original_conversion_error(class
 
 
 @pytest.mark.parametrize(
-    "cls", [LogisticRegression, LogisticRegressionModel, LinearSVC, LinearSVCModel],
+    "cls", [
+        LogisticRegression, LogisticRegressionModel, LinearSVC, LinearSVCModel,
+        LinearRegression, LinearRegressionModel,
+    ],
 )
 def test_copies_and_restored_state_have_current_native_params(cls):
     instance = cls().setPredictionCol("predicted")
@@ -241,19 +252,19 @@ def test_copies_and_restored_state_have_current_native_params(cls):
     _assert_native_params_match(instance)
 
 
-def test_default_only_copy_values_updates_native_target(classifier):
-    source = classifier()._setDefault(maxIter=41)
+def test_default_only_copy_values_updates_native_target(estimator_cls):
+    source = estimator_cls()._setDefault(maxIter=41)
     assert not source._paramMap
-    model_cls = getattr(classification, classifier.__name__ + "Model")
-    for target in (classifier(), model_cls()):
+    model_cls = getattr(sys.modules[estimator_cls.__module__], estimator_cls.__name__ + "Model")
+    for target in (estimator_cls(), model_cls()):
         assert source._copyValues(target) is target
         assert target.getMaxIter() == 41
         _assert_native_params_match(target)
     _assert_native_params_match(source.copy())
 
 
-def test_subclass_setters_and_fit_overrides_observe_current_native_params(classifier):
-    class RecordingClassifier(classifier):
+def test_subclass_setters_and_fit_overrides_observe_current_native_params(estimator_cls):
+    class RecordingEstimator(estimator_cls):
         def _set(self, **kwargs):
             result = super()._set(**kwargs)
             # During _copyValues, defaults are still being copied one by one.
@@ -266,7 +277,7 @@ def test_subclass_setters_and_fit_overrides_observe_current_native_params(classi
             _assert_native_params_match(self)
             return self.getMaxIter()
 
-    estimator = RecordingClassifier(maxIter=3)
+    estimator = RecordingEstimator(maxIter=3)
     assert estimator.fit(object(), {estimator.maxIter: 7}) == 7
     assert estimator.fit(object(), [{estimator.maxIter: 2}, {estimator.maxIter: 4}]) == [2, 4]
     assert estimator.getMaxIter() == 3
@@ -285,19 +296,19 @@ def test_other_native_algorithms_keep_operation_time_synchronization():
     _assert_native_params_match(svc)
 
 
-def test_direct_dictionary_mutations_still_sync_before_native_operations(classifier):
-    estimator = classifier(maxIter=3)
+def test_direct_dictionary_mutations_still_sync_before_native_operations(estimator_cls):
+    estimator = estimator_cls(maxIter=3)
     estimator._paramMap[estimator.maxIter] = 17
     assert _pyspark._ml_params(estimator)[0]["maxIter"] == 3
     estimator.write()
     _assert_native_params_match(estimator)
 
 
-def test_eager_native_defaults_do_not_leak_reference_cycles(classifier):
+def test_eager_native_defaults_do_not_leak_reference_cycles(estimator_cls):
     import gc
     import weakref
 
-    estimator = classifier()
+    estimator = estimator_cls()
     estimator.maxIter.typeConverter = lambda value: value
     estimator._setDefault(maxIter=estimator)
     reference = weakref.ref(estimator)

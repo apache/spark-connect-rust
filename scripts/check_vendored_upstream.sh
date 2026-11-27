@@ -223,7 +223,6 @@ VENDORED_FILES=(
   "ml/model_cache.py"
   "ml/pipeline.py"
   "ml/recommendation.py"
-  "ml/regression.py"
   # ml/stat.py is a Rust-backed shim; it is not vendored.
   "ml/tree.py"
   "ml/tuning.py"
@@ -346,6 +345,7 @@ VENDORED_FILES=(
 # "<path in this repo>=<path in Apache Spark>". Keep these byte-identical to the tag.
 VENDORED_MAPPED_FILES=(
   "python/pyspark/ml/_upstream/classification.py=python/pyspark/ml/classification.py"
+  "python/pyspark/ml/_upstream/regression.py=python/pyspark/ml/regression.py"
   # Spark's spatial reference system registry, which the Rust crate embeds (srs.rs) to map the
   # SRIDs of the spatial types to their CRS strings. Spark generates it from PROJ
   # (dev/generate_srs_registry.py) and ships the same file in sql/api and in PySpark.

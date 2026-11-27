@@ -281,6 +281,22 @@ def user_mypy(tmp_path_factory):
             f"def to_standard_{name}(value: native.{name}) -> standard.{name}:",
             "    return value",
         ]
+    ml_aliases += [
+        "import pyspark.ml.regression as regression",
+        "import pyspark.ml.connect.regression as native_regression",
+        "def fit_linear(df: DataFrame) -> regression.LinearRegressionModel:",
+        "    return regression.LinearRegression(maxIter=3).setRegParam(0.1).fit(df)",
+    ]
+    for name in (
+        "LinearRegression", "LinearRegressionModel", "LinearRegressionSummary",
+        "LinearRegressionTrainingSummary",
+    ):
+        ml_aliases += [
+            f"def to_native_{name}(value: regression.{name}) -> native_regression.{name}:",
+            "    return value",
+            f"def to_standard_{name}(value: native_regression.{name}) -> regression.{name}:",
+            "    return value",
+        ]
     (app / "probe_ml_aliases.py").write_text("\n".join(ml_aliases) + "\n")
 
     diagnostics = _run_mypy(
@@ -374,11 +390,11 @@ def test_user_application_has_only_its_deliberate_error(user_mypy):
     assert len(revealed) == 4
 
 
-def test_standard_classification_aliases_are_typed(user_mypy):
+def test_standard_ml_aliases_are_typed(user_mypy):
     assert _of(user_mypy, "probe_ml_aliases.py") == []
 
 
-def test_pyright_types_standard_classification_aliases(user_pyright):
+def test_pyright_types_standard_ml_aliases(user_pyright):
     assert _of(user_pyright, "probe_ml_aliases.py") == []
 
 
