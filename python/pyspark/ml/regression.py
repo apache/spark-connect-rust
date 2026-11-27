@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Standard regression APIs, with linear and generalized linear regression delegated to Rust."""
+"""Standard regression APIs, with linear, generalized linear, and AFT regression delegated to Rust."""
 
 from typing import TYPE_CHECKING
 
@@ -24,6 +24,8 @@ def _load_regression():
     SourceFileLoader(__name__, str(source)).exec_module(module)
     reference = SimpleNamespace(**vars(module))
     names = (
+        "AFTSurvivalRegression",
+        "AFTSurvivalRegressionModel",
         "GeneralizedLinearRegression",
         "GeneralizedLinearRegressionModel",
         "GeneralizedLinearRegressionSummary",
@@ -37,6 +39,7 @@ def _load_regression():
     publish(
         native, reference, public_module=__name__,
         eager_params=(
+            "AFTSurvivalRegression", "AFTSurvivalRegressionModel",
             "LinearRegression", "LinearRegressionModel",
             "GeneralizedLinearRegression", "GeneralizedLinearRegressionModel",
         ),
